@@ -2,12 +2,15 @@
 created: 2026-07-25
 updated: 2026-07-25
 type: task
-status: in-progress
+status: done
 priority: high
 epic: ossctl-phase4-build
 commits:
 - hash: b939fa7
   summary: scaffold ossctl-core + ossctl-cli workspace; version/doctor + clap taxonomy + CI green
+- hash: a8e0be0
+  summary: apply llm-review fixes (build.rs freshness, Fs port, doctor/clap polish)
+closed: 2026-07-25
 ---
 
 # Scaffold the ossctl-core + ossctl-cli cargo workspace (ADR-0001)
