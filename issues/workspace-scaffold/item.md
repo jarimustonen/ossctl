@@ -5,6 +5,9 @@ type: task
 status: in-progress
 priority: high
 epic: ossctl-phase4-build
+commits:
+- hash: b939fa7
+  summary: scaffold ossctl-core + ossctl-cli workspace; version/doctor + clap taxonomy + CI green
 ---
 
 # Scaffold the ossctl-core + ossctl-cli cargo workspace (ADR-0001)

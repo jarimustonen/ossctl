@@ -86,17 +86,12 @@ impl CliError {
     }
 
     /// Attach the offending value (§4).
-    // Part of the §4 error-envelope builder; first consumed by the validating
-    // subcommands (contract/facts/audit) in later units.
-    #[allow(dead_code)]
     pub fn with_invalid_value(mut self, value: impl Into<String>) -> Self {
         self.invalid_value = Some(value.into());
         self
     }
 
     /// Attach the accepted-alternatives set (§4).
-    // As above — consumed by the validating subcommands in later units.
-    #[allow(dead_code)]
     pub fn with_expected(mut self, expected: serde_json::Value) -> Self {
         self.expected = Some(expected);
         self

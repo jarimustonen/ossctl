@@ -67,6 +67,24 @@ fn doctor_json_shape() {
     assert!(v["data"]["summary"]["ok"].is_u64(), "summary.ok: {v}");
 }
 
+/// `doctor --json --fix` keeps stderr clean: a JSON caller's stderr is the
+/// fatal-only channel, so the `--fix` narration must not leak there.
+#[test]
+fn doctor_json_fix_leaves_stderr_clean() {
+    let out = ossctl()
+        .args(["doctor", "--json", "--fix"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        out.stderr.is_empty(),
+        "JSON-mode --fix must not narrate on stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // stdout is still valid envelope JSON.
+    let _: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+}
+
 /// A stub subcommand returns a clean `not_implemented` error envelope on
 /// stderr and exits 2 — not a panic.
 #[test]
@@ -86,5 +104,5 @@ fn unknown_subcommand_is_structured_error() {
     let out = ossctl().arg("frobnicate").output().unwrap();
     assert_eq!(out.status.code(), Some(1), "user error → exit 1");
     let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
-    assert_eq!(v["error"]["code"], "unknown_subcommand_or_flag");
+    assert_eq!(v["error"]["code"], "unknown_subcommand");
 }

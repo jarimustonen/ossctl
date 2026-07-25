@@ -20,8 +20,8 @@
 //! - [`protocol`] — the versioned public JSON/JSONL envelopes + DTOs (§10/§12),
 //!   versioned independently of the internal domain types.
 //! - [`ports`] — the injected effect seam (`CommandRunner`, `Clock`, `IdGen`,
-//!   `RegistryQuery`, `GitRepo`) so each domain is testable without touching
-//!   the real filesystem, git, network, or clock.
+//!   `RegistryQuery`, `Fs`, `GitRepo`) so each domain is testable without
+//!   touching the real filesystem, git, network, or clock.
 //!
 //! `ossctl-core` is the canonical library surface, so public items must carry
 //! doc comments (`#![warn(missing_docs)]`); level policy otherwise lives in the

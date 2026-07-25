@@ -117,12 +117,6 @@ pub fn run() -> ExitCode {
 
     let format = OutputFormat::from_json_flag(cli.json);
 
-    // `doctor` owns its exit code directly (§18: exit 1 on any `fail` *without*
-    // an error envelope), which does not map onto the shared Result path.
-    if let Command::Doctor(args) = &cli.command {
-        return crate::doctor::run(args, format);
-    }
-
     let result = match cli.command {
         Command::Version => cmd_version(format),
         Command::Contract { action } => match action {
@@ -133,7 +127,10 @@ pub fn run() -> ExitCode {
         Command::Audit(args) => crate::audit::run(&args, format),
         Command::Release { action } => crate::release::dispatch(action, format),
         Command::Skill { action } => crate::skill::dispatch(action, format),
-        Command::Doctor(_) => unreachable!("doctor handled above"),
+        // `doctor` owns its exit code directly (§18: exit 1 on any `fail`
+        // *without* an error envelope), which does not map onto the shared
+        // Result path — the `return` diverges so this arm's type is compatible.
+        Command::Doctor(args) => return crate::doctor::run(&args, format),
     };
 
     match result {
@@ -148,7 +145,7 @@ pub fn run() -> ExitCode {
 /// Translate a clap parse failure into either its native help/usage output
 /// (exit 0 for `--help`) or the §10 error envelope on stderr.
 fn handle_clap_error(e: &clap::Error) -> ExitCode {
-    use clap::error::ErrorKind;
+    use clap::error::{ContextKind, ErrorKind};
     // Help is not a failure; let clap print and exit 0. `--version` is disabled
     // at the clap level, so it never surfaces here — agents use `version`.
     if matches!(
@@ -176,14 +173,42 @@ fn handle_clap_error(e: &clap::Error) -> ExitCode {
         message
     };
 
+    // Distinct codes so an agent branching on `code` gets a distinct fix — a
+    // bad subcommand and a bad flag are not the same problem.
     let code = match e.kind() {
-        ErrorKind::InvalidSubcommand | ErrorKind::UnknownArgument => "unknown_subcommand_or_flag",
+        ErrorKind::InvalidSubcommand => "unknown_subcommand",
+        ErrorKind::UnknownArgument => "unknown_flag",
         ErrorKind::MissingRequiredArgument | ErrorKind::MissingSubcommand => "missing_argument",
         ErrorKind::InvalidValue => "invalid_value",
         _ => "invalid_arguments",
     };
-    CliError::user(code, message).emit();
+
+    // §4: hand the caller the offending value and the accepted set as
+    // structured fields when clap knows them, instead of forcing it to scrape
+    // prose out of `message`.
+    let mut err = CliError::user(code, message);
+    if let Some(invalid) = clap_context(e, ContextKind::InvalidValue) {
+        err = err.with_invalid_value(invalid);
+    }
+    if let Some(valid) = clap_context(e, ContextKind::ValidValue) {
+        let expected: Vec<&str> = valid.split(", ").collect();
+        err = err.with_expected(serde_json::json!(expected));
+    }
+    err.emit();
     ExitCode::from(ExitKind::User as u8)
+}
+
+/// Pull one piece of clap's structured error context (the offending value, the
+/// allowed-value set, …) out of a parse failure, stringified. `None` when clap
+/// did not attach that context to this error.
+fn clap_context(e: &clap::Error, want: clap::error::ContextKind) -> Option<String> {
+    e.context().find_map(|(kind, value)| {
+        if kind == want {
+            Some(value.to_string())
+        } else {
+            None
+        }
+    })
 }
 
 /// Metadata about one bundled companion skill (`AGENTS-AI-FIRST-CLI.md` §17).

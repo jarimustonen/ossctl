@@ -37,11 +37,29 @@ pub trait Clock {
     fn now_unix(&self) -> u64;
 }
 
-/// Generates opaque unique identifiers (run ids, plan ids' random component).
-/// Injected so id-dependent output is deterministic under test.
+/// Generates opaque, unique, non-deterministic identifiers — run ids and the
+/// like. Injected so id-dependent output is deterministic under test.
+///
+/// Note: this is **not** the source of `plan_id`. A release plan id is
+/// *content-addressed* — derived deterministically from the sealed plan's
+/// canonical bytes (ADR-0002), not generated here. Do not route plan sealing
+/// through this port.
 pub trait IdGen {
     /// Produce a fresh, unique identifier.
     fn new_id(&self) -> String;
+}
+
+/// Read/write access to the filesystem — the `Fs` half of the `Fs/Git` seam
+/// (ADR-0001 §2). Domain code (contract loading, journal persistence, sealed
+/// plans) goes through this port rather than calling `std::fs` directly, so it
+/// is testable against an in-memory fake. At founding this is a deliberately
+/// small surface; it grows (atomic writes, dir listing, metadata) as the
+/// journal and plan-sealing units land.
+pub trait Fs {
+    /// Read a file's full contents as bytes.
+    fn read(&self, path: &std::path::Path) -> io::Result<Vec<u8>>;
+    /// Whether `path` exists.
+    fn exists(&self, path: &std::path::Path) -> bool;
 }
 
 /// Queries a package registry for already-published state — the "remote is

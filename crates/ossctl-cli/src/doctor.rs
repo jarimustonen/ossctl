@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use clap::Args;
 use serde::Serialize;
 
-use crate::error::{CliError, ExitKind};
+use crate::error::CliError;
 use crate::output::OutputFormat;
 
 /// Arguments for `ossctl doctor`.
@@ -99,8 +99,10 @@ fn run_inner(args: &DoctorArgs, format: OutputFormat) -> Result<ExitCode, CliErr
 
     // `--fix` has nothing to apply yet: the scaffold's checks carry no
     // auto-fixable suggestions. Report that plainly rather than silently
-    // no-op'ing, so the `--fix` path is honest when checks grow fixable.
-    if args.fix {
+    // no-op'ing, so the `--fix` path is honest when checks grow fixable. Only
+    // in text mode — a JSON caller's stderr is the fatal-only error channel
+    // (§10); fix outcomes belong in the stdout report once they are real.
+    if args.fix && format == OutputFormat::Text {
         let verb = if args.dry_run {
             "would apply"
         } else {
@@ -109,9 +111,12 @@ fn run_inner(args: &DoctorArgs, format: OutputFormat) -> Result<ExitCode, CliErr
         eprintln!("doctor --fix: {verb} 0 fixes (no auto-fixable checks yet)");
     }
 
-    // §18: exit 1 on any fail, else 0. Warnings never flip the code.
+    // §18: exit 1 on any fail, else 0 — warnings never flip the code. This 1 is
+    // a distinct axis from §2's user-error exit 1: a `fail` is the *tool*
+    // finding a problem, not a bad invocation. Written as a bare `1` (not
+    // `ExitKind::User`) so that semantic distinction is not implied.
     Ok(if any_fail {
-        ExitCode::from(ExitKind::User as u8)
+        ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     })
