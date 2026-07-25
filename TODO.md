@@ -5,15 +5,24 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-07-25. New agent: read this, then continue with a fresh `/stint`.
-Repo just bootstrapped by `/create-project`; the founding architecture is decided and
-the build backlog is filed. Start building._
+_Handoff written 2026-07-25 (updated after stint #1). New agent: read this, then continue
+with a fresh `/stint`. The workspace scaffold has LANDED — `main` compiles, `ossctl version
+--json` works, CI is wired. The critical-path root is done; three units are now unblocked
+and can run in parallel next round._
 
 **Focus:** Build `ossctl` — extract the `/oss-*` skill family's deterministic core into
 this CLI, per the three founding ADRs in `docs/adr/`. The architecture is LOCKED; this is
 implementation, dependency-first.
 **Epic:** [`ossctl-phase4-build`](issues/ossctl-phase4-build/item.md)
 **Branch / worktree:** main (clean).
+
+**NEXT ROUND (start here):** `workspace-scaffold` is DONE. Fan out these three now-unblocked
+units **in parallel** (they are disjoint — but each touches hot files, so watch the migration
+rule): [`contract-command`](issues/contract-command/item.md), [`facts-command`](issues/facts-command/item.md),
+[`skill-subcommand`](issues/skill-subcommand/item.md). Note `contract-command` + `facts-command`
+both create serde types in `contract/schema.rs` / `protocol/**` — if they collide, sequence
+those two instead. `audit-command` unblocks after contract+facts; `release-engine` after
+contract; `migrate-oss-init` after contract+facts+skill.
 
 **Read first (the spec):**
 - `docs/adr/0001-founding-architecture.md` — CLI taxonomy, two-crate workspace, binary↔skill boundary.
@@ -26,7 +35,7 @@ implementation, dependency-first.
   these migrate here; `SCHEMA.md` §4 is the canonical-JSON contract to preserve.
 
 **Build order (ADR-0001 dependency-first) — the backlog is filed and blocker-wired:**
-1. **[`workspace-scaffold`](issues/workspace-scaffold/item.md)** — the ONLY unblocked unit; do this first. Two-crate workspace + clap skeleton + `version`/`doctor` + CI.
+1. ~~**[`workspace-scaffold`](issues/workspace-scaffold/item.md)** — Two-crate workspace + clap skeleton + `version`/`doctor` + CI.~~ ✅ **DONE** (stint #1, commits b939fa7 → 1bb18ab).
 2. [`contract-command`](issues/contract-command/item.md) — port `check-oss-release.py` → `ossctl contract show|validate` (the inter-skill contract; preserve JSON shape). *blocked by 1.*
 3. [`facts-command`](issues/facts-command/item.md) — port `infer-repo-facts.py` → `ossctl facts`. *blocked by 1.*
 4. [`skill-subcommand`](issues/skill-subcommand/item.md) — `ossctl skill list|install|print` + bundle mechanism (§15-17). *blocked by 1.*
