@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = ["crates/ossctl-core", "crates/ossctl-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+authors = ["Jari Mustonen"]
+repository = "https://github.com/jarimustonen/ossctl"
+homepage = "https://github.com/jarimustonen/ossctl"
+description = "Release & readiness coordinator: the AI-first Rust CLI behind the /oss-* skill family."
+keywords = ["cli", "ai", "release", "oss", "readiness"]
+categories = ["command-line-utilities", "development-tools"]
+
+[workspace.dependencies]
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+assert_cmd = "2"
+predicates = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# The profile 'dist' (cargo-dist) builds with.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+# Workspace-wide lint policy. Each crate opts in with `lints.workspace = true`.
+# `ossctl-core` additionally layers `missing_docs` via a crate-root
+# `#![warn(missing_docs)]` — Cargo rejects mixing `lints.workspace = true` with a
+# per-crate `[lints.rust]` table, so the attribute is the clean path (mirrors
+# octl-core).
+[workspace.lints.clippy]
+# Pedantic is a strong default for a CLI that will grow many subcommands. Kept at
+# "warn"; CI promotes warnings to errors via `-D warnings`. Aggressive lints that
+# fight this codebase's idioms are allow-listed below with a reason each.
+pedantic = { level = "warn", priority = -1 }
+
+# `foo::Foo`-style paths are conventional and readable here.
+module_name_repetitions = "allow"
+# Plain APIs; `#[must_use]` everywhere is noise for an internal tool.
+must_use_candidate = "allow"
+# Error/panic doc enforcement deferred until the public API stabilises.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# `match { Some(x) => x, None => ... }` vs `let...else` is a style preference;
+# clippy marks these MaybeIncorrect.
+manual_let_else = "allow"
+# Handlers take owned args they only borrow; tightening every signature to `&T`
+# ripples through callers for no gain on a pre-1.0 CLI.
+needless_pass_by_value = "allow"

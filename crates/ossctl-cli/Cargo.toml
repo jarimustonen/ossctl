@@ -1,0 +1,33 @@
+[package]
+name = "ossctl-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Release & readiness coordinator: the AI-first Rust CLI behind the /oss-* skill family."
+# Private, early (README: not yet published). Flip to `true` when the crates.io
+# publish path is deliberately opened.
+publish = false
+
+[package.metadata.dist]
+dist = true
+
+[[bin]]
+name = "ossctl"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ossctl-core = { path = "../ossctl-core", version = "=0.1.0" }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }

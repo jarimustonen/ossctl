@@ -1,0 +1,22 @@
+[package]
+name = "ossctl-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Core library for ossctl: contract normalizer, repo-fact detection, audit scoring, release engine, and the versioned protocol DTOs."
+# Private, early (README: not yet published). Flip to `true` when the crates.io
+# publish path is deliberately opened (dogfooded through `ossctl release cut`).
+publish = false
+
+[lints]
+workspace = true
+
+# No external dependencies yet. `ossctl-core` at founding is std-only: it owns
+# the protocol schema constants and the injected-port trait seam. serde lands
+# with the first real DTO / serde model (contract/schema.rs) in a later unit —
+# a deliberate hot-file edit, not a speculative dependency now (ADR-0001 §2).
+[dependencies]

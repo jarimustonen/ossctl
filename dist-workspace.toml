@@ -1,0 +1,24 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist' (cargo-dist). ossctl is a portable, POSIX-friendly CLI
+# (no fork/tmux/signal machinery), so the target set is broader than
+# orchestratectl's. Release wiring is not yet active — the project is private
+# and unpublished (README) — but the dist config is stood up here so the
+# release pipeline is near-copyable when publishing is deliberately opened.
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax).
+cargo-dist-version = "0.28.2"
+# CI backend.
+ci = "github"
+# Installers to generate for each app.
+installers = ["shell"]
+# Target platforms (Rust target-triple syntax).
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+]
+# Where to host releases.
+hosting = "github"

@@ -1,0 +1,13 @@
+# Clippy configuration for ossctl.
+#
+# Lint *levels* (pedantic = warn + the allow-list) live in the root Cargo.toml
+# `[workspace.lints.clippy]` table so they apply per-crate via
+# `lints.workspace = true`. This file holds clippy's behavioural knobs only.
+
+# The public API is pre-1.0 and unstable; let clippy suggest signature-level
+# improvements without treating breakage as a cost.
+avoid-breaking-exported-api = false
+
+# Match the workspace `rust-version` so clippy's MSRV-gated suggestions stay in
+# step with what the crates promise to compile on.
+msrv = "1.85"
