@@ -41,6 +41,32 @@ validate` and `ossctl facts`.
 scaffolded. Open an `issuectl` issue before building a feature — do not pre-design the
 app beyond what the ADRs already fix.
 
+## Operating policy (for `/stint`)
+
+`/stint` reads this section for how to run a work-session in this repo.
+
+- **Green gate** (must pass before a unit counts as landed):
+  - `cargo fmt --all --check`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace`
+  - `cargo build --workspace` (release build not required per-unit)
+- **Deploy: none per stint.** `ossctl` is a CLI library/binary; units land on `main`,
+  they are not deployed to a server. *Publishing `ossctl` itself* (crates.io / GitHub
+  Release) is a deliberate future act — eventually dogfooded through `ossctl`'s own
+  `release cut` — never an automatic per-stint step. So `/stint` **skips Phase 4
+  (deploy)** here and says so.
+- **Live-version check:** `ossctl version --json` (once the binary builds); before that,
+  `git log --oneline` against `main`.
+- **Hot files (sequence, never parallelise units that touch these):**
+  - the workspace `Cargo.toml` and any crate `Cargo.toml` (dependency edits collide)
+  - `crates/ossctl-core/src/contract/schema.rs` — the ONE canonical serde model
+  - `crates/ossctl-core/src/protocol/**` — the versioned public JSON/JSONL DTOs
+  - the canonical-JSON contract shape (SCHEMA) — the inter-skill contract; a change here
+    ripples to every member
+- **Migration rule:** the canonical-JSON output shape is a schema-versioned compatibility
+  contract (§10). Preserve it; bump `schema_version` on a breaking change, never silently.
+- **Test-account reset:** n/a (no external test accounts).
+
 ## Gitignored directories
 
 - `history/` — agent scratchpad and ephemeral planning docs (not tracked)
