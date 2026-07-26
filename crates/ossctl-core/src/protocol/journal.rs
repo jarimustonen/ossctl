@@ -95,6 +95,19 @@ pub enum RunStatus {
     Abandoned,
 }
 
+impl RunStatus {
+    /// The wire string for this status (matches the `Serialize` derive), so text
+    /// diagnostics and JSON never drift.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+            Self::Abandoned => "abandoned",
+        }
+    }
+}
+
 /// The per-target publish receipt the journal persists — the fact "this exact
 /// artifact landed" that resume/reconcile checks against the registry (the
 /// remote is ground truth, ADR-0003 §4).

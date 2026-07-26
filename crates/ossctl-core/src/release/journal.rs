@@ -357,6 +357,35 @@ pub fn load_state(
     Ok(Some(reduce(&events)))
 }
 
+/// Authoritatively rebuild a run's [`RunState`] straight from its event log —
+/// the read-only path `release verify` reconciles from.
+///
+/// Unlike [`load_state`] this **ignores the `manifest.json` fast-path** and always
+/// reduces the authoritative `journal.jsonl`, so a manifest that lags the log by
+/// its last event (a crash between append and manifest write) cannot hide a
+/// just-published receipt from the reconcile. Unlike [`Journal::open`] it takes
+/// **no lock and writes nothing** — not even the manifest self-heal — so it is
+/// safe against a live run and leaves the journal byte-for-byte unchanged (the
+/// read-only guarantee `verify` promises).
+///
+/// Returns `Ok(None)` when the run has no journal.
+///
+/// # Errors
+/// An invalid `run_id` ([`io::ErrorKind::InvalidInput`]), or any store/parse error
+/// from [`read_events`] (a corrupt or too-new event line).
+pub fn read_run_state(
+    store: &dyn JournalStore,
+    paths: &JournalPaths,
+    run_id: &str,
+) -> io::Result<Option<RunState>> {
+    validate_run_id(run_id)?;
+    let events = read_events(store, &paths.journal_file(run_id))?;
+    if events.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(reduce(&events)))
+}
+
 /// List the run ids present under the releases root — the enumeration behind
 /// `release list`.
 ///
@@ -1232,6 +1261,92 @@ mod tests {
     }
 
     #[test]
+    fn read_run_state_reduces_from_journal_without_writing() {
+        // Write only event lines (no manifest), simulating the authoritative log.
+        let store = FakeStore::default();
+        for ev in sample_events() {
+            let line = serde_json::to_string(&ev).unwrap();
+            store
+                .append_line(&paths().journal_file("RUN01"), &line)
+                .unwrap();
+        }
+        // Snapshot every file before the read so we can prove nothing was written.
+        let files_before = store.inner.borrow().files.clone();
+
+        let state = read_run_state(&store, &paths(), "RUN01").unwrap().unwrap();
+        assert_eq!(state, reduce(&sample_events()));
+
+        // Read-only: no manifest self-heal, no lock file, no new bytes anywhere.
+        assert_eq!(
+            store.inner.borrow().files,
+            files_before,
+            "read_run_state must not write anything"
+        );
+        assert!(
+            store.inner.borrow().locked.is_empty(),
+            "read_run_state must not take the lock"
+        );
+        assert!(
+            !store
+                .inner
+                .borrow()
+                .files
+                .contains_key(&paths().manifest_file("RUN01")),
+            "read_run_state must not materialize a manifest"
+        );
+
+        // A run with no journal is a clean None, and a bad id is rejected.
+        assert!(read_run_state(&store, &paths(), "MISSING")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            read_run_state(&store, &paths(), "../escape")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn read_run_state_ignores_a_stale_manifest_fast_path() {
+        // A manifest that lags the log must NOT shadow the authoritative reduce —
+        // this is exactly the crash window `verify` must see through.
+        let store = FakeStore::default();
+        for ev in sample_events() {
+            let line = serde_json::to_string(&ev).unwrap();
+            store
+                .append_line(&paths().journal_file("RUN01"), &line)
+                .unwrap();
+        }
+        // Plant a deliberately-wrong manifest cache.
+        let mut stale = RunState::empty();
+        stale.run_id = "RUN01".into();
+        stale.plan_id = "STALE".into();
+        store
+            .write_atomic(
+                &paths().manifest_file("RUN01"),
+                &serde_json::to_vec(&stale).unwrap(),
+            )
+            .unwrap();
+
+        // load_state trusts the (stale) manifest; read_run_state reduces the log.
+        assert_eq!(
+            load_state(&store, &paths(), "RUN01")
+                .unwrap()
+                .unwrap()
+                .plan_id,
+            "STALE"
+        );
+        assert_eq!(
+            read_run_state(&store, &paths(), "RUN01")
+                .unwrap()
+                .unwrap()
+                .plan_id,
+            "plan-abc",
+        );
+    }
+
+    #[test]
     fn run_id_validation_rejects_path_traversal() {
         let store = FakeStore::default();
         let clock = FakeClock::at(1000);
@@ -1300,6 +1415,21 @@ mod tests {
         let events = read_events(&store, &paths().journal_file("RUN01")).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].seq, 1);
+    }
+
+    #[test]
+    fn run_status_as_str_matches_serde() {
+        for s in [
+            RunStatus::InProgress,
+            RunStatus::Completed,
+            RunStatus::Abandoned,
+        ] {
+            assert_eq!(
+                serde_json::to_value(s).unwrap(),
+                serde_json::Value::String(s.as_str().to_string()),
+                "as_str() drifted from serde for {s:?}"
+            );
+        }
     }
 
     #[test]

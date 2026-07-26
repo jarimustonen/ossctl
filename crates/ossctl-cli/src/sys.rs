@@ -10,8 +10,11 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use ossctl_core::ports::{CommandOutput, CommandRunner, Fs, GitRepo};
+use ossctl_core::ports::{
+    Clock, CommandOutput, CommandRunner, Fs, GitRepo, JournalLock, JournalStore, RegistryQuery,
+};
 
 /// The real subprocess runner, backing the [`CommandRunner`] port with
 /// `std::process`. The audit's read-only GitHub community-standards lookup
@@ -189,5 +192,145 @@ impl GitRepo for RealGitRepo {
         } else {
             self.root.join(path)
         })
+    }
+}
+
+/// The real wall clock, backing the [`Clock`] port with `SystemTime`.
+pub struct RealClock;
+
+impl Clock for RealClock {
+    fn now_unix(&self) -> u64 {
+        // A pre-epoch system clock is not a real deployment; clamp to 0 rather
+        // than panic so a misconfigured host cannot crash a read-only command.
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    }
+}
+
+/// The real registry-state lookup, backing the read-only [`RegistryQuery`] port
+/// the release reconciler consults (the remote is ground truth, ADR-0003).
+///
+/// The reconciler degrades a lookup failure to [`VerifyOutcome::Unknown`], never a
+/// false `Missing`, so an ecosystem with no wired query is honestly "cannot
+/// check" rather than "did not land". Today only `node` (queried through the
+/// clean `npm view … versions --json` surface) is wired; the remaining ecosystems
+/// return an `Err` so the reconcile reports `unknown` until their registry query
+/// lands — matching the skeleton state of the adapter layer.
+///
+/// [`VerifyOutcome::Unknown`]: ossctl_core::protocol::release::VerifyOutcome::Unknown
+pub struct RealRegistryQuery;
+
+impl RealRegistryQuery {
+    /// `npm view <package> versions --json` → the published version list.
+    ///
+    /// Hardened against non-interactive hangs the same way the other real ports
+    /// are (stdin `/dev/null`, registry/update prompts disabled). A missing `npm`,
+    /// a non-zero exit, or unparsable output all surface as `Err`, which the
+    /// reconciler reads as `unknown`.
+    fn npm_versions(package: &str) -> io::Result<Vec<String>> {
+        let out = Command::new("npm")
+            .args(["view", package, "versions", "--json"])
+            .stdin(Stdio::null())
+            .env("npm_config_yes", "true")
+            .env("NPM_CONFIG_UPDATE_NOTIFIER", "false")
+            .output()?;
+        if !out.status.success() {
+            return Err(io::Error::other(format!(
+                "npm view {package} versions exited {:?}",
+                out.status.code()
+            )));
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // `npm view` returns a JSON array for many versions, or a bare JSON string
+        // for a single one; accept either.
+        match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+            Ok(serde_json::Value::Array(items)) => Ok(items
+                .into_iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()),
+            Ok(serde_json::Value::String(v)) => Ok(vec![v]),
+            _ => Err(io::Error::other(format!(
+                "could not parse `npm view {package} versions --json` output"
+            ))),
+        }
+    }
+}
+
+impl RegistryQuery for RealRegistryQuery {
+    fn published_versions(&self, ecosystem: &str, package: &str) -> io::Result<Vec<String>> {
+        match ecosystem {
+            "node" => Self::npm_versions(package),
+            other => Err(io::Error::other(format!(
+                "no registry query wired for ecosystem '{other}' yet"
+            ))),
+        }
+    }
+}
+
+/// A **read-only** [`JournalStore`] for the `release verify`/`show` path.
+///
+/// `verify` reconciles a journaled run without ever writing — no manifest
+/// self-heal, no lock, no publish — so its store deliberately implements only the
+/// read operations. The mutating operations ([`JournalStore::lock_exclusive`],
+/// [`JournalStore::append_line`], [`JournalStore::write_atomic`]) return an error
+/// rather than a fake success: the writable, lockable production store belongs to
+/// the `release cut`/`resume` units, and routing a mutation through the read-only
+/// store is a programming error worth surfacing loudly.
+pub struct ReadOnlyJournalStore;
+
+impl ReadOnlyJournalStore {
+    fn read_only(op: &str) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("{op} is not available on the read-only journal store"),
+        )
+    }
+}
+
+impl JournalStore for ReadOnlyJournalStore {
+    fn lock_exclusive(&self, _lock_path: &Path) -> io::Result<Box<dyn JournalLock>> {
+        Err(Self::read_only("lock_exclusive"))
+    }
+
+    fn append_line(&self, _path: &Path, _line: &str) -> io::Result<()> {
+        Err(Self::read_only("append_line"))
+    }
+
+    fn read_lines(&self, path: &Path) -> io::Result<Vec<String>> {
+        match std::fs::read_to_string(path) {
+            Ok(contents) => Ok(contents.lines().map(str::to_string).collect()),
+            // An absent journal is empty, not an error (mirrors the port contract).
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn write_atomic(&self, _path: &Path, _bytes: &[u8]) -> io::Result<()> {
+        Err(Self::read_only("write_atomic"))
+    }
+
+    fn list_dir(&self, dir: &Path) -> io::Result<Vec<String>> {
+        let mut names = Vec::new();
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    names.push(entry?.file_name().to_string_lossy().into_owned());
+                }
+            }
+            // An absent releases root simply has no runs.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        }
+        names.sort();
+        Ok(names)
     }
 }

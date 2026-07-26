@@ -12,12 +12,18 @@ use clap::Args;
 
 use ossctl_core::contract::{self, LoadError, Normalized};
 use ossctl_core::ports::GitRepo;
+use ossctl_core::protocol::journal::RunStatus;
 use ossctl_core::protocol::plan::ReleasePlan;
+use ossctl_core::protocol::reconcile::ReconcileReport;
+use ossctl_core::release::adapters::EffectCtx;
+use ossctl_core::release::journal::{self, JournalPaths};
 
 use crate::cli::ReleaseAction;
 use crate::error::CliError;
 use crate::output::OutputFormat;
-use crate::sys::{RealFs, RealGitRepo};
+use crate::sys::{
+    ReadOnlyJournalStore, RealClock, RealCommandRunner, RealFs, RealGitRepo, RealRegistryQuery,
+};
 
 /// Arguments for `release plan`.
 #[derive(Args, Debug)]
@@ -40,12 +46,23 @@ pub struct CutArgs {
     pub plan: String,
 }
 
-/// A single positional `<run_id>`, shared by `resume` / `verify` / `show`.
+/// A single positional `<run_id>` plus the journal-location flags, shared by
+/// `resume` / `verify` / `show` — every run-scoped verb needs to locate the same
+/// journal for the same run.
 #[derive(Args, Debug)]
 pub struct RunIdArgs {
     /// The run id.
     #[arg(value_name = "RUN_ID")]
     pub run_id: String,
+    /// Repository whose release journal to read (default: current directory). The
+    /// journal is rooted at `<git-common-dir>/ossctl/releases`, so any linked
+    /// worktree of the repo resolves to the same run state.
+    #[arg(long, value_name = "PATH")]
+    pub repo_root: Option<PathBuf>,
+    /// Read the journal from this directory instead of resolving it from git
+    /// (`<git-common-dir>/ossctl/releases`). For CI and tests.
+    #[arg(long, value_name = "PATH")]
+    pub journal_dir: Option<PathBuf>,
 }
 
 /// Arguments for `release abandon`.
@@ -65,7 +82,7 @@ pub fn dispatch(action: ReleaseAction, format: OutputFormat) -> Result<(), CliEr
         ReleaseAction::Plan(args) => plan(&args, format),
         ReleaseAction::Cut(_) => Err(CliError::not_implemented("release cut")),
         ReleaseAction::Resume(_) => Err(CliError::not_implemented("release resume")),
-        ReleaseAction::Verify(_) => Err(CliError::not_implemented("release verify")),
+        ReleaseAction::Verify(args) => verify(&args, format),
         ReleaseAction::Show(_) => Err(CliError::not_implemented("release show")),
         ReleaseAction::List => Err(CliError::not_implemented("release list")),
         ReleaseAction::Abandon(_) => Err(CliError::not_implemented("release abandon")),
@@ -152,6 +169,158 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
         OutputFormat::Text => render_plan_text(&plan, &warnings),
     }
     Ok(())
+}
+
+/// `ossctl release verify` — read-only reconcile of a journaled run against
+/// remote registry state (ADR-0002 §1, ADR-0003 state table).
+///
+/// Reads the run's state straight from the authoritative event log (no lock, no
+/// manifest self-heal, no writes) and, for each published target, dispatches the
+/// ecosystem adapter's `verify()` against the registry through the injected
+/// [`RealRegistryQuery`] port — classifying each as `matches`/`conflicts`/
+/// `missing`/`unknown`. A registry lookup that cannot be performed degrades to
+/// `unknown`, never a false `missing`. Emits the reconcile report under the
+/// canonical envelope. This command mutates nothing — not the repo, the journal,
+/// or the registry.
+pub fn verify(args: &RunIdArgs, format: OutputFormat) -> Result<(), CliError> {
+    let repo_root = resolve_repo_root(args.repo_root.as_ref())?;
+    if !repo_root.is_dir() {
+        return Err(CliError::user(
+            "invalid_repo_root",
+            format!("repo_root '{}' is not a directory", repo_root.display()),
+        )
+        .with_invalid_value(repo_root.display().to_string()));
+    }
+    let root = std::fs::canonicalize(&repo_root).map_err(|e| {
+        CliError::system(
+            "io_error",
+            format!(
+                "cannot canonicalize repo_root '{}': {e}",
+                repo_root.display()
+            ),
+        )
+    })?;
+
+    // Resolve the journal root: an explicit `--journal-dir` wins (CI/tests),
+    // otherwise `<git-common-dir>/ossctl/releases` so every linked worktree shares
+    // one run-state root.
+    let git = RealGitRepo::new(&root);
+    let paths = JournalPaths::from_git(&git, args.journal_dir.as_deref()).map_err(|e| {
+        CliError::system(
+            "journal_root_unresolved",
+            format!(
+                "cannot locate the release journal root (is '{}' a git repository? pass \
+                 --journal-dir to override): {e}",
+                root.display()
+            ),
+        )
+    })?;
+
+    // Authoritative, write-free read of the run's state.
+    let store = ReadOnlyJournalStore;
+    let state = journal::read_run_state(&store, &paths, &args.run_id)
+        .map_err(|e| read_state_error(&args.run_id, e))?
+        .ok_or_else(|| {
+            CliError::user(
+                "run_not_found",
+                format!(
+                    "no release run '{}' found under {}",
+                    args.run_id,
+                    paths.releases_dir().display()
+                ),
+            )
+            .with_invalid_value(args.run_id.clone())
+        })?;
+
+    // The reconcile queries the registry only; the runner/clock are supplied
+    // because the adapter effect context requires them, but verify() never runs a
+    // command or reads the clock.
+    let runner = RealCommandRunner;
+    let clock = RealClock;
+    let registry = RealRegistryQuery;
+    let ctx = EffectCtx {
+        runner: &runner,
+        clock: &clock,
+        registry: &registry,
+        repo_root: &root,
+    };
+    let report = ossctl_core::release::reconcile::reconcile(&state, &ctx);
+    let warnings = reconcile_warnings(&state, &report);
+
+    match format {
+        OutputFormat::Json => crate::output::emit_json(&report, &warnings)?,
+        OutputFormat::Text => render_reconcile_text(&report, &warnings),
+    }
+    Ok(())
+}
+
+/// Map a journal-read `io::Error` to the right exit class: a malformed `run_id`
+/// is caller-fixable (exit 1); a corrupt or too-new journal is a system fault
+/// (exit 2).
+fn read_state_error(run_id: &str, e: std::io::Error) -> CliError {
+    match e.kind() {
+        std::io::ErrorKind::InvalidInput => {
+            CliError::user("invalid_run_id", e.to_string()).with_invalid_value(run_id.to_string())
+        }
+        std::io::ErrorKind::InvalidData => CliError::system("journal_unreadable", e.to_string()),
+        _ => CliError::system("io_error", e.to_string()),
+    }
+}
+
+/// Non-fatal context for the envelope: targets declared but never published (the
+/// run was interrupted before publishing them — nothing to reconcile, and *not* a
+/// false `missing`), and a note when the run is still live.
+fn reconcile_warnings(
+    state: &ossctl_core::protocol::journal::RunState,
+    report: &ReconcileReport,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if state.status == RunStatus::InProgress {
+        warnings.push(
+            "the run is still in progress — this reconcile is a point-in-time snapshot".to_string(),
+        );
+    }
+    for target in &state.targets {
+        if !state.published.contains_key(target) {
+            warnings.push(format!(
+                "target '{target}' was declared but has no publish receipt in this run \
+                 (not yet published, or the run was interrupted); it is not reconciled"
+            ));
+        }
+    }
+    if report.summary.conflicts > 0 {
+        warnings.push(format!(
+            "{} target(s) conflict with registry state — a human must reconcile before resuming",
+            report.summary.conflicts
+        ));
+    }
+    warnings
+}
+
+fn render_reconcile_text(report: &ReconcileReport, warnings: &[String]) {
+    println!("run_id:     {}", report.run_id);
+    println!("plan_id:    {}", report.plan_id);
+    println!("status:     {}", report.run_status.as_str());
+    let s = &report.summary;
+    println!(
+        "reconciled: {} ({} matches, {} conflicts, {} missing, {} unknown)",
+        s.reconciled, s.matches, s.conflicts, s.missing, s.unknown
+    );
+    for t in &report.targets {
+        println!(
+            "  {:<10} {:<8} {:<20} {}",
+            t.target,
+            t.ecosystem,
+            format!("{}@{}", t.package.as_deref().unwrap_or("<none>"), t.version),
+            t.outcome.as_str(),
+        );
+        if let Some(detail) = &t.detail {
+            println!("             └─ {detail}");
+        }
+    }
+    for w in warnings {
+        println!("warning:    {w}");
+    }
 }
 
 /// Validate the chosen version as an opaque, already-chosen identifier. Scheme

@@ -533,3 +533,123 @@ fn audit_missing_repo_root_is_user_error() {
     let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
     assert_eq!(v["error"]["code"], "invalid_repo_root");
 }
+
+// ── release verify: read-only reconcile of a journaled run ───────────────────
+
+/// Write a minimal journal for `run_id` under a `--journal-dir` root and return
+/// that root. The events use the flat on-disk line shape the journal reads back.
+fn seed_journal(run_id: &str, lines: &[&str]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = dir.path().join(run_id);
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(
+        run_dir.join("journal.jsonl"),
+        format!("{}\n", lines.join("\n")),
+    )
+    .unwrap();
+    dir
+}
+
+/// `release verify` reconciles a journaled run and emits the report envelope.
+/// Uses `rust` + `binary` targets, which classify as `unknown` without any
+/// network access (rust has no wired registry query yet; binary is structurally
+/// unobservable), so the test is deterministic and offline.
+#[test]
+fn release_verify_reconciles_a_journaled_run() {
+    let dir = seed_journal(
+        "RUN01",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN01","plan_id":"plan-abc","targets":["cargo","gh"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"published:cargo","kind":"target_published","target":"cargo","receipt":{"ecosystem":"rust","package":"tool","version":"1.0.0","registry_url":null,"digest":null}}"#,
+            r#"{"schema_version":1,"seq":3,"ts":1002,"idempotency_key":"published:gh","kind":"target_published","target":"gh","receipt":{"ecosystem":"binary","package":"tool","version":"1.0.0","registry_url":null,"digest":null}}"#,
+        ],
+    );
+
+    let out = ossctl()
+        .args(["release", "verify", "RUN01", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "verify must exit 0: {out:?}");
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout JSON");
+    assert_eq!(v["schema_version"], 1);
+    let data = &v["data"];
+    assert_eq!(data["run_id"], "RUN01");
+    assert_eq!(data["plan_id"], "plan-abc");
+    // Both targets classify as unknown offline; never a false "missing".
+    assert_eq!(data["summary"]["reconciled"], 2);
+    assert_eq!(data["summary"]["unknown"], 2);
+    assert_eq!(data["summary"]["missing"], 0);
+    let outcomes: Vec<&str> = data["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(outcomes, vec!["unknown", "unknown"]);
+
+    // Read-only: verify must not materialize a manifest cache next to the journal.
+    assert!(
+        !dir.path().join("RUN01").join("manifest.json").exists(),
+        "verify wrote a manifest — it must be read-only"
+    );
+}
+
+/// A verify against a run with no journal is a caller-fixable (exit 1) error.
+#[test]
+fn release_verify_unknown_run_is_user_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = ossctl()
+        .args(["release", "verify", "NOPE", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "run_not_found");
+}
+
+/// A `run_id` that is not a single path segment is rejected (no path traversal).
+#[test]
+fn release_verify_rejects_bad_run_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = ossctl()
+        .args(["release", "verify", "../escape", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "invalid_run_id");
+}
+
+/// An interrupted run (a declared target with no receipt) reconciles what landed
+/// and surfaces the un-published target as a warning — never a false "missing".
+#[test]
+fn release_verify_warns_about_unpublished_targets() {
+    let dir = seed_journal(
+        "RUN02",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN02","plan_id":"plan-xyz","targets":["cargo","npm"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"published:cargo","kind":"target_published","target":"cargo","receipt":{"ecosystem":"rust","package":"tool","version":"2.0.0","registry_url":null,"digest":null}}"#,
+        ],
+    );
+
+    let out = ossctl()
+        .args(["release", "verify", "RUN02", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["data"]["summary"]["reconciled"], 1,
+        "only the published target reconciles"
+    );
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| w.as_str().unwrap().contains("npm")),
+        "the unpublished target must be surfaced as a warning: {warnings:?}"
+    );
+}
