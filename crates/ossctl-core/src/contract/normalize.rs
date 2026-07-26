@@ -317,7 +317,7 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
         }
     };
     // fragment_dir must be a relative path inside the repo (floor 6).
-    if !path_inside_repo(&changelog.fragment_dir, repo_root) {
+    if !path_inside_repo(&changelog.fragment_dir) {
         p.err(format!(
             "floor: changelog.fragment_dir '{}' must be a relative path inside the repo (an \
              absolute or '../'-escaping path is refused)",
@@ -427,7 +427,7 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
 
     // ── Filesystem/producer-existence semantic check — ADVISORY, never fatal ─
     if changelog.mode == ChangelogMode::Fragment
-        && path_inside_repo(&changelog.fragment_dir, repo_root)
+        && path_inside_repo(&changelog.fragment_dir)
         && !fs.is_dir(&repo_root.join(&changelog.fragment_dir))
     {
         p.warn(format!(
@@ -745,32 +745,35 @@ fn yaml_display(v: &Value) -> String {
     }
 }
 
-/// Whether `rel` is a relative path that resolves inside `repo_root` (no
-/// absolute path, no `../` escape) — the fragment-dir floor. Lexical, so the
-/// path need not exist (mirrors the Python `os.path.normpath` check).
-fn path_inside_repo(rel: &str, repo_root: &Path) -> bool {
-    let relp = Path::new(rel);
-    if relp.is_absolute() {
-        return false;
-    }
-    let resolved = lexical_normalize(&repo_root.join(relp));
-    let root = lexical_normalize(repo_root);
-    resolved == root || resolved.starts_with(&root)
-}
-
-/// Collapse `.` and `..` components lexically (no filesystem access).
-fn lexical_normalize(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for comp in p.components() {
+/// Whether `rel` is a relative path that stays inside the repo — no absolute
+/// path, no `../` escape — the fragment-dir floor. Lexical, so the path need not
+/// exist. The check is purely on `rel`'s own component depth, so it holds
+/// whether the repo root is absolute or relative (notably `--repo-root .`,
+/// where `repo_root` normalizes to an empty path): a `..` is an escape the
+/// moment it would pop above the repo root, exactly the Python
+/// `_path_inside_repo` verdict (which rejects any `rel` that normalizes to an
+/// escaping path). Joining `rel` onto a relative root and testing containment —
+/// the previous approach — silently accepted `../etc` under a `.` root, because
+/// an empty normalized root is a prefix of every path.
+fn path_inside_repo(rel: &str) -> bool {
+    let mut depth: usize = 0;
+    for comp in Path::new(rel).components() {
         match comp {
-            Component::ParentDir => {
-                out.pop();
-            }
             Component::CurDir => {}
-            other => out.push(other.as_os_str()),
+            Component::Normal(_) => depth += 1,
+            Component::ParentDir => {
+                // An escape above the repo root the instant depth would go < 0.
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+            }
+            // An absolute path (or a Windows drive prefix) never stays inside a
+            // relative repo root.
+            Component::RootDir | Component::Prefix(_) => return false,
         }
     }
-    out
+    true
 }
 
 /// Convert an arbitrary YAML value to JSON, for `extra_fields` preservation.
@@ -1005,6 +1008,31 @@ mod tests {
         let text = "---\nstatus: approved\nmaturity: mvp\n\
                     changelog:\n  mode: fragment\n  source: manual\n  fragment_dir: /etc\n---\n";
         assert_error_contains(&norm(text), "must be a relative path inside the repo");
+    }
+
+    #[test]
+    fn floor_fragment_dir_escape_relative_root() {
+        // Regression: with a *relative* repo root (the CLI's `--repo-root .`),
+        // a `../`-escaping fragment_dir must still be rejected. The earlier
+        // join-then-contain check accepted it because a `.` root normalizes to
+        // an empty path that prefixes everything.
+        let text = "---\nstatus: approved\nmaturity: mvp\n\
+                    changelog:\n  mode: fragment\n  source: manual\n  fragment_dir: ../etc\n---\n";
+        let n = normalize_str(text, Path::new("."), &FakeFs::empty());
+        assert_error_contains(&n, "must be a relative path inside the repo");
+    }
+
+    #[test]
+    fn path_inside_repo_verdicts() {
+        // Inside — plain and `.`/`..`-collapsing relative paths that stay in.
+        assert!(path_inside_repo("changelog/fragments"));
+        assert!(path_inside_repo("./changelog/fragments"));
+        assert!(path_inside_repo("a/../fragments"));
+        assert!(path_inside_repo("")); // the repo root itself
+                                       // Escapes — absolute, leading `..`, and mid-path `..` that pops out.
+        assert!(!path_inside_repo("/etc"));
+        assert!(!path_inside_repo("../etc"));
+        assert!(!path_inside_repo("a/../../etc"));
     }
 
     #[test]
