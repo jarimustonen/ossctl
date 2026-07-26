@@ -42,6 +42,12 @@
 //! is skipped if journalled and the [`Tagger`](crate::ports::Tagger) treats
 //! "already exists" as success), so continuing the barrier *is* the tag reconcile.
 //! Forking a second copy of that logic here is exactly what ADR-0003 forbids.
+//!
+//! A target the original run **cancelled** (a `target_cancelled` fact) is off the
+//! table entirely: it is a deliberate skip, and the coordinator's publish-all skips
+//! only *published* targets, so continuing would re-publish it. Resume classifies it
+//! as [`ResumeAction::Cancelled`] — a hard stop — rather than silently un-cancelling
+//! it (there is no ADR-0003 cell for cancelled × remote).
 
 use std::collections::HashMap;
 
@@ -61,6 +67,9 @@ pub enum JournalState {
     /// The journal holds no receipt for this target (never published, or the
     /// publish landed before its receipt was fsynced).
     NotRecorded,
+    /// The journal recorded a `target_cancelled` for this target — a deliberate
+    /// skip. Resume must never silently un-cancel it into a publish.
+    Cancelled,
 }
 
 /// The reconciled action for one target — the resolved cell of the ADR-0003 §4
@@ -87,6 +96,11 @@ pub enum ResumeAction {
     /// go-ahead (`allow_unverified`), because an outage must never be assumed to
     /// mean "not published".
     Unverifiable,
+    /// The target was cancelled in the original run — a **hard stop**. The
+    /// coordinator's publish-all skips only *published* targets, so continuing
+    /// would re-publish a target the operator deliberately cancelled; resume never
+    /// silently un-cancels it (there is no ADR-0003 cell for cancelled × remote).
+    Cancelled,
 }
 
 impl ResumeAction {
@@ -94,7 +108,7 @@ impl ResumeAction {
     /// not continued past).
     #[must_use]
     pub fn is_blocker(self) -> bool {
-        matches!(self, Self::Conflict | Self::Unverifiable)
+        matches!(self, Self::Conflict | Self::Unverifiable | Self::Cancelled)
     }
 
     /// The stable wire/diagnostic string for this action.
@@ -106,6 +120,7 @@ impl ResumeAction {
             Self::ResumePublish => "resume_publish",
             Self::Conflict => "conflict",
             Self::Unverifiable => "unverifiable",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -194,8 +209,11 @@ pub fn reconcile_for_resume(
     ctx: &EffectCtx<'_>,
     allow_unverified: bool,
 ) -> ResumeReconcile {
-    // Published targets are classified through the same read-only reconcile engine
-    // `release verify` uses (remote is ground truth), keyed by target id.
+    // The remote outcome for *published* targets comes from the same read-only
+    // reconcile engine `release verify` uses (remote is ground truth). Note this
+    // supplies only the outcome — the journal-state axis is decided directly from
+    // `state.published` below, never from report membership, so a receipt can never
+    // be misclassified as not-recorded (which would risk a double publish).
     let published_report = super::reconcile::reconcile(state, ctx);
     let published: HashMap<&str, (VerifyOutcome, Option<String>)> = published_report
         .targets
@@ -206,19 +224,50 @@ pub fn reconcile_for_resume(
     let mut decisions = Vec::with_capacity(plan.targets.len());
     for pt in &plan.targets {
         let target = pt.ecosystem.as_str().to_string();
-        let (journal_state, outcome, verify_detail) =
-            if let Some((outcome, detail)) = published.get(target.as_str()) {
-                (JournalState::Published, *outcome, detail.clone())
-            } else {
-                let (outcome, detail) = verify_not_recorded(ctx, pt, &plan.version);
-                (JournalState::NotRecorded, outcome, detail)
-            };
+
+        // A cancelled target is a deliberate skip, not a publish candidate. The
+        // coordinator's publish-all skips only *published* targets, so continuing
+        // would re-publish it — block instead of silently un-cancelling.
+        if let Some(reason) = state.cancelled.get(&target) {
+            decisions.push(TargetDecision {
+                target,
+                ecosystem: pt.ecosystem,
+                journal_state: JournalState::Cancelled,
+                outcome: VerifyOutcome::Unknown,
+                action: ResumeAction::Cancelled,
+                detail: Some(format!(
+                    "this target was cancelled in the original run ({reason}); resuming would \
+                     re-publish it. ossctl will not silently un-cancel a target — abandon and \
+                     re-plan, or reconcile it by hand"
+                )),
+                adopted_receipt: None,
+            });
+            continue;
+        }
+
+        // The journal-state axis: authoritative from `state.published`.
+        let (journal_state, outcome, verify_detail) = if state.published.contains_key(&target) {
+            // A receipt exists; take its remote outcome from the reconcile report
+            // (defensively Unknown if — impossibly — the engine omitted the row).
+            let (outcome, detail) = published.get(target.as_str()).cloned().unwrap_or((
+                VerifyOutcome::Unknown,
+                Some("the published receipt could not be reconciled against the registry".into()),
+            ));
+            (JournalState::Published, outcome, detail)
+        } else {
+            let (outcome, detail) = verify_not_recorded(ctx, pt, &plan.version);
+            (JournalState::NotRecorded, outcome, detail)
+        };
 
         let action = classify(journal_state, outcome, allow_unverified);
         let adopted_receipt = (action == ResumeAction::AdoptForward).then(|| JournalReceipt {
             ecosystem: pt.ecosystem.as_str().to_string(),
             package: pt.package.clone(),
             version: plan.version.clone(),
+            // The current RegistryQuery port lists versions only (no remote digest
+            // or URL to capture); an adopted receipt therefore records presence,
+            // matching what a live publish receipt carries through this port. A
+            // richer digest-observing port is a documented follow-up.
             registry_url: None,
             digest: None,
         });
@@ -251,9 +300,12 @@ fn classify(
     outcome: VerifyOutcome,
     allow_unverified: bool,
 ) -> ResumeAction {
-    use JournalState::{NotRecorded, Published};
+    use JournalState::{Cancelled, NotRecorded, Published};
     use VerifyOutcome::{Conflicts, Matches, Missing, Unknown};
     match (journal_state, outcome) {
+        // Cancelled targets are decided before classify (never queried); this arm
+        // only satisfies exhaustiveness and mirrors that hard-stop disposition.
+        (Cancelled, _) => ResumeAction::Cancelled,
         (Published, Matches) => ResumeAction::Skip,
         // A recorded publish that now conflicts, or has vanished, is a hard stop:
         // never overwrite someone else's artifact, never blind-re-publish.
@@ -358,7 +410,9 @@ fn action_detail(
     verify_detail: Option<String>,
 ) -> Option<String> {
     match action {
-        ResumeAction::Skip => None,
+        // Skip carries no note; a Cancelled decision is built with its own detail
+        // at the call site (it needs the cancellation reason), so neither reaches here.
+        ResumeAction::Skip | ResumeAction::Cancelled => None,
         ResumeAction::AdoptForward => Some(
             "a publish landed before its receipt was recorded; adopting it forward so it is \
              not re-published"

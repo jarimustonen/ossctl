@@ -705,6 +705,9 @@ pub fn resume(args: &ResumeArgs, format: OutputFormat) -> Result<(), CliError> {
     }
 
     let mut sink = StreamSink::new(std::io::stdout(), matches!(format, OutputFormat::Json));
+    // Lead the stream with the run's identity (parity with `cut`), so a `--json`
+    // resume is self-contained even when the only following events are adoptions.
+    stream_run_created(&mut sink, &journal, &plan);
 
     // Adopt forward any publish that landed without a durable receipt, so the
     // coordinator treats it as done and never re-publishes an already-published
@@ -844,9 +847,11 @@ fn resume_drift_error(
         "resume_drift",
         format!(
             "run {} was sealed against plan {}, but the current repository (HEAD {}, version {}) \
-             hashes to a different plan_id — a commit, contract edit, or version change occurred \
-             since the cut. Resume against the sealed state (check out the sealed commit), or plan \
-             and cut a new release; ossctl will not continue a different plan under this run",
+             hashes to a different plan_id — a commit, a contract or manifest edit, a version \
+             change, or an uncommitted working-tree change occurred since the cut (the plan is \
+             re-derived from the working tree, so a dirty tree drifts too). Restore the sealed \
+             state (a clean checkout of the sealed commit), or plan and cut a new release; ossctl \
+             will not continue a different plan under this run",
             state.run_id,
             short_sha(&state.plan_id),
             short_sha(&current.head_sha),

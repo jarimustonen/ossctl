@@ -361,6 +361,54 @@ fn structurally_unobservable_binary_target_is_unknown_not_missing() {
     );
 }
 
+// ── Cancelled targets never become publish candidates ────────────────────────
+
+#[test]
+fn a_cancelled_target_blocks_and_is_never_queried() {
+    // A target the original run cancelled must not be silently un-cancelled into a
+    // publish — the coordinator's publish-all skips only *published* targets, so
+    // resume blocks instead.
+    let mut state = state_with(&[], &["rust"]);
+    state
+        .cancelled
+        .insert("rust".to_string(), "OTP timeout".to_string());
+    let (cmd, clock) = (RecordingCmd::default(), FixedClock);
+    // A registry that WOULD answer must not tempt resume into publishing it.
+    let reg = FakeRegistry::new().with("rust", "tool", &["1.0.0"]);
+    let r = reconcile(&state, &rust_plan(), &cmd, &clock, &reg, false);
+
+    let d = &r.decisions[0];
+    assert_eq!(d.journal_state, JournalState::Cancelled);
+    assert_eq!(d.action, ResumeAction::Cancelled);
+    assert!(
+        d.action.is_blocker(),
+        "a cancelled target must block resume"
+    );
+    assert!(r.is_blocked());
+    assert!(d.detail.as_deref().unwrap().contains("OTP timeout"));
+    assert!(d.adopted_receipt.is_none());
+    // A cancelled target is never queried — its disposition is already decided.
+    assert!(
+        reg.queried.borrow().is_empty(),
+        "a cancelled target must not hit the registry"
+    );
+}
+
+#[test]
+fn a_cancelled_target_blocks_even_with_the_go_ahead() {
+    // The --allow-unverified go-ahead relaxes only the Unknown rows; it must never
+    // un-cancel a target.
+    let mut state = state_with(&[], &["rust"]);
+    state
+        .cancelled
+        .insert("rust".to_string(), "manual skip".to_string());
+    let (cmd, clock) = (RecordingCmd::default(), FixedClock);
+    let reg = FakeRegistry::new();
+    let r = reconcile(&state, &rust_plan(), &cmd, &clock, &reg, true);
+    assert_eq!(r.decisions[0].action, ResumeAction::Cancelled);
+    assert!(r.is_blocked());
+}
+
 // ── Multi-target roll-up + the resume-facing helpers ─────────────────────────
 
 #[test]
