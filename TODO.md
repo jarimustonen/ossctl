@@ -5,14 +5,25 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-07-25 (updated after stint #3). New agent: read this, then continue
-with a fresh `/stint`. FOUR units have LANDED: `workspace-scaffold`, `contract-command`
+_Handoff written 2026-07-25 (updated after stint #4). New agent: read this, then continue
+with a fresh `/stint`. SIX units have LANDED: `workspace-scaffold`, `contract-command`
 (canonical `contract/schema.rs` + `protocol` DTOs + `ossctl contract show|validate`),
-`facts-command` (`ossctl facts`, byte-for-value identical to the Python detector), and
+`facts-command` (`ossctl facts`, byte-for-value identical to the Python detector),
 `skill-subcommand` (`ossctl skill list|install|print` + §15-17 bundle mechanism + §17 CI
-lockstep gate; first two templates wired: oss-release, oss-readiness). 101 tests green on
-`main`. Now unblocked: `audit-command` (contract+facts both done), `release-engine`
-(contract done), and `migrate-oss-init` (contract+facts+skill all done)._
+lockstep gate), `audit-command` (`ossctl audit` readiness engine — reads contract+facts,
+read-only gap report, registry/GH failure⇒unknown), and the ossctl side of
+`migrate-oss-init` (oss-init bundled as a skill template shelling out to the binary). 130
+tests green on `main`. Now unblocked: `release-engine` (contract done) and `prose-skills`
+(audit done). `migrate-oss-init` stays IN-PROGRESS — see the homebase-removal note below._
+
+_migrate-oss-init tail (DO NOT rush): the ossctl side is done + bundled, but the homebase
+copy (`dotfiles/src/.claude/skills/oss-init/`: SKILL.md, SCHEMA.md, scripts/*.py, fixtures/)
+is STILL the user's live /oss-init. Removing it now would break /oss-init in the environment,
+because ossctl is not yet installed on PATH — `ossctl skill install oss-init` can't take over
+until ossctl ships as a distributable binary. So the homebase removal is DEFERRED until ossctl
+is installed. Keep migrate-oss-init open until then. Homebase design docs in
+issues/oss-release-skill-family/ STAY (history); only the live skill + Python get removed,
+and only after ossctl install works._
 
 _Stint-note (agent-death + salvage): the first `contract-command` spinoff DIED (`agent-died`)
 at ~31 min AFTER committing complete green work, before its review+merge — the underlying
@@ -33,16 +44,15 @@ implementation, dependency-first.
 **Epic:** [`ossctl-phase4-build`](issues/ossctl-phase4-build/item.md)
 **Branch / worktree:** main (clean).
 
-**NEXT ROUND (start here):** four units DONE. Now unblocked:
-[`audit-command`](issues/audit-command/item.md) (needs contract+facts — both landed),
-[`release-engine`](issues/release-engine/item.md) (needs contract — landed; large epic,
-ADR-0002/0003, likely its own round), and [`migrate-oss-init`](issues/migrate-oss-init/item.md)
-(needs contract+facts+skill — all landed). Only [`prose-skills`](issues/prose-skills/item.md)
-stays blocked (needs `audit-command`). Suggested order: `audit-command` next (it unblocks
-`prose-skills` and is the last piece of the readiness half), then `migrate-oss-init` (relocate
-/oss-init, delete its Python) can run parallel to the `release-engine` epic since they're
-disjoint (skill templates + Python removal vs. the release state machine) — watch only crate
-`Cargo.toml` (union-resolve on conflict, proven safe in round #3).
+**NEXT ROUND (start here):** six units DONE. Two remain unblocked:
+[`release-engine`](issues/release-engine/item.md) (the big ADR-0002/0003 epic —
+plan/cut/resume/verify + adapters + journal; likely its own dedicated round, possibly
+`/orchestrate` given the DAG shape) and [`prose-skills`](issues/prose-skills/item.md) (author
+the remaining prose /oss-* members + the /oss-release orchestrator — a large authoring task;
+per the migrate decision ALL family skills bundle under crates/ossctl-cli/skills/ and ship via
+`ossctl skill install`, none in homebase). These two are disjoint (release state machine vs.
+skill prose) → parallelizable, union-resolve Cargo.toml. `migrate-oss-init` is all-but-done
+(homebase removal deferred, see above).
 
 **Hot-file learning (round #3):** crate `Cargo.toml` is listed as a hot file, but two
 disjoint units (`facts-command` + `skill-subcommand`) ran in PARALLEL and merged clean — the
@@ -66,10 +76,10 @@ shared-logic files (`contract/schema.rs`, a shared `protocol/*.rs` module).
 2. ~~[`contract-command`](issues/contract-command/item.md) — port `check-oss-release.py` → `ossctl contract show|validate` (the inter-skill contract; preserve JSON shape).~~ ✅ **DONE** (stint #2, commits ee39196 → 7f07930; salvaged after agent-death, reviewed).
 3. ~~[`facts-command`](issues/facts-command/item.md) — port `infer-repo-facts.py` → `ossctl facts`.~~ ✅ **DONE** (stint #3, commits 7f9fe99 → 9450b2b).
 4. ~~[`skill-subcommand`](issues/skill-subcommand/item.md) — `ossctl skill list|install|print` + bundle mechanism (§15-17).~~ ✅ **DONE** (stint #3, commits 4f7e7a6 → 0103247).
-5. [`audit-command`](issues/audit-command/item.md) — `ossctl audit` readiness engine. *blocked by 2+3.*
-6. [`release-engine`](issues/release-engine/item.md) — plan/cut/resume/verify + adapters + journal (epic; ADR-0002/0003). *blocked by 2.*
-7. [`migrate-oss-init`](issues/migrate-oss-init/item.md) — relocate `/oss-init`, delete its Python. *blocked by 2+3+4.*
-8. [`prose-skills`](issues/prose-skills/item.md) — the skill-side members + `/oss-release` orchestrator. *blocked by 5.*
+5. ~~[`audit-command`](issues/audit-command/item.md) — `ossctl audit` readiness engine.~~ ✅ **DONE** (stint #4, commits 0d54998 → b423cd0).
+6. [`release-engine`](issues/release-engine/item.md) — plan/cut/resume/verify + adapters + journal (epic; ADR-0002/0003). **UNBLOCKED — not yet started.**
+7. ⏳ [`migrate-oss-init`](issues/migrate-oss-init/item.md) — ossctl side DONE (stint #4, commits f8eb2fd → 97eaa0e); oss-init bundled as a skill template. **Homebase removal DEFERRED until ossctl is installed on PATH** (see handoff note) — issue kept in-progress.
+8. [`prose-skills`](issues/prose-skills/item.md) — the skill-side members + `/oss-release` orchestrator. **UNBLOCKED — not yet started.**
 
 **Watch out:**
 - **No deploy step** — see AGENTS.md "Operating policy": units land on `main`, `/stint`
