@@ -402,10 +402,18 @@ pub(crate) fn run_all(
                 source: e.to_string(),
             })?;
         if out.status != Some(0) {
+            // Many CLIs (npm, go, cargo) write fatal diagnostics to stdout, not
+            // stderr — fold stdout in when stderr is empty so the failure is
+            // never opaque.
+            let detail = if out.stderr.trim().is_empty() {
+                out.stdout
+            } else {
+                out.stderr
+            };
             return Err(AdapterError::Command {
                 command: cmd.rendered(),
                 code: out.status,
-                stderr: out.stderr,
+                stderr: detail,
             });
         }
         outputs.push(out);

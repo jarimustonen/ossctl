@@ -1,8 +1,11 @@
 //! Rust ecosystem adapter: `cargo-publish` (crates.io) and `cargo-dist`.
 //!
-//! Publishes crates to crates.io via `cargo publish`, or builds/uploads
-//! distributable binaries via `cargo-dist` (`dist`). `verify` reconciles against
-//! crates.io through [`RegistryQuery`](crate::ports::RegistryQuery) using the
+//! `cargo-publish` publishes a crate to crates.io via `cargo publish`.
+//! `cargo-dist` plans and builds distributable binaries locally (`dist`), but
+//! its *upload* is the CI release workflow — so its publish body is
+//! [`AdapterError::Unsupported`] from this host rather than a fabricated receipt
+//! for a build-only command. `verify` (for `cargo-publish`) reconciles against
+//! crates.io through [`RegistryQuery`](crate::ports::RegistryQuery) via the
 //! adapter's default path.
 
 use std::time::Duration;
@@ -27,18 +30,6 @@ impl CargoAdapter {
             Adapter::CargoPublish | Adapter::CargoDist
         ));
         Self { adapter }
-    }
-
-    fn publish_commands(&self, t: &AdapterTarget) -> Vec<PlannedCommand> {
-        match self.adapter {
-            Adapter::CargoDist => vec![PlannedCommand::new("dist", &["build", "--artifacts=all"])],
-            // `--no-verify`: the build phase already verified; re-verifying here
-            // would double the work and is not what makes this irreversible.
-            _ => vec![PlannedCommand::new(
-                "cargo",
-                &["publish", "-p", &t.package, "--no-verify"],
-            )],
-        }
     }
 }
 
@@ -74,17 +65,25 @@ impl ReleaseAdapter for CargoAdapter {
         ctx: &EffectCtx<'_>,
         t: &AdapterTarget,
     ) -> Result<BuildArtifacts, AdapterError> {
-        let cmds = match self.adapter {
-            Adapter::CargoDist => vec![PlannedCommand::new("dist", &["build"])],
-            _ => vec![PlannedCommand::new("cargo", &["package", "-p", &t.package])],
+        // `dist build` emits per-platform tarballs/installers, not a `.crate`;
+        // name the artifact set to match what each identity actually produces.
+        let (cmds, artifacts) = match self.adapter {
+            Adapter::CargoDist => (
+                vec![PlannedCommand::new("dist", &["build"])],
+                vec!["dist/".to_string()],
+            ),
+            _ => (
+                vec![PlannedCommand::new("cargo", &["package", "-p", &t.package])],
+                vec![format!("{}-{}.crate", t.package, t.version)],
+            ),
         };
         run_all(ctx, &cmds)?;
-        // SKELETON: a production build parses the packaged `.crate` / dist
-        // manifest paths out of the command output; here we name the expected
-        // artifact deterministically.
+        // SKELETON: a production build parses the exact packaged `.crate` /
+        // `dist-manifest.json` paths out of the command output; here we name the
+        // expected artifact set deterministically.
         Ok(BuildArtifacts {
             adapter: self.adapter,
-            artifacts: vec![format!("{}-{}.crate", t.package, t.version)],
+            artifacts,
             notes: vec![],
         })
     }
@@ -94,13 +93,29 @@ impl ReleaseAdapter for CargoAdapter {
         ctx: &EffectCtx<'_>,
         t: &AdapterTarget,
     ) -> Result<PublishReceipt, AdapterError> {
-        // PER-TARGET IRREVERSIBLE — drives the real registry CLI through the
-        // injected runner (the port is the safety seam under test).
-        run_all(ctx, &self.publish_commands(t))?;
+        // cargo-dist uploads via the CI release workflow, not from this host —
+        // `dist build` only builds. Report that honestly rather than returning a
+        // receipt for a publish that did not happen.
+        if matches!(self.adapter, Adapter::CargoDist) {
+            return Err(AdapterError::Unsupported {
+                adapter: self.adapter,
+                operation: "publish",
+            });
+        }
+        // PER-TARGET IRREVERSIBLE — drives the real `cargo publish` through the
+        // injected runner (the port is the safety seam under test). No
+        // `--no-verify`: a resume that enters publish without re-running build
+        // must still let cargo verify the package before it lands.
+        run_all(
+            ctx,
+            &[PlannedCommand::new("cargo", &["publish", "-p", &t.package])],
+        )?;
         // SKELETON: a production publish parses the crates.io checksum from the
         // `cargo publish` output for `digest`; the canonical URL is well-known.
-        let remote_url = matches!(self.adapter, Adapter::CargoPublish)
-            .then(|| format!("https://crates.io/crates/{}/{}", t.package, t.version));
+        let remote_url = Some(format!(
+            "https://crates.io/crates/{}/{}",
+            t.package, t.version
+        ));
         Ok(make_receipt(ctx, t, None, remote_url))
     }
 

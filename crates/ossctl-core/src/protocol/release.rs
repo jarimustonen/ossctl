@@ -1,6 +1,6 @@
 //! Public wire DTOs for the release engine's per-target adapter facts (ADR-0002).
 //!
-//! These are the shapes an [adapter](crate::release::adapter::ReleaseAdapter)
+//! These are the shapes an [adapter](crate::release::adapters::ReleaseAdapter)
 //! produces and the coordinator journals and re-emits: the dry-run command plan,
 //! the build-artifact manifest, the **publish receipt** (a durable *fact* — the
 //! canonical ref/digest/URL captured at publish time, never re-derived later),

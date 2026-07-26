@@ -290,7 +290,7 @@ fn publish_runs_the_registry_command_and_returns_a_receipt() {
     );
     let r = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap();
 
-    assert_eq!(cmd.calls(), vec!["cargo publish -p tool --no-verify"]);
+    assert_eq!(cmd.calls(), vec!["cargo publish -p tool"]);
     assert_eq!(r.adapter, Adapter::CargoPublish);
     assert_eq!(r.ecosystem, Ecosystem::Rust);
     assert_eq!(r.package, "tool");
@@ -330,6 +330,33 @@ fn publish_surfaces_a_spawn_failure_as_io_error() {
     let t = target(Ecosystem::Node, Registry::Npm, Adapter::NpmPublish, "1.0.0");
     let err = resolve(Adapter::NpmPublish).publish(&c, &t).unwrap_err();
     assert!(matches!(err, AdapterError::Io { .. }));
+}
+
+#[test]
+fn cargo_dist_publish_is_unsupported_from_host() {
+    // cargo-dist only builds locally; its upload is the CI workflow, so it must
+    // not fabricate a receipt for a publish that did not happen.
+    let cmd = FakeCmd::new();
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoDist,
+        "1.0.0",
+    );
+    let err = resolve(Adapter::CargoDist).publish(&c, &t).unwrap_err();
+    assert!(matches!(
+        err,
+        AdapterError::Unsupported {
+            operation: "publish",
+            ..
+        }
+    ));
+    assert!(cmd.calls().is_empty());
 }
 
 #[test]
@@ -485,6 +512,24 @@ fn homebrew_and_binary_verify_is_always_unknown() {
             resolve(id).verify(&c, &r).unwrap(),
             VerifyOutcome::Unknown,
             "{id:?} must report Unknown"
+        );
+    }
+}
+
+// ── Wire parity: as_str() must equal the serde form (they must never drift) ──
+
+#[test]
+fn verify_outcome_as_str_matches_serde() {
+    for v in [
+        VerifyOutcome::Matches,
+        VerifyOutcome::Conflicts,
+        VerifyOutcome::Missing,
+        VerifyOutcome::Unknown,
+    ] {
+        assert_eq!(
+            serde_json::to_value(v).unwrap(),
+            serde_json::Value::String(v.as_str().to_string()),
+            "as_str() drifted from serde for {v:?}"
         );
     }
 }
