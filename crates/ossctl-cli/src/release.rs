@@ -90,6 +90,31 @@ pub struct RunIdArgs {
     pub journal_dir: Option<PathBuf>,
 }
 
+/// Arguments for `release resume` — the shared run-scoped locators plus the
+/// explicit go-ahead for the state table's unverifiable (`Unknown`) rows.
+#[derive(Args, Debug)]
+pub struct ResumeArgs {
+    /// The run id to resume.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// Repository whose release journal to resume (default: current directory).
+    /// The journal is rooted at `<git-common-dir>/ossctl/releases`, so any linked
+    /// worktree of the repo resolves to the same run state.
+    #[arg(long, value_name = "PATH")]
+    pub repo_root: Option<PathBuf>,
+    /// Read/write the journal in this directory instead of resolving it from git
+    /// (`<git-common-dir>/ossctl/releases`). For CI and tests.
+    #[arg(long, value_name = "PATH")]
+    pub journal_dir: Option<PathBuf>,
+    /// Proceed past targets whose remote state could not be verified (registry
+    /// outage, an unobservable distribution target). Without this the resume
+    /// refuses on any `unknown` target rather than assume it did not publish
+    /// (ADR-0003 §4). With it, an unverifiable target is trusted to the journal:
+    /// a recorded publish is skipped, an unrecorded one is (re-)published.
+    #[arg(long)]
+    pub allow_unverified: bool,
+}
+
 /// Arguments for `release abandon`.
 #[derive(Args, Debug)]
 pub struct AbandonArgs {
@@ -106,7 +131,7 @@ pub fn dispatch(action: ReleaseAction, format: OutputFormat) -> Result<(), CliEr
     match action {
         ReleaseAction::Plan(args) => plan(&args, format),
         ReleaseAction::Cut(args) => cut(&args, format),
-        ReleaseAction::Resume(_) => Err(CliError::not_implemented("release resume")),
+        ReleaseAction::Resume(args) => resume(&args, format),
         ReleaseAction::Verify(args) => verify(&args, format),
         ReleaseAction::Show(args) => show(&args, format),
         ReleaseAction::List => Err(CliError::not_implemented("release list")),
@@ -562,6 +587,315 @@ fn render_show_text(state: &RunState, events: &[JournalEvent]) {
     }
 }
 
+/// `ossctl release resume <run_id>` — reconcile an interrupted run against remote
+/// registry state (remote is ground truth) and continue the phase barrier from the
+/// first incomplete step (ADR-0003 §4).
+///
+/// Flow: open the run's journal under the single-active-cut lock (authoritative
+/// reduce of the durable log); short-circuit a terminal run (a `completed` run is
+/// idempotent success, an `abandoned` run is refused). Otherwise re-derive the
+/// approved plan from the *current* repo + the journal's sealed version and refuse
+/// unless it still hashes to the run's `plan_id` (the same drift discipline `cut`
+/// enforces — a resume must continue the exact approved plan, whose tag points at
+/// the sealed commit). Then **reconcile**: classify every target against remote via
+/// the adapter `verify()` per the ADR-0003 state table. A hard-stop cell
+/// (`conflicts`/`missing` after a recorded publish, or an unverifiable target
+/// without `--allow-unverified`) refuses with the §10 envelope and mutates nothing.
+/// A publish that landed without a durable receipt is **adopted forward** (journalled)
+/// so it is never re-published, then the coordinator continues — already-landed
+/// targets skipped, tag-once preserved.
+///
+/// Output (§12): the same event stream as `cut` — with `--json`, one
+/// [`JournalEvent`] per line; otherwise human progress lines.
+pub fn resume(args: &ResumeArgs, format: OutputFormat) -> Result<(), CliError> {
+    let repo_root = resolve_repo_root(args.repo_root.as_ref())?;
+    if !repo_root.is_dir() {
+        return Err(CliError::user(
+            "invalid_repo_root",
+            format!("repo_root '{}' is not a directory", repo_root.display()),
+        )
+        .with_invalid_value(repo_root.display().to_string()));
+    }
+    let root = std::fs::canonicalize(&repo_root).map_err(|e| {
+        CliError::system(
+            "io_error",
+            format!(
+                "cannot canonicalize repo_root '{}': {e}",
+                repo_root.display()
+            ),
+        )
+    })?;
+
+    let git = RealGitRepo::new(&root);
+    let paths = JournalPaths::from_git(&git, args.journal_dir.as_deref()).map_err(|e| {
+        CliError::system(
+            "journal_root_unresolved",
+            format!(
+                "cannot locate the release journal root (is '{}' a git repository? pass \
+                 --journal-dir to override): {e}",
+                root.display()
+            ),
+        )
+    })?;
+
+    let store = RealJournalStore;
+    let clock = RealClock;
+    let runner = RealCommandRunner;
+    let registry = RealRegistryQuery;
+    let tagger = RealTagger::new(&root);
+
+    // Open the run under the single-active-cut lock: an authoritative reduce of the
+    // durable log (never the possibly-stale manifest fast-path), held for the whole
+    // resume so no concurrent cut/resume can race this reconcile.
+    let mut journal = Journal::open(&store, &clock, paths, &args.run_id)
+        .map_err(|e| open_run_error(&args.run_id, e))?;
+
+    // Terminal runs never resume: a completed run is idempotent success (nothing to
+    // do), an abandoned run is refused (it was deliberately marked un-resumable).
+    match journal.state().status {
+        RunStatus::Completed => {
+            if !matches!(format, OutputFormat::Json) {
+                println!(
+                    "run {} is already complete — nothing to resume",
+                    args.run_id
+                );
+            }
+            return Ok(());
+        }
+        RunStatus::Abandoned => {
+            return Err(CliError::user(
+                "run_abandoned",
+                format!(
+                    "run {} was abandoned{} — it cannot be resumed; plan and cut a new release",
+                    args.run_id,
+                    journal
+                        .state()
+                        .abandon_reason
+                        .as_deref()
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default(),
+                ),
+            )
+            .with_invalid_value(args.run_id.clone()));
+        }
+        RunStatus::InProgress => {}
+    }
+
+    // Re-derive the approved plan from CURRENT repo state + the journal's sealed
+    // version, refusing on drift (the same discipline `cut` enforces).
+    let plan = derive_resume_plan(&root, &git, journal.state(), &args.run_id)?;
+
+    let ctx = EffectCtx {
+        runner: &runner,
+        clock: &clock,
+        registry: &registry,
+        repo_root: &root,
+    };
+
+    // Reconcile against remote registry state (the state table). This is the only
+    // step that decides continue/skip/adopt/stop; the coordinator then executes it.
+    let reconcile = ossctl_core::release::resume::reconcile_for_resume(
+        journal.state(),
+        &plan,
+        &ctx,
+        args.allow_unverified,
+    );
+    if reconcile.is_blocked() {
+        return Err(resume_conflict_error(&args.run_id, &reconcile));
+    }
+
+    let mut sink = StreamSink::new(std::io::stdout(), matches!(format, OutputFormat::Json));
+
+    // Adopt forward any publish that landed without a durable receipt, so the
+    // coordinator treats it as done and never re-publishes an already-published
+    // version. Journalled before the barrier continues, and streamed like any fact.
+    journal_adoptions(&mut journal, &reconcile, &mut sink, &args.run_id)?;
+
+    // Continue the phase-barrier from the first incomplete step. The coordinator's
+    // idempotent re-entry skips completed phases and already-landed targets, and
+    // drives tag-once (idempotent step-by-step) — no second copy of that logic here.
+    match coordinator::execute(&mut journal, &plan, &ctx, &tagger, &mut sink) {
+        Ok(()) => {
+            if !matches!(format, OutputFormat::Json) {
+                render_cut_success(&args.run_id, &plan);
+            }
+            Ok(())
+        }
+        Err(e) => Err(cut_error_to_cli(&args.run_id, e)),
+    }
+}
+
+/// Re-derive the run's approved plan from the *current* repo + the journal's sealed
+/// version and refuse unless it still hashes to the run's `plan_id` — a resume must
+/// continue the exact approved plan (whose tag points at the sealed commit), so a
+/// drifted repo is a hard stop, not a silently-different release.
+///
+/// Runs the same normalizer/detector/approval/executability gates `cut` does; the
+/// only new gate is `resume_drift` (the current `plan_id` ≠ the run's).
+fn derive_resume_plan(
+    root: &std::path::Path,
+    git: &RealGitRepo,
+    state: &ossctl_core::protocol::journal::RunState,
+    run_id: &str,
+) -> Result<ReleasePlan, CliError> {
+    let normalized = contract::normalize(root, &RealFs).map_err(load_error_to_cli)?;
+    if !normalized.is_valid() {
+        return Err(invalid_contract_error(&normalized));
+    }
+    // A resume mutates external state (it may publish + tag), so — like `cut` — it
+    // refuses a contract a human has not approved.
+    if normalized.contract.status != Status::Approved {
+        return Err(CliError::user(
+            "not_approved",
+            format!(
+                "{} is `{}`, not `approved` — a human must approve the contract before resuming",
+                contract::CONTRACT_FILENAME,
+                normalized.contract.status.as_str()
+            ),
+        )
+        .with_invalid_value(normalized.contract.status.as_str().to_string()));
+    }
+    let head_sha = git.head_commit().map_err(|e| {
+        CliError::user(
+            "no_head",
+            format!("cannot resume a release: could not resolve HEAD ({e}) — the repository may have no commits"),
+        )
+    })?;
+    let facts = ossctl_core::facts::gather(root, &RealFs, git);
+    let plan =
+        ossctl_core::release::plan::build(&normalized.contract, &facts, &head_sha, &state.version);
+    if plan.plan_id != state.plan_id {
+        return Err(resume_drift_error(state, &plan));
+    }
+    // Defense in depth: the same executability preflight `cut` runs.
+    coordinator::validate_plan(&plan).map_err(|e| cut_error_to_cli(run_id, e))?;
+    Ok(plan)
+}
+
+/// Journal each adopt-forward publish (a publish that landed without a durable
+/// receipt) as a `target_published` fact **before** the barrier continues, so the
+/// coordinator skips it rather than re-publishing an already-published version. Each
+/// fact is streamed to `sink` the same way the coordinator streams its own.
+fn journal_adoptions(
+    journal: &mut Journal<'_>,
+    reconcile: &ossctl_core::release::resume::ResumeReconcile,
+    sink: &mut dyn ProgressSink,
+    run_id: &str,
+) -> Result<(), CliError> {
+    for (target, receipt) in reconcile.adoptions() {
+        let kind = EventKind::TargetPublished {
+            target: target.to_string(),
+            receipt: receipt.clone(),
+        };
+        let idempotency_key = kind.idempotency_key();
+        let kind_for_sink = kind.clone();
+        let state = journal.append(kind).map_err(|e| {
+            CliError::system(
+                "journal_error",
+                format!("run {run_id}: could not journal an adopted publish receipt: {e}"),
+            )
+        })?;
+        sink.event(&JournalEvent {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            seq: state.applied_seq,
+            ts: state.updated_ts,
+            idempotency_key,
+            kind: kind_for_sink,
+        });
+    }
+    Ok(())
+}
+
+/// Map a `Journal::open` failure (resume) to the right §10 envelope: an absent run
+/// or bad id is caller-fixable (exit 1); a held lock is the single-active-cut
+/// refusal (exit 1 — wait/abandon); a corrupt/too-new journal is a system fault
+/// (exit 2).
+fn open_run_error(run_id: &str, e: std::io::Error) -> CliError {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => CliError::user(
+            "run_not_found",
+            format!("no release run '{run_id}' found to resume"),
+        )
+        .with_invalid_value(run_id.to_string()),
+        std::io::ErrorKind::WouldBlock => CliError::user(
+            "cut_in_progress",
+            "another release cut or resume is already active for this repository (the \
+             single-active-cut lock is held) — wait for it, or `release abandon` a stuck run"
+                .to_string(),
+        ),
+        std::io::ErrorKind::InvalidInput => {
+            CliError::user("invalid_run_id", e.to_string()).with_invalid_value(run_id.to_string())
+        }
+        std::io::ErrorKind::InvalidData => CliError::system("journal_unreadable", e.to_string()),
+        _ => CliError::system("journal_error", e.to_string()),
+    }
+}
+
+/// The §10 `resume_drift` refusal: the current repo no longer hashes to the run's
+/// approved `plan_id`, so a commit/contract/version change occurred since the cut.
+/// Exit 1 — the run must be resumed against the state it was sealed for (check out
+/// the sealed commit), or a new release planned. `ossctl` will not continue a
+/// *different* plan under the old run.
+fn resume_drift_error(
+    state: &ossctl_core::protocol::journal::RunState,
+    current: &ReleasePlan,
+) -> CliError {
+    CliError::user(
+        "resume_drift",
+        format!(
+            "run {} was sealed against plan {}, but the current repository (HEAD {}, version {}) \
+             hashes to a different plan_id — a commit, contract edit, or version change occurred \
+             since the cut. Resume against the sealed state (check out the sealed commit), or plan \
+             and cut a new release; ossctl will not continue a different plan under this run",
+            state.run_id,
+            short_sha(&state.plan_id),
+            short_sha(&current.head_sha),
+            current.version,
+        ),
+    )
+    .with_invalid_value(state.run_id.clone())
+    .with_expected(serde_json::json!({
+        "sealed_plan_id": state.plan_id,
+        "current_plan_id": current.plan_id,
+    }))
+}
+
+/// The §10 `resume_conflict` refusal: one or more targets are in a state the resume
+/// must not continue past — a recorded publish that now conflicts or has vanished,
+/// or an unverifiable target with no `--allow-unverified` go-ahead (ADR-0003 §4).
+/// Exit 1 — a human must reconcile the registries (or pass the go-ahead) before
+/// resuming; `ossctl` never overwrites or blind-re-publishes.
+fn resume_conflict_error(
+    run_id: &str,
+    reconcile: &ossctl_core::release::resume::ResumeReconcile,
+) -> CliError {
+    let blockers = reconcile.blockers();
+    let problems: Vec<String> = blockers
+        .iter()
+        .map(|d| {
+            format!(
+                "{} ({}): {} — {}",
+                d.target,
+                d.outcome.as_str(),
+                d.action.as_str(),
+                d.detail
+                    .as_deref()
+                    .unwrap_or("must be reconciled by a human"),
+            )
+        })
+        .collect();
+    CliError::user(
+        "resume_conflict",
+        format!(
+            "run {run_id} cannot be resumed: {} target(s) are in a state a resume must not \
+             continue past (remote is ground truth). Reconcile the registries — or pass \
+             --allow-unverified for targets that only could not be verified — then resume again",
+            blockers.len()
+        ),
+    )
+    .with_invalid_value(run_id.to_string())
+    .with_problems(problems)
+}
 /// `ossctl release cut --plan <id> --version <v>` — execute a sealed plan across
 /// the phase-barrier coordinator, refusing on repo drift (ADR-0002 §2/§3).
 ///

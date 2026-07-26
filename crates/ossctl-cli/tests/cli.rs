@@ -1040,6 +1040,210 @@ fn release_cut_refuses_when_version_differs_from_the_sealed_plan() {
     assert!(out.stdout.is_empty());
 }
 
+// ── release resume: reconcile decisions that refuse/short-circuit offline ─────
+
+/// A resume against a run with no journal is a caller-fixable (exit 1) error.
+#[test]
+fn release_resume_unknown_run_is_user_error() {
+    let repo = tempfile::tempdir().unwrap();
+    let journal = tempfile::tempdir().unwrap();
+    let out = ossctl()
+        .args(["release", "resume", "NOPE", "--json", "--repo-root"])
+        .arg(repo.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "run_not_found");
+    assert!(out.stdout.is_empty());
+}
+
+/// A `run_id` that is not a single path segment is rejected (no path traversal).
+#[test]
+fn release_resume_rejects_bad_run_id() {
+    let repo = tempfile::tempdir().unwrap();
+    let journal = tempfile::tempdir().unwrap();
+    let out = ossctl()
+        .args(["release", "resume", "../escape", "--json", "--repo-root"])
+        .arg(repo.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "invalid_run_id");
+}
+
+/// Resuming an already-`completed` run is idempotent success (exit 0) — it
+/// short-circuits before touching the repo or any registry.
+#[test]
+fn release_resume_completed_run_is_idempotent_success() {
+    let repo = tempfile::tempdir().unwrap();
+    let journal = seed_journal(
+        "RUNC",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUNC","plan_id":"plan-done","version":"1.0.0","targets":["rust"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"phase_completed:tag","kind":"phase_completed","phase":"tag","outcome":"ok"}"#,
+        ],
+    );
+    let out = ossctl()
+        .args(["release", "resume", "RUNC", "--repo-root"])
+        .arg(repo.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "completed run resume must exit 0: {out:?}"
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("already complete"));
+}
+
+/// Resuming an `abandoned` run is refused (exit 1) — it was deliberately marked
+/// un-resumable.
+#[test]
+fn release_resume_abandoned_run_is_refused() {
+    let repo = tempfile::tempdir().unwrap();
+    let journal = seed_journal(
+        "RUNA",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUNA","plan_id":"plan-x","version":"1.0.0","targets":["rust"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"run_abandoned","kind":"run_abandoned","reason":"OTP timeout"}"#,
+        ],
+    );
+    let out = ossctl()
+        .args(["release", "resume", "RUNA", "--json", "--repo-root"])
+        .arg(repo.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "run_abandoned");
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("OTP timeout"));
+}
+
+/// A resume whose run was sealed against a `plan_id` the current repo no longer
+/// hashes to is refused with `resume_drift` — before any reconcile or publish.
+#[test]
+fn release_resume_refuses_a_drifted_repo() {
+    let repo = approved_git_repo();
+    let journal = seed_journal(
+        "RUND",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUND","plan_id":"plan-mismatch","version":"1.0.0","targets":["rust"]}"#,
+        ],
+    );
+    let out = ossctl()
+        .args(["release", "resume", "RUND", "--json", "--repo-root"])
+        .arg(repo.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "drifted repo → resume_drift");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "resume_drift");
+    assert_eq!(v["error"]["expected"]["sealed_plan_id"], "plan-mismatch");
+    assert!(out.stdout.is_empty(), "a refused resume published nothing");
+}
+
+/// A single-python-target approved repo whose target's package is explicit (so the
+/// plan resolves without facts and validates), inside a one-commit git repo. Python
+/// has no wired registry query, so a resume reconciles its publish to `unknown`
+/// offline — the deterministic path to a `resume_conflict`.
+fn approved_python_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let contract = std::fs::read_to_string(fixture("python-lib").join("OSS-RELEASE.md"))
+        .unwrap()
+        .replace("status: draft", "status: approved")
+        .replace(
+            "ecosystems: [python]",
+            "ecosystems: [python]\ntargets:\n  - {ecosystem: python, package: mytool, registry: pypi, adapter: twine}",
+        );
+    std::fs::write(dir.path().join("OSS-RELEASE.md"), contract).unwrap();
+
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .expect("git runs")
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "init"]);
+    dir
+}
+
+/// A resume that reconciles a recorded publish to `unknown` (python has no wired
+/// registry query yet — offline) refuses with `resume_conflict` rather than
+/// proceed on an unverifiable target; the blocking target is surfaced.
+#[test]
+fn release_resume_refuses_an_unverifiable_target() {
+    let repo = approved_python_repo();
+
+    // Seal a real plan so the resume's drift check passes; reuse its id + version.
+    let planned = ossctl()
+        .args([
+            "release",
+            "plan",
+            "--json",
+            "--version",
+            "1.0.0",
+            "--repo-root",
+        ])
+        .arg(repo.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        planned.status.code(),
+        Some(0),
+        "plan should succeed: {planned:?}"
+    );
+    let pv: serde_json::Value = serde_json::from_slice(&planned.stdout).unwrap();
+    let plan_id = pv["data"]["plan_id"].as_str().unwrap().to_string();
+
+    let run_created = format!(
+        r#"{{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUNU","plan_id":"{plan_id}","version":"1.0.0","targets":["python"]}}"#
+    );
+    let published = r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"published:python","kind":"target_published","target":"python","receipt":{"ecosystem":"python","package":"mytool","version":"1.0.0","registry_url":null,"digest":null}}"#;
+    let journal = seed_journal("RUNU", &[&run_created, published]);
+
+    let out = ossctl()
+        .args(["release", "resume", "RUNU", "--json", "--repo-root"])
+        .arg(repo.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "unverifiable target → resume_conflict"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "resume_conflict");
+    let problems = v["error"]["problems"].as_array().expect("problems listed");
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.as_str().unwrap().contains("rust")),
+        "the blocking target must be surfaced: {problems:?}"
+    );
+    assert!(out.stdout.is_empty());
+}
+
 /// A version that would produce an invalid git tag (`v{version}`) is rejected up
 /// front — before any repo work — so it can never publish and then fail at tag
 /// time (post-publish, unrecoverable-late).
