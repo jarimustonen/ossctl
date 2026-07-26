@@ -6,6 +6,9 @@ status: in-progress
 priority: normal
 epic: ossctl-phase4-build
 blocked_by: ['@contract-command', '@facts-command']
+commits:
+- hash: 845e19f
+  summary: implement ossctl audit readiness engine
 ---
 
 # ossctl audit — readiness scoring (the /oss-readiness engine)

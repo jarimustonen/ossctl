@@ -50,6 +50,20 @@ pub enum Presence {
     Unknown,
 }
 
+impl Presence {
+    /// The wire string for this value — the single source of truth the
+    /// `Serialize` derive (`rename_all = "lowercase"`) also emits, so text and
+    /// JSON never drift.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Present => "present",
+            Self::Absent => "absent",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Whether the tier-scaled **gated core** is complete.
 ///
 /// The gated core is README + LICENSE + CI, but the CI leg only gates at `mvp`
@@ -69,6 +83,18 @@ pub enum CoreStatus {
     Unknown,
 }
 
+impl CoreStatus {
+    /// The wire string for this value (matches the `Serialize` derive).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Incomplete => "incomplete",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Which scoring axis a gap comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -83,6 +109,18 @@ pub enum Category {
     Producer,
 }
 
+impl Category {
+    /// The wire string for this value (matches the `Serialize` derive).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Canon => "canon",
+            Self::Producer => "producer",
+        }
+    }
+}
+
 /// How much a gap matters — its gating weight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -91,6 +129,17 @@ pub enum Severity {
     Blocking,
     /// Tier-scaled canon or a producer obligation: offered, never blocks.
     Recommended,
+}
+
+impl Severity {
+    /// The wire string for this value (matches the `Serialize` derive).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blocking => "blocking",
+            Self::Recommended => "recommended",
+        }
+    }
 }
 
 /// One unmet readiness obligation — an artifact that is absent (or could not be

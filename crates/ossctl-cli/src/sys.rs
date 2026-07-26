@@ -17,10 +17,18 @@ use ossctl_core::ports::{CommandOutput, CommandRunner, Fs, GitRepo};
 /// `std::process`. The audit's read-only GitHub community-standards lookup
 /// (`git remote get-url origin`, then `gh api …/community/profile`) runs through
 /// this. Hardened against non-interactive hangs the same way [`RealGitRepo`] is:
-/// stdin is `/dev/null` and terminal/askpass prompts are disabled, so a command
-/// that would block on a credential prompt fails fast instead. A command that
-/// cannot spawn (`gh` not installed) surfaces as an `Err`, which the audit reads
-/// as "could not check" ⇒ `unknown`, never `false`.
+/// stdin is `/dev/null` and terminal/askpass/`gh` prompts are disabled, so a
+/// command that would block on a credential or auth prompt fails fast instead.
+/// `GH_NO_UPDATE_NOTIFIER` keeps `gh`'s update banner out of the captured
+/// stderr the audit surfaces as a diagnostic. A command that cannot spawn (`gh`
+/// not installed) surfaces as an `Err`, which the audit reads as "could not
+/// check" ⇒ `unknown`, never `false`.
+///
+/// **Timeout gap (accepted).** Like [`RealGitRepo::git`], there is no hard
+/// wall-clock timeout — `std` has none on `Command::output` and this crate takes
+/// no new dependency. `gh api` is a network call, so a stalled DNS/TLS/proxy can
+/// hang the audit; the prompt-disabling above removes the common interactive
+/// stall, and the read-only queries are cheap on a healthy connection.
 pub struct RealCommandRunner;
 
 impl CommandRunner for RealCommandRunner {
@@ -31,6 +39,8 @@ impl CommandRunner for RealCommandRunner {
             .stdin(Stdio::null())
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "true")
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("GH_NO_UPDATE_NOTIFIER", "1")
             .output()?;
         Ok(CommandOutput {
             status: out.status.code(),

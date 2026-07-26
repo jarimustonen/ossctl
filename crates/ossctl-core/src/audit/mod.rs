@@ -257,50 +257,55 @@ fn producer_gaps(
             "registry-license",
             "oss-readme",
             Presence::Absent,
-            "a registry publish target is configured but the contract declares no SPDX \
-             license — registries (crates.io/npm/PyPI) require one",
+            "a registry publish target is configured but the contract declares no license \
+             — registries (crates.io/npm/PyPI) require an SPDX license",
         ));
     }
 
     // A `coverage` badge needs a coverage step in CI. Also recommended at
-    // production even without the badge; emit at most one coverage gap.
+    // production even without the badge; emit at most one coverage gap. A
+    // workflow-read failure surfaces as `Unknown`, never a false `Absent`.
     let coverage_badge = contract.health_badges.contains(&HealthBadge::Coverage);
     let coverage_expected =
         coverage_badge || tier_rank(maturity) >= tier_rank(Maturity::Production);
-    if coverage_expected && !workflow_mentions(repo_root, fs, COVERAGE_TOKENS) {
-        let (category, detail) = if coverage_badge {
-            (
-                Category::Producer,
-                "the contract enables a 'coverage' health badge but no coverage step was \
-                 found in CI — the badge has no producer",
-            )
-        } else {
-            (
-                Category::Canon,
-                "no coverage step found in CI — recommended at production",
-            )
-        };
-        gaps.push(Gap {
-            id: "coverage".to_string(),
-            category,
-            severity: Severity::Recommended,
-            status: Presence::Absent,
-            member: "oss-ci".to_string(),
-            detail: detail.to_string(),
-        });
+    if coverage_expected {
+        let status = workflow_mentions(repo_root, fs, COVERAGE_TOKENS);
+        if status != Presence::Present {
+            let (category, detail) = if coverage_badge {
+                (
+                    Category::Producer,
+                    "the contract enables a 'coverage' health badge but no coverage step was \
+                     found in CI — the badge has no producer",
+                )
+            } else {
+                (
+                    Category::Canon,
+                    "no coverage step found in CI — recommended at production",
+                )
+            };
+            gaps.push(Gap {
+                id: "coverage".to_string(),
+                category,
+                severity: Severity::Recommended,
+                status,
+                member: "oss-ci".to_string(),
+                detail: detail.to_string(),
+            });
+        }
     }
 
     // A `scorecard` badge needs the OSSF Scorecard action wired in CI.
-    if contract.health_badges.contains(&HealthBadge::Scorecard)
-        && !workflow_mentions(repo_root, fs, SCORECARD_TOKENS)
-    {
-        gaps.push(producer_gap(
-            "scorecard",
-            "oss-security-policy",
-            Presence::Absent,
-            "the contract enables a 'scorecard' health badge but no OSSF Scorecard action \
-             was found in CI — the badge has no producer",
-        ));
+    if contract.health_badges.contains(&HealthBadge::Scorecard) {
+        let status = workflow_mentions(repo_root, fs, SCORECARD_TOKENS);
+        if status != Presence::Present {
+            gaps.push(producer_gap(
+                "scorecard",
+                "oss-security-policy",
+                status,
+                "the contract enables a 'scorecard' health badge but no OSSF Scorecard action \
+                 was found in CI — the badge has no producer",
+            ));
+        }
     }
 
     // A `ci` badge needs CI to actually exist.
@@ -353,14 +358,29 @@ fn community_profile(repo_root: &Path, cmd: &dyn CommandRunner) -> CommunityProf
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&out.stdout) else {
         return unchecked_profile("gh api returned unparseable JSON");
     };
-    let files = &json["files"];
-    // Each `files.<name>` is an object (present) or null/absent (absent).
+    // The response MUST carry a `files` object. Anything else (a `{}`, a
+    // `{"message": "..."}` error body that still exited 0 through a proxy, a
+    // renamed schema) is "could not check" ⇒ every field unknown, never a blanket
+    // `Absent` — the outage discipline (issue: failure ⇒ unknown, never false).
+    let Some(files) = json.get("files").and_then(serde_json::Value::as_object) else {
+        return unchecked_profile("gh api response had no 'files' object");
+    };
+    // A recognized health file is a non-null object under its key; a `null` (or
+    // absent) key means checked-and-absent.
     let f = |key: &str| {
         if files.get(key).is_some_and(|v| !v.is_null()) {
             Presence::Present
         } else {
             Presence::Absent
         }
+    };
+    // GitHub has named the security-policy field `security_policy` and (in some
+    // API versions) `security`; accept either so a present SECURITY.md is not
+    // misreported absent.
+    let security = if matches!(f("security_policy"), Presence::Present) {
+        Presence::Present
+    } else {
+        f("security")
     };
     CommunityProfile {
         checked: true,
@@ -371,7 +391,7 @@ fn community_profile(repo_root: &Path, cmd: &dyn CommandRunner) -> CommunityProf
         code_of_conduct: f("code_of_conduct"),
         issue_template: f("issue_template"),
         pull_request_template: f("pull_request_template"),
-        security: f("security"),
+        security,
     }
 }
 
@@ -387,20 +407,32 @@ fn github_slug(repo_root: &Path, cmd: &dyn CommandRunner) -> Option<String> {
     parse_github_slug(out.stdout.trim())
 }
 
-/// Parse `owner/repo` out of a GitHub remote URL — SSH (`git@github.com:o/r.git`),
-/// HTTPS (`https://github.com/o/r.git`), or `git://` forms. `None` for a
-/// non-GitHub host or an unrecognizable URL.
+/// Every recognized way a GitHub remote URL prefixes the `owner/repo` tail. The
+/// match is a **prefix**, not a substring, so a non-GitHub host that merely
+/// contains `github.com` in its path (`https://mirror.example/github.com/o/r`)
+/// is rejected rather than mis-parsed into a GitHub slug.
+const GITHUB_PREFIXES: &[&str] = &[
+    "git@github.com:",       // scp-like (the common SSH form)
+    "ssh://git@github.com/", // explicit ssh:// SSH form
+    "ssh://github.com/",     // ssh:// without a user
+    "https://github.com/",   //
+    "http://github.com/",    //
+    "git://github.com/",     //
+    "github.com:",           // bare scp-like
+    "github.com/",           // bare
+];
+
+/// Parse `owner/repo` out of a GitHub remote URL — the SSH (`git@github.com:o/r`,
+/// `ssh://git@github.com/o/r`), HTTPS, and `git://` forms. `None` for a
+/// non-GitHub host or an unrecognizable URL. The parser anchors on a known host
+/// prefix (never a bare `find`), so a lookalike host is never accepted; a wrong
+/// parse would in any case only yield a failed `gh api` ⇒ `unknown`, never a
+/// false `Absent`.
 fn parse_github_slug(url: &str) -> Option<String> {
-    // Normalize to the "github.com/<owner>/<repo>" tail.
-    let tail = if let Some(rest) = url.strip_prefix("git@github.com:") {
-        rest
-    } else if let Some(idx) = url.find("github.com/") {
-        &url[idx + "github.com/".len()..]
-    } else {
-        // scp-like without the git@ user (`github.com:owner/repo`).
-        let idx = url.find("github.com:")?;
-        &url[idx + "github.com:".len()..]
-    };
+    let tail = GITHUB_PREFIXES.iter().find_map(|p| url.strip_prefix(p))?;
+    // Trim a trailing slash BEFORE stripping `.git` so `.../repo.git/` and
+    // `.../repo/` both reduce to `repo` (strip order matters).
+    let tail = tail.trim_end_matches('/');
     let tail = tail.strip_suffix(".git").unwrap_or(tail);
     let tail = tail.trim_end_matches('/');
     let mut parts = tail.splitn(3, '/');
@@ -501,22 +533,63 @@ fn probe(fs: &dyn Fs, repo_root: &Path, names: &[&str]) -> bool {
     })
 }
 
-/// Whether any file under `.github/workflows` contains any of `tokens`
+/// Cap on a single workflow file read — a workflow this large is not real, and
+/// an unbounded read would let a pathological file stall the audit.
+const WORKFLOW_READ_LIMIT: usize = 1 << 20; // 1 MiB
+
+/// Probe `.github/workflows` for any YAML file mentioning one of `tokens`
 /// (case-insensitively) — the read-only producer probe for a coverage/scorecard
-/// step. `false` when the directory is absent or unreadable.
-fn workflow_mentions(repo_root: &Path, fs: &dyn Fs, tokens: &[&str]) -> bool {
+/// step. Tri-state, honoring the outage discipline:
+///
+/// - [`Presence::Present`] — a readable workflow contains a token.
+/// - [`Presence::Absent`] — the directory is genuinely missing, or every YAML
+///   workflow was read and none matched.
+/// - [`Presence::Unknown`] — the directory or a workflow file could not be read
+///   (permission/I/O error), so "no producer" cannot be asserted.
+///
+/// This is a substring heuristic, not a YAML parse: a token inside a comment
+/// (`# TODO: add coverage`) can false-positive and an unusual action name can
+/// false-negative. That is a deliberate, documented limitation — the audit only
+/// *reports* the gap (never mutates), and a coarse producer signal is enough to
+/// tell an agent to look; a full workflow-graph parse is out of scope here.
+fn workflow_mentions(repo_root: &Path, fs: &dyn Fs, tokens: &[&str]) -> Presence {
     let dir = repo_root.join(".github/workflows");
-    let Ok(entries) = fs.read_dir(&dir) else {
-        return false;
+    let entries = match fs.read_dir(&dir) {
+        Ok(entries) => entries,
+        // A missing directory is "checked, no producer"; any other read error
+        // (permission, I/O) is "could not check".
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Presence::Absent,
+        Err(_) => return Presence::Unknown,
     };
-    entries.iter().any(|name| {
+    let mut unreadable = false;
+    for name in &entries {
+        // Only real workflow files (`.yml`/`.yaml`) — not a stray `README.bak`.
+        if !matches!(
+            Path::new(name).extension().and_then(|e| e.to_str()),
+            Some("yml" | "yaml")
+        ) {
+            continue;
+        }
         let path = dir.join(name);
-        let Ok(bytes) = fs.read(&path) else {
-            return false;
-        };
-        let text = String::from_utf8_lossy(&bytes).to_lowercase();
-        tokens.iter().any(|t| text.contains(t))
-    })
+        match fs.read(&path) {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes[..bytes.len().min(WORKFLOW_READ_LIMIT)])
+                    .to_lowercase();
+                if tokens.iter().any(|t| text.contains(t)) {
+                    return Presence::Present;
+                }
+            }
+            // A file that vanished mid-scan is fine to skip; a genuine read
+            // failure means we cannot be sure the producer is absent.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => unreadable = true,
+        }
+    }
+    if unreadable {
+        Presence::Unknown
+    } else {
+        Presence::Absent
+    }
 }
 
 /// Maturity as a monotone rank for tier comparisons (`spike < mvp < production`).
@@ -567,7 +640,11 @@ const COVERAGE_TOKENS: &[&str] = &[
     "grcov",
 ];
 /// CI tokens that indicate the OSSF Scorecard action.
-const SCORECARD_TOKENS: &[&str] = &["ossf/scorecard", "scorecard-action"];
+const SCORECARD_TOKENS: &[&str] = &[
+    "ossf/scorecard",
+    "scorecard-action",
+    "step-security/scorecard",
+];
 
 #[cfg(test)]
 mod tests;

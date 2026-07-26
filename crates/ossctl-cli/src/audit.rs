@@ -109,28 +109,19 @@ fn invalid_contract_error(normalized: &Normalized) -> CliError {
 }
 
 fn render_audit_text(report: &AuditReport) {
-    use ossctl_core::protocol::audit::{CoreStatus, Presence};
-
-    let core = match report.core_complete {
-        CoreStatus::Complete => "complete",
-        CoreStatus::Incomplete => "INCOMPLETE",
-        CoreStatus::Unknown => "unknown",
-    };
+    let core = report.core_complete.as_str();
     println!("repo_root:      {}", report.repo_root);
     println!("maturity:       {}", report.maturity.as_str());
     println!("gated core:     {core}");
     println!("gaps:           {}", report.gaps.len());
     for g in &report.gaps {
-        let status = match g.status {
-            Presence::Present => "present",
-            Presence::Absent => "absent",
-            Presence::Unknown => "unknown",
-        };
         println!(
-            "  [{:>11}] {:<24} ({}, {status}) — {}",
-            format!("{:?}", g.severity).to_lowercase(),
+            "  [{:>11}] {:<24} ({}, {}, {}) — {}",
+            g.severity.as_str(),
             g.id,
+            g.category.as_str(),
             g.member,
+            g.status.as_str(),
             g.detail
         );
     }

@@ -21,6 +21,9 @@ use crate::protocol::facts::{Facts, MaturitySignals};
 struct FakeFs {
     files: HashMap<PathBuf, Vec<u8>>,
     dirs: HashSet<PathBuf>,
+    /// Paths that a `read` fails on with `PermissionDenied` — used to exercise
+    /// the "could not check ⇒ unknown" workflow-probe path.
+    unreadable: HashSet<PathBuf>,
 }
 
 impl FakeFs {
@@ -42,10 +45,25 @@ impl FakeFs {
         self.dirs.insert(PathBuf::from(path));
         self
     }
+
+    /// Register a directory entry that exists (so `read_dir` lists it) but whose
+    /// `read` fails with `PermissionDenied`.
+    fn unreadable_file(mut self, path: &str) -> Self {
+        let p = PathBuf::from(path);
+        if let Some(dir) = p.parent() {
+            self.dirs.insert(dir.to_path_buf());
+        }
+        self.files.insert(p.clone(), Vec::new());
+        self.unreadable.insert(p);
+        self
+    }
 }
 
 impl Fs for FakeFs {
     fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        if self.unreadable.contains(path) {
+            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        }
         self.files
             .get(path)
             .cloned()
@@ -646,8 +664,31 @@ fn parses_github_slugs_across_url_forms() {
         parse_github_slug("git://github.com/acme/tool.git"),
         Some("acme/tool".to_string())
     );
+    assert_eq!(
+        parse_github_slug("ssh://git@github.com/acme/tool.git"),
+        Some("acme/tool".to_string())
+    );
+    // A trailing slash after `.git` still reduces to the bare slug.
+    assert_eq!(
+        parse_github_slug("https://github.com/acme/tool.git/"),
+        Some("acme/tool".to_string())
+    );
+    assert_eq!(
+        parse_github_slug("https://github.com/acme/tool/"),
+        Some("acme/tool".to_string())
+    );
     // Non-GitHub host → None.
     assert_eq!(parse_github_slug("git@gitlab.com:acme/tool.git"), None);
+    // A lookalike host that merely CONTAINS github.com in its path is rejected
+    // (anchored prefix, not a substring find).
+    assert_eq!(
+        parse_github_slug("https://mirror.example.com/github.com/acme/tool.git"),
+        None
+    );
+    assert_eq!(
+        parse_github_slug("https://github.com.evil.example/acme/tool"),
+        None
+    );
     // Trailing path segment is not a bare slug.
     assert_eq!(
         parse_github_slug("https://github.com/acme/tool/tree/main"),
@@ -655,6 +696,165 @@ fn parses_github_slugs_across_url_forms() {
     );
     // Missing repo → None.
     assert_eq!(parse_github_slug("https://github.com/acme"), None);
+}
+
+// ── Producer probe: outage ⇒ unknown, never absent ─────────────────────────
+
+#[test]
+fn coverage_probe_read_failure_yields_unknown_not_absent() {
+    // The workflows dir lists a file, but reading it fails (permission). The
+    // coverage badge's producer cannot be confirmed absent ⇒ Unknown gap.
+    let mut contract = contract_at(Maturity::Mvp);
+    contract.health_badges = vec![HealthBadge::Coverage];
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n")
+        .unreadable_file("/repo/.github/workflows/ci.yml");
+    let report = audit(
+        repo(),
+        &contract,
+        &facts_with(Maturity::Mvp, true, Some("dependabot")),
+        &fs,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    let g = gap(&report, "coverage");
+    assert_eq!(
+        g.status,
+        Presence::Unknown,
+        "an unreadable workflow must yield unknown, not absent"
+    );
+}
+
+#[test]
+fn coverage_probe_ignores_non_yaml_files() {
+    // A non-YAML file mentioning 'coverage' must NOT satisfy the producer.
+    let mut contract = contract_at(Maturity::Mvp);
+    contract.health_badges = vec![HealthBadge::Coverage];
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n")
+        .file("/repo/.github/workflows/notes.txt", "coverage is planned\n");
+    let report = audit(
+        repo(),
+        &contract,
+        &facts_with(Maturity::Mvp, true, Some("dependabot")),
+        &fs,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    let g = gap(&report, "coverage");
+    assert_eq!(g.status, Presence::Absent, "a .txt file is not a workflow");
+}
+
+// ── GitHub community profile: schema robustness + security alias ────────────
+
+#[test]
+fn community_profile_missing_files_object_is_unknown_not_absent() {
+    // A 200 with a valid-JSON but unexpected body (no `files` object) must NOT
+    // report every file absent — it is "could not check".
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n");
+    let cmd = FakeCmd::new()
+        .on(
+            "git",
+            &["remote", "get-url", "origin"],
+            0,
+            "git@github.com:acme/tool.git\n",
+            "",
+        )
+        .on(
+            "gh",
+            &["api", "repos/acme/tool/community/profile"],
+            0,
+            r#"{"message":"rate limited"}"#,
+            "",
+        );
+    let report = audit(
+        repo(),
+        &contract_at(Maturity::Spike),
+        &facts_with(Maturity::Spike, true, None),
+        &fs,
+        &cmd,
+    );
+    let cp = &report.community_profile;
+    assert!(!cp.checked, "no files object ⇒ not a successful check");
+    assert_eq!(cp.readme, Presence::Unknown);
+    assert_eq!(cp.security, Presence::Unknown);
+}
+
+#[test]
+fn community_profile_reads_security_policy_alias() {
+    // GitHub names the field `security_policy`; a present SECURITY.md there must
+    // be reported present, not absent.
+    let profile = r#"{"files":{
+        "readme":{"url":"x"},"license":{"key":"mit"},
+        "security_policy":{"url":"y"}}}"#;
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n");
+    let report = audit(
+        repo(),
+        &contract_at(Maturity::Spike),
+        &facts_with(Maturity::Spike, true, None),
+        &fs,
+        &FakeCmd::github(profile),
+    );
+    assert_eq!(report.community_profile.security, Presence::Present);
+}
+
+// ── Wire-format contract (serialized enum strings) ─────────────────────────
+
+#[test]
+fn enum_wire_strings_are_stable() {
+    // The JSON strings downstream consumers key off must not drift; assert the
+    // exact serialization for every enum variant.
+    let cases = [
+        (
+            serde_json::to_string(&Presence::Present).unwrap(),
+            "\"present\"",
+        ),
+        (
+            serde_json::to_string(&Presence::Absent).unwrap(),
+            "\"absent\"",
+        ),
+        (
+            serde_json::to_string(&Presence::Unknown).unwrap(),
+            "\"unknown\"",
+        ),
+        (
+            serde_json::to_string(&CoreStatus::Complete).unwrap(),
+            "\"complete\"",
+        ),
+        (
+            serde_json::to_string(&CoreStatus::Incomplete).unwrap(),
+            "\"incomplete\"",
+        ),
+        (serde_json::to_string(&Category::Core).unwrap(), "\"core\""),
+        (
+            serde_json::to_string(&Category::Canon).unwrap(),
+            "\"canon\"",
+        ),
+        (
+            serde_json::to_string(&Category::Producer).unwrap(),
+            "\"producer\"",
+        ),
+        (
+            serde_json::to_string(&Severity::Blocking).unwrap(),
+            "\"blocking\"",
+        ),
+        (
+            serde_json::to_string(&Severity::Recommended).unwrap(),
+            "\"recommended\"",
+        ),
+    ];
+    for (got, want) in cases {
+        assert_eq!(got, want, "wire string drift");
+    }
+    // as_str() and the Serialize derive agree (unquoted).
+    assert_eq!(Presence::Unknown.as_str(), "unknown");
+    assert_eq!(CoreStatus::Incomplete.as_str(), "incomplete");
+    assert_eq!(Category::Producer.as_str(), "producer");
+    assert_eq!(Severity::Blocking.as_str(), "blocking");
 }
 
 // ── Determinism ────────────────────────────────────────────────────────────
