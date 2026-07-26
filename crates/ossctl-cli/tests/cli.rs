@@ -106,3 +106,168 @@ fn unknown_subcommand_is_structured_error() {
     let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
     assert_eq!(v["error"]["code"], "unknown_subcommand");
 }
+
+// ── contract show / validate ─────────────────────────────────────────────────
+
+fn fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+/// Every positive fixture normalizes cleanly and the `data` payload carries the
+/// canonical SCHEMA.md §4 fields under the CLI envelope.
+#[test]
+fn contract_show_positive_fixtures() {
+    for name in ["solo-rust-cli", "node-monorepo", "python-lib", "go-cli"] {
+        let out = ossctl()
+            .args(["contract", "show", "--json", "--repo-root"])
+            .arg(fixture(name))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{name} must show cleanly");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout JSON");
+        assert_eq!(v["schema_version"], 1, "{name} envelope");
+        let data = &v["data"];
+        assert_eq!(data["schema_version"], 1, "{name} contract schema_version");
+        assert!(data["maturity"].is_string(), "{name} maturity: {data}");
+        assert!(data["targets"].is_array(), "{name} targets: {data}");
+        assert!(data["extra_fields"].is_object(), "{name} extra_fields");
+        assert!(data["warnings"].is_array(), "{name} warnings");
+        assert!(data["versioning_pattern"].is_null() || data["versioning_pattern"].is_string());
+    }
+}
+
+/// `python-lib` omits `targets`; the reader expands one concrete `PyPI` target.
+#[test]
+fn contract_show_expands_omitted_targets() {
+    let out = ossctl()
+        .args(["contract", "show", "--json", "--repo-root"])
+        .arg(fixture("python-lib"))
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let targets = v["data"]["targets"].as_array().unwrap();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0]["ecosystem"], "python");
+    assert_eq!(targets[0]["registry"], "pypi");
+    assert_eq!(targets[0]["adapter"], "gh-action-pypi-publish");
+    assert!(targets[0]["package"].is_null());
+}
+
+/// `go-cli` carries an unknown field — preserved under `extra_fields`, reported
+/// once in `warnings`, never dropped (forward-compat).
+#[test]
+fn contract_show_preserves_unknown_fields() {
+    let out = ossctl()
+        .args(["contract", "show", "--json", "--repo-root"])
+        .arg(fixture("go-cli"))
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["data"]["extra_fields"]["roadmap_url"],
+        "https://example.com/roadmap"
+    );
+    let warnings = v["data"]["warnings"].as_array().unwrap();
+    assert!(warnings
+        .iter()
+        .any(|w| w.as_str().is_some_and(|s| s.contains("roadmap_url"))));
+}
+
+/// `contract show` is idempotent: re-showing yields byte-identical output.
+#[test]
+fn contract_show_is_idempotent() {
+    let run = || {
+        ossctl()
+            .args(["contract", "show", "--json", "--repo-root"])
+            .arg(fixture("solo-rust-cli"))
+            .output()
+            .unwrap()
+            .stdout
+    };
+    assert_eq!(run(), run(), "contract show must be deterministic");
+}
+
+/// Every negative fixture is refused: exit 1, `invalid_contract` envelope on
+/// stderr carrying the full problem list, no document on stdout.
+#[test]
+fn contract_validate_rejects_floor_violations() {
+    for name in [
+        "neg-auto-on-spike",
+        "neg-registry-without-license",
+        "neg-badge-without-producer",
+        "neg-schema-too-new",
+        "neg-fragment-dir-escape",
+    ] {
+        let out = ossctl()
+            .args(["contract", "validate", "--repo-root"])
+            .arg(fixture(name))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{name} → exit 1");
+        assert!(out.stdout.is_empty(), "{name} emits no body on failure");
+        let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+        assert_eq!(v["error"]["code"], "invalid_contract", "{name}");
+        assert!(
+            v["error"]["problems"]
+                .as_array()
+                .is_some_and(|p| !p.is_empty()),
+            "{name} carries the problem list: {v}"
+        );
+    }
+}
+
+/// `show` on a valid config also refuses to emit when it is invalid (same gate).
+#[test]
+fn contract_show_rejects_invalid() {
+    let out = ossctl()
+        .args(["contract", "show", "--json", "--repo-root"])
+        .arg(fixture("neg-auto-on-spike"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "no canonical body on invalid");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(v["error"]["code"], "invalid_contract");
+}
+
+/// A positive fixture passes `validate` (exit 0).
+#[test]
+fn contract_validate_accepts_valid() {
+    ossctl()
+        .args(["contract", "validate", "--repo-root"])
+        .arg(fixture("python-lib"))
+        .assert()
+        .success();
+}
+
+/// `--require-approved` refuses a `status: draft` config (the mutating-member
+/// gate) with a `not_approved` envelope, exit 1.
+#[test]
+fn contract_require_approved_refuses_draft() {
+    let out = ossctl()
+        .args(["contract", "show", "--require-approved", "--repo-root"])
+        .arg(fixture("solo-rust-cli")) // status: draft
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(v["error"]["code"], "not_approved");
+    assert_eq!(v["error"]["invalid_value"], "draft");
+}
+
+/// A missing `OSS-RELEASE.md` is a system-level (exit 2) error, distinct from an
+/// invalid one (exit 1).
+#[test]
+fn contract_show_missing_file_is_system_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = ossctl()
+        .args(["contract", "show", "--repo-root"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "missing file → exit 2");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(v["error"]["code"], "contract_not_found");
+}

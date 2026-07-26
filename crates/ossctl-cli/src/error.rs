@@ -34,6 +34,11 @@ struct ErrorBody<'a> {
     invalid_value: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     expected: Option<&'a serde_json::Value>,
+    /// The full list of validation problems when a single `message` cannot
+    /// carry them (e.g. `contract validate` finds many floor violations at
+    /// once). Omitted when there is nothing beyond `message`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    problems: Option<&'a [String]>,
 }
 
 /// A structured, emit-once CLI error.
@@ -47,8 +52,12 @@ pub struct CliError {
     pub message: String,
     /// The offending value, when there is a single one to echo back (§4).
     pub invalid_value: Option<String>,
-    /// The accepted alternatives, when a closed set applies (§4).
-    pub expected: Option<serde_json::Value>,
+    /// The accepted alternatives, when a closed set applies (§4). Boxed to keep
+    /// `CliError` small enough to return by value without tripping
+    /// `clippy::result_large_err` across every handler.
+    pub expected: Option<Box<serde_json::Value>>,
+    /// The full list of validation problems, when more than one applies.
+    pub problems: Option<Vec<String>>,
 }
 
 impl CliError {
@@ -60,6 +69,7 @@ impl CliError {
             message: message.into(),
             invalid_value: None,
             expected: None,
+            problems: None,
         }
     }
 
@@ -71,6 +81,7 @@ impl CliError {
             message: message.into(),
             invalid_value: None,
             expected: None,
+            problems: None,
         }
     }
 
@@ -93,7 +104,14 @@ impl CliError {
 
     /// Attach the accepted-alternatives set (§4).
     pub fn with_expected(mut self, expected: serde_json::Value) -> Self {
-        self.expected = Some(expected);
+        self.expected = Some(Box::new(expected));
+        self
+    }
+
+    /// Attach the full list of validation problems (for multi-error gates like
+    /// `contract validate`).
+    pub fn with_problems(mut self, problems: Vec<String>) -> Self {
+        self.problems = Some(problems);
         self
     }
 
@@ -105,7 +123,8 @@ impl CliError {
                 code: &self.code,
                 message: &self.message,
                 invalid_value: self.invalid_value.as_deref(),
-                expected: self.expected.as_ref(),
+                expected: self.expected.as_deref(),
+                problems: self.problems.as_deref(),
             },
         };
         match serde_json::to_string(&payload) {

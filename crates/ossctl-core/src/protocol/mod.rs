@@ -11,6 +11,8 @@
 //! with their owning units and each becomes a hot file under the migration rule
 //! (bump `SCHEMA_VERSION` on a breaking change, never silently).
 
+pub mod contract;
+
 /// Current envelope/DTO schema version for `ossctl`'s public JSON output.
 ///
 /// Monotonic integer. Breaking changes (removing/renaming fields, changing

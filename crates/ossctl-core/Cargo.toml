@@ -15,8 +15,11 @@ publish = false
 [lints]
 workspace = true
 
-# No external dependencies yet. `ossctl-core` at founding is std-only: it owns
-# the protocol schema constants and the injected-port trait seam. serde lands
-# with the first real DTO / serde model (contract/schema.rs) in a later unit —
-# a deliberate hot-file edit, not a speculative dependency now (ADR-0001 §2).
+# `ossctl-core` owns the ONE canonical serde model (contract/schema.rs) and the
+# public wire DTOs (protocol/). serde drives the wire shape; serde_json is the
+# `extra_fields` value type + JSON emission; serde_yaml parses OSS-RELEASE.md
+# frontmatter (the `contract` unit — a deliberate hot-file edit, ADR-0001 §2).
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }

@@ -9,3 +9,6 @@
 pub mod normalize;
 pub mod schema;
 pub mod spdx;
+
+pub use normalize::{normalize, normalize_str, LoadError, Normalized, Problems, CONTRACT_FILENAME};
+pub use spdx::spdx_valid;

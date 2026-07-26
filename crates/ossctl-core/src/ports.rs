@@ -60,6 +60,9 @@ pub trait Fs {
     fn read(&self, path: &std::path::Path) -> io::Result<Vec<u8>>;
     /// Whether `path` exists.
     fn exists(&self, path: &std::path::Path) -> bool;
+    /// Whether `path` exists and is a directory (used for the contract's
+    /// fragment-dir producer check, which is a *directory*, not a file).
+    fn is_dir(&self, path: &std::path::Path) -> bool;
 }
 
 /// Queries a package registry for already-published state — the "remote is
