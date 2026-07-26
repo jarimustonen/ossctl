@@ -96,6 +96,29 @@ jobs:
       # debug-assertions / overflow checks in the type/borrow check).
       - run: cargo check --locked --workspace --all-targets
 
+  skill-lockstep:
+    name: skill↔CLI lockstep (§17)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      # §17 release-blocker gate: every bundled skill's referenced subcommands /
+      # flags must exist against the live `--help`, the version token must be
+      # substituted, and install+print are golden-tested. The `test` job already
+      # runs these; this named job makes the lockstep guarantee an explicit,
+      # required check rather than one buried in the full suite.
+      - run: cargo test --locked -p ossctl-cli --test skill --test skill_lockstep
+
   doc:
     name: docs
     runs-on: ubuntu-latest

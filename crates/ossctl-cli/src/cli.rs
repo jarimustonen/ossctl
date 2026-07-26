@@ -211,9 +211,9 @@ fn clap_context(e: &clap::Error, want: clap::error::ContextKind) -> Option<Strin
     })
 }
 
-/// Metadata about one bundled companion skill (`AGENTS-AI-FIRST-CLI.md` §17).
-/// The scaffold bundles no skills yet, so the catalog is empty; the field is
-/// present and typed so the wire shape is stable when the skills land.
+/// Metadata about one bundled companion skill (`AGENTS-AI-FIRST-CLI.md` §17):
+/// `{name, cli_version, schema_version}`, so an agent can audit skill freshness
+/// against the running binary in one `version --json` call.
 #[derive(Debug, Serialize)]
 struct SkillCatalogEntry {
     name: &'static str,
@@ -238,9 +238,16 @@ fn cmd_version(format: OutputFormat) -> Result<(), CliError> {
         commit: GIT_COMMIT,
         schema_version: ossctl_core::SCHEMA_VERSION,
         supported_schemas: ossctl_core::SUPPORTED_SCHEMAS,
-        // No skills bundled at founding (they land with the skill-subcommand /
-        // prose-skills units). Empty, not absent — the field is the contract.
-        skills: Vec::new(),
+        // The bundled-skill catalog (§17): every skill's `cli_version` equals
+        // this binary's version — they are one release unit.
+        skills: crate::skill::CATALOG
+            .iter()
+            .map(|s| SkillCatalogEntry {
+                name: s.name,
+                cli_version: CARGO_VERSION,
+                schema_version: crate::skill::SKILL_SCHEMA_VERSION,
+            })
+            .collect(),
     };
     match format {
         OutputFormat::Json => crate::output::emit_json(&payload, &[])?,
