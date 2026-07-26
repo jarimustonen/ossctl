@@ -10,19 +10,22 @@ use std::path::PathBuf;
 
 use clap::Args;
 
+use ossctl_core::contract::schema::Status;
 use ossctl_core::contract::{self, LoadError, Normalized};
 use ossctl_core::ports::GitRepo;
-use ossctl_core::protocol::journal::RunStatus;
+use ossctl_core::protocol::journal::{EventKind, JournalEvent, RunStatus, JOURNAL_SCHEMA_VERSION};
 use ossctl_core::protocol::plan::ReleasePlan;
 use ossctl_core::protocol::reconcile::ReconcileReport;
 use ossctl_core::release::adapters::EffectCtx;
-use ossctl_core::release::journal::{self, JournalPaths};
+use ossctl_core::release::coordinator::{self, CutError, ProgressSink};
+use ossctl_core::release::journal::{self, Journal, JournalPaths};
 
 use crate::cli::ReleaseAction;
 use crate::error::CliError;
 use crate::output::OutputFormat;
 use crate::sys::{
-    ReadOnlyJournalStore, RealClock, RealCommandRunner, RealFs, RealGitRepo, RealRegistryQuery,
+    ReadOnlyJournalStore, RealClock, RealCommandRunner, RealFs, RealGitRepo, RealIdGen,
+    RealJournalStore, RealRegistryQuery, RealTagger,
 };
 
 /// Arguments for `release plan`.
@@ -39,11 +42,30 @@ pub struct PlanArgs {
 }
 
 /// Arguments for `release cut`.
+///
+/// `release plan` is read-only and persists nothing, so `cut` re-derives the plan
+/// from the *current* repo state and the re-supplied `--version`, then refuses
+/// unless the recomputed `plan_id` equals the approved `--plan` (drift check,
+/// ADR-0002 §3). The `--version` cannot be recovered from the opaque `plan_id`
+/// hash, so it is required; a wrong version simply fails the drift check.
 #[derive(Args, Debug)]
 pub struct CutArgs {
-    /// The sealed plan id to execute (from `release plan`).
+    /// The sealed plan id to execute (from `release plan`). The cut refuses if the
+    /// current repository no longer hashes to it.
     #[arg(long, value_name = "PLAN_ID")]
     pub plan: String,
+    /// The chosen release version the plan was sealed with (the human's approved
+    /// bump). Must match the version `release plan` sealed, or the cut refuses on
+    /// drift.
+    #[arg(long, value_name = "VERSION")]
+    pub version: String,
+    /// Repository root to cut the release in (default: current directory).
+    #[arg(long, value_name = "PATH")]
+    pub repo_root: Option<PathBuf>,
+    /// Override the release-journal location (default: the repo's
+    /// `git-common-dir/ossctl/releases`). For CI or debugging (ADR-0003 §3).
+    #[arg(long, value_name = "DIR")]
+    pub journal_dir: Option<PathBuf>,
 }
 
 /// A single positional `<run_id>` plus the journal-location flags, shared by
@@ -80,7 +102,7 @@ pub struct AbandonArgs {
 pub fn dispatch(action: ReleaseAction, format: OutputFormat) -> Result<(), CliError> {
     match action {
         ReleaseAction::Plan(args) => plan(&args, format),
-        ReleaseAction::Cut(_) => Err(CliError::not_implemented("release cut")),
+        ReleaseAction::Cut(args) => cut(&args, format),
         ReleaseAction::Resume(_) => Err(CliError::not_implemented("release resume")),
         ReleaseAction::Verify(args) => verify(&args, format),
         ReleaseAction::Show(_) => Err(CliError::not_implemented("release show")),
@@ -333,6 +355,280 @@ fn render_reconcile_text(report: &ReconcileReport, warnings: &[String]) {
     for w in warnings {
         println!("warning:    {w}");
     }
+}
+
+/// `ossctl release cut --plan <id> --version <v>` — execute a sealed plan across
+/// the phase-barrier coordinator, refusing on repo drift (ADR-0002 §2/§3).
+///
+/// Flow: re-derive the plan from the *current* contract + facts + `HEAD` and the
+/// supplied `--version`; **refuse (`plan_stale`) unless the recomputed `plan_id`
+/// equals `--plan`** (the drift check — a commit, contract edit, or version
+/// change since `release plan` aborts here rather than publishing something the
+/// human did not approve). On acceptance, create the journalled run (single
+/// active cut) and drive dry-run-all → build-all → publish-all → tag-once through
+/// the coordinator, streaming each journalled fact.
+///
+/// Output (§12): a `--output=jsonl`-style event stream — with `--json`, one
+/// [`JournalEvent`] per line; otherwise human progress lines. `cut` never emits a
+/// single `--json` envelope (a partially-irreversible, streaming command).
+///
+/// On any phase failure the run **stops with no rollback**; what landed is
+/// journalled and the error names the `run_id` for `release verify` / `resume`.
+pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
+    let version = validate_version(&args.version)?;
+
+    let repo_root = resolve_repo_root(args.repo_root.as_ref())?;
+    if !repo_root.is_dir() {
+        return Err(CliError::user(
+            "invalid_repo_root",
+            format!("repo_root '{}' is not a directory", repo_root.display()),
+        )
+        .with_invalid_value(repo_root.display().to_string()));
+    }
+    let root = std::fs::canonicalize(&repo_root).map_err(|e| {
+        CliError::system(
+            "io_error",
+            format!(
+                "cannot canonicalize repo_root '{}': {e}",
+                repo_root.display()
+            ),
+        )
+    })?;
+
+    // Re-derive the same normalized contract + facts + HEAD the plan sealed
+    // against, through the identical code paths behind `contract show` / `facts`.
+    let normalized = contract::normalize(&root, &RealFs).map_err(load_error_to_cli)?;
+    if !normalized.is_valid() {
+        return Err(invalid_contract_error(&normalized));
+    }
+    // A cut mutates external state, so — unlike the read-only `plan` — it refuses a
+    // contract a human has not approved (SCHEMA.md: mutating members require
+    // `status: approved`).
+    if normalized.contract.status != Status::Approved {
+        return Err(CliError::user(
+            "not_approved",
+            format!(
+                "{} is `{}`, not `approved` — a human must approve the contract before a cut",
+                contract::CONTRACT_FILENAME,
+                normalized.contract.status.as_str()
+            ),
+        )
+        .with_invalid_value(normalized.contract.status.as_str().to_string()));
+    }
+
+    let git = RealGitRepo::new(&root);
+    let head_sha = git.head_commit().map_err(|e| {
+        CliError::user(
+            "no_head",
+            format!("cannot cut a release: could not resolve HEAD ({e}) — the repository may have no commits"),
+        )
+    })?;
+    let facts = ossctl_core::facts::gather(&root, &RealFs, &git);
+
+    // Drift check: the current repo + supplied version must hash to the approved
+    // plan_id, or we refuse rather than publish a different release (§3).
+    let current =
+        ossctl_core::release::plan::build(&normalized.contract, &facts, &head_sha, version);
+    if current.plan_id != args.plan {
+        return Err(plan_stale_error(&args.plan, &current));
+    }
+
+    // Journal location (git-common-dir-local, or an explicit override).
+    let paths = JournalPaths::from_git(&git, args.journal_dir.as_deref()).map_err(|e| {
+        CliError::system(
+            "io_error",
+            format!("cannot resolve the release-journal directory: {e}"),
+        )
+    })?;
+
+    let store = RealJournalStore;
+    let clock = RealClock;
+    let idgen = RealIdGen;
+    let runner = RealCommandRunner;
+    let registry = RealRegistryQuery;
+    let tagger = RealTagger::new(&root);
+
+    // Create the run under the single-active-cut lock (RunCreated is journalled).
+    let target_ids: Vec<String> = current
+        .targets
+        .iter()
+        .map(|t| t.ecosystem.as_str().to_string())
+        .collect();
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths,
+        current.plan_id.clone(),
+        current.version.clone(),
+        target_ids,
+    )
+    .map_err(create_journal_error)?;
+    let run_id = journal.run_id().to_string();
+
+    let mut sink = CutSink {
+        json: matches!(format, OutputFormat::Json),
+    };
+    // Emit the run identity first so the stream is self-contained.
+    stream_run_created(&mut sink, &journal, &current);
+
+    let ctx = EffectCtx {
+        runner: &runner,
+        clock: &clock,
+        registry: &registry,
+        repo_root: &root,
+    };
+
+    match coordinator::execute(&mut journal, &current, &ctx, &tagger, &mut sink) {
+        Ok(()) => {
+            if !matches!(format, OutputFormat::Json) {
+                render_cut_success(&run_id, &current);
+            }
+            Ok(())
+        }
+        Err(e) => Err(cut_error_to_cli(&run_id, e)),
+    }
+}
+
+/// The §10 `plan_stale` refusal: the current repo no longer hashes to the
+/// approved plan (ADR-0002 §3). Exit 1 — caller-fixable by re-planning.
+fn plan_stale_error(approved: &str, current: &ReleasePlan) -> CliError {
+    CliError::user(
+        "plan_stale",
+        format!(
+            "the approved plan is stale: the current repository (HEAD {}, version {}) hashes to \
+             a different plan_id, so a commit, contract edit, or version change occurred since \
+             `release plan` — re-run `ossctl release plan` and approve the new plan_id before cutting",
+            short_sha(&current.head_sha),
+            current.version,
+        ),
+    )
+    .with_invalid_value(approved.to_string())
+    .with_expected(serde_json::json!({ "current_plan_id": current.plan_id }))
+}
+
+/// Map a `Journal::create` failure to the error envelope: a held lock is the
+/// single-active-cut refusal (user-fixable — wait/abandon), anything else is a
+/// journal I/O failure (system).
+fn create_journal_error(e: std::io::Error) -> CliError {
+    if e.kind() == std::io::ErrorKind::WouldBlock {
+        CliError::user(
+            "cut_in_progress",
+            "another release cut or resume is already active for this repository (the \
+             single-active-cut lock is held) — wait for it, or `release abandon` a stuck run"
+                .to_string(),
+        )
+    } else {
+        CliError::system(
+            "journal_error",
+            format!("could not create the release journal: {e}"),
+        )
+    }
+}
+
+/// Map a coordinator [`CutError`] to the error envelope, always naming the
+/// `run_id` and the (no-rollback) recovery path.
+fn cut_error_to_cli(run_id: &str, err: CutError) -> CliError {
+    match err {
+        CutError::Plan(message) => {
+            // Caught before any external action — a plan the executor cannot run.
+            CliError::user("invalid_plan", message)
+        }
+        CutError::Journal(io) => CliError::system(
+            "journal_error",
+            format!("run {run_id}: could not write the release journal: {io} — the run may be in an unknown state"),
+        ),
+        CutError::PhaseFailed { .. } => CliError::system(
+            "release_failed",
+            format!(
+                "run {run_id}: {err}. Nothing was rolled back; inspect what landed with \
+                 `ossctl release verify {run_id}` and continue with `ossctl release resume {run_id}`"
+            ),
+        ),
+    }
+}
+
+/// A [`ProgressSink`] for `release cut`: streams each journalled fact as a JSONL
+/// line (`--json`, §12) or a human-readable progress line.
+struct CutSink {
+    json: bool,
+}
+
+impl ProgressSink for CutSink {
+    fn event(&mut self, event: &JournalEvent) {
+        if self.json {
+            if let Ok(line) = serde_json::to_string(event) {
+                println!("{line}");
+            }
+        } else {
+            println!("{}", render_event_line(event));
+        }
+    }
+}
+
+/// Emit the `run_created` fact to the stream before the coordinator runs, so the
+/// event stream carries the run's identity as its first line.
+fn stream_run_created(sink: &mut CutSink, journal: &Journal<'_>, plan: &ReleasePlan) {
+    let state = journal.state();
+    let event = JournalEvent {
+        schema_version: JOURNAL_SCHEMA_VERSION,
+        seq: 1,
+        ts: state.created_ts,
+        idempotency_key: "run_created".to_string(),
+        kind: EventKind::RunCreated {
+            run_id: journal.run_id().to_string(),
+            plan_id: plan.plan_id.clone(),
+            version: plan.version.clone(),
+            targets: state.targets.clone(),
+        },
+    };
+    sink.event(&event);
+}
+
+/// Render one journalled event as a human progress line (text mode).
+fn render_event_line(event: &JournalEvent) -> String {
+    use ossctl_core::protocol::journal::PhaseOutcome;
+    match &event.kind {
+        EventKind::RunCreated {
+            run_id, targets, ..
+        } => {
+            format!("run {run_id} started ({} target(s))", targets.len())
+        }
+        EventKind::PhaseEntered { phase } => format!("→ {}", phase.as_str()),
+        EventKind::PhaseCompleted { phase, outcome } => match outcome {
+            PhaseOutcome::Ok => format!("✓ {} complete", phase.as_str()),
+            PhaseOutcome::Failed => format!("✗ {} failed", phase.as_str()),
+        },
+        EventKind::TargetDryRun { target } => format!("  dry-run ok: {target}"),
+        EventKind::TargetBuilt { target } => format!("  built: {target}"),
+        EventKind::TargetPublished { target, receipt } => {
+            format!("  published: {target}@{}", receipt.version)
+        }
+        EventKind::TargetCancelled { target, reason } => {
+            format!("  cancelled: {target} ({reason})")
+        }
+        EventKind::TagCreatedLocal { tag } => format!("  tag created: {tag}"),
+        EventKind::TagPushedRemote { tag } => format!("  tag pushed: {tag}"),
+        EventKind::GithubReleaseCreated { tag, url } => match url {
+            Some(u) => format!("  release: {tag} ({u})"),
+            None => format!("  release: {tag}"),
+        },
+        EventKind::RunAbandoned { reason } => format!("run abandoned: {reason}"),
+    }
+}
+
+/// Text summary printed after a successful cut (json mode's summary is the stream).
+fn render_cut_success(run_id: &str, plan: &ReleasePlan) {
+    println!();
+    println!("release complete — run {run_id}");
+    println!("version: {}", plan.version);
+    println!("tag:     v{}", plan.version);
+    println!("published {} target(s)", plan.targets.len());
+}
+
+/// Short (first 12 hex chars) `HEAD` sha for the drift message.
+fn short_sha(sha: &str) -> &str {
+    sha.get(..12).unwrap_or(sha)
 }
 
 /// Validate the chosen version as an opaque, already-chosen identifier. Scheme

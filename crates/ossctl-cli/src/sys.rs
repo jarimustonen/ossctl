@@ -7,13 +7,18 @@
 //! port for the facts detector by shelling out to `git`. The remaining
 //! registry/clock ports gain real impls with their consuming units.
 
-use std::io;
+use std::collections::hash_map::DefaultHasher;
+use std::fs::{File, OpenOptions};
+use std::hash::{Hash, Hasher};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ossctl_core::ports::{
-    Clock, CommandOutput, CommandRunner, Fs, GitRepo, JournalLock, JournalStore, RegistryQuery,
+    Clock, CommandOutput, CommandRunner, Fs, GitRepo, IdGen, JournalLock, JournalStore,
+    RegistryQuery, Tagger,
 };
 
 /// The real subprocess runner, backing the [`CommandRunner`] port with
@@ -195,17 +200,71 @@ impl GitRepo for RealGitRepo {
     }
 }
 
-/// The real wall clock, backing the [`Clock`] port with `SystemTime`.
+/// The real wall clock, backing the [`Clock`] port with system time. Whole
+/// seconds since the Unix epoch; a clock set before the epoch degrades to `0`
+/// rather than panicking.
 pub struct RealClock;
 
 impl Clock for RealClock {
     fn now_unix(&self) -> u64 {
-        // A pre-epoch system clock is not a real deployment; clamp to 0 rather
-        // than panic so a misconfigured host cannot crash a read-only command.
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs())
     }
+}
+
+/// The real run-id generator, backing the [`IdGen`] port with a ULID-shaped
+/// identifier (ADR-0003 §3): a 48-bit millisecond timestamp followed by 80 bits
+/// of entropy, rendered as 26 Crockford base-32 characters (lexicographically
+/// sortable by creation time).
+///
+/// The entropy is derived from the system clock's sub-second component, a
+/// process-lifetime counter, and a stack address hashed together — **not** a CSPRNG.
+/// This is deliberate: `ossctl` takes no `rand`/`ulid` dependency (the workspace
+/// `Cargo.toml` is a hot file), and a release run id needs only to be unique on
+/// one machine, where the single-active-cut lock already serializes concurrent
+/// cuts. Collisions would require two runs in the same millisecond with a hash
+/// collision — not a correctness hazard for a per-repo, human-paced operation.
+pub struct RealIdGen;
+
+/// Monotonic within one process, to diversify same-millisecond ids.
+static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+impl IdGen for RealIdGen {
+    fn new_id(&self) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let ms = u64::try_from(now.as_millis()).unwrap_or(u64::MAX) & ((1 << 48) - 1);
+        let counter = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // A stack address gives cheap per-call address-space entropy without a
+        // dependency; hashed, never dereferenced.
+        let anchor = 0u8;
+        let addr = std::ptr::addr_of!(anchor) as usize;
+
+        let mut h1 = DefaultHasher::new();
+        (now.subsec_nanos(), counter, ms, addr).hash(&mut h1);
+        let mut h2 = DefaultHasher::new();
+        (counter, h1.finish(), addr, ms).hash(&mut h2);
+        // 80 bits of entropy: 64 from h1, 16 more from h2.
+        let rand80 = (u128::from(h1.finish()) << 16) | u128::from(h2.finish() & 0xffff);
+
+        let value = (u128::from(ms) << 80) | (rand80 & ((1 << 80) - 1));
+        crockford_u128(value)
+    }
+}
+
+/// Encode a 128-bit value as 26 Crockford base-32 characters (the ULID text
+/// form). The top two of the 130 encodable bits are always zero here.
+fn crockford_u128(mut value: u128) -> String {
+    const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let mut buf = [0u8; 26];
+    for slot in buf.iter_mut().rev() {
+        *slot = ALPHABET[(value & 0x1f) as usize];
+        value >>= 5;
+    }
+    // `buf` is ASCII by construction.
+    String::from_utf8(buf.to_vec()).expect("crockford alphabet is ASCII")
 }
 
 /// The real registry-state lookup, backing the read-only [`RegistryQuery`] port
@@ -364,5 +423,218 @@ impl JournalStore for ReadOnlyJournalStore {
         }
         names.sort();
         Ok(names)
+    }
+}
+
+/// The real tag publisher, backing the coordinator-only [`Tagger`] port by
+/// shelling out to `git` (local tag + push) and `gh` (GitHub Release), rooted at
+/// the repository. Hardened against non-interactive hangs the same way
+/// [`RealGitRepo`] and [`RealCommandRunner`] are (no terminal/askpass/`gh`
+/// prompts). No wall-clock timeout — the same accepted `std`-has-none gap.
+pub struct RealTagger {
+    root: PathBuf,
+}
+
+impl RealTagger {
+    /// A tagger operating on the repository at `root`.
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// Run `program` (git/gh) with `args` in the repo root, prompts disabled.
+    fn run(&self, program: &str, args: &[&str]) -> io::Result<std::process::Output> {
+        Command::new(program)
+            .args(args)
+            .current_dir(&self.root)
+            .stdin(Stdio::null())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "true")
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("GH_NO_UPDATE_NOTIFIER", "1")
+            .output()
+    }
+
+    /// Map a non-zero exit into an `Err` carrying the captured diagnostic (stderr,
+    /// or stdout when the tool wrote its error there).
+    fn check(out: std::process::Output, what: &str) -> io::Result<std::process::Output> {
+        if out.status.success() {
+            return Ok(out);
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let detail = if stderr.trim().is_empty() {
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        } else {
+            stderr.into_owned()
+        };
+        Err(io::Error::other(format!(
+            "{what} exited {:?}: {}",
+            out.status.code(),
+            detail.trim()
+        )))
+    }
+}
+
+impl Tagger for RealTagger {
+    fn create_tag(&self, tag: &str, message: &str) -> io::Result<()> {
+        let out = self.run("git", &["tag", "-a", tag, "-m", message])?;
+        Self::check(out, "git tag")?;
+        Ok(())
+    }
+
+    fn push_tag(&self, tag: &str) -> io::Result<()> {
+        let out = self.run("git", &["push", "origin", tag])?;
+        Self::check(out, "git push")?;
+        Ok(())
+    }
+
+    fn create_github_release(&self, tag: &str, title: &str) -> io::Result<Option<String>> {
+        let out = self.run(
+            "gh",
+            &[
+                "release",
+                "create",
+                tag,
+                "--title",
+                title,
+                "--generate-notes",
+            ],
+        )?;
+        let out = Self::check(out, "gh release create")?;
+        // `gh release create` prints the Release URL on stdout.
+        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Ok(if url.is_empty() { None } else { Some(url) })
+    }
+}
+
+/// The real durable release-journal store, backing the [`JournalStore`] port with
+/// `std::fs`. Honors the append-then-apply atomicity discipline (ADR-0003 §2):
+/// events are `O_APPEND`-written and fsynced before returning; the manifest is
+/// replaced via temp-file → fsync → atomic rename → directory fsync.
+///
+/// **Lock deviation (accepted, documented follow-up).** ADR-0003 §3 specifies a
+/// `flock`; this impl instead uses an `O_EXCL` lock *file* so `ossctl` takes no
+/// new dependency (`std::fs::File::lock` is newer than the pinned MSRV, and a
+/// `libc`/`fs2` dep would edit the hot workspace `Cargo.toml`). The trade-off: a
+/// hard process kill leaves a stale lock file that a human (or a future `doctor
+/// --fix`) must remove, whereas `flock` releases on death. Mutual exclusion under
+/// normal operation (and Drop-based release) is equivalent.
+pub struct RealJournalStore;
+
+/// The `O_EXCL` lock guard: removes its lock file on drop (normal release).
+struct RealJournalLock {
+    path: PathBuf,
+}
+
+impl JournalLock for RealJournalLock {}
+
+impl Drop for RealJournalLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Best-effort directory fsync so a newly created file's directory entry is
+/// durable (ADR-0003 §2). Silently ignored where a directory cannot be opened as
+/// a file (non-Unix); the data fsync already happened.
+fn fsync_dir(dir: &Path) {
+    let _ = File::open(dir).and_then(|f| f.sync_all());
+}
+
+impl JournalStore for RealJournalStore {
+    fn lock_exclusive(&self, lock_path: &Path) -> io::Result<Box<dyn JournalLock>> {
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(lock_path)
+        {
+            Ok(mut f) => {
+                // Record the holder's pid for diagnostics / stale-lock recovery.
+                let _ = writeln!(f, "{}", std::process::id());
+                let _ = f.sync_all();
+                Ok(Box::new(RealJournalLock {
+                    path: lock_path.to_path_buf(),
+                }))
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "another release cut/resume holds the single-active-cut lock",
+            )),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn append_line(&self, path: &Path, line: &str) -> io::Result<()> {
+        let created_parent = match path.parent() {
+            Some(p) if !p.exists() => {
+                std::fs::create_dir_all(p)?;
+                true
+            }
+            _ => false,
+        };
+        let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+        f.write_all(line.as_bytes())?;
+        f.write_all(b"\n")?;
+        f.sync_all()?;
+        if created_parent {
+            if let Some(p) = path.parent() {
+                fsync_dir(p);
+            }
+        }
+        Ok(())
+    }
+
+    fn read_lines(&self, path: &Path) -> io::Result<Vec<String>> {
+        match std::fs::read_to_string(path) {
+            Ok(s) => Ok(s.lines().map(str::to_string).collect()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        match std::fs::read(path) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn write_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "manifest path has no parent")
+        })?;
+        std::fs::create_dir_all(parent)?;
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("manifest.json");
+        let counter = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(".{file_name}.{}.{counter}.tmp", std::process::id()));
+        {
+            let mut f = File::create(&tmp)?;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, path)?;
+        fsync_dir(parent);
+        Ok(())
+    }
+
+    fn list_dir(&self, dir: &Path) -> io::Result<Vec<String>> {
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                let mut names = Vec::new();
+                for entry in entries {
+                    names.push(entry?.file_name().to_string_lossy().into_owned());
+                }
+                names.sort();
+                Ok(names)
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
     }
 }

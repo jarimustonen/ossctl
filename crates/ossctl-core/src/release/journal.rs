@@ -171,10 +171,12 @@ pub fn apply(state: &mut RunState, event: &JournalEvent) {
         EventKind::RunCreated {
             run_id,
             plan_id,
+            version,
             targets,
         } => {
             state.run_id.clone_from(run_id);
             state.plan_id.clone_from(plan_id);
+            state.version.clone_from(version);
             state.targets.clone_from(targets);
             state.created_ts = event.ts;
             state.status = RunStatus::InProgress;
@@ -444,6 +446,7 @@ impl<'a> Journal<'a> {
         idgen: &dyn IdGen,
         paths: JournalPaths,
         plan_id: String,
+        version: String,
         targets: Vec<String>,
     ) -> io::Result<Self> {
         let lock = store.lock_exclusive(&paths.lock_file())?;
@@ -459,6 +462,7 @@ impl<'a> Journal<'a> {
         journal.append(EventKind::RunCreated {
             run_id,
             plan_id,
+            version,
             targets,
         })?;
         Ok(journal)
@@ -762,6 +766,7 @@ mod tests {
             EventKind::RunCreated {
                 run_id: "RUN01".into(),
                 plan_id: "plan-abc".into(),
+                version: "0.1.0".into(),
                 targets: vec!["cargo".into(), "npm".into()],
             },
             EventKind::PhaseEntered {
@@ -885,6 +890,7 @@ mod tests {
                 EventKind::RunCreated {
                     run_id: "R".into(),
                     plan_id: "p".into(),
+                    version: "0.1.0".into(),
                     targets: vec!["cargo".into()],
                 },
             ),
@@ -995,6 +1001,7 @@ mod tests {
             &idgen,
             paths(),
             "plan-abc".into(),
+            "0.1.0".into(),
             vec!["cargo".into()],
         )
         .unwrap();
@@ -1031,6 +1038,7 @@ mod tests {
             &idgen,
             paths(),
             "plan-abc".into(),
+            "0.1.0".into(),
             vec!["cargo".into()],
         )
         .unwrap();
@@ -1109,6 +1117,7 @@ mod tests {
             &idgen,
             paths(),
             "plan-abc".into(),
+            "0.1.0".into(),
             vec!["cargo".into()],
         )
         .unwrap();
@@ -1170,6 +1179,7 @@ mod tests {
             &idgen,
             paths(),
             "plan-abc".into(),
+            "0.1.0".into(),
             vec!["cargo".into()],
         )
         .unwrap();
@@ -1185,6 +1195,7 @@ mod tests {
             &idgen2,
             paths(),
             "plan-def".into(),
+            "0.1.0".into(),
             vec!["cargo".into()],
         );
         let err = result.err().expect("concurrent create must fail");
@@ -1200,6 +1211,7 @@ mod tests {
             &idgen3,
             paths(),
             "plan-def".into(),
+            "0.1.0".into(),
             vec!["cargo".into()],
         )
         .is_ok());
@@ -1218,6 +1230,7 @@ mod tests {
             &idgen,
             paths(),
             "plan-abc".into(),
+            "0.1.0".into(),
             vec!["cargo".into()],
         )
         .unwrap();
@@ -1238,6 +1251,7 @@ mod tests {
             &idgen,
             paths(),
             "plan-abc".into(),
+            "0.1.0".into(),
             vec!["cargo".into()],
         )
         .unwrap();
@@ -1373,6 +1387,7 @@ mod tests {
                 &idgen,
                 paths(),
                 "plan".into(),
+                "0.1.0".into(),
                 vec!["cargo".into()],
             )
             .unwrap();

@@ -716,4 +716,149 @@ fn release_verify_reports_cancelled_targets_distinctly() {
             .contains("npm' was cancelled: OTP timeout")),
         "cancelled target must report its reason: {warnings:?}"
     );
+// ── release cut: drift-refusal + approval gate (no external publish) ──────────
+
+/// Prepare a temp repo from a positive fixture with `status: approved`, inside a
+/// real git repo with one commit — the minimum a `release cut` needs to reach its
+/// drift check. Returns the temp dir (kept alive by the caller).
+fn approved_git_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let contract = std::fs::read_to_string(fixture("solo-rust-cli").join("OSS-RELEASE.md"))
+        .unwrap()
+        .replace("status: draft", "status: approved");
+    std::fs::write(dir.path().join("OSS-RELEASE.md"), contract).unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"tool\"\n",
+    )
+    .unwrap();
+
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .expect("git runs")
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "init"]);
+    dir
+}
+
+/// `release cut` on a `draft` contract is refused (a cut mutates external state,
+/// so it requires human approval) — before any git or journal work.
+#[test]
+fn release_cut_refuses_a_draft_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixture("solo-rust-cli").join("OSS-RELEASE.md"),
+        dir.path().join("OSS-RELEASE.md"),
+    )
+    .unwrap();
+
+    let out = ossctl()
+        .args([
+            "release",
+            "cut",
+            "--plan",
+            "deadbeef",
+            "--version",
+            "1.0.0",
+            "--repo-root",
+        ])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "draft cut → user error");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
+    assert_eq!(v["error"]["code"], "not_approved");
+    assert!(out.stdout.is_empty());
+}
+
+/// `release cut` with a `plan_id` the current repo does not hash to is refused
+/// with `plan_stale` — the drift guard (ADR-0002 §3). Nothing is published.
+#[test]
+fn release_cut_refuses_a_stale_plan_id() {
+    let dir = approved_git_repo();
+    let journal = tempfile::tempdir().unwrap();
+
+    let out = ossctl()
+        .args([
+            "release",
+            "cut",
+            "--plan",
+            "0000000000000000",
+            "--version",
+            "1.0.0",
+            "--repo-root",
+        ])
+        .arg(dir.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "stale plan → user error");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
+    assert_eq!(v["error"]["code"], "plan_stale");
+    // The refusal echoes the offending (approved) id back to the caller.
+    assert_eq!(v["error"]["invalid_value"], "0000000000000000");
+    assert!(out.stdout.is_empty(), "a refused cut published nothing");
+}
+
+/// A correct-shape plan cut with the WRONG version is still drift: the version is
+/// part of the content address, so a different `--version` hashes to a different
+/// `plan_id` and the cut refuses rather than publishing an unapproved version.
+#[test]
+fn release_cut_refuses_when_version_differs_from_the_sealed_plan() {
+    let dir = approved_git_repo();
+    let journal = tempfile::tempdir().unwrap();
+
+    // Seal a real plan at version 1.0.0 and read its plan_id from the envelope.
+    let planned = ossctl()
+        .args([
+            "release",
+            "plan",
+            "--json",
+            "--version",
+            "1.0.0",
+            "--repo-root",
+        ])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        planned.status.code(),
+        Some(0),
+        "plan should succeed on an approved repo"
+    );
+    let pv: serde_json::Value =
+        serde_json::from_slice(&planned.stdout).expect("plan stdout is JSON");
+    let plan_id = pv["data"]["plan_id"]
+        .as_str()
+        .expect("plan_id present")
+        .to_string();
+
+    // Execute that exact plan_id but with a different version → drift refusal.
+    let out = ossctl()
+        .args([
+            "release",
+            "cut",
+            "--plan",
+            &plan_id,
+            "--version",
+            "2.0.0",
+            "--repo-root",
+        ])
+        .arg(dir.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "wrong version → plan_stale");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
+    assert_eq!(v["error"]["code"], "plan_stale");
+    assert!(out.stdout.is_empty());
 }

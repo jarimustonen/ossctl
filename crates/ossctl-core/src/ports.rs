@@ -186,3 +186,32 @@ pub trait JournalStore {
 /// [`JournalStore::lock_exclusive`]. Dropping it releases the lock; there are no
 /// methods — its lifetime *is* the contract.
 pub trait JournalLock {}
+
+/// Creates and publishes the **one** shared release tag + GitHub Release for a
+/// cut — the external side of the coordinator's coordinator-only tag phase
+/// (ADR-0002 §2).
+///
+/// Tagging is deliberately **not** on the [`crate::release::adapters::ReleaseAdapter`]
+/// trait: no per-ecosystem adapter can create the shared tag, which is what makes
+/// "tag once, after every publish succeeds" a structural guarantee. The
+/// coordinator drives these three steps in order and journals each as its own
+/// resumable event (`tag_created_local` → `tag_pushed_remote` →
+/// `github_release_created`), so an interrupted tag phase resumes from the first
+/// incomplete step rather than re-tagging.
+///
+/// Every method is **idempotent-friendly**: the coordinator only calls a step
+/// whose journalled fact is not yet present, but a production impl should still
+/// treat "already exists" as success (a pushed tag that is already on the remote,
+/// a Release that already exists) rather than an error, so a resume after a crash
+/// *between* the external action and its journal write reconciles cleanly.
+pub trait Tagger {
+    /// Create the annotated tag `tag` (with message `message`) in the local
+    /// repository. `Err` only on a genuine failure to create it.
+    fn create_tag(&self, tag: &str, message: &str) -> io::Result<()>;
+    /// Push the already-created tag `tag` to the remote. `Err` on a push failure
+    /// (network, auth, rejected ref).
+    fn push_tag(&self, tag: &str) -> io::Result<()>;
+    /// Create the GitHub Release for `tag` (titled `title`), returning its URL
+    /// when the host reports one. `Err` on a creation failure.
+    fn create_github_release(&self, tag: &str, title: &str) -> io::Result<Option<String>>;
+}

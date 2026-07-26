@@ -167,7 +167,14 @@ pub enum EventKind {
         run_id: String,
         /// The sealed, content-addressed plan id this run executes (ADR-0002).
         plan_id: String,
-        /// The ordered target set (e.g. `["cargo", "npm"]`).
+        /// The chosen release version this run publishes — the human's approved
+        /// bump, sealed into `plan_id` and journalled as an input so `resume`
+        /// (wave-3) can reconstruct the plan from the durable record alone
+        /// (ADR-0002 §3; the plan module persists exactly `plan_id` + `version`).
+        /// `#[serde(default)]` for forward tolerance of any pre-field log line.
+        #[serde(default)]
+        version: String,
+        /// The ordered target set (e.g. `["rust", "node"]`).
         targets: Vec<String>,
     },
     /// A phase barrier was entered.
@@ -303,6 +310,12 @@ pub struct RunState {
     pub run_id: String,
     /// The sealed plan id this run executes.
     pub plan_id: String,
+    /// The chosen release version this run publishes (from the `RunCreated`
+    /// event) — the input `resume` reconstructs the plan against. `#[serde(default)]`
+    /// so a manifest cache written before this field parses (it is disposable and
+    /// rebuilt from the log regardless).
+    #[serde(default)]
+    pub version: String,
     /// The ordered target set, as declared at creation.
     pub targets: Vec<String>,
     /// The high-water sequence number folded into this state — the append-then-
@@ -342,6 +355,7 @@ impl RunState {
             schema_version: JOURNAL_SCHEMA_VERSION,
             run_id: String::new(),
             plan_id: String::new(),
+            version: String::new(),
             targets: Vec::new(),
             applied_seq: 0,
             status: RunStatus::InProgress,
