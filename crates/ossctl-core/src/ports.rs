@@ -63,6 +63,12 @@ pub trait Fs {
     /// Whether `path` exists and is a directory (used for the contract's
     /// fragment-dir producer check, which is a *directory*, not a file).
     fn is_dir(&self, path: &std::path::Path) -> bool;
+    /// List the immediate entry *names* (not full paths) within `dir` — the
+    /// facts detector's CI probe needs to know whether `.github/workflows`
+    /// holds at least one entry, not merely that the directory exists.
+    /// `Ok(vec![])` for an empty directory; `Err` when `dir` is absent or
+    /// unreadable (the detector treats that as "no entries").
+    fn read_dir(&self, dir: &std::path::Path) -> io::Result<Vec<String>>;
 }
 
 /// Queries a package registry for already-published state — the "remote is
@@ -75,7 +81,28 @@ pub trait RegistryQuery {
 /// Read-only view of the git repository under audit/release. The detector and
 /// release engine read repo facts through this port rather than shelling out
 /// to `git` themselves.
+///
+/// The detector's queries are deliberately *best-effort*: an unborn or
+/// non-repository root makes several of these fail, and the detector treats
+/// every such failure as "absent" (no committers, no tags) rather than an
+/// error — mirroring the read-only, never-mutating `infer-repo-facts.py`.
 pub trait GitRepo {
-    /// The full commit hash of `HEAD`.
+    /// The full commit hash of `HEAD`. `Err` on an unborn repository (no
+    /// commits yet) or a non-repository root — the detector reads this as
+    /// "the repo has no commits".
     fn head_commit(&self) -> io::Result<String>;
+    /// Whether the root is inside a git work tree (`git rev-parse
+    /// --is-inside-work-tree` succeeds). `false` for a non-repository root or
+    /// on any git error.
+    fn is_work_tree(&self) -> bool;
+    /// Raw `git shortlog -sne --all HEAD` output — one line per distinct
+    /// committer. When `since` is set (a git date expression such as
+    /// `"1 year ago"`), the log is limited to commits at or after it. `Err` on
+    /// any git failure (an unborn/empty repo); the detector counts that as zero
+    /// committers.
+    fn shortlog(&self, since: Option<&str>) -> io::Result<String>;
+    /// The repository's tag names (`git tag --list`), trimmed and with empty
+    /// lines dropped. `Err` on any git failure; the detector reads that as "no
+    /// tags".
+    fn tags(&self) -> io::Result<Vec<String>>;
 }

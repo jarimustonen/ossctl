@@ -89,7 +89,7 @@ fn doctor_json_fix_leaves_stderr_clean() {
 /// stderr and exits 2 — not a panic.
 #[test]
 fn stub_subcommand_returns_not_implemented() {
-    let out = ossctl().arg("facts").output().unwrap();
+    let out = ossctl().arg("audit").output().unwrap();
     assert_eq!(out.status.code(), Some(2), "not_implemented → exit 2");
 
     let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
@@ -270,4 +270,109 @@ fn contract_show_missing_file_is_system_error() {
     assert_eq!(out.status.code(), Some(2), "missing file → exit 2");
     let v: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
     assert_eq!(v["error"]["code"], "contract_not_found");
+}
+
+// ── facts ────────────────────────────────────────────────────────────────────
+
+/// `facts --json` over a manifest-bearing (non-git) temp dir emits the canonical
+/// envelope with the SCHEMA.md §4 field names oss-init relies on. A fresh temp
+/// dir is outside any git work tree, so the git-derived fields are deterministic
+/// (`is_git: false`, no committers, no tags).
+#[test]
+fn facts_json_shape_and_field_names() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"toolx\"\nversion = \"0.3.0\"\ndescription = \"a tool\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
+    std::fs::write(dir.path().join(".github/workflows/ci.yml"), "on: push\n").unwrap();
+
+    let out = ossctl()
+        .args(["facts", "--json", "--repo-root"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "facts --json must exit 0");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    assert_eq!(v["schema_version"], 1, "envelope schema_version");
+    assert_eq!(v["warnings"], serde_json::json!([]));
+
+    let d = &v["data"];
+    // The exact field names oss-init reads (SCHEMA.md §4).
+    for key in [
+        "ecosystems",
+        "packages",
+        "has_ci",
+        "tags",
+        "committers_total",
+        "committers_recent_year",
+        "inferred_maturity",
+        "maturity_signals",
+        "has_semver_tag",
+        "has_ge_1_0_release",
+    ] {
+        assert!(d.get(key).is_some(), "missing facts key {key}: {d}");
+    }
+    assert_eq!(d["ecosystems"], serde_json::json!(["rust"]));
+    assert_eq!(d["packages"][0]["package"], "toolx");
+    assert_eq!(d["packages"][0]["version"], "0.3.0");
+    assert_eq!(d["has_ci"], true);
+    assert_eq!(d["is_git"], false, "a temp dir is not a git work tree");
+    assert_eq!(d["committers_total"], 0);
+    assert_eq!(d["tags"], serde_json::json!([]));
+    assert_eq!(d["description"], "a tool");
+    // Has CI (so not spike) but no >=1.0 and no recent committers → mvp.
+    assert_eq!(d["inferred_maturity"], "mvp");
+}
+
+/// A repo with no package manifest reports the `binary` ecosystem and — with no
+/// CI, tags, or committers — a `spike` maturity.
+#[test]
+fn facts_binary_fallback_is_spike() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Makefile"), "all:\n\techo hi\n").unwrap();
+
+    let out = ossctl()
+        .args(["facts", "--json", "--repo-root"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["ecosystems"], serde_json::json!(["binary"]));
+    assert_eq!(v["data"]["inferred_maturity"], "spike");
+}
+
+/// `facts` is deterministic: two runs over the same tree are byte-identical.
+#[test]
+fn facts_is_deterministic() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("package.json"),
+        r#"{"name": "widget", "version": "1.0.0"}"#,
+    )
+    .unwrap();
+    let run = || {
+        ossctl()
+            .args(["facts", "--json", "--repo-root"])
+            .arg(dir.path())
+            .output()
+            .unwrap()
+            .stdout
+    };
+    assert_eq!(run(), run(), "facts must be deterministic");
+}
+
+/// A non-existent `--repo-root` is a caller-fixable (exit 1) error.
+#[test]
+fn facts_missing_repo_root_is_user_error() {
+    let out = ossctl()
+        .args(["facts", "--repo-root", "/no/such/dir/anywhere"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "invalid_repo_root");
 }

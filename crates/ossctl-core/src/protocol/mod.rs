@@ -12,6 +12,7 @@
 //! (bump `SCHEMA_VERSION` on a breaking change, never silently).
 
 pub mod contract;
+pub mod facts;
 
 /// Current envelope/DTO schema version for `ossctl`'s public JSON output.
 ///

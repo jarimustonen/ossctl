@@ -845,6 +845,10 @@ mod tests {
         fn is_dir(&self, path: &Path) -> bool {
             self.dirs.contains(path)
         }
+        fn read_dir(&self, _dir: &Path) -> io::Result<Vec<String>> {
+            // The contract normalizer never lists directories.
+            Ok(Vec::new())
+        }
     }
 
     fn repo() -> &'static Path {
