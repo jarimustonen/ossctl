@@ -180,8 +180,10 @@ impl FakeTagger {
     }
 }
 impl Tagger for FakeTagger {
-    fn create_tag(&self, tag: &str, _message: &str) -> io::Result<()> {
-        self.calls.borrow_mut().push(format!("create:{tag}"));
+    fn create_tag(&self, tag: &str, commit: &str, _message: &str) -> io::Result<()> {
+        self.calls
+            .borrow_mut()
+            .push(format!("create:{tag}@{commit}"));
         if self.fail_step == Some("create") {
             return Err(io::Error::other("cannot create tag"));
         }
@@ -378,7 +380,7 @@ fn tags_exactly_once_after_all_publishes_and_completes_the_run() {
     // Exactly one tag, driven through its three steps in order.
     assert_eq!(
         tagger.calls(),
-        vec!["create:v1.2.3", "push:v1.2.3", "release:v1.2.3"]
+        vec!["create:v1.2.3@deadbeef", "push:v1.2.3", "release:v1.2.3"]
     );
 
     let state = journal.state();
@@ -554,7 +556,10 @@ fn a_tag_push_failure_journals_the_local_tag_and_stops() {
         .iter()
         .any(|r| r.phase == Phase::Tag && r.outcome == PhaseOutcome::Failed));
     // The GitHub Release step was never attempted after the push failed.
-    assert_eq!(tagger.calls(), vec!["create:v1.2.3", "push:v1.2.3"]);
+    assert_eq!(
+        tagger.calls(),
+        vec!["create:v1.2.3@deadbeef", "push:v1.2.3"]
+    );
 }
 
 // ── Resume-ready journal state (idempotent re-entry) ─────────────────────────
@@ -616,7 +621,7 @@ fn re_execution_resumes_without_re_publishing_landed_targets() {
     assert!(state.published.contains_key("rust") && state.published.contains_key("node"));
     assert_eq!(
         tagger.calls(),
-        vec!["create:v1.2.3", "push:v1.2.3", "release:v1.2.3"]
+        vec!["create:v1.2.3@deadbeef", "push:v1.2.3", "release:v1.2.3"]
     );
 }
 

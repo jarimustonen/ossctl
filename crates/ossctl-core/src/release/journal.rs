@@ -1423,7 +1423,7 @@ mod tests {
     fn read_events_tolerates_unknown_additive_fields() {
         // An extra top-level field a newer ossctl might add is ignored, not fatal.
         let store = FakeStore::default();
-        let line = r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"R","plan_id":"p","targets":[],"future_field":42}"#;
+        let line = r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"R","plan_id":"p","version":"0.1.0","targets":[],"future_field":42}"#;
         store
             .append_line(&paths().journal_file("RUN01"), line)
             .unwrap();

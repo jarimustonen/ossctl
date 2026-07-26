@@ -171,8 +171,11 @@ pub enum EventKind {
         /// bump, sealed into `plan_id` and journalled as an input so `resume`
         /// (wave-3) can reconstruct the plan from the durable record alone
         /// (ADR-0002 §3; the plan module persists exactly `plan_id` + `version`).
-        /// `#[serde(default)]` for forward tolerance of any pre-field log line.
-        #[serde(default)]
+        ///
+        /// A **required** field of the v1 event, deliberately *not* `#[serde(default)]`:
+        /// a `RunCreated` without it is corrupt (a resume must never fabricate an
+        /// empty version and hash it into a wrong `plan_id`), so [`crate::release::journal::read_events`]
+        /// refuses such a line with an actionable error rather than defaulting to `""`.
         version: String,
         /// The ordered target set (e.g. `["rust", "node"]`).
         targets: Vec<String>,
@@ -272,8 +275,15 @@ pub struct JournalEvent {
 
 impl EventKind {
     /// The stable idempotency key for this event — its natural semantic identity,
-    /// so a retried step (re-publishing an already-published target, re-entering
-    /// a phase) resolves to the same key and is deduplicated on append.
+    /// so a retried step (re-publishing an already-published target, re-entering a
+    /// phase) resolves to the same key.
+    ///
+    /// This is **metadata only**: it is deliberately *not* used to suppress an
+    /// append (see [`JournalEvent::idempotency_key`]). Two events can share a key
+    /// yet be distinct facts that must both be recorded — a `phase_completed`
+    /// `Failed` and, after a resume, a `phase_completed` `Ok` for the same phase.
+    /// Replay idempotency comes from [`JournalEvent::seq`] (the watermark), never
+    /// from this key.
     #[must_use]
     pub fn idempotency_key(&self) -> String {
         match self {
@@ -311,10 +321,9 @@ pub struct RunState {
     /// The sealed plan id this run executes.
     pub plan_id: String,
     /// The chosen release version this run publishes (from the `RunCreated`
-    /// event) — the input `resume` reconstructs the plan against. `#[serde(default)]`
-    /// so a manifest cache written before this field parses (it is disposable and
-    /// rebuilt from the log regardless).
-    #[serde(default)]
+    /// event) — the input `resume` reconstructs the plan against. Populated from
+    /// the required event field; the manifest is disposable and always rebuilt
+    /// from the log, so no cross-version default is needed here.
     pub version: String,
     /// The ordered target set, as declared at creation.
     pub targets: Vec<String>,

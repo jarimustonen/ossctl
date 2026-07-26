@@ -179,6 +179,21 @@ pub fn execute(
     Ok(())
 }
 
+/// Preflight a plan **without** touching external state or creating a run: check
+/// it resolves into executable targets (every package resolved, no two targets
+/// colliding on one ecosystem id).
+///
+/// `release cut` calls this *before* `Journal::create` so an unexecutable plan is
+/// refused up front rather than leaving an orphaned `run_created` run behind.
+/// [`execute`] re-runs the same resolution (defense in depth).
+///
+/// # Errors
+/// [`CutError::Plan`] when a target has no resolved package or two targets share
+/// an ecosystem journal id.
+pub fn validate_plan(plan: &ReleasePlan) -> Result<(), CutError> {
+    resolve_target_plans(plan).map(|_| ())
+}
+
 /// Turn the sealed plan's abstract targets into concrete, adapter-backed units of
 /// work — the one place a `null`-package or a duplicate-ecosystem plan is refused
 /// (before any external action).
@@ -349,7 +364,9 @@ fn tag_phase(
     let title = format!("Release {}", plan.version);
 
     if !tag_step_done(journal.state(), &tag, |s| s.created_local) {
-        if let Err(e) = tagger.create_tag(&tag, &title) {
+        // Tag the plan's SEALED commit, not whatever HEAD is now — the approval
+        // seam binds HEAD, so the tag must point at the approved commit.
+        if let Err(e) = tagger.create_tag(&tag, &plan.head_sha, &title) {
             return fail_phase(journal, sink, phase, None, format!("create local tag: {e}"));
         }
         record(

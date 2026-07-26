@@ -862,3 +862,32 @@ fn release_cut_refuses_when_version_differs_from_the_sealed_plan() {
     assert_eq!(v["error"]["code"], "plan_stale");
     assert!(out.stdout.is_empty());
 }
+
+/// A version that would produce an invalid git tag (`v{version}`) is rejected up
+/// front — before any repo work — so it can never publish and then fail at tag
+/// time (post-publish, unrecoverable-late).
+#[test]
+fn release_cut_rejects_a_git_ref_unsafe_version() {
+    for bad in ["1.0..0", "1.0.0~1", "../evil", "1.0.0.lock"] {
+        let out = ossctl()
+            .args([
+                "release",
+                "cut",
+                "--plan",
+                "x",
+                "--version",
+                bad,
+                "--repo-root",
+                ".",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "version {bad:?} should be rejected"
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
+        assert_eq!(v["error"]["code"], "invalid_version", "version {bad:?}");
+    }
+}

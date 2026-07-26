@@ -242,10 +242,14 @@ impl IdGen for RealIdGen {
         let anchor = 0u8;
         let addr = std::ptr::addr_of!(anchor) as usize;
 
+        // The pid distinguishes two short-lived processes that start in the same
+        // millisecond with a similar stack layout (the case a time+addr hash alone
+        // could collide on).
+        let pid = std::process::id();
         let mut h1 = DefaultHasher::new();
-        (now.subsec_nanos(), counter, ms, addr).hash(&mut h1);
+        (now.subsec_nanos(), counter, ms, addr, pid).hash(&mut h1);
         let mut h2 = DefaultHasher::new();
-        (counter, h1.finish(), addr, ms).hash(&mut h2);
+        (counter, h1.finish(), addr, ms, pid).hash(&mut h2);
         // 80 bits of entropy: 64 from h1, 16 more from h2.
         let rand80 = (u128::from(h1.finish()) << 16) | u128::from(h2.finish() & 0xffff);
 
@@ -472,22 +476,65 @@ impl RealTagger {
             detail.trim()
         )))
     }
+
+    /// The commit a local tag resolves to (`git rev-parse <tag>^{commit}`), or
+    /// `None` if the tag does not exist. Used to make [`Self::create_tag`]
+    /// idempotent: an already-present tag at the sealed commit is success, one
+    /// pointing elsewhere is a conflict.
+    fn tag_commit(&self, tag: &str) -> Option<String> {
+        let out = self
+            .run(
+                "git",
+                &["rev-parse", "--verify", "-q", &format!("{tag}^{{commit}}")],
+            )
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!sha.is_empty()).then_some(sha)
+    }
 }
 
 impl Tagger for RealTagger {
-    fn create_tag(&self, tag: &str, message: &str) -> io::Result<()> {
-        let out = self.run("git", &["tag", "-a", tag, "-m", message])?;
+    fn create_tag(&self, tag: &str, commit: &str, message: &str) -> io::Result<()> {
+        // Idempotent resume: a tag already at the sealed commit is success; one at
+        // a different commit is a genuine conflict we must never overwrite.
+        if let Some(existing) = self.tag_commit(tag) {
+            if existing == commit || existing.starts_with(commit) || commit.starts_with(&existing) {
+                return Ok(());
+            }
+            return Err(io::Error::other(format!(
+                "tag `{tag}` already exists at {existing}, not the sealed commit {commit}"
+            )));
+        }
+        // Tag the sealed commit explicitly (`git tag -a <tag> <commit>`), not HEAD.
+        let out = self.run("git", &["tag", "-a", tag, commit, "-m", message])?;
         Self::check(out, "git tag")?;
         Ok(())
     }
 
     fn push_tag(&self, tag: &str) -> io::Result<()> {
-        let out = self.run("git", &["push", "origin", tag])?;
+        // A fully-qualified refspec is unambiguous; an already-present identical
+        // remote tag reports "Everything up-to-date" (exit 0), so re-pushing on
+        // resume is a no-op rather than an error.
+        let refspec = format!("refs/tags/{tag}:refs/tags/{tag}");
+        let out = self.run("git", &["push", "origin", &refspec])?;
         Self::check(out, "git push")?;
         Ok(())
     }
 
     fn create_github_release(&self, tag: &str, title: &str) -> io::Result<Option<String>> {
+        // Idempotent resume: if the Release already exists, return its URL rather
+        // than failing on a duplicate `gh release create`.
+        let view = self.run(
+            "gh",
+            &["release", "view", tag, "--json", "url", "-q", ".url"],
+        )?;
+        if view.status.success() {
+            let url = String::from_utf8_lossy(&view.stdout).trim().to_string();
+            return Ok((!url.is_empty()).then_some(url));
+        }
         let out = self.run(
             "gh",
             &[
@@ -502,7 +549,7 @@ impl Tagger for RealTagger {
         let out = Self::check(out, "gh release create")?;
         // `gh release create` prints the Release URL on stdout.
         let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        Ok(if url.is_empty() { None } else { Some(url) })
+        Ok((!url.is_empty()).then_some(url))
     }
 }
 

@@ -205,13 +205,22 @@ pub trait JournalLock {}
 /// a Release that already exists) rather than an error, so a resume after a crash
 /// *between* the external action and its journal write reconciles cleanly.
 pub trait Tagger {
-    /// Create the annotated tag `tag` (with message `message`) in the local
-    /// repository. `Err` only on a genuine failure to create it.
-    fn create_tag(&self, tag: &str, message: &str) -> io::Result<()>;
-    /// Push the already-created tag `tag` to the remote. `Err` on a push failure
-    /// (network, auth, rejected ref).
+    /// Create the annotated tag `tag` (message `message`) pointing at the sealed
+    /// `commit` in the local repository.
+    ///
+    /// `commit` is the plan's sealed `HEAD` (not whatever `HEAD` happens to be at
+    /// tag time), so the tag authenticates the approved commit even if `HEAD`
+    /// moved during the cut. Idempotent-friendly: if the tag already exists **at
+    /// `commit`** this is success (a resumed cut re-reaching this step after a
+    /// crash between the tag and its journal write); a tag that exists pointing
+    /// **elsewhere** is a genuine conflict (`Err`), never silently overwritten.
+    fn create_tag(&self, tag: &str, commit: &str, message: &str) -> io::Result<()>;
+    /// Push the already-created tag `tag` to the remote. Idempotent-friendly: an
+    /// already-present identical remote tag is success; `Err` on a real push
+    /// failure (network, auth, a conflicting remote ref).
     fn push_tag(&self, tag: &str) -> io::Result<()>;
     /// Create the GitHub Release for `tag` (titled `title`), returning its URL
-    /// when the host reports one. `Err` on a creation failure.
+    /// when the host reports one. Idempotent-friendly: an already-existing Release
+    /// is success (returning its URL); `Err` on a real creation failure.
     fn create_github_release(&self, tag: &str, title: &str) -> io::Result<Option<String>>;
 }

@@ -180,8 +180,9 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
     // concrete and can pin an explicit `package` in the contract.
     for t in plan.targets.iter().filter(|t| t.package.is_none()) {
         warnings.push(format!(
-            "target '{}' has no resolved package name (ambiguous or undetected) — it will be \
-             inferred at cut time; pin an explicit 'package' in the contract to seal it",
+            "target '{}' has no resolved package name (ambiguous or undetected) — this plan is \
+             NOT cuttable as-is; `release cut` will refuse it. Pin an explicit 'package' in the \
+             contract and re-plan",
             t.ecosystem.as_str()
         ));
     }
@@ -433,6 +434,11 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
         return Err(plan_stale_error(&args.plan, &current));
     }
 
+    // Preflight the plan *before* creating a run, so an unexecutable plan (an
+    // unresolved package, a duplicate-ecosystem target) is refused up front rather
+    // than leaving an orphaned `run_created` run behind.
+    coordinator::validate_plan(&current).map_err(|e| cut_error_to_cli("(not created)", e))?;
+
     // Journal location (git-common-dir-local, or an explicit override).
     let paths = JournalPaths::from_git(&git, args.journal_dir.as_deref()).map_err(|e| {
         CliError::system(
@@ -466,9 +472,7 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     .map_err(create_journal_error)?;
     let run_id = journal.run_id().to_string();
 
-    let mut sink = CutSink {
-        json: matches!(format, OutputFormat::Json),
-    };
+    let mut sink = CutSink::new(matches!(format, OutputFormat::Json));
     // Emit the run identity first so the stream is self-contained.
     stream_run_created(&mut sink, &journal, &current);
 
@@ -541,8 +545,10 @@ fn cut_error_to_cli(run_id: &str, err: CutError) -> CliError {
         CutError::PhaseFailed { .. } => CliError::system(
             "release_failed",
             format!(
-                "run {run_id}: {err}. Nothing was rolled back; inspect what landed with \
-                 `ossctl release verify {run_id}` and continue with `ossctl release resume {run_id}`"
+                "run {run_id}: {err}. Nothing was rolled back; the journal records exactly what \
+                 landed under this run id. Recovery via `release verify {run_id}` / `release \
+                 resume {run_id}` lands in a later version; until then inspect the journal and \
+                 reconcile the registries manually before retrying"
             ),
         ),
     }
@@ -550,18 +556,44 @@ fn cut_error_to_cli(run_id: &str, err: CutError) -> CliError {
 
 /// A [`ProgressSink`] for `release cut`: streams each journalled fact as a JSONL
 /// line (`--json`, §12) or a human-readable progress line.
+///
+/// Writes through a held `stdout` handle and flushes each line, so a JSONL
+/// consumer (`tail -f`, `jq`) sees events as they happen rather than at buffer
+/// flush. A **broken pipe** (the consumer exited, e.g. piped to `head`) is not an
+/// error to shout about: `stopped` latches and the sink goes quiet for the rest
+/// of the run rather than letting `println!` panic mid-stream.
 struct CutSink {
     json: bool,
+    stopped: bool,
+}
+
+impl CutSink {
+    fn new(json: bool) -> Self {
+        Self {
+            json,
+            stopped: false,
+        }
+    }
 }
 
 impl ProgressSink for CutSink {
     fn event(&mut self, event: &JournalEvent) {
-        if self.json {
-            if let Ok(line) = serde_json::to_string(event) {
-                println!("{line}");
-            }
+        use std::io::Write as _;
+        if self.stopped {
+            return;
+        }
+        // A `JournalEvent` (plain strings/enums/ints) is infallible to serialize;
+        // a failure here is a programmer error, not a runtime condition to hide.
+        let line = if self.json {
+            serde_json::to_string(event).expect("a JournalEvent is always serializable")
         } else {
-            println!("{}", render_event_line(event));
+            render_event_line(event)
+        };
+        let mut out = std::io::stdout().lock();
+        if writeln!(out, "{line}").and_then(|()| out.flush()).is_err() {
+            // Consumer went away (broken pipe) — stop streaming quietly; the
+            // journal remains the durable record.
+            self.stopped = true;
         }
     }
 }
@@ -653,6 +685,30 @@ fn validate_version(version: &str) -> Result<&str, CliError> {
     if version.starts_with('-') {
         return reject("the release version must not start with '-' (it would be read as a flag)");
     }
+    // The version becomes the `v{version}` git tag (coordinator tag phase). Reject
+    // the shapes `git check-ref-format` forbids, so an invalid ref cannot pass
+    // validation, get every package published, and only then fail at tag time
+    // (post-publish, unrecoverable-late). This is shape-level ref safety, not
+    // scheme validation (semver vs calver stays the contract's job).
+    if version.chars().any(|c| "~^:?*[\\".contains(c)) {
+        return reject(
+            "the release version must not contain any of ~ ^ : ? * [ \\ (invalid in a git tag)",
+        );
+    }
+    if version.contains("..") || version.contains("@{") || version.contains("//") {
+        return reject(
+            "the release version must not contain '..', '@{', or '//' (invalid in a git tag)",
+        );
+    }
+    // Git rejects a ref component ending in the literal (case-sensitive) `.lock`;
+    // this is a ref-name rule, not a filesystem extension check.
+    let ends_with_lock = version.as_bytes().ends_with(b".lock");
+    if version.starts_with('.') || version.ends_with('.') || ends_with_lock {
+        return reject("the release version must not start or end with '.' or end with '.lock' (invalid in a git tag)");
+    }
+    if version.starts_with('/') || version.ends_with('/') {
+        return reject("the release version must not start or end with '/' (invalid in a git tag)");
+    }
     Ok(version)
 }
 
@@ -713,5 +769,8 @@ fn render_plan_text(plan: &ReleasePlan, warnings: &[String]) {
     }
     println!();
     println!("To execute this exact plan (refuses if the repo drifts):");
-    println!("  ossctl release cut --plan {}", plan.plan_id);
+    println!(
+        "  ossctl release cut --plan {} --version {}",
+        plan.plan_id, plan.version
+    );
 }
