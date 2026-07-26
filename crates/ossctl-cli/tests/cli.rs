@@ -653,3 +653,67 @@ fn release_verify_warns_about_unpublished_targets() {
         "the unpublished target must be surfaced as a warning: {warnings:?}"
     );
 }
+
+/// A concurrently-appended journal (a torn final line with no trailing newline)
+/// must NOT crash verify: the incomplete tail is dropped and the complete events
+/// reconcile. This is the "safe against a live run" guarantee.
+#[test]
+fn release_verify_tolerates_a_torn_final_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = dir.path().join("RUN03");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    // Two complete newline-terminated events, then a partial third with NO newline
+    // (as if `release cut` were mid-append).
+    let good = concat!(
+        r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN03","plan_id":"plan-torn","targets":["cargo"]}"#,
+        "\n",
+        r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"published:cargo","kind":"target_published","target":"cargo","receipt":{"ecosystem":"rust","package":"tool","version":"1.0.0","registry_url":null,"digest":null}}"#,
+        "\n",
+        r#"{"schema_version":1,"seq":3,"ts":1002,"idempotency_key":"published:npm","kind":"target_publ"#, // truncated, no newline
+    );
+    std::fs::write(run_dir.join("journal.jsonl"), good).unwrap();
+
+    let out = ossctl()
+        .args(["release", "verify", "RUN03", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "a torn tail must not fail verify: {out:?}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Only the complete cargo receipt is reconciled; the torn npm line is dropped.
+    assert_eq!(v["data"]["summary"]["reconciled"], 1);
+    assert_eq!(v["data"]["journal_seq"], 2);
+}
+
+/// A cancelled target is reported with its cancellation reason, not the generic
+/// "not yet published" warning.
+#[test]
+fn release_verify_reports_cancelled_targets_distinctly() {
+    let dir = seed_journal(
+        "RUN04",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN04","plan_id":"plan-c","targets":["cargo","npm"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"published:cargo","kind":"target_published","target":"cargo","receipt":{"ecosystem":"rust","package":"tool","version":"1.0.0","registry_url":null,"digest":null}}"#,
+            r#"{"schema_version":1,"seq":3,"ts":1002,"idempotency_key":"cancelled:npm","kind":"target_cancelled","target":"npm","reason":"OTP timeout"}"#,
+        ],
+    );
+
+    let out = ossctl()
+        .args(["release", "verify", "RUN04", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| w
+            .as_str()
+            .unwrap()
+            .contains("npm' was cancelled: OTP timeout")),
+        "cancelled target must report its reason: {warnings:?}"
+    );
+}

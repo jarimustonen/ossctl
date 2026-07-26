@@ -218,22 +218,39 @@ impl Clock for RealClock {
 /// return an `Err` so the reconcile reports `unknown` until their registry query
 /// lands — matching the skeleton state of the adapter layer.
 ///
+/// **Timeout gap (accepted).** Like [`RealCommandRunner`] and [`RealGitRepo`],
+/// there is no hard wall-clock timeout — `std` has none on `Command::output` and
+/// this crate takes no new dependency. A stalled `npm`/DNS/TLS can hang the
+/// lookup; a bounded-deadline registry client is a documented follow-up.
+///
 /// [`VerifyOutcome::Unknown`]: ossctl_core::protocol::release::VerifyOutcome::Unknown
 pub struct RealRegistryQuery;
 
 impl RealRegistryQuery {
-    /// `npm view <package> versions --json` → the published version list.
+    /// `npm view --json <package> versions` → the published version list.
     ///
     /// Hardened against non-interactive hangs the same way the other real ports
-    /// are (stdin `/dev/null`, registry/update prompts disabled). A missing `npm`,
-    /// a non-zero exit, or unparsable output all surface as `Err`, which the
-    /// reconciler reads as `unknown`.
+    /// are (stdin `/dev/null`, update notifier disabled). A missing `npm`, a
+    /// non-zero exit, or unparsable output all surface as `Err`, which the
+    /// reconciler reads as `unknown` (never a false `missing`).
     fn npm_versions(package: &str) -> io::Result<Vec<String>> {
+        // A package name is a positional; one that begins with '-' would be read
+        // by npm as a flag (flag injection from a tampered/erroneous journal).
+        // A real npm package name never starts with '-', so reject it outright
+        // rather than let it alter where/how the query runs.
+        if package.starts_with('-') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to query npm for a package name that looks like a flag: {package:?}"
+                ),
+            ));
+        }
         let out = Command::new("npm")
-            .args(["view", package, "versions", "--json"])
+            .args(["view", "--json", package, "versions"])
             .stdin(Stdio::null())
-            .env("npm_config_yes", "true")
-            .env("NPM_CONFIG_UPDATE_NOTIFIER", "false")
+            .env("NO_UPDATE_NOTIFIER", "1")
+            .env("NPM_CONFIG_FUND", "false")
             .output()?;
         if !out.status.success() {
             return Err(io::Error::other(format!(
@@ -243,15 +260,21 @@ impl RealRegistryQuery {
         }
         let stdout = String::from_utf8_lossy(&out.stdout);
         // `npm view` returns a JSON array for many versions, or a bare JSON string
-        // for a single one; accept either.
+        // for a single one; accept either, but reject any other shape (an object,
+        // null, or a mixed array) rather than silently dropping entries — a
+        // partial parse that yielded an empty list would misread as `missing`.
         match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
-            Ok(serde_json::Value::Array(items)) => Ok(items
+            Ok(serde_json::Value::Array(items)) => items
                 .into_iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()),
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| io::Error::other("npm returned a non-string version entry"))
+                })
+                .collect(),
             Ok(serde_json::Value::String(v)) => Ok(vec![v]),
             _ => Err(io::Error::other(format!(
-                "could not parse `npm view {package} versions --json` output"
+                "could not parse `npm view --json {package} versions` output"
             ))),
         }
     }
@@ -299,7 +322,16 @@ impl JournalStore for ReadOnlyJournalStore {
 
     fn read_lines(&self, path: &Path) -> io::Result<Vec<String>> {
         match std::fs::read_to_string(path) {
-            Ok(contents) => Ok(contents.lines().map(str::to_string).collect()),
+            Ok(contents) => {
+                // `verify` reads without a lock, so a `release cut` may be
+                // mid-append. Every *committed* line ends in '\n' (the store
+                // appends it), so a trailing fragment with no newline is an
+                // in-progress, not-yet-durable append — return only the bytes up
+                // to the last '\n' so a torn tail is a dropped partial rather than
+                // a false `journal_unreadable` corruption error.
+                let end = contents.rfind('\n').map_or(0, |i| i + 1);
+                Ok(contents[..end].lines().map(str::to_string).collect())
+            }
             // An absent journal is empty, not an error (mirrors the port contract).
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(e) => Err(e),

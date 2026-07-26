@@ -39,6 +39,10 @@ pub struct ReconcileReport {
     /// `abandoned`) — context for the reconcile, which is a point-in-time snapshot
     /// of a possibly-live run.
     pub run_status: RunStatus,
+    /// The high-water event sequence this report was reconciled against — the
+    /// snapshot's provenance. For a live run, two reconciles taken at different
+    /// `journal_seq` may legitimately differ; this pins which log prefix was seen.
+    pub journal_seq: u64,
     /// One entry per published target, in stable target-id order.
     pub targets: Vec<TargetReconcile>,
     /// Rollup counts across [`Self::targets`].
@@ -75,7 +79,11 @@ pub struct ReconcileSummary {
     pub reconciled: usize,
     /// Targets whose receipt matches registry state.
     pub matches: usize,
-    /// Targets present remotely but with a differing digest.
+    /// Targets present remotely but with a differing digest. Reachable only when
+    /// the registry exposes a remote digest to compare against the receipt's; the
+    /// current [`RegistryQuery`](crate::ports::RegistryQuery) port lists versions
+    /// only, so in production a digest-level conflict is not yet observable (a
+    /// present version resolves to `matches`, never a false `conflicts`).
     pub conflicts: usize,
     /// Targets the registry does not report as published.
     pub missing: usize,

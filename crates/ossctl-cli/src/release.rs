@@ -281,7 +281,15 @@ fn reconcile_warnings(
         );
     }
     for target in &state.targets {
-        if !state.published.contains_key(target) {
+        if state.published.contains_key(target) {
+            continue;
+        }
+        // A cancelled target has a known reason on the journal — report that,
+        // rather than the generic "not yet published" that would misread an
+        // intentional skip as an interruption.
+        if let Some(reason) = state.cancelled.get(target) {
+            warnings.push(format!("target '{target}' was cancelled: {reason}"));
+        } else {
             warnings.push(format!(
                 "target '{target}' was declared but has no publish receipt in this run \
                  (not yet published, or the run was interrupted); it is not reconciled"
@@ -300,7 +308,11 @@ fn reconcile_warnings(
 fn render_reconcile_text(report: &ReconcileReport, warnings: &[String]) {
     println!("run_id:     {}", report.run_id);
     println!("plan_id:    {}", report.plan_id);
-    println!("status:     {}", report.run_status.as_str());
+    println!(
+        "status:     {} (journal seq {})",
+        report.run_status.as_str(),
+        report.journal_seq
+    );
     let s = &report.summary;
     println!(
         "reconciled: {} ({} matches, {} conflicts, {} missing, {} unknown)",

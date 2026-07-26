@@ -17,8 +17,13 @@
 //!
 //! - `rust`/`node`/`python`/`go` route to a registry-observing adapter; a present
 //!   version ⇒ [`VerifyOutcome::Matches`], an absent one ⇒
-//!   [`VerifyOutcome::Missing`], a digest disagreement ⇒
-//!   [`VerifyOutcome::Conflicts`].
+//!   [`VerifyOutcome::Missing`]. A digest disagreement ⇒ [`VerifyOutcome::Conflicts`]
+//!   *only* where the registry exposes a remote digest to compare; the current
+//!   [`RegistryQuery`](crate::ports::RegistryQuery) port lists versions only, so a
+//!   present version resolves to `Matches` today and `Conflicts` becomes reachable
+//!   when digest observation is wired. Which ecosystems the *CLI* can actually
+//!   observe is a property of the injected port — the production
+//!   `RealRegistryQuery` wires `node` first, degrading the rest to `Unknown`.
 //! - `binary` (GitHub Releases, and homebrew taps — which the contract models
 //!   under the `binary` ecosystem) routes to an adapter that is **not** observable
 //!   through [`RegistryQuery`], so it honestly reports [`VerifyOutcome::Unknown`].
@@ -72,6 +77,7 @@ pub fn reconcile(state: &RunState, ctx: &EffectCtx<'_>) -> ReconcileReport {
         run_id: state.run_id.clone(),
         plan_id: state.plan_id.clone(),
         run_status: state.status,
+        journal_seq: state.applied_seq,
         targets,
         summary,
     }

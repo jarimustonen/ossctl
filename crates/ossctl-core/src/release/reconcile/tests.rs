@@ -108,6 +108,7 @@ fn state_with(published: &[(&str, PublishReceipt)]) -> RunState {
     s.run_id = "RUN01".into();
     s.plan_id = "plan-abc".into();
     s.status = RunStatus::Completed;
+    s.applied_seq = 7;
     s.targets = published.iter().map(|(id, _)| (*id).to_string()).collect();
     for (id, r) in published {
         s.published.insert((*id).to_string(), r.clone());
@@ -333,6 +334,10 @@ fn report_serializes_under_the_envelope_shape() {
     let v = serde_json::to_value(&report).unwrap();
     assert_eq!(v["run_id"], "RUN01");
     assert_eq!(v["run_status"], "completed");
+    assert_eq!(
+        v["journal_seq"], 7,
+        "the report pins the snapshot's log prefix"
+    );
     assert_eq!(v["targets"][0]["outcome"], "matches");
     // `detail` is omitted for a clean match (skip_serializing_if).
     assert!(v["targets"][0].get("detail").is_none());
