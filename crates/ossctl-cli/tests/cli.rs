@@ -89,7 +89,7 @@ fn doctor_json_fix_leaves_stderr_clean() {
 /// stderr and exits 2 — not a panic.
 #[test]
 fn stub_subcommand_returns_not_implemented() {
-    let out = ossctl().arg("audit").output().unwrap();
+    let out = ossctl().args(["release", "list"]).output().unwrap();
     assert_eq!(out.status.code(), Some(2), "not_implemented → exit 2");
 
     let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
@@ -438,6 +438,95 @@ fn facts_is_deterministic() {
 fn facts_missing_repo_root_is_user_error() {
     let out = ossctl()
         .args(["facts", "--repo-root", "/no/such/dir/anywhere"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "invalid_repo_root");
+}
+
+// ── audit ────────────────────────────────────────────────────────────────────
+
+/// List the immediate entry names of a directory, sorted — for the read-only
+/// assertion (the audit must not add, remove, or change any repo file).
+fn dir_snapshot(path: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(path)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// `audit --json` over a repo that has a normalizing contract but none of the
+/// gated-core files emits the canonical gap-report envelope, reports the core
+/// incomplete, and — in a non-git temp dir — degrades the GitHub community
+/// lookup to `unknown` (never `false`). It writes nothing to the repo.
+#[test]
+fn audit_json_reports_core_gaps_and_is_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    // A known-clean positive contract; the temp dir has no README/LICENSE/CI.
+    std::fs::copy(
+        fixture("python-lib").join("OSS-RELEASE.md"),
+        dir.path().join("OSS-RELEASE.md"),
+    )
+    .unwrap();
+
+    let before = dir_snapshot(dir.path());
+    let out = ossctl()
+        .args(["audit", "--json", "--repo-root"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    // Gaps are data, not an error: a repo with gaps still exits 0.
+    assert!(out.status.success(), "audit --json must exit 0");
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    assert_eq!(v["schema_version"], 1);
+    assert_eq!(v["warnings"], serde_json::json!([]));
+
+    let d = &v["data"];
+    assert!(d["maturity"].is_string(), "maturity present: {d}");
+    assert_eq!(d["core_complete"], "incomplete", "no README/LICENSE/CI");
+    let gaps = d["gaps"].as_array().expect("gaps is an array");
+    let gap_ids: Vec<&str> = gaps.iter().map(|g| g["id"].as_str().unwrap()).collect();
+    assert!(gap_ids.contains(&"readme"), "readme gap: {gap_ids:?}");
+    assert!(gap_ids.contains(&"license"), "license gap: {gap_ids:?}");
+
+    // A fresh temp dir is outside any GitHub remote, so the community lookup
+    // could not run — every field is `unknown`, never `false`.
+    let cp = &d["community_profile"];
+    assert_eq!(cp["checked"], false, "no GitHub remote → unchecked");
+    assert_eq!(cp["readme"], "unknown", "outage ⇒ unknown, never absent");
+
+    // Read-only: the audit added/removed nothing.
+    assert_eq!(
+        dir_snapshot(dir.path()),
+        before,
+        "audit must not write the repo"
+    );
+}
+
+/// `audit` over a repo without an `OSS-RELEASE.md` is a system-level (exit 2)
+/// error — the audit cannot score without the contract it reads.
+#[test]
+fn audit_missing_contract_is_system_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = ossctl()
+        .args(["audit", "--repo-root"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "missing contract → exit 2");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "contract_not_found");
+}
+
+/// A non-existent `--repo-root` is a caller-fixable (exit 1) error.
+#[test]
+fn audit_missing_repo_root_is_user_error() {
+    let out = ossctl()
+        .args(["audit", "--repo-root", "/no/such/dir/anywhere"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));

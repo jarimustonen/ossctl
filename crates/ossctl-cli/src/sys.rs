@@ -11,7 +11,34 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use ossctl_core::ports::{Fs, GitRepo};
+use ossctl_core::ports::{CommandOutput, CommandRunner, Fs, GitRepo};
+
+/// The real subprocess runner, backing the [`CommandRunner`] port with
+/// `std::process`. The audit's read-only GitHub community-standards lookup
+/// (`git remote get-url origin`, then `gh api …/community/profile`) runs through
+/// this. Hardened against non-interactive hangs the same way [`RealGitRepo`] is:
+/// stdin is `/dev/null` and terminal/askpass prompts are disabled, so a command
+/// that would block on a credential prompt fails fast instead. A command that
+/// cannot spawn (`gh` not installed) surfaces as an `Err`, which the audit reads
+/// as "could not check" ⇒ `unknown`, never `false`.
+pub struct RealCommandRunner;
+
+impl CommandRunner for RealCommandRunner {
+    fn run(&self, program: &str, args: &[&str], cwd: &Path) -> io::Result<CommandOutput> {
+        let out = Command::new(program)
+            .args(args)
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "true")
+            .output()?;
+        Ok(CommandOutput {
+            status: out.status.code(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+}
 
 /// The real filesystem, backing the [`Fs`] port with `std::fs`.
 pub struct RealFs;

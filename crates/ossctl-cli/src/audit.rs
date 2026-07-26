@@ -1,22 +1,146 @@
 //! `ossctl audit` handler.
 //!
-//! Stub at founding: the scorer lives in `ossctl-core::audit` and lands in the
-//! `audit-command` unit.
+//! Runs the read-only readiness scorer (`ossctl_core::audit`) over the repo and
+//! emits the schema-versioned gap-report. The scorer is a pure function of
+//! `(repo tree, contract, facts)`: this handler obtains the contract by running
+//! the same normalizer behind `contract show` and the facts by running the same
+//! detector behind `facts`, then hands both to the engine — so the audit,
+//! `/oss-init`, and every other member agree on maturity and the gated core
+//! (ADR-0001 §3). The GitHub community-standards lookup goes through the real
+//! [`RealCommandRunner`] port; a lookup failure degrades to `unknown`, never
+//! `false`. Never writes the repo.
+
+use std::path::PathBuf;
 
 use clap::Args;
 
+use ossctl_core::contract::{self, LoadError, Normalized};
+use ossctl_core::protocol::audit::AuditReport;
+
 use crate::error::CliError;
 use crate::output::OutputFormat;
+use crate::sys::{RealCommandRunner, RealFs, RealGitRepo};
 
 /// Arguments for `ossctl audit`.
 #[derive(Args, Debug)]
 pub struct AuditArgs {
     /// Repository root to score (default: current directory).
     #[arg(long, value_name = "PATH")]
-    pub repo_root: Option<std::path::PathBuf>,
+    pub repo_root: Option<PathBuf>,
 }
 
-/// `ossctl audit` — score release readiness into a gap report.
-pub fn run(_args: &AuditArgs, _format: OutputFormat) -> Result<(), CliError> {
-    Err(CliError::not_implemented("audit"))
+/// `ossctl audit` — score release readiness into a gap report (read-only).
+pub fn run(args: &AuditArgs, format: OutputFormat) -> Result<(), CliError> {
+    let repo_root = resolve_repo_root(args.repo_root.as_ref())?;
+    if !repo_root.is_dir() {
+        return Err(CliError::user(
+            "invalid_repo_root",
+            format!("repo_root '{}' is not a directory", repo_root.display()),
+        )
+        .with_invalid_value(repo_root.display().to_string()));
+    }
+    // Canonicalize so the emitted `repo_root` is absolute + symlink-resolved,
+    // matching the facts detector's contract.
+    let root = std::fs::canonicalize(&repo_root).map_err(|e| {
+        CliError::system(
+            "io_error",
+            format!(
+                "cannot canonicalize repo_root '{}': {e}",
+                repo_root.display()
+            ),
+        )
+    })?;
+
+    // The audit reads an already-normalized contract; a missing or invalid
+    // OSS-RELEASE.md is the same failure `contract show` reports (the
+    // /oss-readiness skill gates on `contract show` before calling audit).
+    let normalized = contract::normalize(&root, &RealFs).map_err(load_error_to_cli)?;
+    if !normalized.is_valid() {
+        return Err(invalid_contract_error(&normalized));
+    }
+
+    let git = RealGitRepo::new(&root);
+    let facts = ossctl_core::facts::gather(&root, &RealFs, &git);
+
+    let report = ossctl_core::audit::audit(
+        &root,
+        &normalized.contract,
+        &facts,
+        &RealFs,
+        &RealCommandRunner,
+    );
+
+    match format {
+        OutputFormat::Json => crate::output::emit_json(&report, &[])?,
+        OutputFormat::Text => render_audit_text(&report),
+    }
+    Ok(())
+}
+
+fn resolve_repo_root(flag: Option<&PathBuf>) -> Result<PathBuf, CliError> {
+    match flag {
+        Some(p) => Ok(p.clone()),
+        None => std::env::current_dir()
+            .map_err(|e| CliError::system("io_error", format!("cannot resolve cwd: {e}"))),
+    }
+}
+
+/// A failed contract load is a system-level (exit-2) error — the audit could not
+/// obtain the config it scores against.
+fn load_error_to_cli(e: LoadError) -> CliError {
+    let code = match e {
+        LoadError::NotFound(_) => "contract_not_found",
+        LoadError::Io(..) => "io_error",
+        LoadError::Utf8(_) => "invalid_encoding",
+    };
+    CliError::system(code, e.to_string())
+}
+
+/// An invalid contract is a caller-fixable (exit-1) error carrying every problem
+/// — the audit cannot score against a config that would not normalize.
+fn invalid_contract_error(normalized: &Normalized) -> CliError {
+    let problems = &normalized.problems.errors;
+    let message = format!(
+        "{} would not normalize: {} problem(s) — fix the contract before auditing",
+        contract::CONTRACT_FILENAME,
+        problems.len()
+    );
+    CliError::user("invalid_contract", message).with_problems(problems.clone())
+}
+
+fn render_audit_text(report: &AuditReport) {
+    use ossctl_core::protocol::audit::{CoreStatus, Presence};
+
+    let core = match report.core_complete {
+        CoreStatus::Complete => "complete",
+        CoreStatus::Incomplete => "INCOMPLETE",
+        CoreStatus::Unknown => "unknown",
+    };
+    println!("repo_root:      {}", report.repo_root);
+    println!("maturity:       {}", report.maturity.as_str());
+    println!("gated core:     {core}");
+    println!("gaps:           {}", report.gaps.len());
+    for g in &report.gaps {
+        let status = match g.status {
+            Presence::Present => "present",
+            Presence::Absent => "absent",
+            Presence::Unknown => "unknown",
+        };
+        println!(
+            "  [{:>11}] {:<24} ({}, {status}) — {}",
+            format!("{:?}", g.severity).to_lowercase(),
+            g.id,
+            g.member,
+            g.detail
+        );
+    }
+    let cp = &report.community_profile;
+    if cp.checked {
+        println!("community:      GitHub community-profile checked");
+    } else {
+        println!(
+            "community:      not checked ({})",
+            cp.unavailable_reason.as_deref().unwrap_or("unknown")
+        );
+    }
 }

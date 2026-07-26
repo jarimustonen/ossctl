@@ -11,6 +11,7 @@
 //! with their owning units and each becomes a hot file under the migration rule
 //! (bump `SCHEMA_VERSION` on a breaking change, never silently).
 
+pub mod audit;
 pub mod contract;
 pub mod facts;
 
