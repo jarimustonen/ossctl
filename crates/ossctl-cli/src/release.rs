@@ -111,12 +111,14 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
     }
 
     let git = RealGitRepo::new(&root);
-    // A release must be sealed against a concrete commit; an unborn repo cannot
-    // be planned (this is caller-fixable — commit first).
-    let head_sha = git.head_commit().map_err(|_| {
+    // A release must be sealed against a concrete commit. An unborn repo is the
+    // caller-fixable case (commit first); any other git failure (git missing,
+    // corrupt repo, permissions) is preserved in the message rather than
+    // mislabelled "no commits".
+    let head_sha = git.head_commit().map_err(|e| {
         CliError::user(
             "no_head",
-            "cannot plan a release: the repository has no commits (HEAD does not resolve)",
+            format!("cannot plan a release: could not resolve HEAD ({e}) — the repository may have no commits"),
         )
     })?;
 
@@ -124,14 +126,25 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
 
     let plan = ossctl_core::release::plan::build(&normalized.contract, &facts, &head_sha, version);
 
+    let mut warnings = normalized.problems.warnings.clone();
     // Surface a non-blocking warning when the contract configures nothing to
     // publish — the plan would tag only.
-    let mut warnings = normalized.problems.warnings.clone();
     if plan.targets.is_empty() {
         warnings.push(
             "the contract declares no publish targets — this plan would create the git tag only"
                 .to_string(),
         );
+    }
+    // A target whose package is still null after facts-resolution is ambiguous
+    // (a monorepo with several crates of one ecosystem): the executor will infer
+    // it at cut time. Name it so the approver knows the plan is not fully
+    // concrete and can pin an explicit `package` in the contract.
+    for t in plan.targets.iter().filter(|t| t.package.is_none()) {
+        warnings.push(format!(
+            "target '{}' has no resolved package name (ambiguous or undetected) — it will be \
+             inferred at cut time; pin an explicit 'package' in the contract to seal it",
+            t.ecosystem.as_str()
+        ));
     }
 
     match format {
@@ -141,24 +154,27 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Validate the chosen version: non-empty and free of whitespace. Scheme
+/// Validate the chosen version as an opaque, already-chosen identifier. Scheme
 /// specificity (semver vs a calver pattern) belongs to the contract/skill, so
-/// the plan treats it as an opaque, already-chosen identifier and only rejects
-/// the shapes that could never be a version.
+/// this only rejects the shapes that could never be a safe version and would be
+/// footguns downstream (empty, whitespace, control characters, or a leading `-`
+/// that a later git/registry command would read as a flag).
 fn validate_version(version: &str) -> Result<&str, CliError> {
-    let trimmed = version.trim();
-    if trimmed.is_empty() {
-        return Err(
-            CliError::user("invalid_version", "the release version must not be empty")
-                .with_invalid_value(version.to_string()),
-        );
+    let reject = |msg: &str| {
+        Err(CliError::user("invalid_version", msg.to_string())
+            .with_invalid_value(version.to_string()))
+    };
+    if version.is_empty() {
+        return reject("the release version must not be empty");
     }
     if version.chars().any(char::is_whitespace) {
-        return Err(CliError::user(
-            "invalid_version",
-            "the release version must not contain whitespace",
-        )
-        .with_invalid_value(version.to_string()));
+        return reject("the release version must not contain whitespace");
+    }
+    if version.chars().any(char::is_control) {
+        return reject("the release version must not contain control characters");
+    }
+    if version.starts_with('-') {
+        return reject("the release version must not start with '-' (it would be read as a flag)");
     }
     Ok(version)
 }

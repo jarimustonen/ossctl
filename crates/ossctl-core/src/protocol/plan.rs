@@ -32,10 +32,11 @@ use crate::contract::schema::{Adapter, Ecosystem, Registry};
 /// A sealed, content-addressed release plan — the artifact `release plan`
 /// emits and a human approves.
 ///
-/// Every field except [`Self::plan_id`] is an *input* to the content address;
-/// `plan_id` is the SHA-256 digest **over** those inputs (plus the full
-/// normalized contract), so it is derived, never authored, and is deliberately
-/// excluded from the hashed pre-image (a hash cannot cover itself).
+/// Every field except [`Self::plan_id`] is an *input* to the content address
+/// (`plan_id` is the SHA-256 digest **over** those inputs — plus the full
+/// normalized contract and a domain/seal-format tag — so it is derived, never
+/// authored, and is deliberately excluded from the hashed pre-image: a hash
+/// cannot cover itself). See [`crate::release::plan`] for the exact pre-image.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReleasePlan {
     /// The content-addressed plan id: a lowercase 64-character SHA-256 hex
@@ -115,9 +116,14 @@ impl PlanPhase {
     }
 
     /// The invariant phase order a cut drives, dry-run-all → tag.
+    pub const SEQUENCE: [PlanPhase; 4] =
+        [Self::DryRunAll, Self::BuildAll, Self::PublishAll, Self::Tag];
+
+    /// The invariant phase order a cut drives, dry-run-all → tag (borrowed view
+    /// of [`Self::SEQUENCE`]; no allocation).
     #[must_use]
-    pub fn sequence() -> Vec<PlanPhase> {
-        vec![Self::DryRunAll, Self::BuildAll, Self::PublishAll, Self::Tag]
+    pub fn sequence() -> &'static [PlanPhase] {
+        &Self::SEQUENCE
     }
 }
 

@@ -11,21 +11,46 @@
 //! detected repo facts, then content-addresses it. The `plan_id` is the
 //! lowercase SHA-256 hex digest of a canonical JSON pre-image (`serde_json`,
 //! whose struct-field and `BTreeMap` ordering is deterministic) covering
-//! **exactly**:
+//! **exactly**, in this fixed order:
 //!
-//! 1. the contract-document `schema_version` (ADR-0002 lists it explicitly);
-//! 2. the **full normalized contract JSON** (`contract show`'s canonical output
-//!    — every defaulted field, so any config change is drift);
-//! 3. the git `HEAD` sha the plan was sealed against;
-//! 4. the chosen release version (the human's bump — design §3.4);
-//! 5. the **resolved concrete target set** — each target's ecosystem, resolved
+//! 1. a domain separator + [`SEAL_VERSION`] — so a `plan_id` can never collide
+//!    with any other ossctl digest and the canonicalization format can be
+//!    evolved by a deliberate `SEAL_VERSION` bump instead of silently;
+//! 2. the contract-document `schema_version` (ADR-0002 lists it explicitly);
+//! 3. the **full normalized contract JSON** (`contract show`'s canonical output
+//!    — every defaulted field, so any config change is drift; hashing the whole
+//!    contract is deliberately *fail-closed*: a cosmetic change re-requires
+//!    approval rather than risk missing a substantive one);
+//! 4. the git `HEAD` sha the plan was sealed against;
+//! 5. the chosen release version (the human's bump — design §3.4);
+//! 6. the **resolved concrete target set** — each target's ecosystem, resolved
 //!    package name, registry, and adapter *identity*. Resolution overlays
 //!    facts-derived package names onto the contract's (which may be `null`), so
 //!    a manifest rename is detectable drift even though the contract text is
-//!    unchanged.
+//!    unchanged;
+//! 7. the phase sequence (constant per ADR-0002 §2, so it never *causes* drift
+//!    within a binary, but binding it authenticates the execution shape the
+//!    approver saw and makes a future phase-model change a `SEAL_VERSION` event).
 //!
-//! The invariant phase sequence is **not** hashed: it is constant across every
-//! plan (ADR-0002 §2), so it cannot drift and adds nothing to the address.
+//! ## Coordinator seam (what the sibling consumes)
+//!
+//! The coordinator refuses a `release cut --plan <id>` on drift by re-deriving
+//! current state and calling [`verify`]. It needs to persist only two plain
+//! fields from an approved plan — `plan_id` and `version` — into its journal;
+//! the approved [`ReleasePlan`] is otherwise reconstructed via [`build`] from
+//! the journalled sealed inputs. The plan DTOs are therefore `Serialize`-only,
+//! matching the repo-wide convention that the wire enums (`Ecosystem`/`Registry`
+//! /`Adapter`) do not derive `Deserialize` (they collect-all-errors on parse).
+//! The trust boundary is the *local journal*: an approved plan is one ossctl
+//! itself wrote, not untrusted caller input.
+//!
+//! ## Out of this worker's scope (handed to the coordinator)
+//!
+//! - **Working-tree cleanliness.** The seal binds `HEAD`, not uncommitted
+//!   changes. Enforcing a clean tree / executing from a clean checkout of the
+//!   sealed commit is an *execution* guard the coordinator owns (it needs a new
+//!   read-only `GitRepo` status port). Until then a dirty tree can publish code
+//!   that differs from the sealed commit — an accepted, documented gap.
 //!
 //! **Adapter tool *versions* (accepted gap).** ADR-0002 §3 names "resolved
 //! adapter identities+versions". The adapter registry (a sibling unit) is not
@@ -65,7 +90,7 @@ pub fn build(contract: &Contract, facts: &Facts, head_sha: &str, version: &str) 
         head_sha: head_sha.to_string(),
         version: version.to_string(),
         targets,
-        phases: PlanPhase::sequence(),
+        phases: PlanPhase::SEQUENCE.to_vec(),
     }
 }
 
@@ -96,7 +121,13 @@ pub fn compute_plan_id(
 /// fixed to the approved plan's (a cut may not change the sealed version — that
 /// would require a new plan). `Ok(())` means the approval is still valid; a
 /// [`PlanDrift`] carries the mismatched id pair and human-readable reasons for
-/// the `plan_stale` error envelope.
+/// the `plan_stale` error envelope. The `plan_id` mismatch is authoritative;
+/// the reasons are **best-effort and may be non-exhaustive** — the approved
+/// plan intentionally does not retain the old normalized contract (trust the
+/// journal, not a re-supplied contract), so an exact field-level contract diff
+/// is not possible here. When more than one input drifts, the reasons name
+/// every one they can pinpoint (`HEAD`, schema version, target set) and fall
+/// back to a generic contract-changed note only when none of those explain it.
 ///
 /// # Errors
 /// Returns [`PlanDrift`] when the recomputed `plan_id` differs from
@@ -185,44 +216,81 @@ fn resolve_targets(contract: &Contract, facts: &Facts) -> Vec<PlanTarget> {
         .collect()
 }
 
-/// The first detected package name for `ecosystem`, or `None` when no manifest
-/// named one (a virtual workspace, or a binary-only repo).
+/// The detected package name for `ecosystem`, resolved **only when
+/// unambiguous** — exactly one named manifest for that ecosystem.
+///
+/// `None` when no manifest named one (a virtual workspace, a binary-only repo)
+/// **or** when several do (a monorepo with multiple crates of one ecosystem):
+/// with no per-target manifest key in the contract, picking the first would
+/// silently mis-assign the same package to every `null` target, so we leave it
+/// `null` for cut-time inference instead. A monorepo should declare explicit
+/// per-target `package`s in the contract; the CLI warns when this fires.
 fn resolve_package(facts: &Facts, ecosystem: crate::contract::schema::Ecosystem) -> Option<String> {
-    facts
+    let mut named = facts
         .packages
         .iter()
-        .find(|p| p.ecosystem == ecosystem && p.package.is_some())
-        .and_then(|p| p.package.clone())
+        .filter(|p| p.ecosystem == ecosystem && p.package.is_some());
+    let first = named.next()?;
+    // More than one named candidate ⇒ ambiguous ⇒ do not guess.
+    if named.next().is_some() {
+        return None;
+    }
+    first.package.clone()
 }
+
+/// Domain separator baked into every pre-image so a `plan_id` can never be
+/// confused with any other SHA-256 an ossctl subsystem might compute over
+/// similar bytes. Ends in the seal-format version for readability; the numeric
+/// [`SEAL_VERSION`] is also hashed as its own field.
+const SEAL_DOMAIN: &str = "ossctl.release-plan";
+
+/// Version of the *hashing pre-image format* — the field set, their order, and
+/// the canonicalization. Independent of the contract-document or wire-envelope
+/// versions. Bump this (never silently) whenever the pre-image shape changes
+/// (e.g. once resolved adapter versions are folded in), so old and new plan ids
+/// are intentionally disjoint rather than accidentally colliding.
+const SEAL_VERSION: u32 = 1;
 
 /// The canonical hashed pre-image (see the module docs for the exact contents).
 /// A dedicated struct rather than an ad-hoc byte concatenation so the field set
 /// is explicit and serde's deterministic struct-field ordering fixes the byte
 /// layout.
+///
+/// **DO NOT REORDER these fields** — field order is part of the content address,
+/// so a reorder silently changes every `plan_id`. Evolve the format via
+/// [`SEAL_VERSION`] instead.
 #[derive(Serialize)]
 struct SealInput<'a> {
+    domain: &'static str,
+    seal_version: u32,
     contract_schema_version: u32,
     contract: &'a Contract,
     head_sha: &'a str,
     version: &'a str,
     targets: &'a [PlanTarget],
+    phases: &'a [PlanPhase],
 }
 
 /// Serialize the pre-image to canonical JSON and return its SHA-256 hex digest.
 fn seal(contract: &Contract, targets: &[PlanTarget], head_sha: &str, version: &str) -> String {
     let input = SealInput {
+        domain: SEAL_DOMAIN,
+        seal_version: SEAL_VERSION,
         contract_schema_version: contract.schema_version,
         contract,
         head_sha,
         version,
         targets,
+        phases: &PlanPhase::SEQUENCE,
     };
-    // `to_vec` on a struct with only structs/Vecs/BTreeMaps (contract's
+    // `to_vec` on a struct of only structs/Vecs/BTreeMaps (contract's
     // `extra_fields` is a `serde_json::Map` = `BTreeMap` without the
     // `preserve_order` feature) is deterministic — no wall-clock, no HashMap,
-    // no float. Serialization of these types cannot fail, so the fallback is
-    // unreachable; hashing an empty pre-image would still be deterministic.
-    let bytes = serde_json::to_vec(&input).unwrap_or_default();
+    // no float. It is also infallible for these concrete types; `expect` (never
+    // `unwrap_or_default`, which would fail *open* by hashing an empty pre-image
+    // and collide every failing plan on the empty-string digest).
+    let bytes =
+        serde_json::to_vec(&input).expect("release-plan pre-image is infallible to serialize");
     sha256::hex(&bytes)
 }
 
@@ -277,7 +345,12 @@ mod sha256 {
         // Pad: 0x80, then zeros to a 56-mod-64 boundary, then the 64-bit
         // big-endian bit length.
         let mut msg = data.to_vec();
-        let bit_len = (data.len() as u64).wrapping_mul(8);
+        // FIPS 180-4 caps the message at 2^64 - 1 bits; a checked multiply turns
+        // the (practically unreachable) overflow into a loud panic rather than a
+        // silently wrong digest.
+        let bit_len = (data.len() as u64)
+            .checked_mul(8)
+            .expect("SHA-256 input exceeds 2^64 bits");
         msg.push(0x80);
         while msg.len() % 64 != 56 {
             msg.push(0);

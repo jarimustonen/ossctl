@@ -32,11 +32,40 @@ fn sha256_abc() {
 
 #[test]
 fn sha256_multiblock() {
-    // A > 64-byte input to exercise the multi-chunk path and the length pad.
+    // The 56-byte NIST vector: after the 0x80 + length pad it spans two 64-byte
+    // blocks, exercising the multi-chunk path and the length pad.
     assert_eq!(
         sha256::hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
         "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
     );
+}
+
+#[test]
+fn sha256_one_million_a() {
+    // The canonical NIST long-message vector: 1,000,000 'a' bytes (15,625
+    // blocks) — the strongest correctness check on the round function, message
+    // schedule, and length padding across many blocks.
+    let data = vec![b'a'; 1_000_000];
+    assert_eq!(
+        sha256::hex(&data),
+        "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+    );
+}
+
+#[test]
+fn sha256_pad_boundaries_are_deterministic_and_distinct() {
+    // Lengths that bracket the 55/56 and 63/64/65 pad boundaries — where a
+    // padding bug would cluster. We can't hardcode every NIST digest here, but
+    // each length must hash deterministically and to a distinct value.
+    let mut seen = std::collections::HashSet::new();
+    for len in [54usize, 55, 56, 57, 63, 64, 65] {
+        let data = vec![b'x'; len];
+        let a = sha256::hex(&data);
+        let b = sha256::hex(&data);
+        assert_eq!(a, b, "len {len} must be deterministic");
+        assert_eq!(a.len(), 64);
+        assert!(seen.insert(a), "len {len} collided with another length");
+    }
 }
 
 // ── Test fixtures ──────────────────────────────────────────────────────────
@@ -186,6 +215,30 @@ fn changed_adapter_changes_the_id() {
     assert_ne!(base, compute_plan_id(&c2, &rust_facts(), HEAD, "1.2.0"));
 }
 
+#[test]
+fn changed_registry_changes_the_id() {
+    let c = rust_contract();
+    let base = compute_plan_id(&c, &rust_facts(), HEAD, "1.2.0");
+    let mut c2 = c.clone();
+    c2.targets[0].registry = Registry::TestPypi;
+    assert_ne!(base, compute_plan_id(&c2, &rust_facts(), HEAD, "1.2.0"));
+}
+
+/// Golden vector: pins the exact `plan_id` bytes for a fixed input so an
+/// accidental change to the pre-image (field reorder, a serde/`serde_json`
+/// serialization change, an unbumped `SEAL_VERSION`) is caught — the
+/// self-consistency tests above cannot detect that, since they call the same
+/// implementation twice. If this fails after a *deliberate* pre-image change,
+/// bump `SEAL_VERSION` and update the expected digest in the same commit.
+#[test]
+fn plan_id_golden_vector() {
+    let plan = build(&rust_contract(), &rust_facts(), HEAD, "1.2.0");
+    assert_eq!(
+        plan.plan_id,
+        "fde1c5c828f8e09a2ad805db83461b3a0124daf064f9cf14ca84435de8e59057"
+    );
+}
+
 // ── verify: Ok when unchanged, PlanDrift (with reasons) when moved ─────────
 
 #[test]
@@ -261,6 +314,74 @@ fn build_leaves_package_null_when_facts_have_none() {
     f.packages.clear();
     let plan = build(&c, &f, HEAD, "1.2.0");
     assert_eq!(plan.targets[0].package, None);
+}
+
+#[test]
+fn build_leaves_package_null_when_ecosystem_is_ambiguous() {
+    // A monorepo: two named rust crates but a single null target. Resolution
+    // must NOT silently pick the first — it leaves the package null (cut-time
+    // inference) rather than mis-assign.
+    let c = rust_contract();
+    let mut f = rust_facts();
+    f.packages = vec![
+        Package {
+            ecosystem: Ecosystem::Rust,
+            manifest: "crates/a/Cargo.toml".to_string(),
+            package: Some("a".to_string()),
+            version: Some("0.1.0".to_string()),
+        },
+        Package {
+            ecosystem: Ecosystem::Rust,
+            manifest: "crates/b/Cargo.toml".to_string(),
+            package: Some("b".to_string()),
+            version: Some("0.1.0".to_string()),
+        },
+    ];
+    let plan = build(&c, &f, HEAD, "1.2.0");
+    assert_eq!(plan.targets[0].package, None);
+}
+
+#[test]
+fn ambiguous_resolution_does_not_depend_on_facts_order() {
+    // The ambiguous case must be order-independent: swapping the two candidate
+    // packages must not change the (null) resolution or the plan_id.
+    let c = rust_contract();
+    let mut f1 = rust_facts();
+    f1.packages = vec![
+        Package {
+            ecosystem: Ecosystem::Rust,
+            manifest: "crates/a/Cargo.toml".to_string(),
+            package: Some("a".to_string()),
+            version: None,
+        },
+        Package {
+            ecosystem: Ecosystem::Rust,
+            manifest: "crates/b/Cargo.toml".to_string(),
+            package: Some("b".to_string()),
+            version: None,
+        },
+    ];
+    let mut f2 = f1.clone();
+    f2.packages.reverse();
+    assert_eq!(
+        compute_plan_id(&c, &f1, HEAD, "1.2.0"),
+        compute_plan_id(&c, &f2, HEAD, "1.2.0")
+    );
+}
+
+#[test]
+fn build_with_no_targets_yields_empty_targets_and_stable_id() {
+    let mut c = rust_contract();
+    c.ecosystems.clear();
+    c.targets.clear();
+    let plan = build(&c, &rust_facts(), HEAD, "1.2.0");
+    assert!(plan.targets.is_empty());
+    // Still a well-formed, stable content address (a tag-only plan).
+    assert_eq!(plan.plan_id.len(), 64);
+    assert_eq!(
+        plan.plan_id,
+        compute_plan_id(&c, &rust_facts(), HEAD, "1.2.0")
+    );
 }
 
 #[test]
