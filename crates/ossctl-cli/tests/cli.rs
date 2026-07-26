@@ -559,7 +559,7 @@ fn release_verify_reconciles_a_journaled_run() {
     let dir = seed_journal(
         "RUN01",
         &[
-            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN01","plan_id":"plan-abc","targets":["cargo","gh"]}"#,
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN01","plan_id":"plan-abc","version":"1.0.0","targets":["cargo","gh"]}"#,
             r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"published:cargo","kind":"target_published","target":"cargo","receipt":{"ecosystem":"rust","package":"tool","version":"1.0.0","registry_url":null,"digest":null}}"#,
             r#"{"schema_version":1,"seq":3,"ts":1002,"idempotency_key":"published:gh","kind":"target_published","target":"gh","receipt":{"ecosystem":"binary","package":"tool","version":"1.0.0","registry_url":null,"digest":null}}"#,
         ],
@@ -631,7 +631,7 @@ fn release_verify_warns_about_unpublished_targets() {
     let dir = seed_journal(
         "RUN02",
         &[
-            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN02","plan_id":"plan-xyz","targets":["cargo","npm"]}"#,
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN02","plan_id":"plan-xyz","version":"1.0.0","targets":["cargo","npm"]}"#,
             r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"published:cargo","kind":"target_published","target":"cargo","receipt":{"ecosystem":"rust","package":"tool","version":"2.0.0","registry_url":null,"digest":null}}"#,
         ],
     );
@@ -665,7 +665,7 @@ fn release_verify_tolerates_a_torn_final_line() {
     // Two complete newline-terminated events, then a partial third with NO newline
     // (as if `release cut` were mid-append).
     let good = concat!(
-        r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN03","plan_id":"plan-torn","targets":["cargo"]}"#,
+        r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN03","plan_id":"plan-torn","version":"1.0.0","targets":["cargo"]}"#,
         "\n",
         r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"published:cargo","kind":"target_published","target":"cargo","receipt":{"ecosystem":"rust","package":"tool","version":"1.0.0","registry_url":null,"digest":null}}"#,
         "\n",
@@ -695,7 +695,7 @@ fn release_verify_reports_cancelled_targets_distinctly() {
     let dir = seed_journal(
         "RUN04",
         &[
-            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN04","plan_id":"plan-c","targets":["cargo","npm"]}"#,
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN04","plan_id":"plan-c","version":"1.0.0","targets":["cargo","npm"]}"#,
             r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"published:cargo","kind":"target_published","target":"cargo","receipt":{"ecosystem":"rust","package":"tool","version":"1.0.0","registry_url":null,"digest":null}}"#,
             r#"{"schema_version":1,"seq":3,"ts":1002,"idempotency_key":"cancelled:npm","kind":"target_cancelled","target":"npm","reason":"OTP timeout"}"#,
         ],
@@ -716,6 +716,8 @@ fn release_verify_reports_cancelled_targets_distinctly() {
             .contains("npm' was cancelled: OTP timeout")),
         "cancelled target must report its reason: {warnings:?}"
     );
+}
+
 // ── release cut: drift-refusal + approval gate (no external publish) ──────────
 
 /// Prepare a temp repo from a positive fixture with `status: approved`, inside a
