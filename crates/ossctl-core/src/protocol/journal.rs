@@ -235,10 +235,15 @@ pub struct JournalEvent {
     /// Event time as whole seconds since the Unix epoch, from the injected
     /// `Clock` (never wall-clock directly, so runs are deterministic under test).
     pub ts: u64,
-    /// Stable semantic key identifying *what* this event records (e.g.
-    /// `published:cargo`, `phase_completed:build`). Re-appending an event with a
-    /// key already in the log is refused as a no-op, so a retried step never
-    /// double-writes.
+    /// Stable semantic key identifying *what subject* this event records (e.g.
+    /// `published:cargo`, `phase_completed:build`). It is **metadata**, not the
+    /// append gate: it deliberately ignores the payload (a phase's `outcome`, a
+    /// receipt's version), so it is safe for diagnostics and for a coordinator's
+    /// own "have I already acted on this subject?" lookups, but it must **not**
+    /// be used to suppress an append — a phase that completed `Failed` and then,
+    /// after a resume, completes `Ok` shares this key yet is a distinct fact that
+    /// must be recorded. Replay idempotency is provided by [`Self::seq`] (the
+    /// high-water mark), not by this key.
     pub idempotency_key: String,
     /// The event payload, flattened into this envelope.
     #[serde(flatten)]

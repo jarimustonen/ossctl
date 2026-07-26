@@ -24,18 +24,31 @@
 //! is folded back in on the next open regardless of whether its manifest write
 //! landed.
 //!
-//! # Idempotency (three guarantees)
+//! # Idempotency
+//!
+//! Replay idempotency — the property the crash-safety discipline needs — comes
+//! from two mechanisms working together:
 //!
 //! 1. **Watermark** — [`apply`] ignores any event whose `seq` is at or below the
-//!    already-applied high-water mark, so replaying the log (or a seen event) is
-//!    a no-op.
-//! 2. **Structural** — the projection is built from keyed sets/maps, so applying
-//!    "published target `cargo`" twice yields the identical map.
-//! 3. **Append dedup** — [`Journal::append`] refuses to write an event whose
-//!    [`crate::protocol::journal::JournalEvent::idempotency_key`] is already in
-//!    the log, so a retried step never double-appends.
+//!    already-applied high-water mark, so replaying the persisted log (or a seen
+//!    event) is a no-op. This is the "re-applying a seen event changes nothing"
+//!    guarantee.
+//! 2. **Structural** — the projection is built from keyed sets/maps, so folding a
+//!    fact about target `cargo` more than once yields the identical map.
+//!
+//! The log is **append-only facts**: [`Journal::append`] does not deduplicate on
+//! [`crate::protocol::journal::JournalEvent::idempotency_key`] (an earlier design
+//! did, which silently swallowed a legitimate `Failed`→`Ok` phase retry after a
+//! resume). Whether to *emit* an event is the coordinator's decision — and since
+//! the remote registry is ground truth (ADR-0003 §4), a resumed cut re-checks
+//! reality before re-emitting rather than trusting an append gate.
+//!
+//! # Terminal states
+//!
+//! Once the run reaches a terminal status ([`RunStatus::Completed`] or
+//! [`RunStatus::Abandoned`]) the reducer freezes: later events are ignored, so a
+//! corrupt or buggy log cannot un-abandon a run or resurrect a completed one.
 
-use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -136,10 +149,22 @@ pub fn reduce(events: &[JournalEvent]) -> RunState {
 /// re-applying a seen event leaves the state byte-identical. This is what makes
 /// append-then-apply crash-safe — replaying after a crash is a clean
 /// no-op-or-apply.
+///
+/// **Terminal-safe**: once the run is [`RunStatus::Completed`] or
+/// [`RunStatus::Abandoned`], further events are ignored (the watermark still
+/// advances so a later legitimate replay is consistent), so a corrupt log cannot
+/// mutate a run past its terminal fact.
 pub fn apply(state: &mut RunState, event: &JournalEvent) {
     // Watermark: never fold an event already accounted for. `seq` starts at 1,
     // so the first event (seq 1) always applies against the initial mark of 0.
     if event.seq <= state.applied_seq {
+        return;
+    }
+    // Terminal states freeze the projection: nothing recorded after a run is
+    // completed or abandoned may change it. Advance the watermark so the state
+    // still reflects "everything up to here has been seen".
+    if matches!(state.status, RunStatus::Completed | RunStatus::Abandoned) {
+        state.applied_seq = event.seq;
         return;
     }
     match &event.kind {
@@ -224,12 +249,38 @@ fn upsert_phase(phases: &mut Vec<PhaseRecord>, phase: Phase, outcome: PhaseOutco
 /// [`io::ErrorKind::InvalidData`] on a malformed or too-new event line, or any
 /// I/O error surfaced by the store.
 pub fn read_events(store: &dyn JournalStore, path: &Path) -> io::Result<Vec<JournalEvent>> {
+    /// A minimal envelope parsed *before* the strict [`JournalEvent`] so a newer
+    /// schema (which may carry an unknown `kind` the enum cannot deserialize) is
+    /// refused with an actionable upgrade error rather than a generic parse error.
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        schema_version: u32,
+    }
+
     let lines = store.read_lines(path)?;
     let mut events = Vec::with_capacity(lines.len());
     for (idx, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
+        }
+        // Version gate first: a too-new event is refused before the strict enum
+        // parse (which would otherwise fail on an unknown `kind` with a generic
+        // message and never reach this check).
+        if let Ok(envelope) = serde_json::from_str::<Envelope>(trimmed) {
+            if envelope.schema_version > JOURNAL_SCHEMA_VERSION {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "release journal {}: line {} has schema_version {} but this \
+                         ossctl understands at most {}; upgrade ossctl to resume this run",
+                        path.display(),
+                        idx + 1,
+                        envelope.schema_version,
+                        JOURNAL_SCHEMA_VERSION
+                    ),
+                ));
+            }
         }
         let event: JournalEvent = serde_json::from_str(trimmed).map_err(|e| {
             io::Error::new(
@@ -242,37 +293,63 @@ pub fn read_events(store: &dyn JournalStore, path: &Path) -> io::Result<Vec<Jour
                 ),
             )
         })?;
-        if event.schema_version > JOURNAL_SCHEMA_VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "release journal {}: event seq {} has schema_version {} but this \
-                     ossctl understands at most {}; upgrade ossctl to resume this run",
-                    path.display(),
-                    event.seq,
-                    event.schema_version,
-                    JOURNAL_SCHEMA_VERSION
-                ),
-            ));
-        }
         events.push(event);
     }
     events.sort_by_key(|e| e.seq);
     Ok(events)
 }
 
-/// Reduce a run's on-disk journal to its current state **without** locking — the
-/// read-only path behind `release show` / `release verify`.
+/// Reject a `run_id` that is not a single safe path segment.
 ///
-/// Returns `Ok(None)` when the run has no journal (unknown run id).
+/// `run_id`s minted by `IdGen` are ULIDs, but `open`/`load_state` also take a
+/// caller-supplied id (a CLI argument), so a `../…`, an absolute path, or an
+/// empty string must never be joined into the releases root (path traversal).
+fn validate_run_id(run_id: &str) -> io::Result<()> {
+    let bad = run_id.is_empty()
+        || run_id == "."
+        || run_id == ".."
+        || run_id.contains('/')
+        || run_id.contains('\\')
+        || run_id.contains('\0');
+    if bad {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid run id {run_id:?}: must be a single path segment"),
+        ));
+    }
+    Ok(())
+}
+
+/// Read a run's current state **without** locking — the read-only path behind
+/// `release show`.
+///
+/// Prefers the atomically-written `manifest.json` cache (a torn-free read, and
+/// O(1) versus replaying the log); falls back to reducing the authoritative
+/// `journal.jsonl` when the manifest is absent, unparsable, or does not match the
+/// run. The cache can lag the log by the last event after a crash between append
+/// and manifest write, so this is *best-effort* for display — a
+/// correctness-critical read (resume/reconcile) must go through the locked
+/// [`Journal::open`], which always reduces the log.
+///
+/// Returns `Ok(None)` when the run has neither a usable manifest nor a journal.
 ///
 /// # Errors
-/// Any store or parse error from [`read_events`].
+/// An invalid `run_id`, or any store/parse error from [`read_events`].
 pub fn load_state(
     store: &dyn JournalStore,
     paths: &JournalPaths,
     run_id: &str,
 ) -> io::Result<Option<RunState>> {
+    validate_run_id(run_id)?;
+    // Fast path: the atomic manifest cache (never torn).
+    if let Some(bytes) = store.read(&paths.manifest_file(run_id))? {
+        if let Ok(state) = serde_json::from_slice::<RunState>(&bytes) {
+            if state.run_id == run_id && state.schema_version <= JOURNAL_SCHEMA_VERSION {
+                return Ok(Some(state));
+            }
+        }
+        // A corrupt/mismatched cache falls through to the authoritative rebuild.
+    }
     let events = read_events(store, &paths.journal_file(run_id))?;
     if events.is_empty() {
         return Ok(None);
@@ -280,8 +357,12 @@ pub fn load_state(
     Ok(Some(reduce(&events)))
 }
 
-/// List the run ids present under the releases root (the `<run_id>` subdirectory
-/// names), excluding the `.lock` file — the enumeration behind `release list`.
+/// List the run ids present under the releases root — the enumeration behind
+/// `release list`.
+///
+/// Only entries that carry a non-empty `journal.jsonl` are returned, so the
+/// `.lock` file, atomic-write temp files, and any stray files/dirs the store may
+/// surface are excluded (a run is defined by having a journal).
 ///
 /// # Errors
 /// Any store error listing the releases directory.
@@ -289,7 +370,14 @@ pub fn list_runs(store: &dyn JournalStore, paths: &JournalPaths) -> io::Result<V
     let mut runs: Vec<String> = store
         .list_dir(paths.releases_dir())?
         .into_iter()
-        .filter(|name| name != ".lock")
+        .filter(|name| validate_run_id(name).is_ok())
+        .filter(|name| {
+            // A real run has a non-empty journal; this also excludes temp files
+            // and empty/aborted run directories.
+            store
+                .read_lines(&paths.journal_file(name))
+                .is_ok_and(|lines| lines.iter().any(|l| !l.trim().is_empty()))
+        })
         .collect();
     runs.sort();
     Ok(runs)
@@ -309,8 +397,6 @@ pub struct Journal<'a> {
     paths: JournalPaths,
     run_id: String,
     state: RunState,
-    /// Idempotency keys already present in the log — the append-dedup guard.
-    applied_keys: HashSet<String>,
     /// The single-active-cut lock, released on drop. Held, never called.
     _lock: Box<dyn JournalLock>,
 }
@@ -339,7 +425,6 @@ impl<'a> Journal<'a> {
             paths,
             run_id: run_id.clone(),
             state: RunState::empty(),
-            applied_keys: HashSet::new(),
             _lock: lock,
         };
         journal.append(EventKind::RunCreated {
@@ -351,18 +436,24 @@ impl<'a> Journal<'a> {
     }
 
     /// Resume an existing run: take the single-active-cut lock, rebuild state from
-    /// the journal (the source of truth), and re-persist the manifest cache so it
-    /// reflects the log even if a prior crash left it stale.
+    /// the journal (the source of truth), and best-effort re-persist the manifest
+    /// cache so it reflects the log even if a prior crash left it stale.
+    ///
+    /// A manifest-write failure here is **not** fatal: the manifest is disposable
+    /// and the in-memory state is already authoritative (rebuilt from the log), so
+    /// a transient cache-write error must not brick an otherwise-recoverable run.
     ///
     /// # Errors
     /// [`io::ErrorKind::WouldBlock`] if the lock is held, [`io::ErrorKind::NotFound`]
-    /// if the run has no journal, plus any store/parse error.
+    /// if the run has no journal, [`io::ErrorKind::InvalidInput`] for a malformed
+    /// `run_id`, plus any store/parse error reading the log.
     pub fn open(
         store: &'a dyn JournalStore,
         clock: &'a dyn Clock,
         paths: JournalPaths,
         run_id: &str,
     ) -> io::Result<Self> {
+        validate_run_id(run_id)?;
         let lock = store.lock_exclusive(&paths.lock_file())?;
         let events = read_events(store, &paths.journal_file(run_id))?;
         if events.is_empty() {
@@ -372,21 +463,16 @@ impl<'a> Journal<'a> {
             ));
         }
         let state = reduce(&events);
-        let applied_keys = events
-            .into_iter()
-            .map(|e| e.idempotency_key)
-            .collect::<HashSet<_>>();
         let journal = Self {
             store,
             clock,
             paths,
             run_id: run_id.to_string(),
             state,
-            applied_keys,
             _lock: lock,
         };
-        // Self-heal: rewrite the disposable manifest from the authoritative log.
-        journal.persist_manifest()?;
+        // Best-effort self-heal of the disposable manifest from the log.
+        let _ = journal.persist_manifest();
         Ok(journal)
     }
 
@@ -408,30 +494,33 @@ impl<'a> Journal<'a> {
         &self.paths
     }
 
-    /// Record an event with full append-then-apply atomicity, returning the
-    /// updated state.
+    /// Record a fact with append-then-apply atomicity, returning the updated
+    /// state.
     ///
-    /// **Idempotent**: if an event with the same idempotency key is already in the
-    /// log, this is a no-op that returns the unchanged state (a retried step never
-    /// double-writes). Otherwise the sequence is strictly: fsync the event →
-    /// apply to state → atomically rewrite the manifest.
+    /// The sequence is strictly: **(1)** serialize and durably fsync the event to
+    /// the log (the source of truth), **(2)** apply it to the in-memory
+    /// projection, **(3)** best-effort rewrite the disposable manifest cache.
+    ///
+    /// Step 3 failing does **not** fail the append: once step 1 returns the event
+    /// is committed, so reporting `Err` would tempt the caller to retry an
+    /// already-committed fact. A stale manifest self-heals on the next append or
+    /// [`Journal::open`]. Only a step-1 failure is fatal, and it leaves the state
+    /// untouched.
+    ///
+    /// This is a low-level append of a raw [`EventKind`] (`seq`/`ts`/
+    /// `idempotency_key` are assigned here). It does **not** validate release
+    /// state-machine ordering — that policy belongs to the coordinator; the
+    /// reducer only guarantees replay-idempotency and terminal-state freezing.
     ///
     /// # Errors
-    /// Any store error appending the event or writing the manifest. On an append
-    /// failure the state is left untouched; the durable event is written *before*
-    /// the manifest, so a crash after the append is recovered by [`reduce`] on the
-    /// next [`Journal::open`].
+    /// A store error from the durable append (step 1), or an event that fails to
+    /// serialize.
     pub fn append(&mut self, kind: EventKind) -> io::Result<&RunState> {
-        let idempotency_key = kind.idempotency_key();
-        if self.applied_keys.contains(&idempotency_key) {
-            // Already recorded — idempotent no-op.
-            return Ok(&self.state);
-        }
         let event = JournalEvent {
             schema_version: JOURNAL_SCHEMA_VERSION,
             seq: self.state.applied_seq + 1,
             ts: self.clock.now_unix(),
-            idempotency_key: idempotency_key.clone(),
+            idempotency_key: kind.idempotency_key(),
             kind,
         };
         let line = serde_json::to_string(&event).map_err(|e| {
@@ -442,9 +531,8 @@ impl<'a> Journal<'a> {
             .append_line(&self.paths.journal_file(&self.run_id), &line)?;
         // 2. Apply to the in-memory projection.
         apply(&mut self.state, &event);
-        self.applied_keys.insert(idempotency_key);
-        // 3. Rewrite the disposable manifest cache atomically.
-        self.persist_manifest()?;
+        // 3. Best-effort rewrite of the disposable manifest cache.
+        let _ = self.persist_manifest();
         Ok(&self.state)
     }
 
@@ -466,7 +554,7 @@ mod tests {
     use super::*;
     use crate::protocol::journal::{PublishReceipt, TagState};
     use std::cell::RefCell;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::rc::Rc;
 
     // ── In-memory fakes for the ports ──────────────────────────────────────
@@ -546,6 +634,10 @@ mod tests {
 
         fn read_lines(&self, path: &Path) -> io::Result<Vec<String>> {
             Ok(self.journal_lines(path))
+        }
+
+        fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+            Ok(self.inner.borrow().files.get(path).cloned())
         }
 
         fn write_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -897,7 +989,10 @@ mod tests {
     }
 
     #[test]
-    fn append_dedup_refuses_duplicate_idempotency_key() {
+    fn append_records_facts_and_a_failed_phase_can_later_complete_ok() {
+        // Regression: an earlier design deduped appends by idempotency key, which
+        // silently swallowed a Failed→Ok phase retry after a resume. The log now
+        // records both facts and the reducer's upsert lands the final outcome.
         let store = FakeStore::default();
         let clock = FakeClock::at(1000);
         let idgen = FakeIdGen { id: "RUN01".into() };
@@ -911,22 +1006,65 @@ mod tests {
         )
         .unwrap();
         journal
-            .append(EventKind::TargetPublished {
-                target: "cargo".into(),
-                receipt: receipt("0.1.0"),
+            .append(EventKind::PhaseCompleted {
+                phase: Phase::Publish,
+                outcome: PhaseOutcome::Failed,
             })
             .unwrap();
-        let seq_after_first = journal.state().applied_seq;
-        // Re-publish the same target: idempotent no-op, no new line, no seq bump.
         journal
-            .append(EventKind::TargetPublished {
-                target: "cargo".into(),
-                receipt: receipt("0.1.0"),
+            .append(EventKind::PhaseCompleted {
+                phase: Phase::Publish,
+                outcome: PhaseOutcome::Ok,
             })
             .unwrap();
-        assert_eq!(journal.state().applied_seq, seq_after_first);
+        // Both facts are durable (RunCreated + two PhaseCompleted).
         let lines = store.journal_lines(&paths().journal_file("RUN01"));
-        assert_eq!(lines.len(), 2); // RunCreated + one TargetPublished only
+        assert_eq!(lines.len(), 3);
+        // The projection reflects the final Ok outcome, once.
+        let publish = journal
+            .state()
+            .phases
+            .iter()
+            .filter(|r| r.phase == Phase::Publish)
+            .collect::<Vec<_>>();
+        assert_eq!(publish.len(), 1);
+        assert_eq!(publish[0].outcome, PhaseOutcome::Ok);
+    }
+
+    #[test]
+    fn terminal_state_freezes_further_events() {
+        // After abandonment, a stray later event must not mutate the projection.
+        let mut state = reduce(&sample_events());
+        let published_before = state.published.clone();
+        let mut seq = state.applied_seq;
+        let mut next = |kind: EventKind| {
+            seq += 1;
+            JournalEvent {
+                schema_version: JOURNAL_SCHEMA_VERSION,
+                seq,
+                ts: 9000 + seq,
+                idempotency_key: kind.idempotency_key(),
+                kind,
+            }
+        };
+        apply(
+            &mut state,
+            &next(EventKind::RunAbandoned {
+                reason: "aborted".into(),
+            }),
+        );
+        assert_eq!(state.status, RunStatus::Abandoned);
+        // A publish recorded after abandonment is ignored.
+        apply(
+            &mut state,
+            &next(EventKind::TargetPublished {
+                target: "npm".into(),
+                receipt: receipt("9.9.9"),
+            }),
+        );
+        assert_eq!(state.status, RunStatus::Abandoned);
+        assert_eq!(state.published, published_before);
+        assert!(!state.published.contains_key("npm"));
     }
 
     // ── Append-then-apply crash safety ─────────────────────────────────────
@@ -946,15 +1084,15 @@ mod tests {
         )
         .unwrap();
         // Arm a crash on the NEXT manifest write, then append: the durable event
-        // lands first, so the append fails only at the manifest step.
+        // lands first and the append still SUCCEEDS (the manifest is disposable),
+        // leaving only a stale cache.
         store.arm_atomic_failure();
-        let err = journal
+        journal
             .append(EventKind::TargetPublished {
                 target: "cargo".into(),
                 receipt: receipt("0.1.0"),
             })
-            .unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::Other);
+            .unwrap();
         drop(journal); // release the lock
 
         // Reopen: state is rebuilt from the authoritative journal, so the event's
@@ -1061,7 +1199,55 @@ mod tests {
     }
 
     #[test]
-    fn list_runs_enumerates_run_dirs_excluding_lock() {
+    fn load_state_prefers_manifest_but_falls_back_to_journal() {
+        let store = FakeStore::default();
+        let clock = FakeClock::at(1000);
+        let idgen = FakeIdGen { id: "RUN01".into() };
+        let journal = Journal::create(
+            &store,
+            &clock,
+            &idgen,
+            paths(),
+            "plan-abc".into(),
+            vec!["cargo".into()],
+        )
+        .unwrap();
+        let expected = journal.state().clone();
+        drop(journal);
+
+        // Fast path: manifest present → returned as-is.
+        assert_eq!(
+            load_state(&store, &paths(), "RUN01").unwrap(),
+            Some(expected.clone())
+        );
+
+        // Corrupt the manifest → falls back to reducing the authoritative journal.
+        store
+            .write_atomic(&paths().manifest_file("RUN01"), b"{not json")
+            .unwrap();
+        assert_eq!(
+            load_state(&store, &paths(), "RUN01").unwrap(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn run_id_validation_rejects_path_traversal() {
+        let store = FakeStore::default();
+        let clock = FakeClock::at(1000);
+        for bad in ["..", "a/b", "", ".", "x/../y"] {
+            assert_eq!(
+                load_state(&store, &paths(), bad).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "load_state must reject run id {bad:?}"
+            );
+            let err = Journal::open(&store, &clock, paths(), bad).err().unwrap();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn list_runs_excludes_lock_and_stray_files() {
         let store = FakeStore::default();
         let clock = FakeClock::at(1000);
         for id in ["RUN01", "RUN02"] {
@@ -1076,6 +1262,14 @@ mod tests {
             )
             .unwrap();
         }
+        // A leftover atomic-write temp file and a stray top-level file must not be
+        // reported as runs (only entries with a non-empty journal count).
+        store
+            .write_atomic(&paths().releases_dir().join("journal.jsonl.tmp"), b"x")
+            .unwrap();
+        store
+            .write_atomic(&paths().releases_dir().join(".lock"), b"")
+            .unwrap();
         let runs = list_runs(&store, &paths()).unwrap();
         assert_eq!(runs, vec!["RUN01".to_string(), "RUN02".to_string()]);
     }

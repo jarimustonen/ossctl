@@ -149,14 +149,29 @@ pub trait JournalStore {
     /// `Err` with [`io::ErrorKind::WouldBlock`] when another holder is active, so
     /// the caller can fail fast and name the active run.
     fn lock_exclusive(&self, lock_path: &std::path::Path) -> io::Result<Box<dyn JournalLock>>;
-    /// Append `line` (a serialized event, no trailing newline — the store adds
-    /// one) to the JSONL file at `path`, creating the file and parent directories
-    /// if absent, and **fsync** so it is durable before returning. This is the
-    /// append half of append-then-apply.
+    /// Append `line` (one serialized event, no embedded newline — the store adds
+    /// the single trailing `\n`) to the JSONL file at `path`, creating the file
+    /// and parent directories if absent, and **fsync** so it is durable before
+    /// returning. This is the append half of append-then-apply.
+    ///
+    /// The write must be **atomic at line granularity**: on return the line is
+    /// either fully present or not present, never truncated. The production impl
+    /// opens with `O_APPEND`, `write_all`s the line + newline, and fsyncs the file
+    /// **and** — when it created the file or a parent directory — the containing
+    /// directory, so a newly created `RunCreated` survives power loss (fsyncing
+    /// only the file leaves the new directory entry non-durable). A torn *final*
+    /// line from a hard kill mid-write is still possible in theory; recovering it
+    /// (truncate-to-last-good under the lock) is a documented follow-up, not part
+    /// of this port yet — [`crate::release::journal::read_events`] currently
+    /// rejects any malformed line.
     fn append_line(&self, path: &std::path::Path, line: &str) -> io::Result<()>;
     /// Read every line of the JSONL file at `path`. `Ok(vec![])` when the file is
     /// absent (a not-yet-written journal is empty, not an error).
     fn read_lines(&self, path: &std::path::Path) -> io::Result<Vec<String>>;
+    /// Read the full contents of the (atomically-written) file at `path`, or
+    /// `Ok(None)` when it is absent. Used for the torn-free fast-path read of the
+    /// `manifest.json` cache; unlike [`Self::read_lines`] it returns raw bytes.
+    fn read(&self, path: &std::path::Path) -> io::Result<Option<Vec<u8>>>;
     /// Atomically replace the file at `path` with `bytes`: write a temp file in
     /// the same directory, flush + fsync it, rename it over `path`, then fsync the
     /// directory. Creates parent directories as needed.
