@@ -112,4 +112,62 @@ pub trait GitRepo {
     /// lines dropped. `Err` on any git failure; the detector reads that as "no
     /// tags".
     fn tags(&self) -> io::Result<Vec<String>>;
+    /// The **common** git directory (`git rev-parse --git-common-dir`), resolved
+    /// to an absolute path. The release journal roots its state under here so all
+    /// linked worktrees of one repo share a single release-state root, and
+    /// submodules / bare repos / `GIT_DIR` overrides resolve correctly — a
+    /// literal `.git/` concatenation is *not* a portable substitute (ADR-0003
+    /// §3, the panel's repeated correctness landmine). `Err` on any git failure.
+    fn git_common_dir(&self) -> io::Result<std::path::PathBuf>;
 }
+
+/// Durable, atomic, lockable storage for the release journal — the seam that
+/// keeps the event-sourced journal (ADR-0003) testable without touching the real
+/// filesystem, while pinning down the atomicity discipline its production impl
+/// **must** honor.
+///
+/// The append-then-apply contract (ADR-0003 §2, borrowed from `octl-core`) maps
+/// onto these operations:
+///
+/// 1. [`Self::append_line`] fsyncs the event so it is durable **before** the
+///    reducer applies it — a crash between append and apply replays as a clean
+///    no-op-or-apply, because the journal (read back by [`Self::read_lines`]) is
+///    the single source of truth.
+/// 2. [`Self::write_atomic`] persists the derived manifest via temp-file → flush
+///    → atomic rename → directory fsync, so a torn write can never leave a
+///    half-written manifest (it is disposable and rebuildable regardless).
+/// 3. [`Self::lock_exclusive`] enforces a single active cut per repo (a `flock`
+///    on the releases-dir `.lock`): a concurrent cut/resume fails fast rather
+///    than corrupting a run.
+///
+/// The port is deliberately path-driven (the journal computes paths via
+/// [`crate::release::journal::JournalPaths`]); the impl adds no policy, only the
+/// durability guarantees documented per method.
+pub trait JournalStore {
+    /// Take the single-active-cut exclusive lock at `lock_path` (creating parent
+    /// directories as needed). The returned guard holds the lock until dropped.
+    /// `Err` with [`io::ErrorKind::WouldBlock`] when another holder is active, so
+    /// the caller can fail fast and name the active run.
+    fn lock_exclusive(&self, lock_path: &std::path::Path) -> io::Result<Box<dyn JournalLock>>;
+    /// Append `line` (a serialized event, no trailing newline — the store adds
+    /// one) to the JSONL file at `path`, creating the file and parent directories
+    /// if absent, and **fsync** so it is durable before returning. This is the
+    /// append half of append-then-apply.
+    fn append_line(&self, path: &std::path::Path, line: &str) -> io::Result<()>;
+    /// Read every line of the JSONL file at `path`. `Ok(vec![])` when the file is
+    /// absent (a not-yet-written journal is empty, not an error).
+    fn read_lines(&self, path: &std::path::Path) -> io::Result<Vec<String>>;
+    /// Atomically replace the file at `path` with `bytes`: write a temp file in
+    /// the same directory, flush + fsync it, rename it over `path`, then fsync the
+    /// directory. Creates parent directories as needed.
+    fn write_atomic(&self, path: &std::path::Path, bytes: &[u8]) -> io::Result<()>;
+    /// The immediate entry *names* (not full paths) within `dir`, or `Ok(vec![])`
+    /// when `dir` is absent — used to enumerate run-id subdirectories for
+    /// `release list`.
+    fn list_dir(&self, dir: &std::path::Path) -> io::Result<Vec<String>>;
+}
+
+/// An opaque RAII guard for the single-active-cut lock taken by
+/// [`JournalStore::lock_exclusive`]. Dropping it releases the lock; there are no
+/// methods — its lifetime *is* the contract.
+pub trait JournalLock {}

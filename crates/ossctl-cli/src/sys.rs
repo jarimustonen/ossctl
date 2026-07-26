@@ -172,4 +172,22 @@ impl GitRepo for RealGitRepo {
             .map(str::to_string)
             .collect())
     }
+
+    fn git_common_dir(&self) -> io::Result<PathBuf> {
+        let raw = self.git_stdout(&["rev-parse", "--git-common-dir"])?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(io::Error::other(
+                "git rev-parse --git-common-dir produced no output",
+            ));
+        }
+        // git may return a path relative to the repo root (e.g. `.git`); resolve
+        // it against `root` so callers always get an absolute location.
+        let path = Path::new(trimmed);
+        Ok(if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.root.join(path)
+        })
+    }
 }
