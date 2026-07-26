@@ -15,6 +15,7 @@ pub mod audit;
 pub mod contract;
 pub mod facts;
 pub mod journal;
+pub mod plan;
 pub mod release;
 
 /// Current envelope/DTO schema version for `ossctl`'s public JSON output.
