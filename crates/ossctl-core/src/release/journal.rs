@@ -388,6 +388,37 @@ pub fn read_run_state(
     Ok(Some(reduce(&events)))
 }
 
+/// Read a run's event log **and** its reduced state, read-only — the read path
+/// behind `release show`.
+///
+/// `release show` needs both halves: the ordered [`JournalEvent`] log (to stream
+/// as a live JSONL event window) *and* the folded [`RunState`] (to decide live
+/// vs. terminal and render the post-mortem summary). This is the write-free,
+/// unlocked twin of [`Journal::open`] that returns the log alongside the
+/// projection so the caller reduces once, not twice.
+///
+/// Like [`read_run_state`] it ignores the `manifest.json` fast path and reduces
+/// the authoritative `journal.jsonl`, so a manifest lagging the log by its last
+/// event cannot hide the newest fact from a live tail. Returns `Ok(None)` when
+/// the run has no journal.
+///
+/// # Errors
+/// An invalid `run_id` ([`io::ErrorKind::InvalidInput`]), or any store/parse
+/// error from [`read_events`].
+pub fn read_run(
+    store: &dyn JournalStore,
+    paths: &JournalPaths,
+    run_id: &str,
+) -> io::Result<Option<(Vec<JournalEvent>, RunState)>> {
+    validate_run_id(run_id)?;
+    let events = read_events(store, &paths.journal_file(run_id))?;
+    if events.is_empty() {
+        return Ok(None);
+    }
+    let state = reduce(&events);
+    Ok(Some((events, state)))
+}
+
 /// List the run ids present under the releases root — the enumeration behind
 /// `release list`.
 ///
@@ -1317,6 +1348,34 @@ mod tests {
             read_run_state(&store, &paths(), "../escape")
                 .unwrap_err()
                 .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn read_run_returns_events_and_reduced_state() {
+        // `release show` reads the log and its projection together, read-only.
+        let store = FakeStore::default();
+        for ev in sample_events() {
+            let line = serde_json::to_string(&ev).unwrap();
+            store
+                .append_line(&paths().journal_file("RUN01"), &line)
+                .unwrap();
+        }
+        let files_before = store.inner.borrow().files.clone();
+
+        let (events, state) = read_run(&store, &paths(), "RUN01").unwrap().unwrap();
+        assert_eq!(events, sample_events());
+        assert_eq!(state, reduce(&sample_events()));
+
+        // Read-only: no manifest self-heal, no lock, no new bytes.
+        assert_eq!(store.inner.borrow().files, files_before);
+        assert!(store.inner.borrow().locked.is_empty());
+
+        // A missing run is a clean None; a traversal id is rejected.
+        assert!(read_run(&store, &paths(), "MISSING").unwrap().is_none());
+        assert_eq!(
+            read_run(&store, &paths(), "../escape").unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
     }

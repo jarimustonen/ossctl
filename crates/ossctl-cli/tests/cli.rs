@@ -718,6 +718,141 @@ fn release_verify_reports_cancelled_targets_distinctly() {
     );
 }
 
+// ── release show: progress query (live tail + post-mortem summary) ───────────
+
+/// A terminal run (`completed`) folds to its final state and emits the summary
+/// under the canonical envelope — the post-mortem form of the §12 progress query.
+#[test]
+fn release_show_post_mortem_summary_from_a_journal() {
+    let dir = seed_journal(
+        "SHOW01",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"SHOW01","plan_id":"plan-done","version":"1.2.0","targets":["cargo"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"phase_entered:publish","kind":"phase_entered","phase":"publish"}"#,
+            r#"{"schema_version":1,"seq":3,"ts":1002,"idempotency_key":"published:cargo","kind":"target_published","target":"cargo","receipt":{"ecosystem":"rust","package":"tool","version":"1.2.0","registry_url":null,"digest":null}}"#,
+            r#"{"schema_version":1,"seq":4,"ts":1003,"idempotency_key":"phase_completed:publish","kind":"phase_completed","phase":"publish","outcome":"ok"}"#,
+            r#"{"schema_version":1,"seq":5,"ts":1004,"idempotency_key":"phase_entered:tag","kind":"phase_entered","phase":"tag"}"#,
+            r#"{"schema_version":1,"seq":6,"ts":1005,"idempotency_key":"tag_created_local:v1.2.0","kind":"tag_created_local","tag":"v1.2.0"}"#,
+            r#"{"schema_version":1,"seq":7,"ts":1006,"idempotency_key":"phase_completed:tag","kind":"phase_completed","phase":"tag","outcome":"ok"}"#,
+        ],
+    );
+
+    let out = ossctl()
+        .args(["release", "show", "SHOW01", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "show must exit 0: {out:?}");
+
+    // A terminal run yields the canonical envelope, NOT a JSONL stream.
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("summary is one JSON doc");
+    assert_eq!(v["schema_version"], 1);
+    let data = &v["data"];
+    assert_eq!(data["run_id"], "SHOW01");
+    assert_eq!(data["plan_id"], "plan-done");
+    assert_eq!(data["version"], "1.2.0");
+    assert_eq!(data["status"], "completed");
+    // The folded state carries the last applied seq and the published receipt.
+    assert_eq!(data["applied_seq"], 7);
+    assert_eq!(data["published"]["cargo"]["version"], "1.2.0");
+
+    // Read-only: show must not materialize a manifest next to the journal.
+    assert!(
+        !dir.path().join("SHOW01").join("manifest.json").exists(),
+        "show wrote a manifest — it must be read-only"
+    );
+}
+
+/// An abandoned run surfaces its abandon reason as an envelope warning.
+#[test]
+fn release_show_post_mortem_surfaces_abandon_reason() {
+    let dir = seed_journal(
+        "SHOW02",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"SHOW02","plan_id":"plan-x","version":"1.0.0","targets":["cargo"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"run_abandoned","kind":"run_abandoned","reason":"OTP timeout"}"#,
+        ],
+    );
+
+    let out = ossctl()
+        .args(["release", "show", "SHOW02", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["status"], "abandoned");
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("abandoned: OTP timeout")),
+        "abandon reason must be a warning: {warnings:?}"
+    );
+}
+
+/// A live (in-progress) run streams the journal as a JSONL event window — one
+/// self-contained JSON object per line, NOT a wrapping envelope.
+#[test]
+fn release_show_live_tail_streams_jsonl() {
+    let dir = seed_journal(
+        "SHOW03",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"SHOW03","plan_id":"plan-live","version":"2.0.0","targets":["cargo"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"phase_entered:dry_run","kind":"phase_entered","phase":"dry_run"}"#,
+            r#"{"schema_version":1,"seq":3,"ts":1002,"idempotency_key":"dry_run:cargo","kind":"target_dry_run","target":"cargo"}"#,
+        ],
+    );
+
+    let out = ossctl()
+        .args(["release", "show", "SHOW03", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "live show must exit 0: {out:?}");
+
+    let text = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 3, "one JSONL line per journal event: {text:?}");
+
+    // Every line parses independently (JSONL), and the stream is NOT an envelope.
+    let first: serde_json::Value = serde_json::from_str(lines[0]).expect("line 0 is JSON");
+    assert_eq!(first["kind"], "run_created");
+    assert_eq!(first["seq"], 1);
+    assert!(
+        first.get("data").is_none(),
+        "a live tail is raw JSONL, never the {{data}} envelope"
+    );
+    let last: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+    assert_eq!(last["kind"], "target_dry_run");
+    assert_eq!(last["seq"], 3);
+}
+
+/// A `show` against a run with no journal is a caller-fixable (exit 1) error, and
+/// a traversal `run_id` is rejected — same guards as `verify`.
+#[test]
+fn release_show_unknown_and_bad_run_ids_are_user_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = ossctl()
+        .args(["release", "show", "NOPE", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&missing.stderr).unwrap();
+    assert_eq!(v["error"]["code"], "run_not_found");
+
+    let bad = ossctl()
+        .args(["release", "show", "../escape", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&bad.stderr).unwrap();
+    assert_eq!(v["error"]["code"], "invalid_run_id");
+}
+
 // ── release cut: drift-refusal + approval gate (no external publish) ──────────
 
 /// Prepare a temp repo from a positive fixture with `status: approved`, inside a

@@ -6,6 +6,7 @@
 //! returning a clean `not_implemented` envelope until then. The argument shapes
 //! are real so the surface and `--help` are accurate.
 
+use std::io::Write;
 use std::path::PathBuf;
 
 use clap::Args;
@@ -13,7 +14,9 @@ use clap::Args;
 use ossctl_core::contract::schema::Status;
 use ossctl_core::contract::{self, LoadError, Normalized};
 use ossctl_core::ports::GitRepo;
-use ossctl_core::protocol::journal::{EventKind, JournalEvent, RunStatus, JOURNAL_SCHEMA_VERSION};
+use ossctl_core::protocol::journal::{
+    EventKind, JournalEvent, RunState, RunStatus, JOURNAL_SCHEMA_VERSION,
+};
 use ossctl_core::protocol::plan::ReleasePlan;
 use ossctl_core::protocol::reconcile::ReconcileReport;
 use ossctl_core::release::adapters::EffectCtx;
@@ -105,7 +108,7 @@ pub fn dispatch(action: ReleaseAction, format: OutputFormat) -> Result<(), CliEr
         ReleaseAction::Cut(args) => cut(&args, format),
         ReleaseAction::Resume(_) => Err(CliError::not_implemented("release resume")),
         ReleaseAction::Verify(args) => verify(&args, format),
-        ReleaseAction::Show(_) => Err(CliError::not_implemented("release show")),
+        ReleaseAction::Show(args) => show(&args, format),
         ReleaseAction::List => Err(CliError::not_implemented("release list")),
         ReleaseAction::Abandon(_) => Err(CliError::not_implemented("release abandon")),
     }
@@ -358,6 +361,183 @@ fn render_reconcile_text(report: &ReconcileReport, warnings: &[String]) {
     }
 }
 
+/// `ossctl release show <run_id>` — the §12 progress query for a release run:
+/// poll a run's progress live, or read its post-mortem summary.
+///
+/// Reads the run's event log and reduced state read-only (no lock, no manifest
+/// self-heal, no writes — safe against a live cut) and branches on whether the
+/// run is terminal:
+///
+/// - **Live** (`in_progress`): streams the journal as a JSONL event window — the
+///   same compact one-event-per-line shape `release cut` emits (`--json`), so an
+///   agent consumes a poll of `show` exactly like a live `cut` stream. Text mode
+///   renders the same events as human progress lines. Broken-pipe-safe.
+/// - **Terminal** (`completed`/`abandoned`): folds the journal to its final
+///   [`RunState`] and emits it as the post-mortem summary under the canonical
+///   `{schema_version, data, warnings}` envelope (`--json`) or a human summary.
+///
+/// The format split is by the run's *terminal status* (a stable run property),
+/// not by elapsed runtime: a summary envelope for a finished run, a live event
+/// window for a running one — the two forms a §12 progress query is defined to
+/// return.
+pub fn show(args: &RunIdArgs, format: OutputFormat) -> Result<(), CliError> {
+    let repo_root = resolve_repo_root(args.repo_root.as_ref())?;
+    if !repo_root.is_dir() {
+        return Err(CliError::user(
+            "invalid_repo_root",
+            format!("repo_root '{}' is not a directory", repo_root.display()),
+        )
+        .with_invalid_value(repo_root.display().to_string()));
+    }
+    let root = std::fs::canonicalize(&repo_root).map_err(|e| {
+        CliError::system(
+            "io_error",
+            format!(
+                "cannot canonicalize repo_root '{}': {e}",
+                repo_root.display()
+            ),
+        )
+    })?;
+
+    // Same journal-root resolution as `verify`: explicit `--journal-dir` wins,
+    // else `<git-common-dir>/ossctl/releases` so every linked worktree shares one
+    // run-state root.
+    let git = RealGitRepo::new(&root);
+    let paths = JournalPaths::from_git(&git, args.journal_dir.as_deref()).map_err(|e| {
+        CliError::system(
+            "journal_root_unresolved",
+            format!(
+                "cannot locate the release journal root (is '{}' a git repository? pass \
+                 --journal-dir to override): {e}",
+                root.display()
+            ),
+        )
+    })?;
+
+    // Read-only read of both the event log and its projection.
+    let store = ReadOnlyJournalStore;
+    let (events, state) = journal::read_run(&store, &paths, &args.run_id)
+        .map_err(|e| read_state_error(&args.run_id, e))?
+        .ok_or_else(|| {
+            CliError::user(
+                "run_not_found",
+                format!(
+                    "no release run '{}' found under {}",
+                    args.run_id,
+                    paths.releases_dir().display()
+                ),
+            )
+            .with_invalid_value(args.run_id.clone())
+        })?;
+
+    let terminal = matches!(state.status, RunStatus::Completed | RunStatus::Abandoned);
+
+    match format {
+        OutputFormat::Json => {
+            if terminal {
+                // Post-mortem: the folded final state IS the summary.
+                crate::output::emit_json(&state, &show_warnings(&state))?;
+            } else {
+                // Live tail: stream the event window as JSONL (broken-pipe-safe).
+                let mut sink = StreamSink::new(std::io::stdout(), true);
+                for event in &events {
+                    sink.event(event);
+                }
+            }
+        }
+        OutputFormat::Text => render_show_text(&state, &events),
+    }
+    Ok(())
+}
+
+/// Non-fatal context for a post-mortem summary envelope: the abandon reason, and
+/// any declared target that never got a publish receipt (interrupted, or
+/// cancelled with its reason) — so an `abandoned`/interrupted run's gaps are
+/// visible without re-reading the raw event window.
+fn show_warnings(state: &RunState) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Some(reason) = &state.abandon_reason {
+        warnings.push(format!("run was abandoned: {reason}"));
+    }
+    for target in &state.targets {
+        if state.published.contains_key(target) {
+            continue;
+        }
+        if let Some(reason) = state.cancelled.get(target) {
+            warnings.push(format!("target '{target}' was cancelled: {reason}"));
+        } else {
+            warnings.push(format!(
+                "target '{target}' was declared but has no publish receipt in this run"
+            ));
+        }
+    }
+    warnings
+}
+
+/// Render a run's state as a human progress summary (text mode) — identity,
+/// status, phase progress, per-target landing state, tags, then the event window.
+/// Works for a live or a terminal run; the status line says which.
+fn render_show_text(state: &RunState, events: &[JournalEvent]) {
+    println!("run_id:     {}", state.run_id);
+    println!("plan_id:    {}", state.plan_id);
+    println!("version:    {}", state.version);
+    match state.status {
+        RunStatus::Abandoned => match &state.abandon_reason {
+            Some(reason) => println!(
+                "status:     abandoned ({reason}) (journal seq {})",
+                state.applied_seq
+            ),
+            None => println!("status:     abandoned (journal seq {})", state.applied_seq),
+        },
+        status => {
+            let phase = state
+                .current_phase
+                .map(|p| format!(" — in {}", p.as_str()))
+                .unwrap_or_default();
+            println!(
+                "status:     {}{phase} (journal seq {})",
+                status.as_str(),
+                state.applied_seq
+            );
+        }
+    }
+
+    println!("targets:    {}", state.targets.len());
+    for target in &state.targets {
+        let landing = if let Some(receipt) = state.published.get(target) {
+            format!("published @{}", receipt.version)
+        } else if let Some(reason) = state.cancelled.get(target) {
+            format!("cancelled ({reason})")
+        } else if state.built.contains(target) {
+            "built".to_string()
+        } else if state.dry_run.contains(target) {
+            "dry-run ok".to_string()
+        } else {
+            "pending".to_string()
+        };
+        println!("  {target:<10} {landing}");
+    }
+
+    for (tag, tstate) in &state.tags {
+        let mut steps = Vec::new();
+        if tstate.created_local {
+            steps.push("local");
+        }
+        if tstate.pushed_remote {
+            steps.push("pushed");
+        }
+        if tstate.github_release {
+            steps.push("release");
+        }
+        println!("tag {tag}: {}", steps.join(", "));
+    }
+
+    println!("events:     {}", events.len());
+    for event in events {
+        println!("  {}", render_event_line(event));
+    }
+}
+
 /// `ossctl release cut --plan <id> --version <v>` — execute a sealed plan across
 /// the phase-barrier coordinator, refusing on repo drift (ADR-0002 §2/§3).
 ///
@@ -472,7 +652,7 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     .map_err(create_journal_error)?;
     let run_id = journal.run_id().to_string();
 
-    let mut sink = CutSink::new(matches!(format, OutputFormat::Json));
+    let mut sink = StreamSink::new(std::io::stdout(), matches!(format, OutputFormat::Json));
     // Emit the run identity first so the stream is self-contained.
     stream_run_created(&mut sink, &journal, &current);
 
@@ -554,31 +734,37 @@ fn cut_error_to_cli(run_id: &str, err: CutError) -> CliError {
     }
 }
 
-/// A [`ProgressSink`] for `release cut`: streams each journalled fact as a JSONL
-/// line (`--json`, §12) or a human-readable progress line.
+/// A [`ProgressSink`] that streams each journalled fact as a JSONL line
+/// (`--json`, §12) or a human-readable progress line, shared by `release cut`'s
+/// live stream and `release show`'s live tail (both surface the same journal
+/// events in the same shape).
 ///
-/// Writes through a held `stdout` handle and flushes each line, so a JSONL
-/// consumer (`tail -f`, `jq`) sees events as they happen rather than at buffer
-/// flush. A **broken pipe** (the consumer exited, e.g. piped to `head`) is not an
-/// error to shout about: `stopped` latches and the sink goes quiet for the rest
-/// of the run rather than letting `println!` panic mid-stream.
-struct CutSink {
+/// Writes through an injected [`Write`] (production: a `stdout` handle) and
+/// flushes each line, so a JSONL consumer (`tail -f`, `jq`) sees events as they
+/// happen rather than at buffer flush. A **broken pipe** (the consumer exited,
+/// e.g. piped to `head`) is not an error to shout about: `stopped` latches and
+/// the sink goes quiet for the rest of the run rather than letting the write
+/// panic mid-stream — the journal remains the durable record either way. The
+/// writer is a type parameter so the broken-pipe latch is unit-testable against
+/// a failing writer without a real pipe.
+struct StreamSink<W: Write> {
+    out: W,
     json: bool,
     stopped: bool,
 }
 
-impl CutSink {
-    fn new(json: bool) -> Self {
+impl<W: Write> StreamSink<W> {
+    fn new(out: W, json: bool) -> Self {
         Self {
+            out,
             json,
             stopped: false,
         }
     }
 }
 
-impl ProgressSink for CutSink {
+impl<W: Write> ProgressSink for StreamSink<W> {
     fn event(&mut self, event: &JournalEvent) {
-        use std::io::Write as _;
         if self.stopped {
             return;
         }
@@ -589,8 +775,10 @@ impl ProgressSink for CutSink {
         } else {
             render_event_line(event)
         };
-        let mut out = std::io::stdout().lock();
-        if writeln!(out, "{line}").and_then(|()| out.flush()).is_err() {
+        if writeln!(self.out, "{line}")
+            .and_then(|()| self.out.flush())
+            .is_err()
+        {
             // Consumer went away (broken pipe) — stop streaming quietly; the
             // journal remains the durable record.
             self.stopped = true;
@@ -600,7 +788,7 @@ impl ProgressSink for CutSink {
 
 /// Emit the `run_created` fact to the stream before the coordinator runs, so the
 /// event stream carries the run's identity as its first line.
-fn stream_run_created(sink: &mut CutSink, journal: &Journal<'_>, plan: &ReleasePlan) {
+fn stream_run_created(sink: &mut dyn ProgressSink, journal: &Journal<'_>, plan: &ReleasePlan) {
     let state = journal.state();
     let event = JournalEvent {
         schema_version: JOURNAL_SCHEMA_VERSION,
@@ -773,4 +961,106 @@ fn render_plan_text(plan: &ReleasePlan, warnings: &[String]) {
         "  ossctl release cut --plan {} --version {}",
         plan.plan_id, plan.version
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ossctl_core::protocol::journal::EventKind;
+
+    /// A `Write` that always fails, counting attempts — models a reader that
+    /// closed the pipe (`| head`).
+    #[derive(Default)]
+    struct BrokenWriter {
+        writes: usize,
+    }
+
+    impl Write for BrokenWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "reader went away",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "reader went away",
+            ))
+        }
+    }
+
+    fn run_created(seq: u64) -> JournalEvent {
+        let kind = EventKind::RunCreated {
+            run_id: "RUN01".to_string(),
+            plan_id: "plan-abc".to_string(),
+            version: "1.0.0".to_string(),
+            targets: vec!["cargo".to_string()],
+        };
+        JournalEvent {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            seq,
+            ts: 1000 + seq,
+            idempotency_key: kind.idempotency_key(),
+            kind,
+        }
+    }
+
+    /// A broken pipe latches `stopped` on the first failed write, and every later
+    /// event is a silent no-op — the write is never retried (no panic, no second
+    /// attempt). This is the cut/show stream's broken-pipe safety.
+    #[test]
+    fn stream_sink_latches_stopped_on_broken_pipe() {
+        let mut sink = StreamSink::new(BrokenWriter::default(), true);
+        sink.event(&run_created(1));
+        assert!(sink.stopped, "a broken pipe must latch stopped");
+        assert_eq!(sink.out.writes, 1, "the first event attempts one write");
+
+        // A second event after the latch must not touch the writer at all.
+        sink.event(&run_created(2));
+        assert_eq!(
+            sink.out.writes, 1,
+            "a stopped sink must not retry writes on later events"
+        );
+    }
+
+    /// The happy path emits one compact JSON object per line (JSONL, §12): each
+    /// line parses independently and carries the event's `seq`/`kind`.
+    #[test]
+    fn stream_sink_emits_one_json_object_per_line() {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut sink = StreamSink::new(&mut buf, true);
+            sink.event(&run_created(1));
+            sink.event(&run_created(2));
+            assert!(!sink.stopped);
+        }
+        let text = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "one line per event");
+        for (i, line) in lines.iter().enumerate() {
+            let v: serde_json::Value = serde_json::from_str(line).expect("each line is JSON");
+            assert_eq!(v["seq"], (i + 1) as u64);
+            assert_eq!(v["kind"], "run_created");
+            assert_eq!(v["schema_version"], JOURNAL_SCHEMA_VERSION);
+        }
+    }
+
+    /// Text mode renders human progress lines, not JSON.
+    #[test]
+    fn stream_sink_text_mode_renders_human_lines() {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut sink = StreamSink::new(&mut buf, false);
+            sink.event(&run_created(1));
+        }
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("run RUN01 started"), "human line: {text:?}");
+        assert!(
+            !text.contains('{'),
+            "text mode must not emit JSON: {text:?}"
+        );
+    }
 }
