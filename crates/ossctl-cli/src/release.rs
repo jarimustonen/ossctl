@@ -361,58 +361,80 @@ fn render_reconcile_text(report: &ReconcileReport, warnings: &[String]) {
     }
 }
 
+/// The most-recent journal events `release show` returns as the §12 "recent
+/// event window". A release journal is inherently small (a handful of events per
+/// target and phase), but a resumed, many-times-retried run can grow, so the
+/// window is bounded rather than dumping the full log on every poll.
+const SHOW_EVENT_WINDOW: usize = 100;
+
+/// The `data` body of a `release show` progress query — the §12 progress-query
+/// payload: the folded run state, the last journal sequence folded into it, and a
+/// bounded window of recent events. Stable across live and terminal runs so an
+/// agent parses one shape regardless of when it polls.
+#[derive(serde::Serialize)]
+struct ShowSnapshot<'a> {
+    /// The last journal sequence folded into [`Self::state`] — the poll cursor an
+    /// agent advances on. Surfaced under a stable public name rather than
+    /// `RunState`'s internal `applied_seq` watermark.
+    last_seq: u64,
+    /// The folded run state: identity, derived status, per-target/tag progress.
+    state: &'a RunState,
+    /// The tail of the journal (at most [`SHOW_EVENT_WINDOW`] events), in
+    /// ascending `seq` — the "recent event window" a live poller reads
+    /// incrementally.
+    recent_events: &'a [JournalEvent],
+}
+
 /// `ossctl release show <run_id>` — the §12 progress query for a release run:
-/// poll a run's progress live, or read its post-mortem summary.
+/// poll a run's live progress, or read its post-mortem summary.
 ///
 /// Reads the run's event log and reduced state read-only (no lock, no manifest
-/// self-heal, no writes — safe against a live cut) and branches on whether the
-/// run is terminal:
-///
-/// - **Live** (`in_progress`): streams the journal as a JSONL event window — the
-///   same compact one-event-per-line shape `release cut` emits (`--json`), so an
-///   agent consumes a poll of `show` exactly like a live `cut` stream. Text mode
-///   renders the same events as human progress lines. Broken-pipe-safe.
-/// - **Terminal** (`completed`/`abandoned`): folds the journal to its final
-///   [`RunState`] and emits it as the post-mortem summary under the canonical
-///   `{schema_version, data, warnings}` envelope (`--json`) or a human summary.
-///
-/// The format split is by the run's *terminal status* (a stable run property),
-/// not by elapsed runtime: a summary envelope for a finished run, a live event
-/// window for a running one — the two forms a §12 progress query is defined to
-/// return.
+/// self-heal, no writes — safe against a live cut) and, in `--json` mode, **always**
+/// emits the canonical `{schema_version, data, warnings}` envelope whose `data` is
+/// a [`ShowSnapshot`]: the folded [`RunState`], the last folded `seq`, and a
+/// bounded [`SHOW_EVENT_WINDOW`] window of recent events. The shape is **the same
+/// whether the run is live or terminal** — §12 forbids a progress query silently
+/// switching wire format across polls, so an agent parses one document regardless
+/// of when it catches the run. (A live JSONL *stream* is `release cut`'s job; a
+/// poll returns a framed snapshot, exactly the payload §12 defines: current state,
+/// last seq, and a recent event window.) Text mode renders a human summary.
 pub fn show(args: &RunIdArgs, format: OutputFormat) -> Result<(), CliError> {
-    let repo_root = resolve_repo_root(args.repo_root.as_ref())?;
-    if !repo_root.is_dir() {
-        return Err(CliError::user(
-            "invalid_repo_root",
-            format!("repo_root '{}' is not a directory", repo_root.display()),
-        )
-        .with_invalid_value(repo_root.display().to_string()));
-    }
-    let root = std::fs::canonicalize(&repo_root).map_err(|e| {
-        CliError::system(
-            "io_error",
-            format!(
-                "cannot canonicalize repo_root '{}': {e}",
-                repo_root.display()
-            ),
-        )
-    })?;
-
-    // Same journal-root resolution as `verify`: explicit `--journal-dir` wins,
-    // else `<git-common-dir>/ossctl/releases` so every linked worktree shares one
-    // run-state root.
-    let git = RealGitRepo::new(&root);
-    let paths = JournalPaths::from_git(&git, args.journal_dir.as_deref()).map_err(|e| {
-        CliError::system(
-            "journal_root_unresolved",
-            format!(
-                "cannot locate the release journal root (is '{}' a git repository? pass \
-                 --journal-dir to override): {e}",
-                root.display()
-            ),
-        )
-    })?;
+    // `show` is a pure journal read: when an explicit `--journal-dir` is given it
+    // needs neither a repository nor a valid cwd (a post-mortem query against an
+    // archived journal must work from anywhere). Only the git-resolved default
+    // requires a repo root.
+    let paths = if let Some(dir) = args.journal_dir.as_deref() {
+        JournalPaths::new(dir)
+    } else {
+        let repo_root = resolve_repo_root(args.repo_root.as_ref())?;
+        if !repo_root.is_dir() {
+            return Err(CliError::user(
+                "invalid_repo_root",
+                format!("repo_root '{}' is not a directory", repo_root.display()),
+            )
+            .with_invalid_value(repo_root.display().to_string()));
+        }
+        let root = std::fs::canonicalize(&repo_root).map_err(|e| {
+            CliError::system(
+                "io_error",
+                format!(
+                    "cannot canonicalize repo_root '{}': {e}",
+                    repo_root.display()
+                ),
+            )
+        })?;
+        let git = RealGitRepo::new(&root);
+        JournalPaths::from_git(&git, None).map_err(|e| {
+            CliError::system(
+                "journal_root_unresolved",
+                format!(
+                    "cannot locate the release journal root (is '{}' a git repository? pass \
+                     --journal-dir to override): {e}",
+                    root.display()
+                ),
+            )
+        })?
+    };
 
     // Read-only read of both the event log and its projection.
     let store = ReadOnlyJournalStore;
@@ -430,34 +452,36 @@ pub fn show(args: &RunIdArgs, format: OutputFormat) -> Result<(), CliError> {
             .with_invalid_value(args.run_id.clone())
         })?;
 
-    let terminal = matches!(state.status, RunStatus::Completed | RunStatus::Abandoned);
+    // The bounded recent-event window (the log tail, ascending seq).
+    let window = &events[events.len().saturating_sub(SHOW_EVENT_WINDOW)..];
 
     match format {
         OutputFormat::Json => {
-            if terminal {
-                // Post-mortem: the folded final state IS the summary.
-                crate::output::emit_json(&state, &show_warnings(&state))?;
-            } else {
-                // Live tail: stream the event window as JSONL (broken-pipe-safe).
-                let mut sink = StreamSink::new(std::io::stdout(), true);
-                for event in &events {
-                    sink.event(event);
-                }
-            }
+            let snapshot = ShowSnapshot {
+                last_seq: state.applied_seq,
+                state: &state,
+                recent_events: window,
+            };
+            crate::output::emit_json(&snapshot, &show_warnings(&state))?;
         }
-        OutputFormat::Text => render_show_text(&state, &events),
+        OutputFormat::Text => render_show_text(&state, window),
     }
     Ok(())
 }
 
-/// Non-fatal context for a post-mortem summary envelope: the abandon reason, and
-/// any declared target that never got a publish receipt (interrupted, or
-/// cancelled with its reason) — so an `abandoned`/interrupted run's gaps are
-/// visible without re-reading the raw event window.
+/// Non-fatal context for the progress-query envelope: the abandon reason (always),
+/// and — for a *terminal* run — any declared target that never got a publish
+/// receipt (interrupted, or cancelled with its reason), so a finished run's gaps
+/// are visible without re-reading the event window. A live run's unpublished
+/// targets are simply not-done-yet, not gaps, so they are not warned about.
 fn show_warnings(state: &RunState) -> Vec<String> {
     let mut warnings = Vec::new();
     if let Some(reason) = &state.abandon_reason {
         warnings.push(format!("run was abandoned: {reason}"));
+    }
+    let terminal = matches!(state.status, RunStatus::Completed | RunStatus::Abandoned);
+    if !terminal {
+        return warnings;
     }
     for target in &state.targets {
         if state.published.contains_key(target) {

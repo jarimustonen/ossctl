@@ -718,10 +718,11 @@ fn release_verify_reports_cancelled_targets_distinctly() {
     );
 }
 
-// ── release show: progress query (live tail + post-mortem summary) ───────────
+// ── release show: progress query (§12 snapshot envelope) ─────────────────────
 
-/// A terminal run (`completed`) folds to its final state and emits the summary
-/// under the canonical envelope — the post-mortem form of the §12 progress query.
+/// A terminal run (`completed`) folds to its final state and emits the §12
+/// progress-query snapshot under the canonical envelope: `data.state` (the folded
+/// run), `data.last_seq`, and `data.recent_events` (the event window).
 #[test]
 fn release_show_post_mortem_summary_from_a_journal() {
     let dir = seed_journal(
@@ -744,18 +745,23 @@ fn release_show_post_mortem_summary_from_a_journal() {
         .unwrap();
     assert!(out.status.success(), "show must exit 0: {out:?}");
 
-    // A terminal run yields the canonical envelope, NOT a JSONL stream.
+    // The progress query is one canonical envelope, NOT a JSONL stream.
     let v: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("summary is one JSON doc");
     assert_eq!(v["schema_version"], 1);
     let data = &v["data"];
-    assert_eq!(data["run_id"], "SHOW01");
-    assert_eq!(data["plan_id"], "plan-done");
-    assert_eq!(data["version"], "1.2.0");
-    assert_eq!(data["status"], "completed");
-    // The folded state carries the last applied seq and the published receipt.
-    assert_eq!(data["applied_seq"], 7);
-    assert_eq!(data["published"]["cargo"]["version"], "1.2.0");
+    // Stable public poll cursor + folded state under `data.state`.
+    assert_eq!(data["last_seq"], 7);
+    let state = &data["state"];
+    assert_eq!(state["run_id"], "SHOW01");
+    assert_eq!(state["plan_id"], "plan-done");
+    assert_eq!(state["version"], "1.2.0");
+    assert_eq!(state["status"], "completed");
+    assert_eq!(state["published"]["cargo"]["version"], "1.2.0");
+    // The recent-event window is present and carries the tag-completion event.
+    let events = data["recent_events"].as_array().unwrap();
+    assert_eq!(events.len(), 7, "the whole (small) log fits the window");
+    assert_eq!(events.last().unwrap()["kind"], "phase_completed");
 
     // Read-only: show must not materialize a manifest next to the journal.
     assert!(
@@ -782,7 +788,7 @@ fn release_show_post_mortem_surfaces_abandon_reason() {
         .unwrap();
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["data"]["status"], "abandoned");
+    assert_eq!(v["data"]["state"]["status"], "abandoned");
     let warnings = v["warnings"].as_array().unwrap();
     assert!(
         warnings
@@ -792,10 +798,11 @@ fn release_show_post_mortem_surfaces_abandon_reason() {
     );
 }
 
-/// A live (in-progress) run streams the journal as a JSONL event window — one
-/// self-contained JSON object per line, NOT a wrapping envelope.
+/// A live (in-progress) run returns the SAME canonical snapshot envelope as a
+/// terminal one — §12 forbids switching wire shape across polls. The live event
+/// window rides in `data.recent_events`; `data.state.status` is `in_progress`.
 #[test]
-fn release_show_live_tail_streams_jsonl() {
+fn release_show_live_returns_the_same_snapshot_envelope() {
     let dir = seed_journal(
         "SHOW03",
         &[
@@ -812,21 +819,54 @@ fn release_show_live_tail_streams_jsonl() {
         .unwrap();
     assert!(out.status.success(), "live show must exit 0: {out:?}");
 
-    let text = String::from_utf8(out.stdout).unwrap();
-    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(lines.len(), 3, "one JSONL line per journal event: {text:?}");
+    // One envelope document — identical top-level shape to the terminal case.
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("a live poll is one envelope, not JSONL");
+    assert_eq!(v["schema_version"], 1);
+    let data = &v["data"];
+    assert_eq!(data["state"]["status"], "in_progress");
+    assert_eq!(data["last_seq"], 3);
+    // A live run in dry_run has no unpublished-target warnings (not gaps yet).
+    assert_eq!(v["warnings"], serde_json::json!([]));
+    // The recent-event window carries the live tail in ascending seq.
+    let events = data["recent_events"].as_array().unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0]["kind"], "run_created");
+    assert_eq!(events[2]["kind"], "target_dry_run");
+    assert_eq!(events[2]["seq"], 3);
+}
 
-    // Every line parses independently (JSONL), and the stream is NOT an envelope.
-    let first: serde_json::Value = serde_json::from_str(lines[0]).expect("line 0 is JSON");
-    assert_eq!(first["kind"], "run_created");
-    assert_eq!(first["seq"], 1);
-    assert!(
-        first.get("data").is_none(),
-        "a live tail is raw JSONL, never the {{data}} envelope"
+/// With an explicit `--journal-dir`, `show` is a pure journal read: it needs no
+/// repository, so even a bogus `--repo-root` is ignored (a post-mortem query
+/// against an archived journal must work from anywhere).
+#[test]
+fn release_show_with_journal_dir_ignores_repo_root() {
+    let dir = seed_journal(
+        "SHOW04",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"SHOW04","plan_id":"p","version":"1.0.0","targets":["cargo"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"run_abandoned","kind":"run_abandoned","reason":"stopped"}"#,
+        ],
     );
-    let last: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
-    assert_eq!(last["kind"], "target_dry_run");
-    assert_eq!(last["seq"], 3);
+    let out = ossctl()
+        .args([
+            "release",
+            "show",
+            "SHOW04",
+            "--json",
+            "--repo-root",
+            "/nonexistent/not/a/repo",
+            "--journal-dir",
+        ])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "an explicit --journal-dir must not require a repo root: {out:?}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["state"]["run_id"], "SHOW04");
 }
 
 /// A `show` against a run with no journal is a caller-fixable (exit 1) error, and
