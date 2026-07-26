@@ -2,13 +2,16 @@
 created: 2026-07-25
 updated: 2026-07-26
 type: feature
-status: in-progress
+status: done
 priority: normal
 epic: ossctl-phase4-build
 blocked_by: ['@contract-command', '@facts-command']
 commits:
 - hash: 845e19f
   summary: implement ossctl audit readiness engine
+- hash: 5fd97c0
+  summary: apply llm-review findings
+closed: 2026-07-26
 ---
 
 # ossctl audit — readiness scoring (the /oss-readiness engine)
