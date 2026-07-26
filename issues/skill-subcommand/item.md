@@ -2,13 +2,16 @@
 created: 2026-07-25
 updated: 2026-07-26
 type: feature
-status: in-progress
+status: done
 priority: normal
 epic: ossctl-phase4-build
 blocked_by: ['@workspace-scaffold']
 commits:
 - hash: 4f7e7a687ea7
   summary: 'feat(skill): skill list|install|print + bundle mechanism + §17 lockstep gate'
+- hash: cad8b54fc3ce
+  summary: 'fix(skill): apply llm-review findings (semver, hardened parsing, gate false-negatives)'
+closed: 2026-07-26
 ---
 
 # ossctl skill list|install|print + bundle the /oss-* skills (§15-17)
