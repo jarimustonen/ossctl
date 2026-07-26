@@ -69,16 +69,61 @@ fn frontmatter_is_well_formed_and_pins_version() {
             .unwrap_or_else(|| panic!("{name}: no `name:` in frontmatter"));
         assert_eq!(fm_name, name, "{name}: frontmatter name matches directory");
 
-        // The installed/printed body has no unrendered token left.
-        let rendered = ossctl()
-            .args(["skill", "print", &name])
-            .output()
-            .unwrap()
-            .stdout;
-        let rendered = String::from_utf8(rendered).unwrap();
+        // `skill print` must SUCCEED for this template — a template on disk that
+        // is not in the binary's catalog would print nothing (empty stdout) and
+        // silently pass the token check below. Assert exit 0 first.
+        let out = ossctl().args(["skill", "print", &name]).output().unwrap();
         assert!(
-            !rendered.contains("{{"),
-            "{name}: rendered skill still contains an unrendered token"
+            out.status.success(),
+            "{name}: template exists on disk but is not printable (missing from CATALOG?): {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // No *substitution token* survives rendering. Checked specifically, not
+        // as a blanket `{{` ban, so a template may legitimately show e.g. a
+        // GitHub Actions `${{ secrets.X }}` snippet.
+        let rendered = String::from_utf8(out.stdout).unwrap();
+        for token in ["{{CLI_VERSION}}", "{{SKILL_SCHEMA_VERSION}}"] {
+            assert!(
+                !rendered.contains(token),
+                "{name}: rendered skill still contains {token}"
+            );
+        }
+    }
+}
+
+/// The on-disk template set, the binary's `skill list` catalog, and safe-slug
+/// naming must all agree — no orphan template, no catalog entry whose name could
+/// escape the install root (`../`, absolute, separators).
+#[test]
+fn catalog_matches_disk_and_names_are_safe_slugs() {
+    let mut on_disk: Vec<String> = bundled_templates().into_iter().map(|(n, _)| n).collect();
+    on_disk.sort();
+
+    let out = ossctl().args(["skill", "list", "--json"]).output().unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let mut catalog: Vec<String> = v["data"]["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap().to_string())
+        .collect();
+    catalog.sort();
+
+    assert_eq!(
+        on_disk, catalog,
+        "every bundled template must be in the catalog and vice-versa"
+    );
+
+    for name in &catalog {
+        assert!(
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                && !name.starts_with('-'),
+            "skill name `{name}` is not a safe slug (would risk path escape under the install root)"
         );
     }
 }
@@ -102,11 +147,28 @@ fn gate_rejects_a_bogus_flag() {
     check_command("self-test", "ossctl audit --no-such-flag");
 }
 
-/// Self-guard: the gate must reject an unknown subcommand path too.
+/// Self-guard: the gate must reject an unknown top-level subcommand path.
 #[test]
 #[should_panic(expected = "unknown subcommand")]
 fn gate_rejects_a_bogus_subcommand() {
     check_command("self-test", "ossctl frobnicate widgets");
+}
+
+/// Self-guard for the nastiest false-negative: a bogus CHILD of a real parent
+/// verb. `release` is real but `frobnicate` is not — the gate must not silently
+/// treat `frobnicate` as an ignored positional and validate against `release`.
+#[test]
+#[should_panic(expected = "unknown subcommand")]
+fn gate_rejects_a_bogus_child_of_a_real_parent() {
+    check_command("self-test", "ossctl release frobnicate --json");
+}
+
+/// Self-guard: a flag that is a *prefix* of a real flag must be rejected — the
+/// help match is boundary-aware, so `--pla` does not pass on `--plan`.
+#[test]
+#[should_panic(expected = "unknown flag")]
+fn gate_rejects_a_prefix_of_a_real_flag() {
+    check_command("self-test", "ossctl release cut --pla");
 }
 
 // ── extraction + validation ──────────────────────────────────────────────────
@@ -141,9 +203,15 @@ fn fenced_ossctl_commands(text: &str) -> Vec<String> {
     cmds
 }
 
-/// Resolve one `ossctl …` command against the live binary: find the longest
-/// leading token run that is a real subcommand path, then verify every `--flag`
-/// it references is listed in that subcommand's `--help`.
+/// Resolve one `ossctl …` command against the live binary, then verify every
+/// referenced flag exists.
+///
+/// The subcommand path is the leading run of tokens that are neither flags
+/// (`-…`) nor positional placeholders (`<…>`) — e.g. `contract show` in
+/// `contract show --json`, `skill print oss-release` in `skill print
+/// oss-release`. That exact path must resolve (`ossctl <path> --help` exits 0);
+/// we do NOT shrink on failure, because shrinking would silently accept a bogus
+/// child of a real parent (`release frobnicate` → validated against `release`).
 fn check_command(skill: &str, cmd: &str) {
     let tokens: Vec<&str> = cmd.split_whitespace().collect();
     assert_eq!(
@@ -152,30 +220,23 @@ fn check_command(skill: &str, cmd: &str) {
     );
     let args = &tokens[1..];
 
-    // Candidate path = leading non-flag tokens (positional placeholders like
-    // `<run_id>` or a skill name are trimmed away by the shrink loop below).
-    let candidate_len = args.iter().take_while(|t| !t.starts_with('-')).count();
+    let path_len = args
+        .iter()
+        .take_while(|t| !t.starts_with('-') && !t.starts_with('<'))
+        .count();
+    let path = &args[..path_len];
 
-    // Shrink from the longest candidate until `ossctl <path> --help` succeeds.
-    // This strips trailing positional args (`skill print oss-release` → `skill
-    // print`) without needing to know the arity of each verb.
-    let mut help = None;
-    for len in (1..=candidate_len).rev() {
-        let path = &args[..len];
-        let out = ossctl().args(path).arg("--help").output().unwrap();
-        if out.status.success() {
-            help = Some((
-                path.to_vec(),
-                String::from_utf8_lossy(&out.stdout).into_owned(),
-            ));
-            break;
-        }
-    }
-    let (path, help_text) = help.unwrap_or_else(|| {
-        panic!("{skill}: `{cmd}` references an unknown subcommand (no valid path prefix)")
-    });
+    let out = ossctl().args(path).arg("--help").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{skill}: `{cmd}` references an unknown subcommand `ossctl {}`",
+        path.join(" ")
+    );
+    let help_text = String::from_utf8_lossy(&out.stdout).into_owned();
 
-    // Every referenced long flag must appear in that subcommand's help.
+    // Every referenced long flag must be a real flag on that subcommand. The
+    // match is boundary-aware (token-exact), so `--force` is NOT satisfied by a
+    // help entry for `--force-approved`.
     for tok in args {
         if let Some(flag) = tok.strip_prefix("--") {
             let flag = flag.split('=').next().unwrap();
@@ -183,7 +244,7 @@ fn check_command(skill: &str, cmd: &str) {
                 continue;
             }
             assert!(
-                help_text.contains(&format!("--{flag}")),
+                help_lists_flag(&help_text, flag),
                 "{skill}: `{cmd}` references unknown flag `--{flag}` on `ossctl {}`",
                 path.join(" ")
             );
@@ -191,18 +252,36 @@ fn check_command(skill: &str, cmd: &str) {
     }
 }
 
-/// Read a scalar `key:` value out of the leading YAML frontmatter block,
-/// unquoted. Mirrors the binary's own hand-rolled frontmatter reader.
+/// Whether `--help` output declares `--<flag>` as an actual flag (not merely a
+/// substring of a longer flag or of prose). clap renders flags as whitespace-
+/// separated tokens like `--json`, `--plan`, `-h,`, `--help`; a value hint
+/// follows as a separate `<VALUE>` token. So a token-exact comparison (after
+/// trimming a trailing `,`) is a reliable boundary check without a regex dep.
+fn help_lists_flag(help: &str, flag: &str) -> bool {
+    let want = format!("--{flag}");
+    help.split_whitespace()
+        .any(|t| t.trim_end_matches(',') == want)
+}
+
+/// Read a top-level scalar `key:` value out of the leading YAML frontmatter
+/// block, unquoted. Mirrors the binary's own hardened reader (BOM tolerant,
+/// top-level keys only, trailing `# comment` stripped) so the gate and the
+/// binary agree on what a frontmatter value is.
 fn frontmatter_field(text: &str, key: &str) -> Option<String> {
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     let body = text.strip_prefix("---")?;
     let end = body.find("\n---")?;
     for line in body[..end].lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix(&format!("{key}:")) {
-            let v = rest.trim().trim_matches(|c| c == '"' || c == '\'');
-            if !v.is_empty() {
-                return Some(v.to_string());
-            }
+        if line.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let Some(rest) = line.trim_end().strip_prefix(&format!("{key}:")) else {
+            continue;
+        };
+        let v = rest.split(" #").next().unwrap_or(rest).trim();
+        let v = v.trim_matches(|c| c == '"' || c == '\'');
+        if !v.is_empty() {
+            return Some(v.to_string());
         }
     }
     None

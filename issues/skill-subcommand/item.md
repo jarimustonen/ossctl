@@ -6,6 +6,9 @@ status: in-progress
 priority: normal
 epic: ossctl-phase4-build
 blocked_by: ['@workspace-scaffold']
+commits:
+- hash: 4f7e7a687ea7
+  summary: 'feat(skill): skill list|install|print + bundle mechanism + §17 lockstep gate'
 ---
 
 # ossctl skill list|install|print + bundle the /oss-* skills (§15-17)

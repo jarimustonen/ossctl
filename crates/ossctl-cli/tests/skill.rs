@@ -77,10 +77,12 @@ fn skill_print_substitutes_tokens() {
         .unwrap();
     assert!(out.status.success());
     let text = String::from_utf8(out.stdout).unwrap();
-    assert!(
-        !text.contains("{{"),
-        "no unrendered token survives print: {text}"
-    );
+    for token in ["{{CLI_VERSION}}", "{{SKILL_SCHEMA_VERSION}}"] {
+        assert!(
+            !text.contains(token),
+            "unrendered token {token} survives print: {text}"
+        );
+    }
     assert!(
         text.contains(&format!("cli_version: \"{ver}\"")),
         "frontmatter pins the running version"
@@ -243,11 +245,12 @@ fn skill_install_refuses_newer_on_disk() {
     assert!(!std::fs::read_to_string(&path).unwrap().contains("stale"));
 }
 
-/// `--dest` with `--agent all` is a caller error (one dir, two runtime shapes).
+/// `--dest` with `--agent all` writes both runtime shapes under the one dir —
+/// they do not collide (`<dest>/<name>/SKILL.md` vs `<dest>/<name>.md`).
 #[test]
-fn skill_install_dest_with_all_is_error() {
+fn skill_install_dest_with_all_writes_both_shapes() {
     let dir = tempfile::tempdir().unwrap();
-    let out = ossctl()
+    ossctl()
         .args([
             "skill",
             "install",
@@ -257,11 +260,16 @@ fn skill_install_dest_with_all_is_error() {
             "--dest",
         ])
         .arg(dir.path())
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    let v: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
-    assert_eq!(v["error"]["code"], "invalid_arguments");
+        .assert()
+        .success();
+    assert!(
+        dir.path().join("oss-release/SKILL.md").exists(),
+        "claude shape written"
+    );
+    assert!(
+        dir.path().join("oss-release.md").exists(),
+        "codex shape written"
+    );
 }
 
 /// A partial-install guard: when any target in the plan is refused, nothing is

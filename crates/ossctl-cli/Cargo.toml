@@ -25,6 +25,7 @@ workspace = true
 [dependencies]
 ossctl-core = { path = "../ossctl-core", version = "=0.1.0" }
 clap = { workspace = true }
+semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
