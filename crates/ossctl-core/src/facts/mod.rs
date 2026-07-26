@@ -10,23 +10,28 @@
 //! whole point of the injected-port seam (ADR-0001 §2).
 //!
 //! The report shape lives in [`crate::protocol::facts`] (the versioned wire
-//! DTO); this module owns only the detection logic. It is **deterministic**:
-//! the same repo tree and git state produce byte-identical facts, so `/oss-init`
-//! and the readiness `audit` — which both read this — can never disagree on
-//! maturity or the gated core.
+//! DTO); this module owns only the detection logic. It is **reproducible**: for
+//! a fixed repository state *and* wall-clock day it produces byte-identical
+//! facts, so `/oss-init` and the readiness `audit` reading the same `ossctl
+//! facts` output agree on maturity and the gated core. It is not a pure function
+//! of `HEAD` alone: the recent-committer count uses git's `--since=1 year ago`
+//! (evaluated against the current clock) and reads all refs/tags, so a run that
+//! crosses the one-year boundary, or after refs change, can shift — the same
+//! time-relative behavior `infer-repo-facts.py` has.
 //!
 //! ## Fidelity to the Python detector
 //!
 //! Field names, the manifest set, the SemVer/monorepo-prefix handling, the CI
 //! globs, the spike-label list, and the maturity truth table all mirror
-//! `infer-repo-facts.py` exactly. Two deliberate, behavior-preserving
-//! departures: (1) TOML manifests are parsed by scanning the relevant
-//! `[section]` for `key = "value"` rather than via a full TOML library (the
-//! contract normalizer avoids new parser deps the same way, and the Python
-//! detector itself falls back to regex when `tomllib` is unavailable); (2) the
-//! `[project]`/`[tool.poetry]` sections are scoped rather than scanning the
-//! whole file, which is strictly more correct for well-formed manifests and
-//! yields the same result the Python `tomllib` path does.
+//! `infer-repo-facts.py`. TOML manifests (`Cargo.toml`, `pyproject.toml`) are
+//! parsed by scanning the relevant `[section]` for `key = "value"` (single or
+//! double quotes) rather than via a full TOML library — the contract normalizer
+//! avoids new parser deps the same way. This matches the Python `tomllib` path
+//! for the common manifest shapes; two edge cases are **not** reproduced and are
+//! deliberately out of scope: escaped/multiline TOML strings, and Python's
+//! whole-file regex *fallback* that fires only when `tomllib` itself fails on
+//! malformed TOML (there, Python may surface a `name` from an unrelated table;
+//! this port returns none). Both are exotic in a real `pyproject.toml`.
 
 use std::path::Path;
 
@@ -74,9 +79,10 @@ const CI_GLOBS: &[&str] = &[
     "Jenkinsfile",
 ];
 
-/// Byte cap for a manifest read (matches the Python `_read` default).
+/// Character cap for a manifest read (matches the Python `_read` default, which
+/// reads decoded characters, not bytes).
 const MANIFEST_LIMIT: usize = 200_000;
-/// Byte cap for a README read (matches the Python README read).
+/// Character cap for a README read (matches the Python text-mode README read).
 const README_LIMIT: usize = 4_000;
 /// Character cap for the emitted `description`.
 const DESCRIPTION_CHARS: usize = 120;
@@ -136,11 +142,11 @@ pub fn gather(repo_root: &Path, fs: &dyn Fs, git: &dyn GitRepo) -> Facts {
     });
 
     // ── dependency bot ──
-    let dependency_bot = if is_file(fs, &repo_root.join(".github/dependabot.yml")) {
+    let dependency_bot = if fs.is_file(&repo_root.join(".github/dependabot.yml")) {
         Some("dependabot".to_string())
     } else if ["renovate.json", ".renovaterc", ".renovaterc.json"]
         .iter()
-        .any(|f| is_file(fs, &repo_root.join(f)))
+        .any(|f| fs.is_file(&repo_root.join(f)))
     {
         Some("renovate".to_string())
     } else {
@@ -204,7 +210,7 @@ fn detect_manifests(repo_root: &Path, fs: &dyn Fs) -> (Vec<Ecosystem>, Vec<Packa
     let mut packages: Vec<Package> = Vec::new();
     for &(fname, eco) in MANIFESTS {
         let path = repo_root.join(fname);
-        if !is_file(fs, &path) {
+        if !fs.is_file(&path) {
             continue;
         }
         let parsed = read_text(fs, &path, MANIFEST_LIMIT)
@@ -369,7 +375,12 @@ fn toml_str_value(block: &str, key: &str, allow_empty: bool) -> Option<String> {
         let Some(rest) = rest.strip_prefix(key) else {
             continue;
         };
-        // The key must be a whole token: what follows (once trimmed) is `=`.
+        // The key must be a whole token: the char after it is whitespace or `=`
+        // (else `name` would spuriously match `nameservers`). Mirrors the Python
+        // `^\s*<key>\s*=` anchor.
+        if !rest.starts_with(|c: char| c.is_whitespace() || c == '=') {
+            continue;
+        }
         let Some(rest) = rest.trim_start().strip_prefix('=') else {
             continue;
         };
@@ -384,11 +395,15 @@ fn toml_str_value(block: &str, key: &str, allow_empty: bool) -> Option<String> {
     None
 }
 
-/// Read a leading `"..."` double-quoted string (no escape handling — TOML basic
-/// strings in these manifests do not need it for name/version/description).
+/// Read a leading quoted string — `"..."` or `'...'`. TOML allows both basic
+/// (double) and literal (single) strings, and `tomllib` accepts either, so both
+/// are honored here for parity. No escape handling: neither this nor the Python
+/// regex `"([^"]+)"` unescapes, and manifest name/version/description do not need
+/// it in practice.
 fn extract_quoted(s: &str) -> Option<String> {
-    let s = s.strip_prefix('"')?;
-    let end = s.find('"')?;
+    let quote = s.chars().next().filter(|&c| c == '"' || c == '\'')?;
+    let s = &s[1..];
+    let end = s.find(quote)?;
     Some(s[..end].to_string())
 }
 
@@ -477,17 +492,19 @@ fn version_ge_1_0(version: Option<&str>) -> bool {
 
 // ── Small helpers ────────────────────────────────────────────────────────────
 
-/// Whether `path` exists and is a regular file (not a directory).
-fn is_file(fs: &dyn Fs, path: &Path) -> bool {
-    fs.exists(path) && !fs.is_dir(path)
-}
-
-/// Read a file through the [`Fs`] port as lossy UTF-8, capped at `limit` bytes.
-/// `None` when the read fails (missing/unreadable).
+/// Read a file through the [`Fs`] port as lossy UTF-8, capped at `limit`
+/// *characters* (not bytes) — the Python `_read` opens in text mode, so
+/// `fh.read(limit)` counts decoded characters. Slicing bytes instead would
+/// under-read a multibyte README (a 4000-byte cap holds only ~1333 CJK chars)
+/// and could split a codepoint into a `U+FFFD`. `None` when the read fails.
 fn read_text(fs: &dyn Fs, path: &Path, limit: usize) -> Option<String> {
     let bytes = fs.read(path).ok()?;
-    let end = bytes.len().min(limit);
-    Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
+    Some(
+        String::from_utf8_lossy(&bytes)
+            .chars()
+            .take(limit)
+            .collect(),
+    )
 }
 
 /// Count non-blank lines (git shortlog emits one per committer).
@@ -548,6 +565,9 @@ mod tests {
         }
         fn is_dir(&self, path: &Path) -> bool {
             self.dirs.contains(path)
+        }
+        fn is_file(&self, path: &Path) -> bool {
+            self.files.contains_key(path)
         }
         fn read_dir(&self, dir: &Path) -> std::io::Result<Vec<String>> {
             if !self.dirs.contains(dir) {
@@ -643,6 +663,22 @@ mod tests {
         assert_eq!(facts.inferred_maturity, Maturity::Spike);
     }
 
+    #[test]
+    fn unborn_repo_has_no_commits() {
+        // A work tree whose HEAD does not resolve (no commits yet): is_git true,
+        // has_commits false, so no committers/tags are read.
+        let git = FakeGit {
+            work_tree: true,
+            head: None,
+            ..FakeGit::default()
+        };
+        let facts = gather(repo(), &FakeFs::default(), &git);
+        assert!(facts.is_git);
+        assert!(!facts.has_commits);
+        assert_eq!(facts.committers_total, 0);
+        assert!(facts.tags.is_empty());
+    }
+
     // ── Ecosystem + manifest detection ─────────────────────────────────────
 
     #[test]
@@ -717,6 +753,38 @@ mod tests {
             &FakeGit::default(),
         );
         assert_eq!(facts.packages[0].package.as_deref(), Some("legacy"));
+    }
+
+    #[test]
+    fn pyproject_single_quoted_strings_parse() {
+        // TOML literal (single-quoted) strings are valid and `tomllib` accepts
+        // them; the scanner must too, or a >=1.0 release would be missed.
+        let project = "[project]\nname = 'widget'\nversion = '1.2.0'\n\
+                       description = 'a widget'\n";
+        let facts = gather(
+            repo(),
+            &FakeFs::default().file("/repo/pyproject.toml", project),
+            &FakeGit::default(),
+        );
+        assert_eq!(facts.packages[0].package.as_deref(), Some("widget"));
+        assert_eq!(facts.packages[0].version.as_deref(), Some("1.2.0"));
+        assert!(facts.has_ge_1_0_release);
+        assert_eq!(facts.description.as_deref(), Some("a widget"));
+    }
+
+    #[test]
+    fn toml_key_matches_whole_token_not_prefix() {
+        // `version-code` / `namespace` must not satisfy the `version` / `name`
+        // key match.
+        let cargo = "[package]\nnamespace = \"nope\"\nversion-code = \"9\"\n\
+                     name = \"real\"\nversion = \"0.2.0\"\n";
+        let facts = gather(
+            repo(),
+            &FakeFs::default().file("/repo/Cargo.toml", cargo),
+            &FakeGit::default(),
+        );
+        assert_eq!(facts.packages[0].package.as_deref(), Some("real"));
+        assert_eq!(facts.packages[0].version.as_deref(), Some("0.2.0"));
     }
 
     #[test]
@@ -825,7 +893,24 @@ mod tests {
         let fs2 = FakeFs::default().file("/repo/Cargo.toml", &cargo);
         let facts2 = gather(repo(), &fs2, &FakeGit::default());
         assert_eq!(facts.description.as_deref(), Some("intro"));
-        assert_eq!(facts2.description.as_deref().map(str::len), Some(120));
+        // Count characters, not bytes — the cap is a char cap.
+        assert_eq!(
+            facts2.description.as_deref().map(|d| d.chars().count()),
+            Some(120)
+        );
+    }
+
+    #[test]
+    fn read_limit_counts_chars_not_bytes() {
+        // A multibyte description right at the boundary: a byte-slice cap would
+        // truncate/corrupt it; the char cap keeps it whole. `く` is 3 bytes.
+        let desc = "く".repeat(60); // 60 chars, 180 bytes — under the 120 char cap
+        let cargo = format!("[package]\nname=\"a\"\nversion=\"0.1.0\"\ndescription=\"{desc}\"\n");
+        let fs = FakeFs::default().file("/repo/Cargo.toml", &cargo);
+        let facts = gather(repo(), &fs, &FakeGit::default());
+        assert_eq!(facts.description.as_deref(), Some(desc.as_str()));
+        // No replacement character crept in from a mid-codepoint byte slice.
+        assert!(!facts.description.as_deref().unwrap().contains('\u{FFFD}'));
     }
 
     // ── SemVer tag handling ────────────────────────────────────────────────

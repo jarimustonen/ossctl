@@ -6,6 +6,9 @@ status: in-progress
 priority: normal
 epic: ossctl-phase4-build
 blocked_by: ['@workspace-scaffold']
+commits:
+- hash: 90a0411516497be0a0e7f048790684e0581c22e8
+  summary: port infer-repo-facts.py to ossctl facts
 ---
 
 # ossctl facts — port the deterministic repo-fact detector to Rust

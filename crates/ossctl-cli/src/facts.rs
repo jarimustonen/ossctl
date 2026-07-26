@@ -34,9 +34,19 @@ pub fn run(args: &FactsArgs, format: OutputFormat) -> Result<(), CliError> {
         .with_invalid_value(repo_root.display().to_string()));
     }
     // Canonicalize so `repo_root` in the report is absolute + symlink-resolved
-    // (mirrors the Python detector's `os.path.realpath`); fall back to the given
-    // path if canonicalization fails.
-    let root = std::fs::canonicalize(&repo_root).unwrap_or(repo_root);
+    // (mirrors the Python detector's `os.path.realpath`). A failure here (a race
+    // after the is_dir check, a permission error) is a system error rather than
+    // a silent fall back to a possibly-relative path — the emitted `repo_root`
+    // is part of the contract.
+    let root = std::fs::canonicalize(&repo_root).map_err(|e| {
+        CliError::system(
+            "io_error",
+            format!(
+                "cannot canonicalize repo_root '{}': {e}",
+                repo_root.display()
+            ),
+        )
+    })?;
     let git = RealGitRepo::new(&root);
     let facts = ossctl_core::facts::gather(&root, &RealFs, &git);
 
@@ -67,6 +77,7 @@ fn render_facts_text(f: &Facts) {
     };
     println!("repo_root:         {}", f.repo_root);
     println!("is_git:            {}", f.is_git);
+    println!("has_commits:       {}", f.has_commits);
     println!("ecosystems:        {ecos}");
     println!("packages:          {}", f.packages.len());
     println!("has_ci:            {}", f.has_ci);
@@ -80,8 +91,16 @@ fn render_facts_text(f: &Facts) {
     if let Some(bot) = &f.dependency_bot {
         println!("dependency_bot:    {bot}");
     }
+    if let Some(label) = &f.readme_self_label {
+        println!("readme_self_label: {label}");
+    }
     if let Some(desc) = &f.description {
         println!("description:       {desc}");
     }
+    // Surface the raw signals so a human can see what drives the maturity call.
+    println!(
+        "maturity_signals:  production={}, spike={}",
+        f.maturity_signals.production, f.maturity_signals.spike
+    );
     println!("inferred_maturity: {}", f.inferred_maturity.as_str());
 }

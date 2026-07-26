@@ -9,7 +9,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use ossctl_core::ports::{Fs, GitRepo};
 
@@ -29,11 +29,18 @@ impl Fs for RealFs {
         path.is_dir()
     }
 
+    fn is_file(&self, path: &Path) -> bool {
+        path.is_file()
+    }
+
     fn read_dir(&self, dir: &Path) -> io::Result<Vec<String>> {
         let mut names = Vec::new();
         for entry in std::fs::read_dir(dir)? {
             names.push(entry?.file_name().to_string_lossy().into_owned());
         }
+        // Sort so the port yields a stable order (the in-memory fake sorts too);
+        // callers must not depend on OS directory-iteration order.
+        names.sort();
         Ok(names)
     }
 }
@@ -53,11 +60,24 @@ impl RealGitRepo {
     }
 
     /// Run `git -C <root> <args>` and capture its output.
+    ///
+    /// Hardened against the realistic non-interactive hangs the Python detector
+    /// dodges with its `timeout=15`: stdin is `/dev/null` and terminal/askpass
+    /// prompts are disabled, so a git that would otherwise block on a credential
+    /// or hook prompt fails fast instead. A hard wall-clock timeout (for a
+    /// stalled network/NFS mount) is a remaining gap versus the Python — std has
+    /// no timeout on `Command::output` and this crate takes no new dependency;
+    /// the read-only queries here (`rev-parse`, `shortlog`, `tag`) do not touch
+    /// the network on a healthy local repo.
     fn git(&self, args: &[&str]) -> io::Result<std::process::Output> {
         Command::new("git")
             .arg("-C")
             .arg(&self.root)
             .args(args)
+            .stdin(Stdio::null())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "true")
+            .env("GIT_OPTIONAL_LOCKS", "0")
             .output()
     }
 
@@ -79,8 +99,14 @@ impl RealGitRepo {
 
 impl GitRepo for RealGitRepo {
     fn head_commit(&self) -> io::Result<String> {
-        self.git_stdout(&["rev-parse", "HEAD"])
-            .map(|s| s.trim().to_string())
+        let head = self.git_stdout(&["rev-parse", "HEAD"])?.trim().to_string();
+        // An unborn repo can exit 0 with empty stdout; treat that as "no HEAD"
+        // so the detector's `has_commits` gate reads false (matches the Python
+        // `bool(... and _run_git(...))` truthiness check).
+        if head.is_empty() {
+            return Err(io::Error::other("git rev-parse HEAD produced no output"));
+        }
+        Ok(head)
     }
 
     fn is_work_tree(&self) -> bool {

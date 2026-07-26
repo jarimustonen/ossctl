@@ -60,8 +60,8 @@ pub struct Facts {
     /// version `>=1.0`. Never probes a registry (that would need the network and
     /// break reproducibility).
     pub has_ge_1_0_release: bool,
-    /// Whether a CI configuration is present (`.github/workflows` with at least
-    /// one file, or a known single-file CI config).
+    /// Whether a CI configuration is present (`.github/workflows` holding at
+    /// least one entry, or a known single-file CI config).
     pub has_ci: bool,
     /// The detected dependency-update bot (`dependabot` / `renovate`), or `null`.
     pub dependency_bot: Option<String>,

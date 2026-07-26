@@ -63,6 +63,13 @@ pub trait Fs {
     /// Whether `path` exists and is a directory (used for the contract's
     /// fragment-dir producer check, which is a *directory*, not a file).
     fn is_dir(&self, path: &std::path::Path) -> bool;
+    /// Whether `path` exists and is a *regular file* — not a directory, FIFO,
+    /// socket, or device (mirrors `os.path.isfile`). The facts detector gates
+    /// every manifest/config read on this so a non-regular node named
+    /// `Cargo.toml` neither marks an ecosystem nor blocks [`Self::read`] (a
+    /// blocking `read` on a FIFO is a real hang the `exists && !is_dir`
+    /// approximation would not prevent).
+    fn is_file(&self, path: &std::path::Path) -> bool;
     /// List the immediate entry *names* (not full paths) within `dir` — the
     /// facts detector's CI probe needs to know whether `.github/workflows`
     /// holds at least one entry, not merely that the directory exists.

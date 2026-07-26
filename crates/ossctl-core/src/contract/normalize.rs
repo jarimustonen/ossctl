@@ -845,6 +845,10 @@ mod tests {
         fn is_dir(&self, path: &Path) -> bool {
             self.dirs.contains(path)
         }
+        fn is_file(&self, _path: &Path) -> bool {
+            // The contract normalizer models only directories (fragment-dir).
+            false
+        }
         fn read_dir(&self, _dir: &Path) -> io::Result<Vec<String>> {
             // The contract normalizer never lists directories.
             Ok(Vec::new())
