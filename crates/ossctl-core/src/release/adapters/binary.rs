@@ -1,0 +1,105 @@
+//! Binary distribution adapter: `manual` / GitHub Releases.
+//!
+//! Attaches prebuilt binaries to a GitHub Release (`gh release`). GitHub
+//! Releases are not observable through the
+//! [`RegistryQuery`](crate::ports::RegistryQuery) port, so `verify` returns
+//! [`VerifyOutcome::Unknown`] **explicitly** (ADR-0002 §1) — an honest "cannot
+//! check", never a false `Missing`.
+
+use std::time::Duration;
+
+use crate::contract::schema::Adapter;
+use crate::protocol::release::{
+    BuildArtifacts, DryRunReport, PlannedCommand, PublishReceipt, VerifyOutcome,
+};
+
+use super::{make_receipt, run_all, AdapterError, AdapterTarget, EffectCtx, ReleaseAdapter};
+
+/// The binary distribution adapter, operating as `manual` (GitHub Releases).
+pub struct BinaryAdapter {
+    adapter: Adapter,
+}
+
+impl BinaryAdapter {
+    /// Construct for the resolved `manual` adapter identity.
+    #[must_use]
+    pub fn new(adapter: Adapter) -> Self {
+        debug_assert!(matches!(adapter, Adapter::Manual));
+        Self { adapter }
+    }
+
+    fn tag(t: &AdapterTarget) -> String {
+        format!("v{}", t.version)
+    }
+}
+
+impl ReleaseAdapter for BinaryAdapter {
+    fn adapter(&self) -> Adapter {
+        self.adapter
+    }
+
+    fn dry_run(
+        &self,
+        _ctx: &EffectCtx<'_>,
+        t: &AdapterTarget,
+    ) -> Result<DryRunReport, AdapterError> {
+        Ok(DryRunReport {
+            adapter: self.adapter,
+            planned_commands: vec![PlannedCommand::new(
+                "gh",
+                &["release", "view", &Self::tag(t)],
+            )],
+            notes: vec!["artifacts are built by the ecosystem's own build step and \
+                 uploaded to the coordinator-owned GitHub Release"
+                .to_string()],
+        })
+    }
+
+    fn build(
+        &self,
+        _ctx: &EffectCtx<'_>,
+        _t: &AdapterTarget,
+    ) -> Result<BuildArtifacts, AdapterError> {
+        // The binary target uploads artifacts produced elsewhere; it has no
+        // build phase of its own.
+        Ok(BuildArtifacts {
+            adapter: self.adapter,
+            artifacts: vec![],
+            notes: vec![
+                "binary target has no build phase (uploads prebuilt artifacts)".to_string(),
+            ],
+        })
+    }
+
+    fn publish(
+        &self,
+        ctx: &EffectCtx<'_>,
+        t: &AdapterTarget,
+    ) -> Result<PublishReceipt, AdapterError> {
+        // PER-TARGET IRREVERSIBLE (uploads assets to the release).
+        // SKELETON: the coordinator threads the concrete asset paths in; the
+        // representative upload command is shown here.
+        run_all(
+            ctx,
+            &[PlannedCommand::new(
+                "gh",
+                &["release", "upload", &Self::tag(t), "--clobber"],
+            )],
+        )?;
+        Ok(make_receipt(ctx, t, None, None))
+    }
+
+    fn verify(
+        &self,
+        _ctx: &EffectCtx<'_>,
+        _receipt: &PublishReceipt,
+    ) -> Result<VerifyOutcome, AdapterError> {
+        // GitHub Releases are not observable through RegistryQuery; report the
+        // honest "cannot check" rather than a false Missing (ADR-0002 §1).
+        Ok(VerifyOutcome::Unknown)
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(600)
+    }
+}
