@@ -9,6 +9,8 @@ blocked_by: ['@skill-subcommand', '@contract-command', '@facts-command']
 commits:
 - hash: f8eb2fd
   summary: bundle oss-init as skill template shelling out to ossctl facts + contract validate
+- hash: 97ca480
+  summary: apply llm-review findings (fresh-repo exit-2 handling, staging-root invariant test, golden+comment fixes)
 ---
 
 # Migrate /oss-init from homebase into ossctl; delete its Python scripts
@@ -22,3 +24,9 @@ Relocate the already-built /oss-init skill (SKILL.md + SCHEMA.md, currently in h
 ### 2026-07-25T11:59:35Z · @jari
 
 Delivery model (confirmed by Jari 2026-07-25): family skills do NOT live in homebase dotfiles. Once ossctl ships them they install via 'ossctl skill install' (§15-17, version-pinned, bundled under crates/ossctl-cli/skills/). This issue removes /oss-init's homebase copy; the broader rule — NO family skill stays in homebase, all via 'ossctl skill install' — applies to prose-skills too. Commits/history in homebase may stay; only the live skill files + Python scripts are deleted.
+
+## Comments
+
+### 2026-07-26T12:47:33Z · @claude
+
+ossctl-side migration done (oss-init bundled as skill template shelling out to ossctl facts + contract validate). REMAINING: remove the homebase copy (dotfiles/src/.claude/skills/oss-init/ SKILL.md, SCHEMA.md, scripts/*.py) + drop tw/skill wiring - a cross-repo step for the conductor.
