@@ -272,6 +272,74 @@ fn contract_show_missing_file_is_system_error() {
     assert_eq!(v["error"]["code"], "contract_not_found");
 }
 
+/// The `/oss-init` skill's whole "stage → validate → install" lifecycle rests on
+/// one invariant: `contract validate`'s hard-floor **verdict** is a pure function
+/// of the `OSS-RELEASE.md` document plus lexical `--repo-root`-relative path
+/// checks — it does NOT depend on the repo's filesystem contents (manifests, git,
+/// CI). That is what lets the skill validate a *staged* proposal under a bare
+/// scratchpad `--repo-root` and trust the result for the real repo. This test
+/// pins the invariant: validate the same document under (a) an empty staging dir
+/// and (b) a populated "real repo" dir, and assert identical exit + error codes.
+/// If a future floor becomes filesystem-dependent, this fails — a caught
+/// regression rather than a skill that silently installs a bad config.
+#[test]
+fn validate_verdict_is_independent_of_repo_filesystem() {
+    // A clean fixture (must pass at both roots) and every hard-floor negative
+    // (must fail identically at both roots).
+    for name in [
+        "solo-rust-cli",
+        "python-lib",
+        "neg-auto-on-spike",
+        "neg-registry-without-license",
+        "neg-badge-without-producer",
+        "neg-schema-too-new",
+        "neg-fragment-dir-escape",
+    ] {
+        let doc = std::fs::read(fixture(name).join("OSS-RELEASE.md")).unwrap();
+
+        // (a) bare staging root — nothing but the document (the skill's scratchpad).
+        let staging = tempfile::tempdir().unwrap();
+        std::fs::write(staging.path().join("OSS-RELEASE.md"), &doc).unwrap();
+
+        // (b) a populated "real repo" — the filesystem signals the normalizer
+        // must be proven to ignore: a git dir, manifests, CI, a fragments dir.
+        let real = tempfile::tempdir().unwrap();
+        std::fs::write(real.path().join("OSS-RELEASE.md"), &doc).unwrap();
+        std::fs::create_dir_all(real.path().join(".git")).unwrap();
+        std::fs::create_dir_all(real.path().join(".github/workflows")).unwrap();
+        std::fs::create_dir_all(real.path().join("changelog/fragments")).unwrap();
+        std::fs::write(real.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        std::fs::write(real.path().join("package.json"), "{}\n").unwrap();
+        std::fs::write(real.path().join("README.md"), "# x\n").unwrap();
+
+        let run = |root: &std::path::Path| {
+            let out = ossctl()
+                .args(["contract", "validate", "--json", "--repo-root"])
+                .arg(root)
+                .output()
+                .unwrap();
+            let stream = if out.status.success() {
+                &out.stdout
+            } else {
+                &out.stderr
+            };
+            let v: serde_json::Value = serde_json::from_slice(stream).unwrap();
+            // (exit code, error code or "" when valid) — the verdict, not the warnings.
+            (
+                out.status.code(),
+                v["error"]["code"].as_str().unwrap_or("").to_string(),
+            )
+        };
+
+        assert_eq!(
+            run(staging.path()),
+            run(real.path()),
+            "{name}: validate verdict must be identical at a bare staging root and a populated \
+             real repo root (the staging-root invariant the oss-init skill depends on)"
+        );
+    }
+}
+
 // ── facts ────────────────────────────────────────────────────────────────────
 
 /// `facts --json` over a manifest-bearing (non-git) temp dir emits the canonical

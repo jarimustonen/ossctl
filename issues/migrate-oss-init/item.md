@@ -6,6 +6,9 @@ status: in-progress
 priority: normal
 epic: ossctl-phase4-build
 blocked_by: ['@skill-subcommand', '@contract-command', '@facts-command']
+commits:
+- hash: f8eb2fd
+  summary: bundle oss-init as skill template shelling out to ossctl facts + contract validate
 ---
 
 # Migrate /oss-init from homebase into ossctl; delete its Python scripts

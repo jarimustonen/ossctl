@@ -161,11 +161,15 @@ fn skill_print_oss_init_is_wired_to_the_binary() {
     );
     assert!(text.contains("# /oss-init"), "body heading present");
 
-    // The migration's whole point: shells out to the binary, not Python.
-    assert!(
-        text.contains("ossctl facts") && text.contains("ossctl contract validate"),
-        "oss-init must invoke `ossctl facts` + `ossctl contract validate`"
-    );
+    // The migration's whole point: shells out to the binary, not Python. All
+    // three subcommands the lifecycle depends on must be present.
+    for sub in [
+        "ossctl facts",
+        "ossctl contract show",
+        "ossctl contract validate",
+    ] {
+        assert!(text.contains(sub), "oss-init must invoke `{sub}`");
+    }
     for retired in ["infer-repo-facts.py", "check-oss-release.py", "python3"] {
         assert!(
             !text.contains(retired),
@@ -331,7 +335,9 @@ fn skill_install_dest_with_all_writes_both_shapes() {
 #[test]
 fn skill_install_preflight_is_all_or_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    // Pre-place a newer copy of the SECOND catalog member so the batch refuses.
+    // Pre-place a newer copy of the LAST catalog member (`oss-readiness`) so the
+    // whole-catalog batch refuses at preflight — after the earlier members would
+    // otherwise have been written, which is exactly the partial-install we guard.
     let poison = dir.path().join("oss-readiness/SKILL.md");
     std::fs::create_dir_all(poison.parent().unwrap()).unwrap();
     std::fs::write(&poison, "---\ncli_version: \"9.9.9\"\n---\n").unwrap();
@@ -342,11 +348,14 @@ fn skill_install_preflight_is_all_or_nothing() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1), "batch refused");
-    // The first member must NOT have been written before the refusal.
-    assert!(
-        !dir.path().join("oss-release/SKILL.md").exists(),
-        "no partial install: preflight refuses before any write"
-    );
+    // No earlier member may have been written before the refusal (preflight
+    // classifies the whole plan up front, so nothing lands).
+    for earlier in ["oss-init", "oss-release"] {
+        assert!(
+            !dir.path().join(earlier).join("SKILL.md").exists(),
+            "no partial install: preflight refuses before any write ({earlier})"
+        );
+    }
 }
 
 /// Codex installs to the flat `<name>.md` prompt shape (§15 `--agent`).

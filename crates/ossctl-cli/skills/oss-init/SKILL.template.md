@@ -283,8 +283,11 @@ paths in the `## Rationale` later):
 ossctl contract show --json --repo-root <repo-root>
 ```
 
-  (A `contract_not_found` error here just means there is no existing config — a fresh repo.)
-  A re-run refines rather than reinvents.
+  **Do NOT blindly `|| exit` this call** — unlike `ossctl facts`, a non-zero exit here is
+  expected on a fresh repo. Branch on the outcome: **exit 0** → an existing config (refine
+  it); **exit 2 with `error.code == contract_not_found`** → no config yet, proceed as a fresh
+  repo; **any other non-zero exit** (e.g. `invalid_contract` — a malformed existing config) →
+  **stop** and surface it, do not treat it as "fresh". A re-run refines rather than reinvents.
 
 ### Phase 2 — Infer maturity + the dials
 
@@ -386,8 +389,20 @@ With a proposal that validated clean:
   of the repo); back the old file up to `$SCRATCH/<slug>-backup-<counter>.md`, then install the
   validated proposal in its place.
 
-After installing, re-run `ossctl contract validate --repo-root <repo-root>` against the **real**
-repo root as a final confirmation the config normalizes in place.
+After installing, re-run validation against the **real** repo root as a final confirmation the
+config normalizes in place:
+
+```bash
+ossctl contract validate --repo-root <repo-root> --json
+```
+
+Staging-root validation (Phase 4) is the *gate* — it is sound because the normalizer's
+verdict is a pure function of the document plus lexical `--repo-root`-relative path checks
+(`maturity` is required, not inferred; `ecosystems`/`targets` come from the frontmatter, not
+from sniffing the filesystem; the `fragment_dir`-escape floor is lexical). The only
+`--repo-root`-dependent behavior — the fragment-dir *producer-existence* note — is advisory
+and never gates. This post-install check is therefore a belt-and-braces confirmation, not the
+gate; the gate already ran clean before anything was written.
 
 ### Phase 6 — Report + STOP (never proceed into a mutating step)
 
