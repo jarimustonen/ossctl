@@ -6,9 +6,18 @@ Pointers to open issues. Descriptions and plans live in the linked
 ## 🔄 Continue here (handoff)
 
 _Handoff written 2026-07-25 (updated after stint #1). New agent: read this, then continue
-with a fresh `/stint`. The workspace scaffold has LANDED — `main` compiles, `ossctl version
---json` works, CI is wired. The critical-path root is done; three units are now unblocked
-and can run in parallel next round._
+with a fresh `/stint`. TWO units have LANDED: `workspace-scaffold` (main compiles, `version
+--json`, CI) and `contract-command` (the canonical `contract/schema.rs` + `protocol` DTOs +
+`ossctl contract show|validate`, 45 tests green). `facts-command`, `skill-subcommand`, and
+`release-engine` are now unblocked._
+
+_Stint-note: the first `contract-command` spinoff DIED (`agent-died`) at ~32 min AFTER
+committing complete green work, before its review+merge. It was salvaged in a follow-up
+spinoff (fast-forward the stranded commit → /llm-review → merge), which caught a real
+floor-bypass bug (`../` escape under a relative repo-root). Lesson: a spinoff can die at the
+review/merge boundary with finished work stranded on its preserved branch — always git-verify
+landing, and check `git log main..<branch>` before discarding a "failed" run. If deaths near
+~30 min recur, investigate an environment/timeout cause._
 
 **Focus:** Build `ossctl` — extract the `/oss-*` skill family's deterministic core into
 this CLI, per the three founding ADRs in `docs/adr/`. The architecture is LOCKED; this is
@@ -16,13 +25,16 @@ implementation, dependency-first.
 **Epic:** [`ossctl-phase4-build`](issues/ossctl-phase4-build/item.md)
 **Branch / worktree:** main (clean).
 
-**NEXT ROUND (start here):** `workspace-scaffold` is DONE. Fan out these three now-unblocked
-units **in parallel** (they are disjoint — but each touches hot files, so watch the migration
-rule): [`contract-command`](issues/contract-command/item.md), [`facts-command`](issues/facts-command/item.md),
-[`skill-subcommand`](issues/skill-subcommand/item.md). Note `contract-command` + `facts-command`
-both create serde types in `contract/schema.rs` / `protocol/**` — if they collide, sequence
-those two instead. `audit-command` unblocks after contract+facts; `release-engine` after
-contract; `migrate-oss-init` after contract+facts+skill.
+**NEXT ROUND (start here):** `workspace-scaffold` and `contract-command` are DONE. Now
+unblocked: [`facts-command`](issues/facts-command/item.md), [`skill-subcommand`](issues/skill-subcommand/item.md),
+and [`release-engine`](issues/release-engine/item.md). Note on hot files: `facts-command`
+adds `facts` output DTOs in `protocol/**` and both it and every unit add crate `Cargo.toml`
+deps — per AGENTS.md hot-file policy these were sequenced this stint, not parallelised. Next
+conductor: `skill-subcommand` (module `skill/`, bundle mechanism) is the most disjoint from
+`facts-command`, so those two are the best parallel candidates IF their Cargo.toml edits don't
+collide; if unsure, sequence. `release-engine` is a large epic (ADR-0002/0003) — likely its
+own round. `audit-command` unblocks once `facts-command` also lands; `migrate-oss-init` after
+facts+skill.
 
 **Read first (the spec):**
 - `docs/adr/0001-founding-architecture.md` — CLI taxonomy, two-crate workspace, binary↔skill boundary.
@@ -36,7 +48,7 @@ contract; `migrate-oss-init` after contract+facts+skill.
 
 **Build order (ADR-0001 dependency-first) — the backlog is filed and blocker-wired:**
 1. ~~**[`workspace-scaffold`](issues/workspace-scaffold/item.md)** — Two-crate workspace + clap skeleton + `version`/`doctor` + CI.~~ ✅ **DONE** (stint #1, commits b939fa7 → 1bb18ab).
-2. [`contract-command`](issues/contract-command/item.md) — port `check-oss-release.py` → `ossctl contract show|validate` (the inter-skill contract; preserve JSON shape). *blocked by 1.*
+2. ~~[`contract-command`](issues/contract-command/item.md) — port `check-oss-release.py` → `ossctl contract show|validate` (the inter-skill contract; preserve JSON shape).~~ ✅ **DONE** (stint #2, commits ee39196 → 7f07930; salvaged after agent-death, reviewed).
 3. [`facts-command`](issues/facts-command/item.md) — port `infer-repo-facts.py` → `ossctl facts`. *blocked by 1.*
 4. [`skill-subcommand`](issues/skill-subcommand/item.md) — `ossctl skill list|install|print` + bundle mechanism (§15-17). *blocked by 1.*
 5. [`audit-command`](issues/audit-command/item.md) — `ossctl audit` readiness engine. *blocked by 2+3.*
