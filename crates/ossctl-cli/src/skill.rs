@@ -49,6 +49,14 @@ pub struct BundledSkill {
 /// and `prose-skills`. Adding a skill is a one-row `include_str!` here.
 pub const CATALOG: &[BundledSkill] = &[
     BundledSkill {
+        name: "oss-init",
+        description:
+            "Generator of a project's OSS-RELEASE.md config: read repo facts, infer the dials, \
+             write a human-reviewable draft (a thin skill over `ossctl facts` + `contract validate`).",
+        template: include_str!("../skills/oss-init/SKILL.template.md"),
+        path_in_repo: "crates/ossctl-cli/skills/oss-init/SKILL.template.md",
+    },
+    BundledSkill {
         name: "oss-release",
         description:
             "Orchestrator/router of the /oss-* family: read the contract, score readiness, \

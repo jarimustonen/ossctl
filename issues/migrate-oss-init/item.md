@@ -1,8 +1,8 @@
 ---
 created: 2026-07-25
-updated: 2026-07-25
+updated: 2026-07-26
 type: task
-status: open
+status: in-progress
 priority: normal
 epic: ossctl-phase4-build
 blocked_by: ['@skill-subcommand', '@contract-command', '@facts-command']

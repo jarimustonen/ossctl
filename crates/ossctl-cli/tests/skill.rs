@@ -139,6 +139,60 @@ fn skill_print_unknown_is_structured_error() {
     assert!(v["error"]["expected"].is_array(), "accepted set present");
 }
 
+/// Golden `oss-init`: it prints, pins the running version, resolves cleanly, and
+/// shells out to the binary subcommands (never the retired Python scripts).
+#[test]
+fn skill_print_oss_init_is_wired_to_the_binary() {
+    let ver = cli_version();
+    let out = ossctl()
+        .args(["skill", "print", "oss-init"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "oss-init prints");
+    let text = String::from_utf8(out.stdout).unwrap();
+
+    // Pinned + fully rendered.
+    for token in ["{{CLI_VERSION}}", "{{SKILL_SCHEMA_VERSION}}"] {
+        assert!(!text.contains(token), "unrendered token {token}: {text}");
+    }
+    assert!(
+        text.contains(&format!("cli_version: \"{ver}\"")),
+        "frontmatter pins the running version"
+    );
+    assert!(text.contains("# /oss-init"), "body heading present");
+
+    // The migration's whole point: shells out to the binary, not Python.
+    assert!(
+        text.contains("ossctl facts") && text.contains("ossctl contract validate"),
+        "oss-init must invoke `ossctl facts` + `ossctl contract validate`"
+    );
+    for retired in ["infer-repo-facts.py", "check-oss-release.py", "python3"] {
+        assert!(
+            !text.contains(retired),
+            "oss-init must not reference the retired `{retired}`"
+        );
+    }
+}
+
+/// `oss-init` install is byte-identical to print (§16) and lands the canonical file.
+#[test]
+fn skill_install_oss_init_matches_print() {
+    let dir = tempfile::tempdir().unwrap();
+    ossctl()
+        .args(["skill", "install", "oss-init", "--dest"])
+        .arg(dir.path())
+        .assert()
+        .success();
+    let installed = std::fs::read(dir.path().join("oss-init/SKILL.md")).unwrap();
+
+    let printed = ossctl()
+        .args(["skill", "print", "oss-init"])
+        .output()
+        .unwrap()
+        .stdout;
+    assert_eq!(installed, printed, "install == print (§16)");
+}
+
 // ── skill install ────────────────────────────────────────────────────────────
 
 /// A clean install writes the canonical file and reports it in the envelope.
