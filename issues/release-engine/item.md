@@ -1,12 +1,13 @@
 ---
 created: 2026-07-25
-updated: 2026-07-26
+updated: 2026-07-27
 type: epic
 owner: jari
-status: open
+status: done
 priority: normal
 epic: ossctl-phase4-build
 blocked_by: ['@contract-command']
+closed: 2026-07-27
 ---
 
 # ossctl release engine — plan/cut/resume/verify state machine + adapters + journal (ADR-0002/0003)
