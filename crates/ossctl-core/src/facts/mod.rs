@@ -620,6 +620,9 @@ mod tests {
                 Err(std::io::Error::from(std::io::ErrorKind::Other))
             }
         }
+        fn git_common_dir(&self) -> std::io::Result<PathBuf> {
+            Ok(PathBuf::from("/repo/.git"))
+        }
     }
 
     /// A git repo with `n` distinct committers total / recent and the given tags.

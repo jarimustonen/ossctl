@@ -86,7 +86,7 @@ pub enum ReleaseAction {
     /// Execute a sealed plan; refuses on repo drift.
     Cut(crate::release::CutArgs),
     /// Reconcile and continue an interrupted run.
-    Resume(crate::release::RunIdArgs),
+    Resume(crate::release::ResumeArgs),
     /// Read-only reconcile of a run against remote registry state.
     Verify(crate::release::RunIdArgs),
     /// Query a run's progress (live) or post-mortem.

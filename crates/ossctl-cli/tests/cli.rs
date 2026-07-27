@@ -533,3 +533,742 @@ fn audit_missing_repo_root_is_user_error() {
     let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
     assert_eq!(v["error"]["code"], "invalid_repo_root");
 }
+
+// ── release verify: read-only reconcile of a journaled run ───────────────────
+
+/// Write a minimal journal for `run_id` under a `--journal-dir` root and return
+/// that root. The events use the flat on-disk line shape the journal reads back.
+fn seed_journal(run_id: &str, lines: &[&str]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = dir.path().join(run_id);
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(
+        run_dir.join("journal.jsonl"),
+        format!("{}\n", lines.join("\n")),
+    )
+    .unwrap();
+    dir
+}
+
+/// `release verify` reconciles a journaled run and emits the report envelope.
+/// Uses `rust` + `binary` targets, which classify as `unknown` without any
+/// network access (rust has no wired registry query yet; binary is structurally
+/// unobservable), so the test is deterministic and offline.
+#[test]
+fn release_verify_reconciles_a_journaled_run() {
+    let dir = seed_journal(
+        "RUN01",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN01","plan_id":"plan-abc","version":"1.0.0","targets":["cargo","gh"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"published:cargo","kind":"target_published","target":"cargo","receipt":{"ecosystem":"rust","package":"tool","version":"1.0.0","registry_url":null,"digest":null}}"#,
+            r#"{"schema_version":1,"seq":3,"ts":1002,"idempotency_key":"published:gh","kind":"target_published","target":"gh","receipt":{"ecosystem":"binary","package":"tool","version":"1.0.0","registry_url":null,"digest":null}}"#,
+        ],
+    );
+
+    let out = ossctl()
+        .args(["release", "verify", "RUN01", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "verify must exit 0: {out:?}");
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout JSON");
+    assert_eq!(v["schema_version"], 1);
+    let data = &v["data"];
+    assert_eq!(data["run_id"], "RUN01");
+    assert_eq!(data["plan_id"], "plan-abc");
+    // Both targets classify as unknown offline; never a false "missing".
+    assert_eq!(data["summary"]["reconciled"], 2);
+    assert_eq!(data["summary"]["unknown"], 2);
+    assert_eq!(data["summary"]["missing"], 0);
+    let outcomes: Vec<&str> = data["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(outcomes, vec!["unknown", "unknown"]);
+
+    // Read-only: verify must not materialize a manifest cache next to the journal.
+    assert!(
+        !dir.path().join("RUN01").join("manifest.json").exists(),
+        "verify wrote a manifest — it must be read-only"
+    );
+}
+
+/// A verify against a run with no journal is a caller-fixable (exit 1) error.
+#[test]
+fn release_verify_unknown_run_is_user_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = ossctl()
+        .args(["release", "verify", "NOPE", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "run_not_found");
+}
+
+/// A `run_id` that is not a single path segment is rejected (no path traversal).
+#[test]
+fn release_verify_rejects_bad_run_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = ossctl()
+        .args(["release", "verify", "../escape", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "invalid_run_id");
+}
+
+/// An interrupted run (a declared target with no receipt) reconciles what landed
+/// and surfaces the un-published target as a warning — never a false "missing".
+#[test]
+fn release_verify_warns_about_unpublished_targets() {
+    let dir = seed_journal(
+        "RUN02",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN02","plan_id":"plan-xyz","version":"1.0.0","targets":["cargo","npm"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"published:cargo","kind":"target_published","target":"cargo","receipt":{"ecosystem":"rust","package":"tool","version":"2.0.0","registry_url":null,"digest":null}}"#,
+        ],
+    );
+
+    let out = ossctl()
+        .args(["release", "verify", "RUN02", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["data"]["summary"]["reconciled"], 1,
+        "only the published target reconciles"
+    );
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| w.as_str().unwrap().contains("npm")),
+        "the unpublished target must be surfaced as a warning: {warnings:?}"
+    );
+}
+
+/// A concurrently-appended journal (a torn final line with no trailing newline)
+/// must NOT crash verify: the incomplete tail is dropped and the complete events
+/// reconcile. This is the "safe against a live run" guarantee.
+#[test]
+fn release_verify_tolerates_a_torn_final_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = dir.path().join("RUN03");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    // Two complete newline-terminated events, then a partial third with NO newline
+    // (as if `release cut` were mid-append).
+    let good = concat!(
+        r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN03","plan_id":"plan-torn","version":"1.0.0","targets":["cargo"]}"#,
+        "\n",
+        r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"published:cargo","kind":"target_published","target":"cargo","receipt":{"ecosystem":"rust","package":"tool","version":"1.0.0","registry_url":null,"digest":null}}"#,
+        "\n",
+        r#"{"schema_version":1,"seq":3,"ts":1002,"idempotency_key":"published:npm","kind":"target_publ"#, // truncated, no newline
+    );
+    std::fs::write(run_dir.join("journal.jsonl"), good).unwrap();
+
+    let out = ossctl()
+        .args(["release", "verify", "RUN03", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "a torn tail must not fail verify: {out:?}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Only the complete cargo receipt is reconciled; the torn npm line is dropped.
+    assert_eq!(v["data"]["summary"]["reconciled"], 1);
+    assert_eq!(v["data"]["journal_seq"], 2);
+}
+
+/// A cancelled target is reported with its cancellation reason, not the generic
+/// "not yet published" warning.
+#[test]
+fn release_verify_reports_cancelled_targets_distinctly() {
+    let dir = seed_journal(
+        "RUN04",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN04","plan_id":"plan-c","version":"1.0.0","targets":["cargo","npm"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"published:cargo","kind":"target_published","target":"cargo","receipt":{"ecosystem":"rust","package":"tool","version":"1.0.0","registry_url":null,"digest":null}}"#,
+            r#"{"schema_version":1,"seq":3,"ts":1002,"idempotency_key":"cancelled:npm","kind":"target_cancelled","target":"npm","reason":"OTP timeout"}"#,
+        ],
+    );
+
+    let out = ossctl()
+        .args(["release", "verify", "RUN04", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| w
+            .as_str()
+            .unwrap()
+            .contains("npm' was cancelled: OTP timeout")),
+        "cancelled target must report its reason: {warnings:?}"
+    );
+}
+
+// ── release show: progress query (§12 snapshot envelope) ─────────────────────
+
+/// A terminal run (`completed`) folds to its final state and emits the §12
+/// progress-query snapshot under the canonical envelope: `data.state` (the folded
+/// run), `data.last_seq`, and `data.recent_events` (the event window).
+#[test]
+fn release_show_post_mortem_summary_from_a_journal() {
+    let dir = seed_journal(
+        "SHOW01",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"SHOW01","plan_id":"plan-done","version":"1.2.0","targets":["cargo"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"phase_entered:publish","kind":"phase_entered","phase":"publish"}"#,
+            r#"{"schema_version":1,"seq":3,"ts":1002,"idempotency_key":"published:cargo","kind":"target_published","target":"cargo","receipt":{"ecosystem":"rust","package":"tool","version":"1.2.0","registry_url":null,"digest":null}}"#,
+            r#"{"schema_version":1,"seq":4,"ts":1003,"idempotency_key":"phase_completed:publish","kind":"phase_completed","phase":"publish","outcome":"ok"}"#,
+            r#"{"schema_version":1,"seq":5,"ts":1004,"idempotency_key":"phase_entered:tag","kind":"phase_entered","phase":"tag"}"#,
+            r#"{"schema_version":1,"seq":6,"ts":1005,"idempotency_key":"tag_created_local:v1.2.0","kind":"tag_created_local","tag":"v1.2.0"}"#,
+            r#"{"schema_version":1,"seq":7,"ts":1006,"idempotency_key":"phase_completed:tag","kind":"phase_completed","phase":"tag","outcome":"ok"}"#,
+        ],
+    );
+
+    let out = ossctl()
+        .args(["release", "show", "SHOW01", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "show must exit 0: {out:?}");
+
+    // The progress query is one canonical envelope, NOT a JSONL stream.
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("summary is one JSON doc");
+    assert_eq!(v["schema_version"], 1);
+    let data = &v["data"];
+    // Stable public poll cursor + folded state under `data.state`.
+    assert_eq!(data["last_seq"], 7);
+    let state = &data["state"];
+    assert_eq!(state["run_id"], "SHOW01");
+    assert_eq!(state["plan_id"], "plan-done");
+    assert_eq!(state["version"], "1.2.0");
+    assert_eq!(state["status"], "completed");
+    assert_eq!(state["published"]["cargo"]["version"], "1.2.0");
+    // The recent-event window is present and carries the tag-completion event.
+    let events = data["recent_events"].as_array().unwrap();
+    assert_eq!(events.len(), 7, "the whole (small) log fits the window");
+    assert_eq!(events.last().unwrap()["kind"], "phase_completed");
+
+    // Read-only: show must not materialize a manifest next to the journal.
+    assert!(
+        !dir.path().join("SHOW01").join("manifest.json").exists(),
+        "show wrote a manifest — it must be read-only"
+    );
+}
+
+/// An abandoned run surfaces its abandon reason as an envelope warning.
+#[test]
+fn release_show_post_mortem_surfaces_abandon_reason() {
+    let dir = seed_journal(
+        "SHOW02",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"SHOW02","plan_id":"plan-x","version":"1.0.0","targets":["cargo"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"run_abandoned","kind":"run_abandoned","reason":"OTP timeout"}"#,
+        ],
+    );
+
+    let out = ossctl()
+        .args(["release", "show", "SHOW02", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["state"]["status"], "abandoned");
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("abandoned: OTP timeout")),
+        "abandon reason must be a warning: {warnings:?}"
+    );
+}
+
+/// A live (in-progress) run returns the SAME canonical snapshot envelope as a
+/// terminal one — §12 forbids switching wire shape across polls. The live event
+/// window rides in `data.recent_events`; `data.state.status` is `in_progress`.
+#[test]
+fn release_show_live_returns_the_same_snapshot_envelope() {
+    let dir = seed_journal(
+        "SHOW03",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"SHOW03","plan_id":"plan-live","version":"2.0.0","targets":["cargo"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"phase_entered:dry_run","kind":"phase_entered","phase":"dry_run"}"#,
+            r#"{"schema_version":1,"seq":3,"ts":1002,"idempotency_key":"dry_run:cargo","kind":"target_dry_run","target":"cargo"}"#,
+        ],
+    );
+
+    let out = ossctl()
+        .args(["release", "show", "SHOW03", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "live show must exit 0: {out:?}");
+
+    // One envelope document — identical top-level shape to the terminal case.
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("a live poll is one envelope, not JSONL");
+    assert_eq!(v["schema_version"], 1);
+    let data = &v["data"];
+    assert_eq!(data["state"]["status"], "in_progress");
+    assert_eq!(data["last_seq"], 3);
+    // A live run in dry_run has no unpublished-target warnings (not gaps yet).
+    assert_eq!(v["warnings"], serde_json::json!([]));
+    // The recent-event window carries the live tail in ascending seq.
+    let events = data["recent_events"].as_array().unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0]["kind"], "run_created");
+    assert_eq!(events[2]["kind"], "target_dry_run");
+    assert_eq!(events[2]["seq"], 3);
+}
+
+/// With an explicit `--journal-dir`, `show` is a pure journal read: it needs no
+/// repository, so even a bogus `--repo-root` is ignored (a post-mortem query
+/// against an archived journal must work from anywhere).
+#[test]
+fn release_show_with_journal_dir_ignores_repo_root() {
+    let dir = seed_journal(
+        "SHOW04",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"SHOW04","plan_id":"p","version":"1.0.0","targets":["cargo"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"run_abandoned","kind":"run_abandoned","reason":"stopped"}"#,
+        ],
+    );
+    let out = ossctl()
+        .args([
+            "release",
+            "show",
+            "SHOW04",
+            "--json",
+            "--repo-root",
+            "/nonexistent/not/a/repo",
+            "--journal-dir",
+        ])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "an explicit --journal-dir must not require a repo root: {out:?}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["state"]["run_id"], "SHOW04");
+}
+
+/// A `show` against a run with no journal is a caller-fixable (exit 1) error, and
+/// a traversal `run_id` is rejected — same guards as `verify`.
+#[test]
+fn release_show_unknown_and_bad_run_ids_are_user_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = ossctl()
+        .args(["release", "show", "NOPE", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&missing.stderr).unwrap();
+    assert_eq!(v["error"]["code"], "run_not_found");
+
+    let bad = ossctl()
+        .args(["release", "show", "../escape", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&bad.stderr).unwrap();
+    assert_eq!(v["error"]["code"], "invalid_run_id");
+}
+
+// ── release cut: drift-refusal + approval gate (no external publish) ──────────
+
+/// Prepare a temp repo from a positive fixture with `status: approved`, inside a
+/// real git repo with one commit — the minimum a `release cut` needs to reach its
+/// drift check. Returns the temp dir (kept alive by the caller).
+fn approved_git_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let contract = std::fs::read_to_string(fixture("solo-rust-cli").join("OSS-RELEASE.md"))
+        .unwrap()
+        .replace("status: draft", "status: approved");
+    std::fs::write(dir.path().join("OSS-RELEASE.md"), contract).unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"tool\"\n",
+    )
+    .unwrap();
+
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .expect("git runs")
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "init"]);
+    dir
+}
+
+/// `release cut` on a `draft` contract is refused (a cut mutates external state,
+/// so it requires human approval) — before any git or journal work.
+#[test]
+fn release_cut_refuses_a_draft_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixture("solo-rust-cli").join("OSS-RELEASE.md"),
+        dir.path().join("OSS-RELEASE.md"),
+    )
+    .unwrap();
+
+    let out = ossctl()
+        .args([
+            "release",
+            "cut",
+            "--plan",
+            "deadbeef",
+            "--version",
+            "1.0.0",
+            "--repo-root",
+        ])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "draft cut → user error");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
+    assert_eq!(v["error"]["code"], "not_approved");
+    assert!(out.stdout.is_empty());
+}
+
+/// `release cut` with a `plan_id` the current repo does not hash to is refused
+/// with `plan_stale` — the drift guard (ADR-0002 §3). Nothing is published.
+#[test]
+fn release_cut_refuses_a_stale_plan_id() {
+    let dir = approved_git_repo();
+    let journal = tempfile::tempdir().unwrap();
+
+    let out = ossctl()
+        .args([
+            "release",
+            "cut",
+            "--plan",
+            "0000000000000000",
+            "--version",
+            "1.0.0",
+            "--repo-root",
+        ])
+        .arg(dir.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "stale plan → user error");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
+    assert_eq!(v["error"]["code"], "plan_stale");
+    // The refusal echoes the offending (approved) id back to the caller.
+    assert_eq!(v["error"]["invalid_value"], "0000000000000000");
+    assert!(out.stdout.is_empty(), "a refused cut published nothing");
+}
+
+/// A correct-shape plan cut with the WRONG version is still drift: the version is
+/// part of the content address, so a different `--version` hashes to a different
+/// `plan_id` and the cut refuses rather than publishing an unapproved version.
+#[test]
+fn release_cut_refuses_when_version_differs_from_the_sealed_plan() {
+    let dir = approved_git_repo();
+    let journal = tempfile::tempdir().unwrap();
+
+    // Seal a real plan at version 1.0.0 and read its plan_id from the envelope.
+    let planned = ossctl()
+        .args([
+            "release",
+            "plan",
+            "--json",
+            "--version",
+            "1.0.0",
+            "--repo-root",
+        ])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        planned.status.code(),
+        Some(0),
+        "plan should succeed on an approved repo"
+    );
+    let pv: serde_json::Value =
+        serde_json::from_slice(&planned.stdout).expect("plan stdout is JSON");
+    let plan_id = pv["data"]["plan_id"]
+        .as_str()
+        .expect("plan_id present")
+        .to_string();
+
+    // Execute that exact plan_id but with a different version → drift refusal.
+    let out = ossctl()
+        .args([
+            "release",
+            "cut",
+            "--plan",
+            &plan_id,
+            "--version",
+            "2.0.0",
+            "--repo-root",
+        ])
+        .arg(dir.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "wrong version → plan_stale");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
+    assert_eq!(v["error"]["code"], "plan_stale");
+    assert!(out.stdout.is_empty());
+}
+
+// ── release resume: reconcile decisions that refuse/short-circuit offline ─────
+
+/// A resume against a run with no journal is a caller-fixable (exit 1) error.
+#[test]
+fn release_resume_unknown_run_is_user_error() {
+    let repo = tempfile::tempdir().unwrap();
+    let journal = tempfile::tempdir().unwrap();
+    let out = ossctl()
+        .args(["release", "resume", "NOPE", "--json", "--repo-root"])
+        .arg(repo.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "run_not_found");
+    assert!(out.stdout.is_empty());
+}
+
+/// A `run_id` that is not a single path segment is rejected (no path traversal).
+#[test]
+fn release_resume_rejects_bad_run_id() {
+    let repo = tempfile::tempdir().unwrap();
+    let journal = tempfile::tempdir().unwrap();
+    let out = ossctl()
+        .args(["release", "resume", "../escape", "--json", "--repo-root"])
+        .arg(repo.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "invalid_run_id");
+}
+
+/// Resuming an already-`completed` run is idempotent success (exit 0) — it
+/// short-circuits before touching the repo or any registry.
+#[test]
+fn release_resume_completed_run_is_idempotent_success() {
+    let repo = tempfile::tempdir().unwrap();
+    let journal = seed_journal(
+        "RUNC",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUNC","plan_id":"plan-done","version":"1.0.0","targets":["rust"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"phase_completed:tag","kind":"phase_completed","phase":"tag","outcome":"ok"}"#,
+        ],
+    );
+    let out = ossctl()
+        .args(["release", "resume", "RUNC", "--repo-root"])
+        .arg(repo.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "completed run resume must exit 0: {out:?}"
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("already complete"));
+}
+
+/// Resuming an `abandoned` run is refused (exit 1) — it was deliberately marked
+/// un-resumable.
+#[test]
+fn release_resume_abandoned_run_is_refused() {
+    let repo = tempfile::tempdir().unwrap();
+    let journal = seed_journal(
+        "RUNA",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUNA","plan_id":"plan-x","version":"1.0.0","targets":["rust"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"run_abandoned","kind":"run_abandoned","reason":"OTP timeout"}"#,
+        ],
+    );
+    let out = ossctl()
+        .args(["release", "resume", "RUNA", "--json", "--repo-root"])
+        .arg(repo.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "run_abandoned");
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("OTP timeout"));
+}
+
+/// A resume whose run was sealed against a `plan_id` the current repo no longer
+/// hashes to is refused with `resume_drift` — before any reconcile or publish.
+#[test]
+fn release_resume_refuses_a_drifted_repo() {
+    let repo = approved_git_repo();
+    let journal = seed_journal(
+        "RUND",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUND","plan_id":"plan-mismatch","version":"1.0.0","targets":["rust"]}"#,
+        ],
+    );
+    let out = ossctl()
+        .args(["release", "resume", "RUND", "--json", "--repo-root"])
+        .arg(repo.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "drifted repo → resume_drift");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "resume_drift");
+    assert_eq!(v["error"]["expected"]["sealed_plan_id"], "plan-mismatch");
+    assert!(out.stdout.is_empty(), "a refused resume published nothing");
+}
+
+/// A single-python-target approved repo whose target's package is explicit (so the
+/// plan resolves without facts and validates), inside a one-commit git repo. Python
+/// has no wired registry query, so a resume reconciles its publish to `unknown`
+/// offline — the deterministic path to a `resume_conflict`.
+fn approved_python_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let contract = std::fs::read_to_string(fixture("python-lib").join("OSS-RELEASE.md"))
+        .unwrap()
+        .replace("status: draft", "status: approved")
+        .replace(
+            "ecosystems: [python]",
+            "ecosystems: [python]\ntargets:\n  - {ecosystem: python, package: mytool, registry: pypi, adapter: twine}",
+        );
+    std::fs::write(dir.path().join("OSS-RELEASE.md"), contract).unwrap();
+
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(args)
+            .output()
+            .expect("git runs")
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "init"]);
+    dir
+}
+
+/// A resume that reconciles a recorded publish to `unknown` (python has no wired
+/// registry query yet — offline) refuses with `resume_conflict` rather than
+/// proceed on an unverifiable target; the blocking target is surfaced.
+#[test]
+fn release_resume_refuses_an_unverifiable_target() {
+    let repo = approved_python_repo();
+
+    // Seal a real plan so the resume's drift check passes; reuse its id + version.
+    let planned = ossctl()
+        .args([
+            "release",
+            "plan",
+            "--json",
+            "--version",
+            "1.0.0",
+            "--repo-root",
+        ])
+        .arg(repo.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        planned.status.code(),
+        Some(0),
+        "plan should succeed: {planned:?}"
+    );
+    let pv: serde_json::Value = serde_json::from_slice(&planned.stdout).unwrap();
+    let plan_id = pv["data"]["plan_id"].as_str().unwrap().to_string();
+
+    let run_created = format!(
+        r#"{{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUNU","plan_id":"{plan_id}","version":"1.0.0","targets":["python"]}}"#
+    );
+    let published = r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"published:python","kind":"target_published","target":"python","receipt":{"ecosystem":"python","package":"mytool","version":"1.0.0","registry_url":null,"digest":null}}"#;
+    let journal = seed_journal("RUNU", &[&run_created, published]);
+
+    let out = ossctl()
+        .args(["release", "resume", "RUNU", "--json", "--repo-root"])
+        .arg(repo.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "unverifiable target → resume_conflict"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "resume_conflict");
+    let problems = v["error"]["problems"].as_array().expect("problems listed");
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.as_str().unwrap().contains("rust")),
+        "the blocking target must be surfaced: {problems:?}"
+    );
+    assert!(out.stdout.is_empty());
+}
+
+/// A version that would produce an invalid git tag (`v{version}`) is rejected up
+/// front — before any repo work — so it can never publish and then fail at tag
+/// time (post-publish, unrecoverable-late).
+#[test]
+fn release_cut_rejects_a_git_ref_unsafe_version() {
+    for bad in ["1.0..0", "1.0.0~1", "../evil", "1.0.0.lock"] {
+        let out = ossctl()
+            .args([
+                "release",
+                "cut",
+                "--plan",
+                "x",
+                "--version",
+                bad,
+                "--repo-root",
+                ".",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "version {bad:?} should be rejected"
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
+        assert_eq!(v["error"]["code"], "invalid_version", "version {bad:?}");
+    }
+}
