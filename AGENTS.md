@@ -57,12 +57,22 @@ app beyond what the ADRs already fix.
   (deploy)** here and says so.
 - **Live-version check:** `ossctl version --json` (once the binary builds); before that,
   `git log --oneline` against `main`.
-- **Hot files (sequence, never parallelise units that touch these):**
-  - the workspace `Cargo.toml` and any crate `Cargo.toml` (dependency edits collide)
-  - `crates/ossctl-core/src/contract/schema.rs` — the ONE canonical serde model
-  - `crates/ossctl-core/src/protocol/**` — the versioned public JSON/JSONL DTOs
-  - the canonical-JSON contract shape (SCHEMA) — the inter-skill contract; a change here
-    ripples to every member
+- **Hot files.** Two classes — do not treat them the same (learned across parallel
+  rounds #3 and #5):
+  - **Append-union-safe — parallel is fine.** The workspace/crate `Cargo.toml`, a module
+    `mod.rs`, and a CLI subcommand-dispatch file collide only as *append* conflicts
+    (a new dep line, a new `pub mod`, a new match arm). Disjoint units may run in
+    parallel against these — just brief each worker to **union-resolve** the conflict
+    (keep all deps / all module decls / both arms). This resolved automatically in
+    practice (e.g. the release campaign's `f-coordinator`↔`f-verify-cmd` merge). Do
+    **not** serialize units solely because they both touch `Cargo.toml`.
+  - **True shared-logic — sequence strictly, never parallelise.** A change to one of
+    these is semantic, not an append, and a parallel edit means a real conflict:
+    - `crates/ossctl-core/src/contract/schema.rs` — the ONE canonical serde model
+    - a shared `crates/ossctl-core/src/protocol/*.rs` module two units both edit
+      (a NEW `protocol/<x>.rs` per unit is append-safe; editing an existing shared one is not)
+    - the canonical-JSON contract shape (SCHEMA) — the inter-skill contract; a change
+      here ripples to every member
 - **Migration rule:** the canonical-JSON output shape is a schema-versioned compatibility
   contract (§10). Preserve it; bump `schema_version` on a breaking change, never silently.
 - **Test-account reset:** n/a (no external test accounts).
