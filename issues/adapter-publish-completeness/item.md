@@ -1,10 +1,13 @@
 ---
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-07-28
 type: task
-status: open
+status: in-progress
 priority: high
 epic: ossctl-phase4-build
+commits:
+- hash: d8518b5
+  summary: audit 6 adapter publish() bodies; analysis.md verdict table + completion sketch
 ---
 
 # Audit + complete the 6 ecosystem adapter publish() bodies before a real release cut
