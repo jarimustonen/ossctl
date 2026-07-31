@@ -92,6 +92,15 @@ pub const CATALOG: &[BundledSkill] = &[
         path_in_repo: "crates/ossctl-cli/skills/oss-security-policy/SKILL.template.md",
     },
     BundledSkill {
+        name: "oss-changelog",
+        description:
+            "Establish + maintain CHANGELOG.md (sole writer): Keep-a-Changelog skeleton, \
+             marker-anchored [Unreleased] ops, and release finalize — reads changelog.mode from \
+             `ossctl contract show`, compiles fragments via `issuectl changelog`.",
+        template: include_str!("../skills/oss-changelog/SKILL.template.md"),
+        path_in_repo: "crates/ossctl-cli/skills/oss-changelog/SKILL.template.md",
+    },
+    BundledSkill {
         name: "oss-readiness",
         description:
             "Score OSS-release readiness and turn the gap report into a prioritized action list \
