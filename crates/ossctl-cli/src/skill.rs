@@ -65,6 +65,15 @@ pub const CATALOG: &[BundledSkill] = &[
         path_in_repo: "crates/ossctl-cli/skills/oss-release/SKILL.template.md",
     },
     BundledSkill {
+        name: "oss-ci",
+        description:
+            "Generator of a repo's contribution-quality CI: read the contract, emit the \
+             tier/ecosystem-tuned GitHub Actions workflow + dep-bot/pre-commit/security-lint \
+             gates (a thin skill over `ossctl contract show`).",
+        template: include_str!("../skills/oss-ci/SKILL.template.md"),
+        path_in_repo: "crates/ossctl-cli/skills/oss-ci/SKILL.template.md",
+    },
+    BundledSkill {
         name: "oss-readiness",
         description:
             "Score OSS-release readiness and turn the gap report into a prioritized action list \
