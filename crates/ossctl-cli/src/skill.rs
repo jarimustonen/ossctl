@@ -49,6 +49,15 @@ pub struct BundledSkill {
 /// and `prose-skills`. Adding a skill is a one-row `include_str!` here.
 pub const CATALOG: &[BundledSkill] = &[
     BundledSkill {
+        name: "oss-architecture",
+        description:
+            "Opt-in architecture docs of the /oss-* family: emit a matklad-style \
+             ARCHITECTURE.md code map, scaffold an ADR log + docs site, act on the `docs_site` \
+             config field. Never a readiness gate; ADRs come from /worktree-technical-decision.",
+        template: include_str!("../skills/oss-architecture/SKILL.template.md"),
+        path_in_repo: "crates/ossctl-cli/skills/oss-architecture/SKILL.template.md",
+    },
+    BundledSkill {
         name: "oss-init",
         description:
             "Generator of a project's OSS-RELEASE.md config: read repo facts, infer the dials, \
@@ -65,12 +74,57 @@ pub const CATALOG: &[BundledSkill] = &[
         path_in_repo: "crates/ossctl-cli/skills/oss-release/SKILL.template.md",
     },
     BundledSkill {
+        name: "oss-ci",
+        description:
+            "Generator of a repo's contribution-quality CI: read the contract, emit the \
+             tier/ecosystem-tuned GitHub Actions workflow + dep-bot/pre-commit/security-lint \
+             gates (a thin skill over `ossctl contract show`).",
+        template: include_str!("../skills/oss-ci/SKILL.template.md"),
+        path_in_repo: "crates/ossctl-cli/skills/oss-ci/SKILL.template.md",
+    },
+    BundledSkill {
+        name: "oss-security-policy",
+        description:
+            "Threat-gated generator of SECURITY.md: detect an enumerated set of threat signals \
+             from repo inspection + `ossctl facts`/`contract show`, and emit a full \
+             coordinated-disclosure policy when the surface warrants, else a minimal pointer.",
+        template: include_str!("../skills/oss-security-policy/SKILL.template.md"),
+        path_in_repo: "crates/ossctl-cli/skills/oss-security-policy/SKILL.template.md",
+    },
+    BundledSkill {
+        name: "oss-changelog",
+        description:
+            "Establish + maintain CHANGELOG.md (sole writer): Keep-a-Changelog skeleton, \
+             marker-anchored [Unreleased] ops, and release finalize — reads changelog.mode from \
+             `ossctl contract show`, compiles fragments via `issuectl changelog`.",
+        template: include_str!("../skills/oss-changelog/SKILL.template.md"),
+        path_in_repo: "crates/ossctl-cli/skills/oss-changelog/SKILL.template.md",
+    },
+    BundledSkill {
         name: "oss-readiness",
         description:
             "Score OSS-release readiness and turn the gap report into a prioritized action list \
              (a thin skill over `ossctl audit`).",
         template: include_str!("../skills/oss-readiness/SKILL.template.md"),
         path_in_repo: "crates/ossctl-cli/skills/oss-readiness/SKILL.template.md",
+    },
+    BundledSkill {
+        name: "oss-readme",
+        description:
+            "Generator of a project's README.md front door + LICENSE: read the contract \
+             (license/ecosystems/targets) and facts, emit a maturity-tiered slotted README and \
+             an SPDX-correct LICENSE (a thin skill over `ossctl contract show` + `facts`).",
+        template: include_str!("../skills/oss-readme/SKILL.template.md"),
+        path_in_repo: "crates/ossctl-cli/skills/oss-readme/SKILL.template.md",
+    },
+    BundledSkill {
+        name: "oss-contributing",
+        description:
+            "Generator of a project's contributor-onboarding docs: CONTRIBUTING.md plus \
+             tier-gated code of conduct, issue forms, PR template, and governance — templated \
+             emission tuned to the contract (a thin skill over `ossctl contract show`).",
+        template: include_str!("../skills/oss-contributing/SKILL.template.md"),
+        path_in_repo: "crates/ossctl-cli/skills/oss-contributing/SKILL.template.md",
     },
 ];
 
