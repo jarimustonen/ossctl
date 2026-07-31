@@ -60,12 +60,22 @@ app beyond what the ADRs already fix.
 - **Hot files.** Two classes — do not treat them the same (learned across parallel
   rounds #3 and #5):
   - **Append-union-safe — parallel is fine.** The workspace/crate `Cargo.toml`, a module
-    `mod.rs`, and a CLI subcommand-dispatch file collide only as *append* conflicts
-    (a new dep line, a new `pub mod`, a new match arm). Disjoint units may run in
-    parallel against these — just brief each worker to **union-resolve** the conflict
-    (keep all deps / all module decls / both arms). This resolved automatically in
-    practice (e.g. the release campaign's `f-coordinator`↔`f-verify-cmd` merge). Do
-    **not** serialize units solely because they both touch `Cargo.toml`.
+    `mod.rs`, a CLI subcommand-dispatch file, and the bundled-skill `CATALOG` in
+    `crates/ossctl-cli/src/skill.rs` collide only as *append* conflicts (a new dep line,
+    a new `pub mod`, a new match arm, a new `BundledSkill { … }` row). Disjoint units may
+    run in parallel against these — just brief each worker to **union-resolve** the conflict
+    (keep all deps / all module decls / both arms / all rows). This resolved automatically in
+    practice for the release campaign (`f-coordinator`↔`f-verify-cmd`). Do **not** serialize
+    units solely because they both touch `Cargo.toml`.
+    - **But the auto-merge is NOT guaranteed** (learned stint #6, prose-skills). A parallel
+      worker's own auto-merge can *stall* on the union conflict: `f-changelog` authored complete
+      green work but its `run merge` never completed — the run sat at `pending` because its
+      branch (forked from `main`) hit a `skill.rs` CATALOG conflict after five siblings had
+      advanced the integration branch. The worker did **not** union-resolve it despite the brief.
+      So: parallelise freely, but **expect to salvage the last-in-line row-adder** — union-merge
+      its clean commit by hand (keep all rows, re-run the green gate incl. the §17 lockstep gate,
+      commit) — or serialize just the CATALOG-touching merges. The parallel *authoring* is safe;
+      only the final *merge* of the append-file is not automatic.
   - **True shared-logic — sequence strictly, never parallelise.** A change to one of
     these is semantic, not an append, and a parallel edit means a real conflict:
     - `crates/ossctl-core/src/contract/schema.rs` — the ONE canonical serde model
