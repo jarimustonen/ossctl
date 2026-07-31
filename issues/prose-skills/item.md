@@ -1,11 +1,12 @@
 ---
 created: 2026-07-25
-updated: 2026-07-25
+updated: 2026-07-31
 type: feature
-status: open
+status: done
 priority: normal
 epic: ossctl-phase4-build
 blocked_by: ['@audit-command']
+closed: 2026-07-31
 ---
 
 # Author the prose /oss-* members + the /oss-release orchestrator (bundled)
