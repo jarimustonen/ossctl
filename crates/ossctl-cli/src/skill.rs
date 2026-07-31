@@ -99,6 +99,15 @@ pub const CATALOG: &[BundledSkill] = &[
         template: include_str!("../skills/oss-readme/SKILL.template.md"),
         path_in_repo: "crates/ossctl-cli/skills/oss-readme/SKILL.template.md",
     },
+    BundledSkill {
+        name: "oss-contributing",
+        description:
+            "Generator of a project's contributor-onboarding docs: CONTRIBUTING.md plus \
+             tier-gated code of conduct, issue forms, PR template, and governance — templated \
+             emission tuned to the contract (a thin skill over `ossctl contract show`).",
+        template: include_str!("../skills/oss-contributing/SKILL.template.md"),
+        path_in_repo: "crates/ossctl-cli/skills/oss-contributing/SKILL.template.md",
+    },
 ];
 
 /// Which agent runtime(s) `skill install` targets. Each selects a well-known
