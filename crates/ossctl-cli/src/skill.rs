@@ -83,6 +83,15 @@ pub const CATALOG: &[BundledSkill] = &[
         path_in_repo: "crates/ossctl-cli/skills/oss-ci/SKILL.template.md",
     },
     BundledSkill {
+        name: "oss-security-policy",
+        description:
+            "Threat-gated generator of SECURITY.md: detect an enumerated set of threat signals \
+             from repo inspection + `ossctl facts`/`contract show`, and emit a full \
+             coordinated-disclosure policy when the surface warrants, else a minimal pointer.",
+        template: include_str!("../skills/oss-security-policy/SKILL.template.md"),
+        path_in_repo: "crates/ossctl-cli/skills/oss-security-policy/SKILL.template.md",
+    },
+    BundledSkill {
         name: "oss-readiness",
         description:
             "Score OSS-release readiness and turn the gap report into a prioritized action list \
