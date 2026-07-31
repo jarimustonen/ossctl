@@ -90,6 +90,15 @@ pub const CATALOG: &[BundledSkill] = &[
         template: include_str!("../skills/oss-readiness/SKILL.template.md"),
         path_in_repo: "crates/ossctl-cli/skills/oss-readiness/SKILL.template.md",
     },
+    BundledSkill {
+        name: "oss-readme",
+        description:
+            "Generator of a project's README.md front door + LICENSE: read the contract \
+             (license/ecosystems/targets) and facts, emit a maturity-tiered slotted README and \
+             an SPDX-correct LICENSE (a thin skill over `ossctl contract show` + `facts`).",
+        template: include_str!("../skills/oss-readme/SKILL.template.md"),
+        path_in_repo: "crates/ossctl-cli/skills/oss-readme/SKILL.template.md",
+    },
 ];
 
 /// Which agent runtime(s) `skill install` targets. Each selects a well-known
