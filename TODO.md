@@ -5,16 +5,17 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-07-25 (updated after stint #4). New agent: read this, then continue
-with a fresh `/stint`. SIX units have LANDED: `workspace-scaffold`, `contract-command`
-(canonical `contract/schema.rs` + `protocol` DTOs + `ossctl contract show|validate`),
-`facts-command` (`ossctl facts`, byte-for-value identical to the Python detector),
-`skill-subcommand` (`ossctl skill list|install|print` + §15-17 bundle mechanism + §17 CI
-lockstep gate), `audit-command` (`ossctl audit` readiness engine — reads contract+facts,
-read-only gap report, registry/GH failure⇒unknown), and the ossctl side of
-`migrate-oss-init` (oss-init bundled as a skill template shelling out to the binary). 130
-tests green on `main`. Now unblocked: `release-engine` (contract done) and `prose-skills`
-(audit done). `migrate-oss-init` stays IN-PROGRESS — see the homebase-removal note below._
+_Handoff written 2026-07-31 (updated after stint #6). New agent: read this, then continue
+with a fresh `/stint`. The build is essentially COMPLETE on `main` + one review-ready branch.
+LANDED ON MAIN: `workspace-scaffold`, `contract-command`, `facts-command`, `skill-subcommand`,
+`audit-command`, ossctl-side of `migrate-oss-init`, and (stint #6) the **`release-engine` epic**
+— merged `613076d`, 261 tests green, epic CLOSED. Also landed (stint #6): the
+**adapter-publish-completeness AUDIT** (`d8518b5`, read-only) — its `analysis.md` scopes the
+remaining publish() completion work (issue in-progress, stays open). REVIEW-READY (NOT yet on
+main): **`prose-skills`** — delivered via `/orchestrate` (stint #6) as 7 features on
+**`orchestrate/prose-skills-2026-07-31`** (tip `d376f94`, 10 commits, 261 tests green). The
+whole /oss-* family (9 skills) is now bundled. `migrate-oss-init` stays IN-PROGRESS — see the
+homebase-removal note below._
 
 _migrate-oss-init tail (DO NOT rush): the ossctl side is done + bundled, but the homebase
 copy (`dotfiles/src/.claude/skills/oss-init/`: SKILL.md, SCHEMA.md, scripts/*.py, fixtures/)
@@ -44,23 +45,26 @@ implementation, dependency-first.
 **Epic:** [`ossctl-phase4-build`](issues/ossctl-phase4-build/item.md)
 **Branch / worktree:** main (clean).
 
-**NEXT ROUND (start here):** seven units effectively DONE. The `release-engine` epic was
-delivered via `/orchestrate` (stint #5) as 7 features on the integration branch
-**`orchestrate/release-engine-2026-07-26`** (HEAD 1abf4a2, 261 tests green, 0 deaths) — it is
-NOT yet merged to main. **FIRST ACTION next session:** review that branch and merge it
-(`/worktree-merge` from the worktree at `ossctl__worktrees/orchestrate-release-engine`, or a
-direct `git merge`), then close the `release-engine` epic. Campaign report:
-`~/.orchestratectl/runs/01kyfc8jf1x9rbf91kjfwdfssn/report.md`.
-⚠️ Before a REAL release cut: audit each of the 6 ecosystem adapter `publish()` bodies — some
-may be faithful skeletons (see report u-001 / spinoff s-001).
+**NEXT ROUND (start here):** **FIRST ACTION — review + merge `prose-skills`.** It is delivered
+on **`orchestrate/prose-skills-2026-07-31`** (tip `d376f94`, 10 commits ahead of main, 261 tests
+green, fmt+clippy clean, `skill list`/`print` verify all 9 skills). Review the diff
+(`git log --oneline main..orchestrate/prose-skills-2026-07-31`) and merge (direct `git merge` —
+the campaign already tore its worktrees down; there is no live worktree to `/worktree-merge`
+from). Then **close `prose-skills`** and **close the `ossctl-phase4-build` epic** (all Phase-4
+build units then done). Campaign report: `~/.orchestratectl/runs/01kywk5sswyxdqvjnkpn32t8zy/report.md`.
+⚠️ Salvage note (u-001 in the report): f-changelog's auto-merge stalled on the `skill.rs` CATALOG
+union conflict and was salvaged by hand (merge `d793612`) — its work IS on the branch; nothing to
+redo. Learning: when parallel workers each append a row to the same file, expect to salvage the
+last-in-line one, or serialize those merges.
 
-After that merge, the ONLY remaining backlog unit is
-[`prose-skills`](issues/prose-skills/item.md): author the remaining prose /oss-* members + the
-/oss-release orchestrator (all bundle under crates/ossctl-cli/skills/, ship via `ossctl skill
-install`, none in homebase). It can start now (it depends on audit, which landed) but the
-/oss-release-cut member wraps `release cut`, so it reads better AFTER the release-engine branch
-merges. `migrate-oss-init` remains all-but-done (homebase removal deferred until ossctl is
-installed on PATH — see above).
+**After that merge, the backlog is effectively empty.** Remaining items:
+- `adapter-publish-completeness` (in-progress, open) — the AUDIT landed; `issues/adapter-publish-completeness/analysis.md`
+  scopes the completion work: **3 REAL adapters** (cargo, python, go), **1 PARTIAL** (node),
+  **2 SKELETON** (homebrew, binary — both blocked on one coordinator change that threads asset
+  paths / tarball-URL+sha256). Recommended order in analysis.md: cross-cutting decisions
+  (auth=ambient-env, idempotency=coordinator verify pre-check, artifact-threading) → cargo/python/go
+  (parallel) → node → binary → homebrew. NOT urgent (ossctl isn't published yet); do before a REAL cut.
+- `migrate-oss-init` — all-but-done; homebase removal deferred until ossctl is installed on PATH (see above).
 
 **Hot-file learning (round #3):** crate `Cargo.toml` is listed as a hot file, but two
 disjoint units (`facts-command` + `skill-subcommand`) ran in PARALLEL and merged clean — the
@@ -85,9 +89,10 @@ shared-logic files (`contract/schema.rs`, a shared `protocol/*.rs` module).
 3. ~~[`facts-command`](issues/facts-command/item.md) — port `infer-repo-facts.py` → `ossctl facts`.~~ ✅ **DONE** (stint #3, commits 7f9fe99 → 9450b2b).
 4. ~~[`skill-subcommand`](issues/skill-subcommand/item.md) — `ossctl skill list|install|print` + bundle mechanism (§15-17).~~ ✅ **DONE** (stint #3, commits 4f7e7a6 → 0103247).
 5. ~~[`audit-command`](issues/audit-command/item.md) — `ossctl audit` readiness engine.~~ ✅ **DONE** (stint #4, commits 0d54998 → b423cd0).
-6. 🔀 [`release-engine`](issues/release-engine/item.md) — plan/cut/resume/verify + adapters + journal (epic; ADR-0002/0003). **DELIVERED via /orchestrate (stint #5) — 7 features on branch `orchestrate/release-engine-2026-07-26`, 261 tests green. AWAITS review+merge to main, then close epic.**
+6. ~~[`release-engine`](issues/release-engine/item.md) — plan/cut/resume/verify + adapters + journal (epic; ADR-0002/0003).~~ ✅ **DONE** — delivered via /orchestrate (stint #5), **merged to main stint #6** (`613076d`, 261 tests green); epic CLOSED.
 7. ⏳ [`migrate-oss-init`](issues/migrate-oss-init/item.md) — ossctl side DONE (stint #4, commits f8eb2fd → 97eaa0e); oss-init bundled as a skill template. **Homebase removal DEFERRED until ossctl is installed on PATH** (see handoff note) — issue kept in-progress.
-8. [`prose-skills`](issues/prose-skills/item.md) — the skill-side members + `/oss-release` orchestrator. **UNBLOCKED — not yet started.**
+8. 🔀 [`prose-skills`](issues/prose-skills/item.md) — the skill-side members + `/oss-release` orchestrator. **DELIVERED via /orchestrate (stint #6) — 7 features on branch `orchestrate/prose-skills-2026-07-31` (tip `d376f94`), 261 tests green. AWAITS review+merge to main, then close prose-skills + the `ossctl-phase4-build` epic.**
+9. ⏳ [`adapter-publish-completeness`](issues/adapter-publish-completeness/item.md) — follow-up from release-engine. **AUDIT landed (stint #6, `d8518b5`)**; `analysis.md` scopes completion (3 REAL / 1 PARTIAL / 2 SKELETON). Do before a REAL release cut — not urgent.
 
 **Watch out:**
 - **No deploy step** — see AGENTS.md "Operating policy": units land on `main`, `/stint`
