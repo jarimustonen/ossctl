@@ -108,7 +108,7 @@ shared-logic files (`contract/schema.rs`, a shared `protocol/*.rs` module).
 - The prose `/oss-*` skills currently referenced from homebase move here over time
   (`migrate-oss-init`, `prose-skills`); after migration, remove the homebase copies.
 
-## Execution DAG (2026-07-31)
+## Execution DAG (2026-08-01)
 
 Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
 (never copied here). Merge at Phase 0/7 (drop landed, add active, keep existing order).
@@ -116,23 +116,30 @@ Scheduling PLAN — source of truth for lane + order; issuectl is authoritative 
 `after <slug> (needs …)` = logical blocked_by mirror. `collision: <file>` = touches a
 second lane's hot file (spawn-time exclusion).
 
-The Phase-4 build is complete; only two non-urgent tails remain, and they are disjoint
-(no shared hot file), so both are UNLANED. `migrate-oss-init` is externally blocked (needs
-ossctl on PATH) — not spawnable until then.
+DECISION (stint #8): finish the adapters BEFORE dogfooding ossctl's own 0.1.0 — a Rust
+CLI's own release path is exactly `binary` (GitHub Release) + `homebrew`, the two SKELETON
+adapters, so a cargo-only dogfood would prove nothing about the incomplete parts. The
+`adapter-publish-completeness` campaign is now decomposed into two sequenced sub-issues in
+LANE R (shared release-engine files → sequenced, never parallel). `python`/`node`/`go`
+finishing stays under the parent umbrella, out of scope for this campaign.
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: adapter-publish-completeness   ← if a round starts; else nothing is urgent
+GLOBAL HEAD-OF-LINE: adapter-artifact-threading   ← start here
+LANE R — release engine (coordinator.rs + adapters/*.rs — true shared logic, sequence strictly)
+  ▶ adapter-artifact-threading
+    adapter-skeletons-finish   after adapter-artifact-threading (needs threaded artifact inputs)
 UNLANED — confirmed no shared hot files, run anytime (one slug per line):
-    adapter-publish-completeness
     migrate-oss-init
 ```
 <!-- execution-dag:end -->
 
-Note: `adapter-publish-completeness`, if started, is itself a small dependency-ordered
-campaign (coordinator threading gates the two skeleton adapters) — treat it as an
-`/orchestrate` hand-off, not one spinoff. `migrate-oss-init` cannot start until ossctl
-installs on PATH.
+Note: LANE R is the decomposed `adapter-publish-completeness` campaign (parent stays open as
+the umbrella for python/node/go). Both LANE R units touch true shared-logic files
+(`coordinator.rs`, `adapters/mod.rs` seam, the adapter bodies) — sequence strictly, one live
+worktree at a time; unit 2 branches off unit 1's landed result. `migrate-oss-init` cannot
+start until ossctl installs on PATH. NEXT STINT (planned): dogfood — run `/oss-init` on ossctl
+itself (it has no OSS-RELEASE.md yet), then `release plan`/`cut`.
 
 ## Backlog
 
