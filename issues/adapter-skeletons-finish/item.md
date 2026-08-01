@@ -2,7 +2,7 @@
 created: 2026-08-01
 updated: 2026-08-01
 type: feature
-status: in-progress
+status: fixed
 priority: high
 epic: ossctl-phase4-build
 related: ['@adapter-publish-completeness']
@@ -10,6 +10,9 @@ blocked_by: ['@adapter-artifact-threading']
 commits:
 - hash: e25c8e19426496d3b3a041f4d7239592871a5ea3
   summary: finish binary+homebrew publish bodies (real receipt URL + tarball sha256)
+- hash: 9649e06f5a181ddbca442be58f33f23520cd3f49
+  summary: apply llm-review fixes — drop wrong homebrew sha256, pin binary upload --repo
+closed: 2026-08-01
 ---
 
 # Finish binary + homebrew publish() bodies using threaded artifact inputs
