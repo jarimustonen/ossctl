@@ -92,6 +92,8 @@ impl ReleaseAdapter for HomebrewAdapter {
                 args.push(sha256.as_str());
             }
         }
+        // `--` terminates options so a formula name is never parsed as a flag.
+        args.push("--");
         args.push(t.package.as_str());
         run_all(ctx, &[PlannedCommand::new("brew", &args)])?;
         Ok(make_receipt(ctx, t, None, None))

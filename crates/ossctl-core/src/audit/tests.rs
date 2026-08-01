@@ -644,59 +644,7 @@ fn no_remote_yields_unchecked_profile() {
     assert!(!report.community_profile.checked);
 }
 
-// ── URL parsing ────────────────────────────────────────────────────────────
-
-#[test]
-fn parses_github_slugs_across_url_forms() {
-    assert_eq!(
-        parse_github_slug("git@github.com:acme/tool.git"),
-        Some("acme/tool".to_string())
-    );
-    assert_eq!(
-        parse_github_slug("https://github.com/acme/tool.git"),
-        Some("acme/tool".to_string())
-    );
-    assert_eq!(
-        parse_github_slug("https://github.com/acme/tool"),
-        Some("acme/tool".to_string())
-    );
-    assert_eq!(
-        parse_github_slug("git://github.com/acme/tool.git"),
-        Some("acme/tool".to_string())
-    );
-    assert_eq!(
-        parse_github_slug("ssh://git@github.com/acme/tool.git"),
-        Some("acme/tool".to_string())
-    );
-    // A trailing slash after `.git` still reduces to the bare slug.
-    assert_eq!(
-        parse_github_slug("https://github.com/acme/tool.git/"),
-        Some("acme/tool".to_string())
-    );
-    assert_eq!(
-        parse_github_slug("https://github.com/acme/tool/"),
-        Some("acme/tool".to_string())
-    );
-    // Non-GitHub host → None.
-    assert_eq!(parse_github_slug("git@gitlab.com:acme/tool.git"), None);
-    // A lookalike host that merely CONTAINS github.com in its path is rejected
-    // (anchored prefix, not a substring find).
-    assert_eq!(
-        parse_github_slug("https://mirror.example.com/github.com/acme/tool.git"),
-        None
-    );
-    assert_eq!(
-        parse_github_slug("https://github.com.evil.example/acme/tool"),
-        None
-    );
-    // Trailing path segment is not a bare slug.
-    assert_eq!(
-        parse_github_slug("https://github.com/acme/tool/tree/main"),
-        None
-    );
-    // Missing repo → None.
-    assert_eq!(parse_github_slug("https://github.com/acme"), None);
-}
+// URL parsing (`parse_github_slug`) moved to `crate::vcs`; its tests live there.
 
 // ── Producer probe: outage ⇒ unknown, never absent ─────────────────────────
 

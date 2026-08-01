@@ -396,7 +396,8 @@ fn community_profile(repo_root: &Path, cmd: &dyn CommandRunner) -> CommunityProf
 }
 
 /// Resolve a `owner/repo` GitHub slug from the `origin` remote, or `None` when
-/// there is no GitHub remote (or `git` failed).
+/// there is no GitHub remote (or `git` failed). Parsing lives in [`crate::vcs`]
+/// (shared with the release coordinator).
 fn github_slug(repo_root: &Path, cmd: &dyn CommandRunner) -> Option<String> {
     let out = cmd
         .run("git", &["remote", "get-url", "origin"], repo_root)
@@ -404,45 +405,7 @@ fn github_slug(repo_root: &Path, cmd: &dyn CommandRunner) -> Option<String> {
     if out.status != Some(0) {
         return None;
     }
-    parse_github_slug(out.stdout.trim())
-}
-
-/// Every recognized way a GitHub remote URL prefixes the `owner/repo` tail. The
-/// match is a **prefix**, not a substring, so a non-GitHub host that merely
-/// contains `github.com` in its path (`https://mirror.example/github.com/o/r`)
-/// is rejected rather than mis-parsed into a GitHub slug.
-const GITHUB_PREFIXES: &[&str] = &[
-    "git@github.com:",       // scp-like (the common SSH form)
-    "ssh://git@github.com/", // explicit ssh:// SSH form
-    "ssh://github.com/",     // ssh:// without a user
-    "https://github.com/",   //
-    "http://github.com/",    //
-    "git://github.com/",     //
-    "github.com:",           // bare scp-like
-    "github.com/",           // bare
-];
-
-/// Parse `owner/repo` out of a GitHub remote URL — the SSH (`git@github.com:o/r`,
-/// `ssh://git@github.com/o/r`), HTTPS, and `git://` forms. `None` for a
-/// non-GitHub host or an unrecognizable URL. The parser anchors on a known host
-/// prefix (never a bare `find`), so a lookalike host is never accepted; a wrong
-/// parse would in any case only yield a failed `gh api` ⇒ `unknown`, never a
-/// false `Absent`.
-pub(crate) fn parse_github_slug(url: &str) -> Option<String> {
-    let tail = GITHUB_PREFIXES.iter().find_map(|p| url.strip_prefix(p))?;
-    // Trim a trailing slash BEFORE stripping `.git` so `.../repo.git/` and
-    // `.../repo/` both reduce to `repo` (strip order matters).
-    let tail = tail.trim_end_matches('/');
-    let tail = tail.strip_suffix(".git").unwrap_or(tail);
-    let tail = tail.trim_end_matches('/');
-    let mut parts = tail.splitn(3, '/');
-    let owner = parts.next().filter(|s| !s.is_empty())?;
-    let repo = parts.next().filter(|s| !s.is_empty())?;
-    // Reject a trailing path segment (`owner/repo/extra`) — not a bare slug.
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(format!("{owner}/{repo}"))
+    crate::vcs::parse_github_slug(out.stdout.trim())
 }
 
 // ── Small builders ───────────────────────────────────────────────────────────

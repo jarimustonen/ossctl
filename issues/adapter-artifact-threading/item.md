@@ -6,6 +6,9 @@ status: in-progress
 priority: high
 epic: ossctl-phase4-build
 related: ['@adapter-publish-completeness']
+commits:
+- hash: 2f1ff8d
+  summary: thread build artifacts + source tarball into adapter publish()
 ---
 
 # Thread release artifact paths (asset paths + tarball URL/sha256) from coordinator into adapters

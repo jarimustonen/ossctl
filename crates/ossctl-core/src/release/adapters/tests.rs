@@ -122,11 +122,6 @@ impl RegistryQuery for FakeRegistry {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/// A `'static` empty artifact set so [`ctx`] can hand out `&'static` — the
-/// `EMPTY` const holds a `Vec` (Drop), so `&ReleaseArtifacts::EMPTY` is a local
-/// temporary that cannot escape a returning function.
-static EMPTY_ARTIFACTS: ReleaseArtifacts = ReleaseArtifacts::EMPTY;
-
 fn ctx<'a>(
     runner: &'a FakeCmd,
     clock: &'a FakeClock,
@@ -455,12 +450,12 @@ fn binary_publish_uploads_the_threaded_asset_paths() {
     );
     resolve(Adapter::Manual).publish(&c, &t).unwrap();
 
-    // The threaded asset paths land between the tag and `--clobber`.
+    // Flags precede the `--` terminator; the threaded asset paths follow it.
     assert_eq!(
         cmd.calls(),
         vec![
-            "gh release upload v1.0.0 dist/tool-1.0.0-x86_64.tar.gz \
-             dist/tool-1.0.0-aarch64.tar.gz --clobber"
+            "gh release upload v1.0.0 --clobber -- dist/tool-1.0.0-x86_64.tar.gz \
+             dist/tool-1.0.0-aarch64.tar.gz"
         ]
     );
 }
@@ -488,12 +483,13 @@ fn homebrew_publish_reads_the_threaded_tarball_url_and_sha256() {
     );
     resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap();
 
-    // The bump carries the threaded `--url`/`--sha256`, with the formula name last.
+    // The bump carries the threaded `--url`/`--sha256`, with the formula name
+    // after the `--` option terminator.
     assert_eq!(
         cmd.calls(),
         vec![
             "brew bump-formula-pr --url \
-             https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz --sha256 deadbeef tool"
+             https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz --sha256 deadbeef -- tool"
         ]
     );
 }
@@ -527,7 +523,7 @@ fn homebrew_core_publish_omits_sha256_when_not_yet_computed() {
         cmd.calls(),
         vec![
             "brew bump-formula-pr --no-fork --url \
-             https://github.com/o/r/archive/refs/tags/v2.0.0.tar.gz tool"
+             https://github.com/o/r/archive/refs/tags/v2.0.0.tar.gz -- tool"
         ]
     );
 }

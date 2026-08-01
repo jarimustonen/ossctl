@@ -66,8 +66,20 @@ pub struct EffectCtx<'a> {
     /// adapter repackages. [`ReleaseArtifacts::EMPTY`] during the re-runnable
     /// dry-run / build phases (the artifacts are not yet known) and for every
     /// non-publish caller; the coordinator swaps in the computed value for the
-    /// publish phase so a `publish` body can read it without re-deriving it.
+    /// publish phase (via [`EffectCtx::with_artifacts`]) so a `publish` body can
+    /// read it without re-deriving it.
     pub artifacts: &'a ReleaseArtifacts,
+}
+
+impl<'a> EffectCtx<'a> {
+    /// The same effect context with `artifacts` swapped in — how the coordinator
+    /// hands the computed release artifacts to the publish phase without manually
+    /// re-threading every port (a new port added to [`EffectCtx`] is carried here
+    /// automatically via the `..*self` update).
+    #[must_use]
+    pub fn with_artifacts(&self, artifacts: &'a ReleaseArtifacts) -> EffectCtx<'a> {
+        EffectCtx { artifacts, ..*self }
+    }
 }
 
 /// The concrete release artifacts the coordinator threads from the build phase
@@ -94,15 +106,18 @@ pub struct ReleaseArtifacts {
     pub source_tarball: Option<SourceTarball>,
 }
 
-impl ReleaseArtifacts {
-    /// No artifacts yet — the value carried through the dry-run / build phases and
-    /// by every non-publish caller. A `const` so a borrow of it is `'static` and
-    /// no caller needs to own a binding just to fill [`EffectCtx::artifacts`].
-    pub const EMPTY: ReleaseArtifacts = ReleaseArtifacts {
-        assets: Vec::new(),
-        source_tarball: None,
-    };
-}
+/// A shared empty artifact set — the value carried through the dry-run / build
+/// phases and by every non-publish caller ([`EffectCtx::artifacts`] must always
+/// point at *something*).
+///
+/// A module-level `static` (not an associated `const`) so `&EMPTY_ARTIFACTS` is a
+/// genuine `&'static ReleaseArtifacts` that a returning function can hand out; a
+/// `const` holding a `Vec` (which has `Drop`) is inlined at each use site as a
+/// local temporary and cannot escape its enclosing expression.
+pub static EMPTY_ARTIFACTS: ReleaseArtifacts = ReleaseArtifacts {
+    assets: Vec::new(),
+    source_tarball: None,
+};
 
 /// The published source tarball a Homebrew formula bump consumes (`--url` /
 /// `--sha256`).

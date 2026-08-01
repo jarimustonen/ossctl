@@ -80,10 +80,12 @@ impl ReleaseAdapter for BinaryAdapter {
         // SKELETON: the concrete asset paths are threaded in via
         // `ctx.artifacts.assets` (gathered from every target's build); the real
         // upload is finished in `adapter-skeletons-finish`.
+        //
+        // Flags precede the `--` option terminator, and every asset path follows
+        // it, so a path that happens to start with `-` is never mis-read as a flag.
         let tag = Self::tag(t);
-        let mut args = vec!["release", "upload", tag.as_str()];
+        let mut args = vec!["release", "upload", tag.as_str(), "--clobber", "--"];
         args.extend(ctx.artifacts.assets.iter().map(String::as_str));
-        args.push("--clobber");
         run_all(ctx, &[PlannedCommand::new("gh", &args)])?;
         Ok(make_receipt(ctx, t, None, None))
     }

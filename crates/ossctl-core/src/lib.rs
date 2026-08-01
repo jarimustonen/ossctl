@@ -34,5 +34,6 @@ pub mod facts;
 pub mod ports;
 pub mod protocol;
 pub mod release;
+pub(crate) mod vcs;
 
 pub use protocol::{SCHEMA_VERSION, SUPPORTED_SCHEMAS};

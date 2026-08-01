@@ -65,7 +65,7 @@ use super::adapters::{
     SourceTarball,
 };
 use super::journal::Journal;
-use crate::contract::schema::{Ecosystem, Target};
+use crate::contract::schema::{Adapter, Ecosystem, Target};
 
 /// A destination for the coordinator's progress events, so a real cut can stream
 /// them (`--output=jsonl`, §12) while the same events are durably journalled.
@@ -185,23 +185,23 @@ pub fn execute(
     )?;
 
     // Thread the build's concrete artifacts into publish-all: the aggregated
-    // asset paths (binary) and the source tarball URL/sha256 (homebrew). A resume
-    // that skipped a completed build phase re-gathers nothing here (`assets` stays
-    // empty); the finishing issue that performs the real upload journals artifacts
-    // so a resume can restore them.
+    // asset paths (binary) and the source tarball URL/sha256 (homebrew).
+    //
+    // Resume caveat: a resume that skipped a completed build phase re-gathers
+    // nothing here (`assets` stays empty), so a distribution adapter would see an
+    // empty/partial set. This is the SKELETON boundary — the two distribution
+    // adapters do not perform a real upload yet, and on a fresh cut the set is
+    // complete; making artifacts survive resume (journaling the per-target build
+    // manifest) is `adapter-skeletons-finish`, which also performs the real
+    // upload. See `threads_no_assets_when_build_phase_is_resumed` for the pinned
+    // current behavior.
     let artifacts = ReleaseArtifacts {
         assets,
-        source_tarball: source_tarball(ctx, plan),
+        source_tarball: source_tarball(ctx, &targets, plan),
     };
-    let publish_ctx = EffectCtx {
-        runner: ctx.runner,
-        clock: ctx.clock,
-        registry: ctx.registry,
-        repo_root: ctx.repo_root,
-        artifacts: &artifacts,
-    };
-    // publish-all: per-target irreversible; receipts journalled per target.
-    publish_phase(journal, sink, &publish_ctx, &targets)?;
+    // publish-all: per-target irreversible; receipts journalled per target. The
+    // publish phase is the only one that sees the computed artifacts.
+    publish_phase(journal, sink, &ctx.with_artifacts(&artifacts), &targets)?;
     // tag-once: coordinator-only, only after every publish succeeded.
     tag_phase(journal, sink, tagger, plan)?;
 
@@ -278,12 +278,28 @@ fn target_id(ecosystem: Ecosystem) -> String {
 /// remote and the plan's tag — the input a downstream Homebrew formula bump needs
 /// (`--url`).
 ///
-/// `None` when there is no resolvable GitHub remote: a non-GitHub repo simply
-/// threads no tarball (the homebrew skeleton then has nothing to bump, which is
-/// honest, not an error). The `sha256` is deliberately left `None` — computing it
-/// needs the tag's archive to already exist, a cross-target ordering resolved by
-/// the homebrew-finishing issue; this layer only threads the seam through.
-fn source_tarball(ctx: &EffectCtx<'_>, plan: &ReleasePlan) -> Option<SourceTarball> {
+/// Only shells out when a target actually consumes it (a homebrew target is in
+/// the cut); other cuts thread no tarball and never touch git. `None` too when
+/// there is no resolvable GitHub remote: a non-GitHub repo simply threads no
+/// tarball (the homebrew skeleton then has nothing to bump — honest, not an
+/// error; a fail-fast on "homebrew target but no GitHub remote" belongs with the
+/// finished body). The `sha256` is deliberately left `None` — computing it needs
+/// the tag's archive to already exist, a cross-target ordering resolved by the
+/// homebrew-finishing issue; this layer only threads the seam through.
+fn source_tarball(
+    ctx: &EffectCtx<'_>,
+    targets: &[TargetPlan],
+    plan: &ReleasePlan,
+) -> Option<SourceTarball> {
+    let needed = targets.iter().any(|tp| {
+        matches!(
+            tp.input.target.adapter,
+            Adapter::HomebrewTap | Adapter::HomebrewCore
+        )
+    });
+    if !needed {
+        return None;
+    }
     let out = ctx
         .runner
         .run("git", &["remote", "get-url", "origin"], ctx.repo_root)
@@ -291,7 +307,7 @@ fn source_tarball(ctx: &EffectCtx<'_>, plan: &ReleasePlan) -> Option<SourceTarba
     if out.status != Some(0) {
         return None;
     }
-    let slug = crate::audit::parse_github_slug(out.stdout.trim())?;
+    let slug = crate::vcs::parse_github_slug(out.stdout.trim())?;
     let tag = format!("v{}", plan.version);
     Some(SourceTarball {
         url: format!("https://github.com/{slug}/archive/refs/tags/{tag}.tar.gz"),

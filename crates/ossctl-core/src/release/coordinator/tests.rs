@@ -17,7 +17,7 @@ use crate::ports::{
 };
 use crate::protocol::journal::{Phase, PhaseOutcome, RunStatus};
 use crate::protocol::plan::{PlanPhase, PlanTarget, ReleasePlan};
-use crate::release::adapters::{EffectCtx, ReleaseArtifacts};
+use crate::release::adapters::{EffectCtx, EMPTY_ARTIFACTS};
 use crate::release::journal::{Journal, JournalPaths};
 
 // ── In-memory journal store (mirrors the journal module's own fake) ──────────
@@ -304,7 +304,7 @@ fn phases_are_strict_barriers() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
-        artifacts: &ReleaseArtifacts::EMPTY,
+        artifacts: &EMPTY_ARTIFACTS,
     };
     let mut sink = RecordingSink::default();
     let mut journal = new_journal(&store, &clock, &idgen);
@@ -393,7 +393,7 @@ fn tags_exactly_once_after_all_publishes_and_completes_the_run() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
-        artifacts: &ReleaseArtifacts::EMPTY,
+        artifacts: &EMPTY_ARTIFACTS,
     };
     let mut sink = NullSink;
     let mut journal = new_journal(&store, &clock, &idgen);
@@ -449,7 +449,7 @@ fn publish_failure_stops_journals_and_does_not_roll_back() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
-        artifacts: &ReleaseArtifacts::EMPTY,
+        artifacts: &EMPTY_ARTIFACTS,
     };
     let mut sink = NullSink;
     let mut journal = new_journal(&store, &clock, &idgen);
@@ -520,7 +520,7 @@ fn a_failed_build_never_publishes_or_tags() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
-        artifacts: &ReleaseArtifacts::EMPTY,
+        artifacts: &EMPTY_ARTIFACTS,
     };
     let err = execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap_err();
     assert!(matches!(
@@ -555,7 +555,7 @@ fn a_tag_push_failure_journals_the_local_tag_and_stops() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
-        artifacts: &ReleaseArtifacts::EMPTY,
+        artifacts: &EMPTY_ARTIFACTS,
     };
     let mut sink = NullSink;
     let mut journal = new_journal(&store, &clock, &idgen);
@@ -607,7 +607,7 @@ fn re_execution_resumes_without_re_publishing_landed_targets() {
             clock: &clock,
             registry: &reg,
             repo_root: &root,
-            artifacts: &ReleaseArtifacts::EMPTY,
+            artifacts: &EMPTY_ARTIFACTS,
         };
         let mut sink = NullSink;
         let mut journal = new_journal(&store, &clock, &idgen);
@@ -624,7 +624,7 @@ fn re_execution_resumes_without_re_publishing_landed_targets() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
-        artifacts: &ReleaseArtifacts::EMPTY,
+        artifacts: &EMPTY_ARTIFACTS,
     };
     let mut sink = NullSink;
     let mut journal = Journal::open(&store, &clock, paths(), "RUN01").unwrap();
@@ -689,7 +689,7 @@ fn threads_build_assets_into_binary_publish() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
-        artifacts: &ReleaseArtifacts::EMPTY,
+        artifacts: &EMPTY_ARTIFACTS,
     };
     let mut sink = NullSink;
     let mut journal = skeleton_journal(&store, &clock, &idgen, "1.2.3");
@@ -707,12 +707,16 @@ fn threads_build_assets_into_binary_publish() {
     };
     execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
 
-    // cargo's built `.crate` is aggregated across build-all and uploaded to the
-    // GitHub Release by the binary adapter (which has no build output of its own).
+    // The build phase's artifacts are aggregated and reach the binary adapter's
+    // publish command (which has no build output of its own). This asserts the
+    // *plumbing* — that a build output threads through to the upload set; WHICH
+    // ecosystems' outputs the binary adapter should actually attach to a GitHub
+    // Release (cargo's `.crate` is a registry artifact, not a distributable) is a
+    // selection policy owned by `adapter-skeletons-finish`, not this seam.
     assert!(
         cmd.calls()
             .iter()
-            .any(|c| c == "gh release upload v1.2.3 tool-1.2.3.crate --clobber"),
+            .any(|c| c == "gh release upload v1.2.3 --clobber -- tool-1.2.3.crate"),
         "binary publish did not receive the threaded build asset: {:?}",
         cmd.calls()
     );
@@ -732,7 +736,7 @@ fn threads_source_tarball_url_into_homebrew_publish() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
-        artifacts: &ReleaseArtifacts::EMPTY,
+        artifacts: &EMPTY_ARTIFACTS,
     };
     let mut sink = NullSink;
     let mut journal = skeleton_journal(&store, &clock, &idgen, "1.0.0");
@@ -756,8 +760,123 @@ fn threads_source_tarball_url_into_homebrew_publish() {
     assert!(
         cmd.calls().iter().any(|c| c
             == "brew bump-formula-pr --url \
-                https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz tool"),
+                https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz -- tool"),
         "homebrew publish did not receive the threaded tarball URL: {:?}",
+        cmd.calls()
+    );
+}
+
+#[test]
+fn no_source_tarball_lookup_without_a_homebrew_target() {
+    // A rust+binary cut needs no source tarball, so the coordinator never shells
+    // out to `git remote get-url origin` (the gate keeps unrelated cuts clean).
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::with_origin("git@github.com:o/r.git");
+    let reg = FakeRegistry;
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = NullSink;
+    let mut journal = skeleton_journal(&store, &clock, &idgen, "1.2.3");
+
+    let plan = ReleasePlan {
+        plan_id: "p".into(),
+        contract_schema_version: 1,
+        head_sha: "d".into(),
+        version: "1.2.3".into(),
+        targets: vec![
+            plan_target(Ecosystem::Rust, Registry::CratesIo, Adapter::CargoPublish),
+            plan_target(Ecosystem::Binary, Registry::GhReleases, Adapter::Manual),
+        ],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+    };
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+
+    assert!(
+        !cmd.calls().iter().any(|c| c == "git remote get-url origin"),
+        "resolved a source tarball for a cut with no homebrew target: {:?}",
+        cmd.calls()
+    );
+}
+
+#[test]
+fn threads_no_assets_when_build_phase_is_resumed() {
+    // Pins the documented resume boundary: a resume that re-enters after a
+    // completed build phase re-gathers no assets (they were gathered on the run
+    // that first built), so the binary adapter's publish sees an empty upload set.
+    // The two distribution adapters do not perform a real upload yet — making
+    // artifacts survive resume is `adapter-skeletons-finish`. Guarding this now
+    // would just move a SKELETON's incompleteness earlier; here we lock the
+    // behavior so the follow-up (which journals artifacts) has a regression anchor.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let reg = FakeRegistry;
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+
+    let plan = ReleasePlan {
+        plan_id: "p".into(),
+        contract_schema_version: 1,
+        head_sha: "d".into(),
+        version: "1.2.3".into(),
+        targets: vec![
+            plan_target(Ecosystem::Rust, Registry::CratesIo, Adapter::CargoPublish),
+            plan_target(Ecosystem::Binary, Registry::GhReleases, Adapter::Manual),
+        ],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+    };
+
+    // First attempt: the binary publish fails after build completed, leaving the
+    // build phase journalled Ok and the run resumable.
+    {
+        let cmd = FakeCmd::failing_on("gh release upload");
+        let ctx = EffectCtx {
+            runner: &cmd,
+            clock: &clock,
+            registry: &reg,
+            repo_root: &root,
+            artifacts: &EMPTY_ARTIFACTS,
+        };
+        let mut sink = NullSink;
+        let mut journal = skeleton_journal(&store, &clock, &idgen, "1.2.3");
+        execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap_err();
+        // The first attempt DID gather the asset (build ran) and passed it through.
+        assert!(cmd.calls().iter().any(|c| c.contains("tool-1.2.3.crate")));
+    }
+
+    // Resume: build is skipped whole (completed Ok), so `assets` is empty and the
+    // binary upload carries no asset path.
+    let cmd = FakeCmd::new();
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = NullSink;
+    let mut journal = Journal::open(&store, &clock, paths(), "RUN01").unwrap();
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+
+    assert!(
+        !cmd.calls().iter().any(|c| c.contains("package")),
+        "resume re-ran the completed build: {:?}",
+        cmd.calls()
+    );
+    assert!(
+        cmd.calls()
+            .iter()
+            .any(|c| c == "gh release upload v1.2.3 --clobber --"),
+        "resumed binary upload should carry no assets (documented boundary): {:?}",
         cmd.calls()
     );
 }
@@ -778,7 +897,7 @@ fn refuses_a_target_with_no_resolved_package() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
-        artifacts: &ReleaseArtifacts::EMPTY,
+        artifacts: &EMPTY_ARTIFACTS,
     };
     let mut sink = NullSink;
     let mut journal = new_journal(&store, &clock, &idgen);
