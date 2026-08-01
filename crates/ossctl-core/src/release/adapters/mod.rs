@@ -104,6 +104,13 @@ pub struct ReleaseArtifacts {
     /// coordinator could resolve it (a GitHub `origin` remote). `None` when the
     /// repo has no resolvable GitHub remote.
     pub source_tarball: Option<SourceTarball>,
+    /// The resolved `owner/repo` GitHub slug of the cut's `origin` remote, when
+    /// the coordinator could parse one and the cut carries a GitHub-backed
+    /// distribution target ([`binary`](self::binary) or [`homebrew`](self::homebrew)).
+    /// The [`binary`](self::binary) adapter records the GitHub-Release page URL for
+    /// this slug as its receipt's [`PublishReceipt::remote_url`](crate::protocol::release::PublishReceipt::remote_url).
+    /// `None` for a cut with no such target or no resolvable GitHub remote.
+    pub repo_slug: Option<String>,
 }
 
 /// A shared empty artifact set — the value carried through the dry-run / build
@@ -117,22 +124,27 @@ pub struct ReleaseArtifacts {
 pub static EMPTY_ARTIFACTS: ReleaseArtifacts = ReleaseArtifacts {
     assets: Vec::new(),
     source_tarball: None,
+    repo_slug: None,
 };
 
 /// The published source tarball a Homebrew formula bump consumes (`--url` /
 /// `--sha256`).
 ///
 /// The `url` is the deterministic GitHub source-archive URL for the cut's tag.
-/// Computing the `sha256` depends on that tag archive already existing — a
-/// cross-target ordering the homebrew-finishing issue (`adapter-skeletons-finish`)
-/// resolves — so it is `None` here: this unit threads the seam through, the digest
-/// lands with the finished body.
+/// The `sha256` is computed by the coordinator from the deterministic
+/// `git archive` of the plan's sealed commit — the same tree GitHub serves for
+/// the tag — because the tag archive the `url` points at does not exist yet at
+/// publish time (publish-all runs before tag-once, ADR-0002 §2), so it cannot be
+/// fetched-and-hashed. See [`super::coordinator`]'s `source_archive_sha256` for
+/// the computation and its documented parity caveat. `None` when the cut has
+/// no GitHub remote or the archive could not be produced/hashed — the formula bump
+/// then omits `--sha256` and lets `brew` compute it from the `--url`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceTarball {
     /// The source tarball's public URL (the GitHub tag archive).
     pub url: String,
-    /// The tarball's sha256, once computed. `None` until the homebrew skeleton is
-    /// finished (see the type docs).
+    /// The tarball's sha256, computed from the deterministic local source archive
+    /// (see the type docs). `None` when it could not be computed.
     pub sha256: Option<String>,
 }
 

@@ -185,19 +185,23 @@ pub fn execute(
     )?;
 
     // Thread the build's concrete artifacts into publish-all: the aggregated
-    // asset paths (binary) and the source tarball URL/sha256 (homebrew).
+    // asset paths (binary), the resolved GitHub slug (binary's receipt URL), and
+    // the source tarball URL/sha256 (homebrew).
     //
     // Resume caveat: a resume that skipped a completed build phase re-gathers
-    // nothing here (`assets` stays empty), so a distribution adapter would see an
-    // empty/partial set. This is the SKELETON boundary — the two distribution
-    // adapters do not perform a real upload yet, and on a fresh cut the set is
-    // complete; making artifacts survive resume (journaling the per-target build
-    // manifest) is `adapter-skeletons-finish`, which also performs the real
-    // upload. See `threads_no_assets_when_build_phase_is_resumed` for the pinned
-    // current behavior.
+    // nothing here (`assets` stays empty), so the binary adapter would see an
+    // empty/partial upload set. On a fresh cut the set is complete; making the
+    // aggregated build manifest survive resume (journaling it per target) is a
+    // documented follow-up. See `threads_no_assets_when_build_phase_is_resumed`
+    // for the pinned current behavior.
+    let repo_slug = resolve_repo_slug(ctx, &targets);
+    let source_tarball = repo_slug
+        .as_deref()
+        .and_then(|slug| source_tarball(ctx, slug, plan, &targets));
     let artifacts = ReleaseArtifacts {
         assets,
-        source_tarball: source_tarball(ctx, &targets, plan),
+        source_tarball,
+        repo_slug,
     };
     // publish-all: per-target irreversible; receipts journalled per target. The
     // publish phase is the only one that sees the computed artifacts.
@@ -274,22 +278,54 @@ fn target_id(ecosystem: Ecosystem) -> String {
     ecosystem.as_str().to_string()
 }
 
-/// Resolve the cut's published source tarball from the repo's GitHub `origin`
-/// remote and the plan's tag — the input a downstream Homebrew formula bump needs
-/// (`--url`).
+/// Whether the cut carries a GitHub-backed distribution target — the binary
+/// (`manual`, GitHub Releases) or a homebrew formula, both of which need the
+/// repo's `origin` slug threaded into publish.
+fn needs_github_slug(targets: &[TargetPlan]) -> bool {
+    targets.iter().any(|tp| {
+        matches!(
+            tp.input.target.adapter,
+            Adapter::Manual | Adapter::HomebrewTap | Adapter::HomebrewCore
+        )
+    })
+}
+
+/// Resolve the repo's `owner/repo` GitHub slug from its `origin` remote — the
+/// input the two GitHub-backed distribution adapters need (binary's receipt URL,
+/// homebrew's source-tarball URL + sha256).
 ///
-/// Only shells out when a target actually consumes it (a homebrew target is in
-/// the cut); other cuts thread no tarball and never touch git. `None` too when
-/// there is no resolvable GitHub remote: a non-GitHub repo simply threads no
-/// tarball (the homebrew skeleton then has nothing to bump — honest, not an
-/// error; a fail-fast on "homebrew target but no GitHub remote" belongs with the
-/// finished body). The `sha256` is deliberately left `None` — computing it needs
-/// the tag's archive to already exist, a cross-target ordering resolved by the
-/// homebrew-finishing issue; this layer only threads the seam through.
+/// Only shells out when a target actually consumes it (a binary or homebrew
+/// target is in the cut); other cuts never touch git here. `None` when there is
+/// no resolvable GitHub remote — a non-GitHub repo simply threads no slug (each
+/// consumer then degrades honestly: binary records no `remote_url`, homebrew
+/// threads no tarball).
+fn resolve_repo_slug(ctx: &EffectCtx<'_>, targets: &[TargetPlan]) -> Option<String> {
+    if !needs_github_slug(targets) {
+        return None;
+    }
+    let out = ctx
+        .runner
+        .run("git", &["remote", "get-url", "origin"], ctx.repo_root)
+        .ok()?;
+    if out.status != Some(0) {
+        return None;
+    }
+    crate::vcs::parse_github_slug(out.stdout.trim())
+}
+
+/// Resolve the cut's published source tarball (URL + sha256) — the input a
+/// downstream Homebrew formula bump needs (`--url` / `--sha256`).
+///
+/// Only produced when a homebrew target is in the cut; other cuts thread no
+/// tarball. The `url` is the deterministic GitHub tag-archive URL for the plan's
+/// tag; the `sha256` is [`source_archive_sha256`] of the sealed commit (`None`
+/// when the archive could not be produced/hashed, in which case the formula bump
+/// omits `--sha256`).
 fn source_tarball(
     ctx: &EffectCtx<'_>,
-    targets: &[TargetPlan],
+    slug: &str,
     plan: &ReleasePlan,
+    targets: &[TargetPlan],
 ) -> Option<SourceTarball> {
     let needed = targets.iter().any(|tp| {
         matches!(
@@ -300,19 +336,63 @@ fn source_tarball(
     if !needed {
         return None;
     }
+    let tag = format!("v{}", plan.version);
+    Some(SourceTarball {
+        url: format!("https://github.com/{slug}/archive/refs/tags/{tag}.tar.gz"),
+        sha256: source_archive_sha256(ctx, slug, plan),
+    })
+}
+
+/// Compute the sha256 of the cut's source tarball from the **deterministic local
+/// `git archive`** of the plan's sealed commit — the digest a Homebrew
+/// `bump-formula-pr` passes as `--sha256`.
+///
+/// # Why the local archive, not the URL
+///
+/// The `--url` points at GitHub's tag archive, which does not exist yet: the tag
+/// is created in the coordinator-owned tag-once phase, *after* publish-all
+/// (ADR-0002 §2), so at homebrew-publish time there is nothing at the URL to
+/// fetch-and-hash. Instead we hash the source archive of `plan.head_sha` — the
+/// exact commit the tag will point at (`tag_phase` tags `plan.head_sha`), so the
+/// archived *tree* is identical to what GitHub will serve for the tag.
+///
+/// # Parity caveat (discussion item)
+///
+/// A local `git archive --format=tar.gz` is **not byte-guaranteed** to equal
+/// GitHub's served tarball: the tar content matches, but the gzip framing (and
+/// any `git` version differences) can change the compressed bytes and thus the
+/// sha256. The only fully-correct value is the hash of the *pushed* GitHub
+/// archive, which the tag-once-last barrier makes unavailable before this point.
+/// A follow-up could move the formula bump to a post-tag coordinator step and
+/// hash the real artifact; until then this best-effort digest is threaded, and a
+/// `None` (below) degrades to letting `brew` compute the checksum from `--url`.
+///
+/// Hermetic: the archive-and-hash runs through the injected [`CommandRunner`]
+/// (`sh -c 'git archive … | shasum -a 256'`), so tests serve a canned digest and
+/// nothing touches a real repo. `None` on any spawn/exit/empty-output failure.
+fn source_archive_sha256(ctx: &EffectCtx<'_>, slug: &str, plan: &ReleasePlan) -> Option<String> {
+    // GitHub's tag archive unpacks under `<repo>-<version>/`; match that prefix so
+    // the archived paths line up with what the URL serves.
+    let repo = slug.rsplit('/').next().filter(|r| !r.is_empty())?;
+    let prefix = format!("{repo}-{}/", plan.version);
+    // A single shelled pipeline: `git archive` streams the tar.gz to `shasum`,
+    // which prints "<hex>  -". The injected runner returns stdout as text (it
+    // cannot carry the binary tarball itself), so hashing happens in the pipe.
+    // The interpolated values are constrained (a parsed slug, a SemVer version, a
+    // git object id) and carry no shell metacharacters.
+    let pipeline = format!(
+        "git archive --format=tar.gz --prefix={prefix} {} | shasum -a 256",
+        plan.head_sha
+    );
     let out = ctx
         .runner
-        .run("git", &["remote", "get-url", "origin"], ctx.repo_root)
+        .run("sh", &["-c", &pipeline], ctx.repo_root)
         .ok()?;
     if out.status != Some(0) {
         return None;
     }
-    let slug = crate::vcs::parse_github_slug(out.stdout.trim())?;
-    let tag = format!("v{}", plan.version);
-    Some(SourceTarball {
-        url: format!("https://github.com/{slug}/archive/refs/tags/{tag}.tar.gz"),
-        sha256: None,
-    })
+    let digest = out.stdout.split_whitespace().next()?;
+    (!digest.is_empty()).then(|| digest.to_string())
 }
 
 /// Run a re-runnable phase (`dry_run` or `build`) as a strict barrier: every

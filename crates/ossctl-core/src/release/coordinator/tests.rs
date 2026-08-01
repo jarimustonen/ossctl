@@ -103,6 +103,10 @@ struct FakeCmd {
     /// Canned `git remote get-url origin` stdout — lets a cut resolve a source
     /// tarball URL. `None` means "no origin" (empty stdout, as a bare repo).
     origin: Option<String>,
+    /// Canned sha256 the `sh -c 'git archive … | shasum -a 256'` pipeline emits —
+    /// lets a cut resolve the source-tarball digest without a real archive/hash.
+    /// `None` means the pipeline returns empty stdout (no digest resolved).
+    archive_sha: Option<String>,
 }
 impl FakeCmd {
     fn new() -> Self {
@@ -110,18 +114,28 @@ impl FakeCmd {
             calls: RefCell::new(Vec::new()),
             fail_contains: None,
             origin: None,
+            archive_sha: None,
         }
     }
     fn failing_on(substr: &str) -> Self {
         Self {
-            calls: RefCell::new(Vec::new()),
             fail_contains: Some(substr.to_string()),
-            origin: None,
+            ..Self::new()
         }
     }
     fn with_origin(origin: &str) -> Self {
         Self {
             origin: Some(origin.to_string()),
+            ..Self::new()
+        }
+    }
+    /// A runner that both serves an `origin` remote and hashes the source archive
+    /// to `sha` — the full input the homebrew formula bump's `--url`/`--sha256`
+    /// needs.
+    fn with_origin_and_archive(origin: &str, sha: &str) -> Self {
+        Self {
+            origin: Some(origin.to_string()),
+            archive_sha: Some(sha.to_string()),
             ..Self::new()
         }
     }
@@ -133,7 +147,7 @@ impl CommandRunner for FakeCmd {
     fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
         let line = format!("{program} {}", args.join(" "));
         self.calls.borrow_mut().push(line.clone());
-        // Serve the origin remote so `source_tarball` can resolve a GitHub slug.
+        // Serve the origin remote so `resolve_repo_slug` can parse a GitHub slug.
         if let Some(origin) = &self.origin {
             if program == "git" && args == ["remote", "get-url", "origin"] {
                 return Ok(CommandOutput {
@@ -142,6 +156,19 @@ impl CommandRunner for FakeCmd {
                     stderr: String::new(),
                 });
             }
+        }
+        // Serve the source-archive digest for the `sh -c 'git archive … | shasum'`
+        // pipeline (`shasum` prints "<hex>  -"; the code takes the first token).
+        if program == "sh" {
+            let stdout = self
+                .archive_sha
+                .as_ref()
+                .map_or_else(String::new, |sha| format!("{sha}  -\n"));
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout,
+                stderr: String::new(),
+            });
         }
         let fails = self
             .fail_contains
@@ -727,7 +754,7 @@ fn threads_source_tarball_url_into_homebrew_publish() {
     let store = FakeStore::default();
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
-    let cmd = FakeCmd::with_origin("git@github.com:o/r.git");
+    let cmd = FakeCmd::with_origin_and_archive("git@github.com:o/r.git", "cafef00d");
     let reg = FakeRegistry;
     let tagger = FakeTagger::new();
     let root = PathBuf::from("/repo");
@@ -754,22 +781,84 @@ fn threads_source_tarball_url_into_homebrew_publish() {
     };
     execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
 
-    // The `origin` remote resolves to the deterministic GitHub tag-archive URL,
-    // threaded into the formula bump's `--url` (the sha256 lands with the finished
-    // homebrew body — it is `None` at this layer).
+    // The `origin` remote resolves to the deterministic GitHub tag-archive URL and
+    // the source archive of the sealed commit hashes to the threaded sha256, both
+    // carried into the formula bump's `--url`/`--sha256`.
     assert!(
         cmd.calls().iter().any(|c| c
             == "brew bump-formula-pr --url \
-                https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz -- tool"),
-        "homebrew publish did not receive the threaded tarball URL: {:?}",
+                https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz \
+                --sha256 cafef00d -- tool"),
+        "homebrew publish did not receive the threaded tarball URL + sha256: {:?}",
+        cmd.calls()
+    );
+    // The digest was computed by archiving the sealed commit (prefix matches the
+    // GitHub tag-archive layout `<repo>-<version>/`), never by fetching the URL.
+    assert!(
+        cmd.calls()
+            .iter()
+            .any(|c| c == "sh -c git archive --format=tar.gz --prefix=r-1.0.0/ d | shasum -a 256"),
+        "the source archive was not hashed through the injected runner: {:?}",
         cmd.calls()
     );
 }
 
 #[test]
-fn no_source_tarball_lookup_without_a_homebrew_target() {
-    // A rust+binary cut needs no source tarball, so the coordinator never shells
-    // out to `git remote get-url origin` (the gate keeps unrelated cuts clean).
+fn no_slug_lookup_without_a_github_distribution_target() {
+    // A rust+python cut carries no GitHub-backed distribution target (binary or
+    // homebrew), so the coordinator never shells out to `git remote get-url origin`
+    // — the gate keeps unrelated cuts clean.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::with_origin("git@github.com:o/r.git");
+    let reg = FakeRegistry;
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = NullSink;
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "plan-test".into(),
+        "1.2.3".into(),
+        vec!["rust".into(), "python".into()],
+    )
+    .unwrap();
+
+    let plan = ReleasePlan {
+        plan_id: "p".into(),
+        contract_schema_version: 1,
+        head_sha: "d".into(),
+        version: "1.2.3".into(),
+        targets: vec![
+            plan_target(Ecosystem::Rust, Registry::CratesIo, Adapter::CargoPublish),
+            plan_target(Ecosystem::Python, Registry::Pypi, Adapter::Twine),
+        ],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+    };
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+
+    assert!(
+        !cmd.calls().iter().any(|c| c == "git remote get-url origin"),
+        "resolved a slug for a cut with no GitHub distribution target: {:?}",
+        cmd.calls()
+    );
+}
+
+#[test]
+fn threads_repo_slug_into_binary_receipt() {
+    // A rust+binary cut resolves the `origin` slug and records the GitHub-Release
+    // page URL on the binary target's receipt (persisted as the journal receipt's
+    // `registry_url`). No homebrew target ⇒ no source-archive hashing.
     let store = FakeStore::default();
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
@@ -800,9 +889,20 @@ fn no_source_tarball_lookup_without_a_homebrew_target() {
     };
     execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
 
+    let receipt = journal
+        .state()
+        .published
+        .get("binary")
+        .expect("binary target published");
+    assert_eq!(
+        receipt.registry_url.as_deref(),
+        Some("https://github.com/o/r/releases/tag/v1.2.3"),
+        "binary receipt did not record the release URL from the threaded slug"
+    );
+    // No homebrew target ⇒ the source archive is never hashed.
     assert!(
-        !cmd.calls().iter().any(|c| c == "git remote get-url origin"),
-        "resolved a source tarball for a cut with no homebrew target: {:?}",
+        !cmd.calls().iter().any(|c| c.contains("git archive")),
+        "hashed a source archive for a cut with no homebrew target: {:?}",
         cmd.calls()
     );
 }

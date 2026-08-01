@@ -77,17 +77,25 @@ impl ReleaseAdapter for BinaryAdapter {
         t: &AdapterTarget,
     ) -> Result<PublishReceipt, AdapterError> {
         // PER-TARGET IRREVERSIBLE (uploads assets to the release).
-        // SKELETON: the concrete asset paths are threaded in via
-        // `ctx.artifacts.assets` (gathered from every target's build); the real
-        // upload is finished in `adapter-skeletons-finish`.
-        //
-        // Flags precede the `--` option terminator, and every asset path follows
-        // it, so a path that happens to start with `-` is never mis-read as a flag.
+        // The concrete asset paths are threaded in via `ctx.artifacts.assets`
+        // (gathered from every target's build). Flags precede the `--` option
+        // terminator, and every asset path follows it, so a path that happens to
+        // start with `-` is never mis-read as a flag.
         let tag = Self::tag(t);
         let mut args = vec!["release", "upload", tag.as_str(), "--clobber", "--"];
         args.extend(ctx.artifacts.assets.iter().map(String::as_str));
         run_all(ctx, &[PlannedCommand::new("gh", &args)])?;
-        Ok(make_receipt(ctx, t, None, None))
+        // Record where the assets landed: the GitHub-Release page for this tag,
+        // built from the coordinator-resolved repo slug (`ctx.artifacts.repo_slug`).
+        // GitHub Releases expose no single publish digest, so `digest` stays `None`
+        // (honest — the receipt type documents `None` for ecosystems without one);
+        // `remote_url` is `None` when the cut has no resolvable GitHub remote.
+        let remote_url = ctx
+            .artifacts
+            .repo_slug
+            .as_ref()
+            .map(|slug| format!("https://github.com/{slug}/releases/tag/{tag}"));
+        Ok(make_receipt(ctx, t, None, remote_url))
     }
 
     fn verify(

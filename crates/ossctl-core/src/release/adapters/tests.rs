@@ -439,6 +439,7 @@ fn binary_publish_uploads_the_threaded_asset_paths() {
             "dist/tool-1.0.0-aarch64.tar.gz".to_string(),
         ],
         source_tarball: None,
+        repo_slug: None,
     };
     let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
 
@@ -461,6 +462,64 @@ fn binary_publish_uploads_the_threaded_asset_paths() {
 }
 
 #[test]
+fn binary_publish_records_the_release_url_from_the_threaded_slug() {
+    let cmd = FakeCmd::new();
+    let clock = FakeClock(7);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = ReleaseArtifacts {
+        assets: vec!["dist/tool-1.0.0-x86_64.tar.gz".to_string()],
+        source_tarball: None,
+        repo_slug: Some("o/r".to_string()),
+    };
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target(
+        Ecosystem::Binary,
+        Registry::GhReleases,
+        Adapter::Manual,
+        "1.0.0",
+    );
+    let r = resolve(Adapter::Manual).publish(&c, &t).unwrap();
+
+    // The receipt records where the assets landed: the GitHub-Release page for the
+    // tag, built from the threaded slug. GitHub Releases expose no single publish
+    // digest, so `digest` is honestly `None`.
+    assert_eq!(
+        r.remote_url.as_deref(),
+        Some("https://github.com/o/r/releases/tag/v1.0.0")
+    );
+    assert_eq!(r.digest, None);
+    assert_eq!(r.timestamp, 7, "receipt stamps the injected clock");
+}
+
+#[test]
+fn binary_publish_records_no_url_without_a_slug() {
+    // No resolvable GitHub remote ⇒ no threaded slug ⇒ the receipt honestly
+    // records no `remote_url` rather than fabricating one.
+    let cmd = FakeCmd::new();
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = ReleaseArtifacts {
+        assets: vec!["dist/tool-1.0.0-x86_64.tar.gz".to_string()],
+        source_tarball: None,
+        repo_slug: None,
+    };
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target(
+        Ecosystem::Binary,
+        Registry::GhReleases,
+        Adapter::Manual,
+        "1.0.0",
+    );
+    let r = resolve(Adapter::Manual).publish(&c, &t).unwrap();
+    assert_eq!(r.remote_url, None);
+    assert_eq!(r.digest, None);
+}
+
+#[test]
 fn homebrew_publish_reads_the_threaded_tarball_url_and_sha256() {
     let cmd = FakeCmd::new();
     let clock = FakeClock(1);
@@ -472,6 +531,7 @@ fn homebrew_publish_reads_the_threaded_tarball_url_and_sha256() {
             url: "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz".to_string(),
             sha256: Some("deadbeef".to_string()),
         }),
+        repo_slug: Some("o/r".to_string()),
     };
     let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
 
@@ -508,6 +568,7 @@ fn homebrew_core_publish_omits_sha256_when_not_yet_computed() {
             url: "https://github.com/o/r/archive/refs/tags/v2.0.0.tar.gz".to_string(),
             sha256: None,
         }),
+        repo_slug: Some("o/r".to_string()),
     };
     let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
 
