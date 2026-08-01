@@ -5,15 +5,30 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-07-31 (updated after stint #7). New agent: read this, then continue
-with a fresh `/stint`. The Phase-4 BUILD is now COMPLETE on `main`; only two non-urgent
-tails remain (both in-progress, neither actionable/urgent this round — see below).
-LANDED ON MAIN: `workspace-scaffold`, `contract-command`, `facts-command`, `skill-subcommand`,
-`audit-command`, ossctl-side of `migrate-oss-init`, the **`release-engine` epic** (`613076d`),
-the **adapter-publish-completeness AUDIT** (`d8518b5`, read-only), and — NEW this stint #7 —
-**`prose-skills`**: merged to main (merge `11b052c`, clean text-merge of the campaign branch;
-261 tests green, fmt+clippy clean, all 9 /oss-* skills bundle + print). `prose-skills` is
-CLOSED. The whole /oss-* family (9 skills) is now on `main`._
+_Handoff written 2026-08-01 (updated after stint #8). New agent: read this, then continue
+with a fresh `/stint`. **NEXT STINT STARTS WITH `/oss-init` ON THIS REPO** (dogfood — see
+NEXT ROUND). The Phase-4 build is complete AND the two SKELETON release adapters are now
+finished — ossctl's own release path (crates.io + GitHub Release + Homebrew) is code-complete._
+
+_STINT #8 LANDED ON MAIN — the `adapter-publish-completeness` campaign, decomposed into LANE R
+and run as two sequenced spinoffs, both reviewed (4-model /llm-review + /assess-findings) and
+green (271 tests):_
+_- **`adapter-artifact-threading`** (`2f1ff8d` → `06b570c`, closed `fixed`) — coordinator now
+  threads concrete release artifacts (asset paths + source tarball url/sha256) into every
+  adapter's `publish()` via `EffectCtx::artifacts` / `ReleaseArtifacts` (adapters/mod.rs)._
+_- **`adapter-skeletons-finish`** (`e25c8e1` → `a9138f3`, closed `fixed`) — `binary` (real
+  GitHub-Release asset upload + real receipt, repo-pinned via `--repo`) and `homebrew` (real
+  `bump-formula-pr --url`, `--sha256` passed only when honestly available). SKELETON markers
+  GONE from binary.rs + homebrew.rs. Review correctly DROPPED a wrong pre-tag homebrew sha256._
+
+_Earlier landed (stints #1–7): `workspace-scaffold`, `contract-command`, `facts-command`,
+`skill-subcommand`, `audit-command`, ossctl-side of `migrate-oss-init`, the `release-engine`
+epic (`613076d`), the adapter AUDIT (`d8518b5`), and `prose-skills` (`11b052c`) — the whole
+/oss-* family (9 skills) is on `main`._
+
+_REMAINING SKELETON markers in cargo/python/go/node adapters are BUILD-side (dist enumeration,
+CI trusted-publisher jobs), NOT the publish path — they stay under the `adapter-publish-
+completeness` umbrella (still in-progress) and are NOT needed for ossctl's own Rust release._
 
 _EPIC STATUS — deliberately NOT closed. The stint #6 handoff said to close
 `ossctl-phase4-build` after the prose-skills merge; stint #7 checked ground truth and left it
@@ -49,26 +64,25 @@ implementation, dependency-first.
 **Epic:** [`ossctl-phase4-build`](issues/ossctl-phase4-build/item.md)
 **Branch / worktree:** main (clean).
 
-**NEXT ROUND (start here):** the core build is done and both remaining items are NON-URGENT.
-There is no forced next action. When you next work this repo, the two candidate tails are:
+**NEXT ROUND (start here — decided with the user at end of stint #8): DOGFOOD ossctl on
+itself.** The adapters are finished specifically so this can happen. The plan:
 
-- **`adapter-publish-completeness`** (in-progress, open) — the AUDIT landed;
-  `issues/adapter-publish-completeness/analysis.md` scopes the completion work: **3 REAL
-  adapters** (cargo, python, go), **1 PARTIAL** (node), **2 SKELETON** (homebrew, binary — both
-  blocked on one coordinator change that threads asset paths / tarball-URL+sha256). Recommended
-  order in analysis.md: cross-cutting decisions (auth=ambient-env, idempotency=coordinator
-  verify pre-check, **artifact-threading — the single biggest missing piece**) →
-  cargo/python/go (parallel) → node → binary → homebrew. This is a small dependency-ordered
-  campaign (the coordinator change gates the two skeletons), so it leans toward `/orchestrate`,
-  NOT one Phase-3 spinoff. **Best done right before the first REAL self-cut** — you'll want to
-  test against live registries then, which is when finishing the adapters actually pays off.
-  Recommended first unit if you do start: just the cross-cutting coordinator/`AdapterTarget`
-  threading (everything else depends on it), then fan the per-adapter finishing out later.
-- **`migrate-oss-init`** — all-but-done; homebase removal DEFERRED until ossctl is installed on
-  PATH (see the tail note above). Not actionable until ossctl ships as a distributable binary.
+1. **`/oss-init` on this repo** — ossctl has NO `OSS-RELEASE.md` of its own yet. Run the
+   generator (it reads Cargo manifests, git history, CI) to author a human-reviewable DRAFT
+   config, then review/approve it. Targets: crates.io (`cargo`), GitHub Release binaries
+   (`binary`), Homebrew (`homebrew`) — exactly the three adapters now code-complete.
+2. Then `ossctl audit` → close readiness gaps → `ossctl release plan` → **`cut`** the real
+   0.1.0 against live registries. This is the first REAL self-cut; expect to surface real-
+   registry surprises the hermetic tests couldn't (that was always the point of finishing
+   the adapters right before the cut).
+3. Shipping 0.1.0 as an installable binary **unblocks `migrate-oss-init`** (homebase removal
+   was deferred until `ossctl` is on PATH).
 
-Stint #7 was offered these and the user chose to STOP (build complete, tails not urgent) —
-so no worktree was spawned this round. Both tails are documented and waiting.
+Secondary / non-urgent tails after the dogfood:
+- **`adapter-publish-completeness`** (umbrella, in-progress) — finish the cargo/python/go/node
+  BUILD-side skeletons (dist enumeration, CI publisher jobs). Not needed for ossctl's own Rust
+  release; do when a non-Rust project needs those ecosystems.
+- **`migrate-oss-init`** — remove the homebase `/oss-init` copy once ossctl is installed.
 
 **Hot-file learning (round #3):** crate `Cargo.toml` is listed as a hot file, but two
 disjoint units (`facts-command` + `skill-subcommand`) ran in PARALLEL and merged clean — the
@@ -116,30 +130,25 @@ Scheduling PLAN — source of truth for lane + order; issuectl is authoritative 
 `after <slug> (needs …)` = logical blocked_by mirror. `collision: <file>` = touches a
 second lane's hot file (spawn-time exclusion).
 
-DECISION (stint #8): finish the adapters BEFORE dogfooding ossctl's own 0.1.0 — a Rust
-CLI's own release path is exactly `binary` (GitHub Release) + `homebrew`, the two SKELETON
-adapters, so a cargo-only dogfood would prove nothing about the incomplete parts. The
-`adapter-publish-completeness` campaign is now decomposed into two sequenced sub-issues in
-LANE R (shared release-engine files → sequenced, never parallel). `python`/`node`/`go`
-finishing stays under the parent umbrella, out of scope for this campaign.
+Stint #8 landed LANE R (adapter-artifact-threading → adapter-skeletons-finish, both closed
+`fixed`). The release adapters ossctl needs for its own cut are now complete. The next move
+is NOT a coding lane — it's the **dogfood** (`/oss-init` → `audit` → `release cut`), which is
+a `/stint`-driven interactive/config task, not a spinoff-able hot-file unit. Remaining issues:
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: adapter-artifact-threading   ← start here
-LANE R — release engine (coordinator.rs + adapters/*.rs — true shared logic, sequence strictly)
-  ▶ adapter-artifact-threading
-    adapter-skeletons-finish   after adapter-artifact-threading (needs threaded artifact inputs)
+GLOBAL HEAD-OF-LINE: (dogfood) run /oss-init on this repo — see NEXT ROUND, not a lane node
 UNLANED — confirmed no shared hot files, run anytime (one slug per line):
-    migrate-oss-init
+    adapter-publish-completeness   (umbrella: cargo/python/go/node BUILD-side skeletons — non-urgent)
+    migrate-oss-init               (blocked: needs ossctl installed on PATH)
 ```
 <!-- execution-dag:end -->
 
-Note: LANE R is the decomposed `adapter-publish-completeness` campaign (parent stays open as
-the umbrella for python/node/go). Both LANE R units touch true shared-logic files
-(`coordinator.rs`, `adapters/mod.rs` seam, the adapter bodies) — sequence strictly, one live
-worktree at a time; unit 2 branches off unit 1's landed result. `migrate-oss-init` cannot
-start until ossctl installs on PATH. NEXT STINT (planned): dogfood — run `/oss-init` on ossctl
-itself (it has no OSS-RELEASE.md yet), then `release plan`/`cut`.
+Note: the head-of-line is the dogfood sequence (config authoring + real release cut), tracked
+in NEXT ROUND above rather than as a DAG lane node — it produces `OSS-RELEASE.md` and cuts
+0.1.0, it is not a hot-file coding unit. `adapter-publish-completeness` stays open only for
+the non-Rust BUILD-side adapter skeletons. `migrate-oss-init` cannot start until ossctl
+installs on PATH (which the dogfood cut delivers).
 
 ## Backlog
 
