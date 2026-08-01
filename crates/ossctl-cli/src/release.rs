@@ -19,7 +19,7 @@ use ossctl_core::protocol::journal::{
 };
 use ossctl_core::protocol::plan::ReleasePlan;
 use ossctl_core::protocol::reconcile::ReconcileReport;
-use ossctl_core::release::adapters::EffectCtx;
+use ossctl_core::release::adapters::{EffectCtx, ReleaseArtifacts};
 use ossctl_core::release::coordinator::{self, CutError, ProgressSink};
 use ossctl_core::release::journal::{self, Journal, JournalPaths};
 
@@ -294,6 +294,7 @@ pub fn verify(args: &RunIdArgs, format: OutputFormat) -> Result<(), CliError> {
         clock: &clock,
         registry: &registry,
         repo_root: &root,
+        artifacts: &ReleaseArtifacts::EMPTY,
     };
     let report = ossctl_core::release::reconcile::reconcile(&state, &ctx);
     let warnings = reconcile_warnings(&state, &report);
@@ -690,6 +691,7 @@ pub fn resume(args: &ResumeArgs, format: OutputFormat) -> Result<(), CliError> {
         clock: &clock,
         registry: &registry,
         repo_root: &root,
+        artifacts: &ReleaseArtifacts::EMPTY,
     };
 
     // Reconcile against remote registry state (the state table). This is the only
@@ -1024,6 +1026,7 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
         clock: &clock,
         registry: &registry,
         repo_root: &root,
+        artifacts: &ReleaseArtifacts::EMPTY,
     };
 
     match coordinator::execute(&mut journal, &current, &ctx, &tagger, &mut sink) {

@@ -428,7 +428,7 @@ const GITHUB_PREFIXES: &[&str] = &[
 /// prefix (never a bare `find`), so a lookalike host is never accepted; a wrong
 /// parse would in any case only yield a failed `gh api` ⇒ `unknown`, never a
 /// false `Absent`.
-fn parse_github_slug(url: &str) -> Option<String> {
+pub(crate) fn parse_github_slug(url: &str) -> Option<String> {
     let tail = GITHUB_PREFIXES.iter().find_map(|p| url.strip_prefix(p))?;
     // Trim a trailing slash BEFORE stripping `.git` so `.../repo.git/` and
     // `.../repo/` both reduce to `repo` (strip order matters).

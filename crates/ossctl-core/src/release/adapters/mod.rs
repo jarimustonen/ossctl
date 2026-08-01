@@ -61,6 +61,64 @@ pub struct EffectCtx<'a> {
     pub registry: &'a dyn RegistryQuery,
     /// Repository root — the working directory every command runs in.
     pub repo_root: &'a std::path::Path,
+    /// The concrete release artifacts threaded from build-all into publish-all
+    /// (ADR-0002 §2) — the asset upload set and the source tarball a distribution
+    /// adapter repackages. [`ReleaseArtifacts::EMPTY`] during the re-runnable
+    /// dry-run / build phases (the artifacts are not yet known) and for every
+    /// non-publish caller; the coordinator swaps in the computed value for the
+    /// publish phase so a `publish` body can read it without re-deriving it.
+    pub artifacts: &'a ReleaseArtifacts,
+}
+
+/// The concrete release artifacts the coordinator threads from the build phase
+/// into every adapter's [`publish`](ReleaseAdapter::publish) (ADR-0002 §2).
+///
+/// The two distribution adapters that repackage *already-produced* outputs need
+/// inputs no single ecosystem build yields on its own:
+/// [`binary`](self::binary) uploads the asset paths gathered from **every**
+/// target's [`build`](ReleaseAdapter::build), and [`homebrew`](self::homebrew)'s
+/// formula bump needs the published source tarball's URL + sha256. The
+/// coordinator computes this once, after build-all, and exposes it through
+/// [`EffectCtx::artifacts`]. The REAL registry adapters (cargo / python / go)
+/// ignore it — their own CLI finds its artifacts. This is an **in-memory**
+/// coordinator↔adapter hand-off only: it is never serialized or journaled, so it
+/// carries no schema version of its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReleaseArtifacts {
+    /// Built asset/binary paths, aggregated across every target's `build` in cut
+    /// order — the upload set for the binary / GitHub-Release adapter.
+    pub assets: Vec<String>,
+    /// The published source tarball a downstream formula bump points at, when the
+    /// coordinator could resolve it (a GitHub `origin` remote). `None` when the
+    /// repo has no resolvable GitHub remote.
+    pub source_tarball: Option<SourceTarball>,
+}
+
+impl ReleaseArtifacts {
+    /// No artifacts yet — the value carried through the dry-run / build phases and
+    /// by every non-publish caller. A `const` so a borrow of it is `'static` and
+    /// no caller needs to own a binding just to fill [`EffectCtx::artifacts`].
+    pub const EMPTY: ReleaseArtifacts = ReleaseArtifacts {
+        assets: Vec::new(),
+        source_tarball: None,
+    };
+}
+
+/// The published source tarball a Homebrew formula bump consumes (`--url` /
+/// `--sha256`).
+///
+/// The `url` is the deterministic GitHub source-archive URL for the cut's tag.
+/// Computing the `sha256` depends on that tag archive already existing — a
+/// cross-target ordering the homebrew-finishing issue (`adapter-skeletons-finish`)
+/// resolves — so it is `None` here: this unit threads the seam through, the digest
+/// lands with the finished body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceTarball {
+    /// The source tarball's public URL (the GitHub tag archive).
+    pub url: String,
+    /// The tarball's sha256, once computed. `None` until the homebrew skeleton is
+    /// finished (see the type docs).
+    pub sha256: Option<String>,
 }
 
 /// The per-target release input an adapter operates on: exactly one contract

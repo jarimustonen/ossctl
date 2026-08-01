@@ -17,7 +17,7 @@ use crate::ports::{
 };
 use crate::protocol::journal::{Phase, PhaseOutcome, RunStatus};
 use crate::protocol::plan::{PlanPhase, PlanTarget, ReleasePlan};
-use crate::release::adapters::EffectCtx;
+use crate::release::adapters::{EffectCtx, ReleaseArtifacts};
 use crate::release::journal::{Journal, JournalPaths};
 
 // ── In-memory journal store (mirrors the journal module's own fake) ──────────
@@ -100,18 +100,29 @@ impl JournalStore for FakeStore {
 struct FakeCmd {
     calls: RefCell<Vec<String>>,
     fail_contains: Option<String>,
+    /// Canned `git remote get-url origin` stdout — lets a cut resolve a source
+    /// tarball URL. `None` means "no origin" (empty stdout, as a bare repo).
+    origin: Option<String>,
 }
 impl FakeCmd {
     fn new() -> Self {
         Self {
             calls: RefCell::new(Vec::new()),
             fail_contains: None,
+            origin: None,
         }
     }
     fn failing_on(substr: &str) -> Self {
         Self {
             calls: RefCell::new(Vec::new()),
             fail_contains: Some(substr.to_string()),
+            origin: None,
+        }
+    }
+    fn with_origin(origin: &str) -> Self {
+        Self {
+            origin: Some(origin.to_string()),
+            ..Self::new()
         }
     }
     fn calls(&self) -> Vec<String> {
@@ -122,6 +133,16 @@ impl CommandRunner for FakeCmd {
     fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
         let line = format!("{program} {}", args.join(" "));
         self.calls.borrow_mut().push(line.clone());
+        // Serve the origin remote so `source_tarball` can resolve a GitHub slug.
+        if let Some(origin) = &self.origin {
+            if program == "git" && args == ["remote", "get-url", "origin"] {
+                return Ok(CommandOutput {
+                    status: Some(0),
+                    stdout: origin.clone(),
+                    stderr: String::new(),
+                });
+            }
+        }
         let fails = self
             .fail_contains
             .as_ref()
@@ -283,6 +304,7 @@ fn phases_are_strict_barriers() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
+        artifacts: &ReleaseArtifacts::EMPTY,
     };
     let mut sink = RecordingSink::default();
     let mut journal = new_journal(&store, &clock, &idgen);
@@ -371,6 +393,7 @@ fn tags_exactly_once_after_all_publishes_and_completes_the_run() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
+        artifacts: &ReleaseArtifacts::EMPTY,
     };
     let mut sink = NullSink;
     let mut journal = new_journal(&store, &clock, &idgen);
@@ -426,6 +449,7 @@ fn publish_failure_stops_journals_and_does_not_roll_back() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
+        artifacts: &ReleaseArtifacts::EMPTY,
     };
     let mut sink = NullSink;
     let mut journal = new_journal(&store, &clock, &idgen);
@@ -496,6 +520,7 @@ fn a_failed_build_never_publishes_or_tags() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
+        artifacts: &ReleaseArtifacts::EMPTY,
     };
     let err = execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap_err();
     assert!(matches!(
@@ -530,6 +555,7 @@ fn a_tag_push_failure_journals_the_local_tag_and_stops() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
+        artifacts: &ReleaseArtifacts::EMPTY,
     };
     let mut sink = NullSink;
     let mut journal = new_journal(&store, &clock, &idgen);
@@ -581,6 +607,7 @@ fn re_execution_resumes_without_re_publishing_landed_targets() {
             clock: &clock,
             registry: &reg,
             repo_root: &root,
+            artifacts: &ReleaseArtifacts::EMPTY,
         };
         let mut sink = NullSink;
         let mut journal = new_journal(&store, &clock, &idgen);
@@ -597,6 +624,7 @@ fn re_execution_resumes_without_re_publishing_landed_targets() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
+        artifacts: &ReleaseArtifacts::EMPTY,
     };
     let mut sink = NullSink;
     let mut journal = Journal::open(&store, &clock, paths(), "RUN01").unwrap();
@@ -625,6 +653,115 @@ fn re_execution_resumes_without_re_publishing_landed_targets() {
     );
 }
 
+// ── Artifact threading: build outputs + source tarball reach publish ──────────
+
+/// A journal for a rust + binary/homebrew skeleton cut (both distribution
+/// adapters share the `binary` ecosystem journal id).
+fn skeleton_journal<'a>(
+    store: &'a FakeStore,
+    clock: &'a FakeClock,
+    idgen: &'a FakeIdGen,
+    version: &str,
+) -> Journal<'a> {
+    Journal::create(
+        store,
+        clock,
+        idgen,
+        paths(),
+        "plan-test".into(),
+        version.to_string(),
+        vec!["rust".into(), "binary".into()],
+    )
+    .unwrap()
+}
+
+#[test]
+fn threads_build_assets_into_binary_publish() {
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::new();
+    let reg = FakeRegistry;
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &ReleaseArtifacts::EMPTY,
+    };
+    let mut sink = NullSink;
+    let mut journal = skeleton_journal(&store, &clock, &idgen, "1.2.3");
+
+    let plan = ReleasePlan {
+        plan_id: "p".into(),
+        contract_schema_version: 1,
+        head_sha: "d".into(),
+        version: "1.2.3".into(),
+        targets: vec![
+            plan_target(Ecosystem::Rust, Registry::CratesIo, Adapter::CargoPublish),
+            plan_target(Ecosystem::Binary, Registry::GhReleases, Adapter::Manual),
+        ],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+    };
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+
+    // cargo's built `.crate` is aggregated across build-all and uploaded to the
+    // GitHub Release by the binary adapter (which has no build output of its own).
+    assert!(
+        cmd.calls()
+            .iter()
+            .any(|c| c == "gh release upload v1.2.3 tool-1.2.3.crate --clobber"),
+        "binary publish did not receive the threaded build asset: {:?}",
+        cmd.calls()
+    );
+}
+
+#[test]
+fn threads_source_tarball_url_into_homebrew_publish() {
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::with_origin("git@github.com:o/r.git");
+    let reg = FakeRegistry;
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &ReleaseArtifacts::EMPTY,
+    };
+    let mut sink = NullSink;
+    let mut journal = skeleton_journal(&store, &clock, &idgen, "1.0.0");
+
+    let plan = ReleasePlan {
+        plan_id: "p".into(),
+        contract_schema_version: 1,
+        head_sha: "d".into(),
+        version: "1.0.0".into(),
+        targets: vec![
+            plan_target(Ecosystem::Rust, Registry::CratesIo, Adapter::CargoPublish),
+            plan_target(Ecosystem::Binary, Registry::Homebrew, Adapter::HomebrewTap),
+        ],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+    };
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+
+    // The `origin` remote resolves to the deterministic GitHub tag-archive URL,
+    // threaded into the formula bump's `--url` (the sha256 lands with the finished
+    // homebrew body — it is `None` at this layer).
+    assert!(
+        cmd.calls().iter().any(|c| c
+            == "brew bump-formula-pr --url \
+                https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz tool"),
+        "homebrew publish did not receive the threaded tarball URL: {:?}",
+        cmd.calls()
+    );
+}
+
 // ── Plan validation (before any external action) ─────────────────────────────
 
 #[test]
@@ -641,6 +778,7 @@ fn refuses_a_target_with_no_resolved_package() {
         clock: &clock,
         registry: &reg,
         repo_root: &root,
+        artifacts: &ReleaseArtifacts::EMPTY,
     };
     let mut sink = NullSink;
     let mut journal = new_journal(&store, &clock, &idgen);

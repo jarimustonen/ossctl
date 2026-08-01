@@ -77,15 +77,14 @@ impl ReleaseAdapter for BinaryAdapter {
         t: &AdapterTarget,
     ) -> Result<PublishReceipt, AdapterError> {
         // PER-TARGET IRREVERSIBLE (uploads assets to the release).
-        // SKELETON: the coordinator threads the concrete asset paths in; the
-        // representative upload command is shown here.
-        run_all(
-            ctx,
-            &[PlannedCommand::new(
-                "gh",
-                &["release", "upload", &Self::tag(t), "--clobber"],
-            )],
-        )?;
+        // SKELETON: the concrete asset paths are threaded in via
+        // `ctx.artifacts.assets` (gathered from every target's build); the real
+        // upload is finished in `adapter-skeletons-finish`.
+        let tag = Self::tag(t);
+        let mut args = vec!["release", "upload", tag.as_str()];
+        args.extend(ctx.artifacts.assets.iter().map(String::as_str));
+        args.push("--clobber");
+        run_all(ctx, &[PlannedCommand::new("gh", &args)])?;
         Ok(make_receipt(ctx, t, None, None))
     }
 

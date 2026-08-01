@@ -169,6 +169,7 @@ fn reconcile(
         clock,
         registry: reg,
         repo_root: Path::new("/repo"),
+        artifacts: &crate::release::adapters::ReleaseArtifacts::EMPTY,
     };
     reconcile_for_resume(state, plan, &ctx, allow_unverified)
 }

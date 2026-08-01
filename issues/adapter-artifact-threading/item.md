@@ -2,7 +2,7 @@
 created: 2026-08-01
 updated: 2026-08-01
 type: feature
-status: open
+status: in-progress
 priority: high
 epic: ossctl-phase4-build
 related: ['@adapter-publish-completeness']

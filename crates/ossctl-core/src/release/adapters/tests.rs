@@ -122,6 +122,11 @@ impl RegistryQuery for FakeRegistry {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+/// A `'static` empty artifact set so [`ctx`] can hand out `&'static` — the
+/// `EMPTY` const holds a `Vec` (Drop), so `&ReleaseArtifacts::EMPTY` is a local
+/// temporary that cannot escape a returning function.
+static EMPTY_ARTIFACTS: ReleaseArtifacts = ReleaseArtifacts::EMPTY;
+
 fn ctx<'a>(
     runner: &'a FakeCmd,
     clock: &'a FakeClock,
@@ -133,6 +138,25 @@ fn ctx<'a>(
         clock,
         registry,
         repo_root: root,
+        artifacts: &EMPTY_ARTIFACTS,
+    }
+}
+
+/// Like [`ctx`], but with concrete threaded [`ReleaseArtifacts`] — for exercising
+/// the two distribution adapters that read `ctx.artifacts` in `publish`.
+fn ctx_with<'a>(
+    runner: &'a FakeCmd,
+    clock: &'a FakeClock,
+    registry: &'a FakeRegistry,
+    root: &'a Path,
+    artifacts: &'a ReleaseArtifacts,
+) -> EffectCtx<'a> {
+    EffectCtx {
+        runner,
+        clock,
+        registry,
+        repo_root: root,
+        artifacts,
     }
 }
 
@@ -404,6 +428,108 @@ fn homebrew_and_binary_have_no_build_phase() {
         assert!(b.artifacts.is_empty(), "{id:?} should have no artifacts");
     }
     assert!(cmd.calls().is_empty(), "a no-op build shelled out");
+}
+
+// ── Threaded artifacts reach the two distribution adapters' publish() ─────────
+
+#[test]
+fn binary_publish_uploads_the_threaded_asset_paths() {
+    let cmd = FakeCmd::new();
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = ReleaseArtifacts {
+        assets: vec![
+            "dist/tool-1.0.0-x86_64.tar.gz".to_string(),
+            "dist/tool-1.0.0-aarch64.tar.gz".to_string(),
+        ],
+        source_tarball: None,
+    };
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target(
+        Ecosystem::Binary,
+        Registry::GhReleases,
+        Adapter::Manual,
+        "1.0.0",
+    );
+    resolve(Adapter::Manual).publish(&c, &t).unwrap();
+
+    // The threaded asset paths land between the tag and `--clobber`.
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "gh release upload v1.0.0 dist/tool-1.0.0-x86_64.tar.gz \
+             dist/tool-1.0.0-aarch64.tar.gz --clobber"
+        ]
+    );
+}
+
+#[test]
+fn homebrew_publish_reads_the_threaded_tarball_url_and_sha256() {
+    let cmd = FakeCmd::new();
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = ReleaseArtifacts {
+        assets: vec![],
+        source_tarball: Some(SourceTarball {
+            url: "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz".to_string(),
+            sha256: Some("deadbeef".to_string()),
+        }),
+    };
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target(
+        Ecosystem::Binary,
+        Registry::Homebrew,
+        Adapter::HomebrewTap,
+        "1.0.0",
+    );
+    resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap();
+
+    // The bump carries the threaded `--url`/`--sha256`, with the formula name last.
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "brew bump-formula-pr --url \
+             https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz --sha256 deadbeef tool"
+        ]
+    );
+}
+
+#[test]
+fn homebrew_core_publish_omits_sha256_when_not_yet_computed() {
+    let cmd = FakeCmd::new();
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    // The sha256 is threaded as `None` by this layer (the digest lands with the
+    // finished body); the bump then carries `--url` but no `--sha256`.
+    let artifacts = ReleaseArtifacts {
+        assets: vec![],
+        source_tarball: Some(SourceTarball {
+            url: "https://github.com/o/r/archive/refs/tags/v2.0.0.tar.gz".to_string(),
+            sha256: None,
+        }),
+    };
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target(
+        Ecosystem::Binary,
+        Registry::Homebrew,
+        Adapter::HomebrewCore,
+        "2.0.0",
+    );
+    resolve(Adapter::HomebrewCore).publish(&c, &t).unwrap();
+
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "brew bump-formula-pr --no-fork --url \
+             https://github.com/o/r/archive/refs/tags/v2.0.0.tar.gz tool"
+        ]
+    );
 }
 
 // ── classify_receipt: the pure verify core, all four outcomes ────────────────

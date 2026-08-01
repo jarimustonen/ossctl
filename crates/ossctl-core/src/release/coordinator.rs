@@ -60,7 +60,10 @@ use crate::protocol::journal::{
 use crate::protocol::plan::ReleasePlan;
 use crate::protocol::release::PublishReceipt as AdapterReceipt;
 
-use super::adapters::{resolve, AdapterTarget, EcosystemAdapter, EffectCtx, ReleaseAdapter};
+use super::adapters::{
+    resolve, AdapterTarget, EcosystemAdapter, EffectCtx, ReleaseAdapter, ReleaseArtifacts,
+    SourceTarball,
+};
 use super::journal::Journal;
 use crate::contract::schema::{Ecosystem, Target};
 
@@ -168,11 +171,37 @@ pub fn execute(
 ) -> Result<(), CutError> {
     let targets = resolve_target_plans(plan)?;
 
-    // dry-run-all → build-all: re-runnable, side-effect-free barriers.
-    reversible_phase(journal, sink, ctx, Phase::DryRun, &targets)?;
-    reversible_phase(journal, sink, ctx, Phase::Build, &targets)?;
+    // dry-run-all → build-all: re-runnable, side-effect-free barriers. build-all
+    // is where the concrete asset paths become known, so it accumulates them.
+    reversible_phase(journal, sink, ctx, Phase::DryRun, &targets, None)?;
+    let mut assets = Vec::new();
+    reversible_phase(
+        journal,
+        sink,
+        ctx,
+        Phase::Build,
+        &targets,
+        Some(&mut assets),
+    )?;
+
+    // Thread the build's concrete artifacts into publish-all: the aggregated
+    // asset paths (binary) and the source tarball URL/sha256 (homebrew). A resume
+    // that skipped a completed build phase re-gathers nothing here (`assets` stays
+    // empty); the finishing issue that performs the real upload journals artifacts
+    // so a resume can restore them.
+    let artifacts = ReleaseArtifacts {
+        assets,
+        source_tarball: source_tarball(ctx, plan),
+    };
+    let publish_ctx = EffectCtx {
+        runner: ctx.runner,
+        clock: ctx.clock,
+        registry: ctx.registry,
+        repo_root: ctx.repo_root,
+        artifacts: &artifacts,
+    };
     // publish-all: per-target irreversible; receipts journalled per target.
-    publish_phase(journal, sink, ctx, &targets)?;
+    publish_phase(journal, sink, &publish_ctx, &targets)?;
     // tag-once: coordinator-only, only after every publish succeeded.
     tag_phase(journal, sink, tagger, plan)?;
 
@@ -245,15 +274,46 @@ fn target_id(ecosystem: Ecosystem) -> String {
     ecosystem.as_str().to_string()
 }
 
+/// Resolve the cut's published source tarball from the repo's GitHub `origin`
+/// remote and the plan's tag — the input a downstream Homebrew formula bump needs
+/// (`--url`).
+///
+/// `None` when there is no resolvable GitHub remote: a non-GitHub repo simply
+/// threads no tarball (the homebrew skeleton then has nothing to bump, which is
+/// honest, not an error). The `sha256` is deliberately left `None` — computing it
+/// needs the tag's archive to already exist, a cross-target ordering resolved by
+/// the homebrew-finishing issue; this layer only threads the seam through.
+fn source_tarball(ctx: &EffectCtx<'_>, plan: &ReleasePlan) -> Option<SourceTarball> {
+    let out = ctx
+        .runner
+        .run("git", &["remote", "get-url", "origin"], ctx.repo_root)
+        .ok()?;
+    if out.status != Some(0) {
+        return None;
+    }
+    let slug = crate::audit::parse_github_slug(out.stdout.trim())?;
+    let tag = format!("v{}", plan.version);
+    Some(SourceTarball {
+        url: format!("https://github.com/{slug}/archive/refs/tags/{tag}.tar.gz"),
+        sha256: None,
+    })
+}
+
 /// Run a re-runnable phase (`dry_run` or `build`) as a strict barrier: every
 /// target clears it (or is already recorded as cleared) before the phase
 /// completes `Ok`; the first failure records `phase_completed … failed` and stops.
+///
+/// For the build phase `assets` accumulates each target's built artifact paths
+/// (`Some` sink), so the coordinator can thread them into publish; the dry-run
+/// phase passes `None`. A target skipped by resume contributes nothing — its
+/// artifacts were gathered on the run that first built it.
 fn reversible_phase(
     journal: &mut Journal<'_>,
     sink: &mut dyn ProgressSink,
     ctx: &EffectCtx<'_>,
     phase: Phase,
     targets: &[TargetPlan],
+    mut assets: Option<&mut Vec<String>>,
 ) -> Result<(), CutError> {
     // Resume-readiness: a phase already completed Ok is skipped whole.
     if phase_completed_ok(journal.state(), phase) {
@@ -267,7 +327,11 @@ fn reversible_phase(
         }
         let outcome = match phase {
             Phase::DryRun => tp.adapter.dry_run(ctx, &tp.input).map(|_| ()),
-            Phase::Build => tp.adapter.build(ctx, &tp.input).map(|_| ()),
+            Phase::Build => tp.adapter.build(ctx, &tp.input).map(|built| {
+                if let Some(sink) = assets.as_deref_mut() {
+                    sink.extend(built.artifacts);
+                }
+            }),
             Phase::Publish | Phase::Tag => unreachable!("reversible_phase only runs dry_run/build"),
         };
         match outcome {

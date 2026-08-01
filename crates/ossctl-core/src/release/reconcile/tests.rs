@@ -127,6 +127,7 @@ fn run<'a>(
         clock,
         registry: reg,
         repo_root: Path::new("/repo"),
+        artifacts: &crate::release::adapters::ReleaseArtifacts::EMPTY,
     };
     reconcile(state, &ctx)
 }

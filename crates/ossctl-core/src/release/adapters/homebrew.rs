@@ -77,19 +77,23 @@ impl ReleaseAdapter for HomebrewAdapter {
         t: &AdapterTarget,
     ) -> Result<PublishReceipt, AdapterError> {
         // PER-TARGET IRREVERSIBLE (opens/merges a formula bump).
-        // SKELETON: `bump-formula-pr` needs the release tarball URL + sha256 the
-        // coordinator will thread in; the representative command is shown here.
-        let cmds = match self.adapter {
-            Adapter::HomebrewCore => vec![PlannedCommand::new(
-                "brew",
-                &["bump-formula-pr", "--no-fork", &t.package],
-            )],
-            _ => vec![PlannedCommand::new(
-                "brew",
-                &["bump-formula-pr", &t.package],
-            )],
+        // SKELETON: `bump-formula-pr` needs the release tarball URL + sha256,
+        // threaded in via `ctx.artifacts.source_tarball`; the real PR is finished
+        // in `adapter-skeletons-finish`. Options precede the formula name.
+        let mut args: Vec<&str> = match self.adapter {
+            Adapter::HomebrewCore => vec!["bump-formula-pr", "--no-fork"],
+            _ => vec!["bump-formula-pr"],
         };
-        run_all(ctx, &cmds)?;
+        if let Some(tarball) = &ctx.artifacts.source_tarball {
+            args.push("--url");
+            args.push(tarball.url.as_str());
+            if let Some(sha256) = &tarball.sha256 {
+                args.push("--sha256");
+                args.push(sha256.as_str());
+            }
+        }
+        args.push(t.package.as_str());
+        run_all(ctx, &[PlannedCommand::new("brew", &args)])?;
         Ok(make_receipt(ctx, t, None, None))
     }
 
