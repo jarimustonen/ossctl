@@ -2,13 +2,16 @@
 created: 2026-08-01
 updated: 2026-08-01
 type: feature
-status: in-progress
+status: fixed
 priority: high
 epic: ossctl-phase4-build
 related: ['@adapter-publish-completeness']
 commits:
 - hash: 2f1ff8d
   summary: thread build artifacts + source tarball into adapter publish()
+- hash: a2a5531
+  summary: apply llm-review fixes (option-injection hardening, vcs extraction, static EMPTY, source_tarball gating, resume test)
+closed: 2026-08-01
 ---
 
 # Thread release artifact paths (asset paths + tarball URL/sha256) from coordinator into adapters
