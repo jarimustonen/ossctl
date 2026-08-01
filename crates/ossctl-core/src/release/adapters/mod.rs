@@ -131,20 +131,19 @@ pub static EMPTY_ARTIFACTS: ReleaseArtifacts = ReleaseArtifacts {
 /// `--sha256`).
 ///
 /// The `url` is the deterministic GitHub source-archive URL for the cut's tag.
-/// The `sha256` is computed by the coordinator from the deterministic
-/// `git archive` of the plan's sealed commit — the same tree GitHub serves for
-/// the tag — because the tag archive the `url` points at does not exist yet at
-/// publish time (publish-all runs before tag-once, ADR-0002 §2), so it cannot be
-/// fetched-and-hashed. See [`super::coordinator`]'s `source_archive_sha256` for
-/// the computation and its documented parity caveat. `None` when the cut has
-/// no GitHub remote or the archive could not be produced/hashed — the formula bump
-/// then omits `--sha256` and lets `brew` compute it from the `--url`.
+/// The `sha256` is currently always `None` (the formula bump omits `--sha256` and
+/// lets `brew` compute it from `--url`): the tag archive the `url` points at is
+/// created only in the tag-once phase, *after* publish-all (ADR-0002 §2), so it
+/// cannot be fetched-and-hashed here, and a local `git archive` is not byte-equal
+/// to GitHub's served tarball — a wrong `--sha256` is worse than none. See
+/// [`super::coordinator`]'s `source_tarball` for the full rationale and the
+/// post-tag follow-up that would populate a correct digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceTarball {
     /// The source tarball's public URL (the GitHub tag archive).
     pub url: String,
-    /// The tarball's sha256, computed from the deterministic local source archive
-    /// (see the type docs). `None` when it could not be computed.
+    /// The tarball's sha256, once a correct value can be produced (see the type
+    /// docs). Currently always `None` — `brew` derives it from [`Self::url`].
     pub sha256: Option<String>,
 }
 

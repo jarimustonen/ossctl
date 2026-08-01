@@ -103,10 +103,6 @@ struct FakeCmd {
     /// Canned `git remote get-url origin` stdout — lets a cut resolve a source
     /// tarball URL. `None` means "no origin" (empty stdout, as a bare repo).
     origin: Option<String>,
-    /// Canned sha256 the `sh -c 'git archive … | shasum -a 256'` pipeline emits —
-    /// lets a cut resolve the source-tarball digest without a real archive/hash.
-    /// `None` means the pipeline returns empty stdout (no digest resolved).
-    archive_sha: Option<String>,
 }
 impl FakeCmd {
     fn new() -> Self {
@@ -114,7 +110,6 @@ impl FakeCmd {
             calls: RefCell::new(Vec::new()),
             fail_contains: None,
             origin: None,
-            archive_sha: None,
         }
     }
     fn failing_on(substr: &str) -> Self {
@@ -126,16 +121,6 @@ impl FakeCmd {
     fn with_origin(origin: &str) -> Self {
         Self {
             origin: Some(origin.to_string()),
-            ..Self::new()
-        }
-    }
-    /// A runner that both serves an `origin` remote and hashes the source archive
-    /// to `sha` — the full input the homebrew formula bump's `--url`/`--sha256`
-    /// needs.
-    fn with_origin_and_archive(origin: &str, sha: &str) -> Self {
-        Self {
-            origin: Some(origin.to_string()),
-            archive_sha: Some(sha.to_string()),
             ..Self::new()
         }
     }
@@ -156,19 +141,6 @@ impl CommandRunner for FakeCmd {
                     stderr: String::new(),
                 });
             }
-        }
-        // Serve the source-archive digest for the `sh -c 'git archive … | shasum'`
-        // pipeline (`shasum` prints "<hex>  -"; the code takes the first token).
-        if program == "sh" {
-            let stdout = self
-                .archive_sha
-                .as_ref()
-                .map_or_else(String::new, |sha| format!("{sha}  -\n"));
-            return Ok(CommandOutput {
-                status: Some(0),
-                stdout,
-                stderr: String::new(),
-            });
         }
         let fails = self
             .fail_contains
@@ -754,7 +726,7 @@ fn threads_source_tarball_url_into_homebrew_publish() {
     let store = FakeStore::default();
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
-    let cmd = FakeCmd::with_origin_and_archive("git@github.com:o/r.git", "cafef00d");
+    let cmd = FakeCmd::with_origin("git@github.com:o/r.git");
     let reg = FakeRegistry;
     let tagger = FakeTagger::new();
     let root = PathBuf::from("/repo");
@@ -781,24 +753,23 @@ fn threads_source_tarball_url_into_homebrew_publish() {
     };
     execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
 
-    // The `origin` remote resolves to the deterministic GitHub tag-archive URL and
-    // the source archive of the sealed commit hashes to the threaded sha256, both
-    // carried into the formula bump's `--url`/`--sha256`.
+    // The `origin` remote resolves to the deterministic GitHub tag-archive URL,
+    // threaded into the formula bump's `--url`. `--sha256` is deliberately omitted
+    // (the coordinator threads `sha256: None`, since a correct digest of GitHub's
+    // served tarball is unavailable pre-tag — see `source_tarball` docs); `brew`
+    // computes it from `--url`.
     assert!(
         cmd.calls().iter().any(|c| c
             == "brew bump-formula-pr --url \
-                https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz \
-                --sha256 cafef00d -- tool"),
-        "homebrew publish did not receive the threaded tarball URL + sha256: {:?}",
+                https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz -- tool"),
+        "homebrew publish did not receive the threaded tarball URL: {:?}",
         cmd.calls()
     );
-    // The digest was computed by archiving the sealed commit (prefix matches the
-    // GitHub tag-archive layout `<repo>-<version>/`), never by fetching the URL.
+    // The source archive is never hashed locally (no `git archive`, no shell) —
+    // guards against reintroducing the wrong-bytes best-effort digest.
     assert!(
-        cmd.calls()
-            .iter()
-            .any(|c| c == "sh -c git archive --format=tar.gz --prefix=r-1.0.0/ d | shasum -a 256"),
-        "the source archive was not hashed through the injected runner: {:?}",
+        !cmd.calls().iter().any(|c| c.contains("git archive")),
+        "a local source archive was hashed despite the wrong-bytes hazard: {:?}",
         cmd.calls()
     );
 }
@@ -889,6 +860,14 @@ fn threads_repo_slug_into_binary_receipt() {
     };
     execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
 
+    // The upload is pinned to the resolved slug with `--repo`.
+    assert!(
+        cmd.calls()
+            .iter()
+            .any(|c| c.starts_with("gh release upload v1.2.3 --repo o/r --clobber --")),
+        "binary upload was not pinned to the resolved slug: {:?}",
+        cmd.calls()
+    );
     let receipt = journal
         .state()
         .published

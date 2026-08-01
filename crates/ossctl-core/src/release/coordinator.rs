@@ -185,8 +185,8 @@ pub fn execute(
     )?;
 
     // Thread the build's concrete artifacts into publish-all: the aggregated
-    // asset paths (binary), the resolved GitHub slug (binary's receipt URL), and
-    // the source tarball URL/sha256 (homebrew).
+    // asset paths (binary), the resolved GitHub slug (binary's receipt URL +
+    // upload target), and the source tarball URL (homebrew).
     //
     // Resume caveat: a resume that skipped a completed build phase re-gathers
     // nothing here (`assets` stays empty), so the binary adapter would see an
@@ -197,7 +197,7 @@ pub fn execute(
     let repo_slug = resolve_repo_slug(ctx, &targets);
     let source_tarball = repo_slug
         .as_deref()
-        .and_then(|slug| source_tarball(ctx, slug, plan, &targets));
+        .and_then(|slug| source_tarball(slug, plan, &targets));
     let artifacts = ReleaseArtifacts {
         assets,
         source_tarball,
@@ -313,20 +313,35 @@ fn resolve_repo_slug(ctx: &EffectCtx<'_>, targets: &[TargetPlan]) -> Option<Stri
     crate::vcs::parse_github_slug(out.stdout.trim())
 }
 
-/// Resolve the cut's published source tarball (URL + sha256) — the input a
-/// downstream Homebrew formula bump needs (`--url` / `--sha256`).
+/// Resolve the cut's published source tarball URL — the input a downstream
+/// Homebrew formula bump needs (`--url`).
 ///
 /// Only produced when a homebrew target is in the cut; other cuts thread no
 /// tarball. The `url` is the deterministic GitHub tag-archive URL for the plan's
-/// tag; the `sha256` is [`source_archive_sha256`] of the sealed commit (`None`
-/// when the archive could not be produced/hashed, in which case the formula bump
-/// omits `--sha256`).
-fn source_tarball(
-    ctx: &EffectCtx<'_>,
-    slug: &str,
-    plan: &ReleasePlan,
-    targets: &[TargetPlan],
-) -> Option<SourceTarball> {
+/// tag.
+///
+/// # Why `sha256` is `None` (deliberate, not deferred work)
+///
+/// A Homebrew `--sha256` must be the hash of the exact bytes `--url` serves —
+/// GitHub's on-the-fly tag archive. That archive **cannot be hashed correctly
+/// here**:
+///
+/// - It does not exist yet: the tag is pushed in the coordinator-owned tag-once
+///   phase, *after* publish-all (ADR-0002 §2), so there is nothing to fetch.
+/// - A local `git archive` of the same tree is **not** a substitute: its gzip
+///   framing (and `git`/libarchive version differences) make its bytes — and thus
+///   its sha256 — diverge from GitHub's served tarball, whose checksum GitHub
+///   explicitly does not guarantee to be stable. A plausible-but-wrong `--sha256`
+///   is *worse* than none: `brew` (and Homebrew CI) reject the download on
+///   mismatch, whereas omitting it lets `brew` compute the correct digest from
+///   `--url` itself.
+///
+/// So this threads `sha256: None` and the formula bump omits `--sha256`. The
+/// genuinely-correct digest needs the *pushed* archive (a post-tag distribution
+/// phase) or an ossctl-built, ossctl-uploaded source-tarball asset whose bytes it
+/// controls — both an ADR-0002 phase-model change tracked separately. See the
+/// merge report's discussion items.
+fn source_tarball(slug: &str, plan: &ReleasePlan, targets: &[TargetPlan]) -> Option<SourceTarball> {
     let needed = targets.iter().any(|tp| {
         matches!(
             tp.input.target.adapter,
@@ -339,60 +354,8 @@ fn source_tarball(
     let tag = format!("v{}", plan.version);
     Some(SourceTarball {
         url: format!("https://github.com/{slug}/archive/refs/tags/{tag}.tar.gz"),
-        sha256: source_archive_sha256(ctx, slug, plan),
+        sha256: None,
     })
-}
-
-/// Compute the sha256 of the cut's source tarball from the **deterministic local
-/// `git archive`** of the plan's sealed commit — the digest a Homebrew
-/// `bump-formula-pr` passes as `--sha256`.
-///
-/// # Why the local archive, not the URL
-///
-/// The `--url` points at GitHub's tag archive, which does not exist yet: the tag
-/// is created in the coordinator-owned tag-once phase, *after* publish-all
-/// (ADR-0002 §2), so at homebrew-publish time there is nothing at the URL to
-/// fetch-and-hash. Instead we hash the source archive of `plan.head_sha` — the
-/// exact commit the tag will point at (`tag_phase` tags `plan.head_sha`), so the
-/// archived *tree* is identical to what GitHub will serve for the tag.
-///
-/// # Parity caveat (discussion item)
-///
-/// A local `git archive --format=tar.gz` is **not byte-guaranteed** to equal
-/// GitHub's served tarball: the tar content matches, but the gzip framing (and
-/// any `git` version differences) can change the compressed bytes and thus the
-/// sha256. The only fully-correct value is the hash of the *pushed* GitHub
-/// archive, which the tag-once-last barrier makes unavailable before this point.
-/// A follow-up could move the formula bump to a post-tag coordinator step and
-/// hash the real artifact; until then this best-effort digest is threaded, and a
-/// `None` (below) degrades to letting `brew` compute the checksum from `--url`.
-///
-/// Hermetic: the archive-and-hash runs through the injected [`CommandRunner`]
-/// (`sh -c 'git archive … | shasum -a 256'`), so tests serve a canned digest and
-/// nothing touches a real repo. `None` on any spawn/exit/empty-output failure.
-fn source_archive_sha256(ctx: &EffectCtx<'_>, slug: &str, plan: &ReleasePlan) -> Option<String> {
-    // GitHub's tag archive unpacks under `<repo>-<version>/`; match that prefix so
-    // the archived paths line up with what the URL serves.
-    let repo = slug.rsplit('/').next().filter(|r| !r.is_empty())?;
-    let prefix = format!("{repo}-{}/", plan.version);
-    // A single shelled pipeline: `git archive` streams the tar.gz to `shasum`,
-    // which prints "<hex>  -". The injected runner returns stdout as text (it
-    // cannot carry the binary tarball itself), so hashing happens in the pipe.
-    // The interpolated values are constrained (a parsed slug, a SemVer version, a
-    // git object id) and carry no shell metacharacters.
-    let pipeline = format!(
-        "git archive --format=tar.gz --prefix={prefix} {} | shasum -a 256",
-        plan.head_sha
-    );
-    let out = ctx
-        .runner
-        .run("sh", &["-c", &pipeline], ctx.repo_root)
-        .ok()?;
-    if out.status != Some(0) {
-        return None;
-    }
-    let digest = out.stdout.split_whitespace().next()?;
-    (!digest.is_empty()).then(|| digest.to_string())
 }
 
 /// Run a re-runnable phase (`dry_run` or `build`) as a strict barrier: every

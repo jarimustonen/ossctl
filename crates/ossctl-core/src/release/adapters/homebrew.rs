@@ -77,12 +77,12 @@ impl ReleaseAdapter for HomebrewAdapter {
         t: &AdapterTarget,
     ) -> Result<PublishReceipt, AdapterError> {
         // PER-TARGET IRREVERSIBLE (opens/merges a formula bump).
-        // `bump-formula-pr` carries the release tarball URL + sha256 threaded in
-        // via `ctx.artifacts.source_tarball` (the coordinator resolves the URL from
-        // the `origin` remote and computes the sha256 from the sealed commit's
-        // source archive). A `None` sha256 (no GitHub remote, or the archive could
-        // not be hashed) omits `--sha256` and lets `brew` derive it from `--url`.
-        // Options precede the formula name.
+        // `bump-formula-pr` carries the release tarball URL threaded in via
+        // `ctx.artifacts.source_tarball` (the coordinator resolves the URL from the
+        // `origin` remote). `sha256` is currently `None` — the coordinator cannot
+        // produce a correct digest before the tag exists (see its `source_tarball`
+        // docs), so `--sha256` is omitted and `brew` derives it from `--url`. When
+        // a digest is present it is passed through. Options precede the formula name.
         let mut args: Vec<&str> = match self.adapter {
             Adapter::HomebrewCore => vec!["bump-formula-pr", "--no-fork"],
             _ => vec!["bump-formula-pr"],

@@ -81,20 +81,28 @@ impl ReleaseAdapter for BinaryAdapter {
         // (gathered from every target's build). Flags precede the `--` option
         // terminator, and every asset path follows it, so a path that happens to
         // start with `-` is never mis-read as a flag.
+        //
+        // Pin the upload to the coordinator-resolved slug with `--repo` (when
+        // known) rather than letting `gh` resolve the repository ambiently from the
+        // cwd/remotes/`GH_REPO` — otherwise the upload target could differ from the
+        // `remote_url` the receipt records below.
         let tag = Self::tag(t);
-        let mut args = vec!["release", "upload", tag.as_str(), "--clobber", "--"];
+        let slug = ctx.artifacts.repo_slug.as_deref();
+        let mut args = vec!["release", "upload", tag.as_str()];
+        if let Some(slug) = slug {
+            args.push("--repo");
+            args.push(slug);
+        }
+        args.push("--clobber");
+        args.push("--");
         args.extend(ctx.artifacts.assets.iter().map(String::as_str));
         run_all(ctx, &[PlannedCommand::new("gh", &args)])?;
         // Record where the assets landed: the GitHub-Release page for this tag,
-        // built from the coordinator-resolved repo slug (`ctx.artifacts.repo_slug`).
-        // GitHub Releases expose no single publish digest, so `digest` stays `None`
-        // (honest — the receipt type documents `None` for ecosystems without one);
-        // `remote_url` is `None` when the cut has no resolvable GitHub remote.
-        let remote_url = ctx
-            .artifacts
-            .repo_slug
-            .as_ref()
-            .map(|slug| format!("https://github.com/{slug}/releases/tag/{tag}"));
+        // built from the same slug the upload targeted. GitHub Releases expose no
+        // single publish digest, so `digest` stays `None` (honest — the receipt
+        // type documents `None` for ecosystems without one); `remote_url` is `None`
+        // when the cut has no resolvable GitHub remote.
+        let remote_url = slug.map(|slug| format!("https://github.com/{slug}/releases/tag/{tag}"));
         Ok(make_receipt(ctx, t, None, remote_url))
     }
 

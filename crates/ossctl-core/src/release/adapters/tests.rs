@@ -482,6 +482,12 @@ fn binary_publish_records_the_release_url_from_the_threaded_slug() {
     );
     let r = resolve(Adapter::Manual).publish(&c, &t).unwrap();
 
+    // The upload is pinned to the threaded slug with `--repo`, so it targets the
+    // same repository the receipt records (not gh's ambient resolution).
+    assert_eq!(
+        cmd.calls(),
+        vec!["gh release upload v1.0.0 --repo o/r --clobber -- dist/tool-1.0.0-x86_64.tar.gz"]
+    );
     // The receipt records where the assets landed: the GitHub-Release page for the
     // tag, built from the threaded slug. GitHub Releases expose no single publish
     // digest, so `digest` is honestly `None`.

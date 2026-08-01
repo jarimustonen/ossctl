@@ -7,6 +7,9 @@ priority: high
 epic: ossctl-phase4-build
 related: ['@adapter-publish-completeness']
 blocked_by: ['@adapter-artifact-threading']
+commits:
+- hash: e25c8e19426496d3b3a041f4d7239592871a5ea3
+  summary: finish binary+homebrew publish bodies (real receipt URL + tarball sha256)
 ---
 
 # Finish binary + homebrew publish() bodies using threaded artifact inputs
