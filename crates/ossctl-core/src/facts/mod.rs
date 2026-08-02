@@ -213,12 +213,28 @@ fn detect_manifests(repo_root: &Path, fs: &dyn Fs) -> (Vec<Ecosystem>, Vec<Packa
         if !fs.is_file(&path) {
             continue;
         }
-        let parsed = read_text(fs, &path, MANIFEST_LIMIT)
-            .and_then(|text| parse_manifest(fname, &text))
+        let text = read_text(fs, &path, MANIFEST_LIMIT);
+        let parsed = text
+            .as_deref()
+            .and_then(|t| parse_manifest(fname, t))
             .unwrap_or_default();
         // A Cargo virtual workspace (no `[package]`) still marks the repo rust.
         if !ecosystems.contains(&eco) {
             ecosystems.push(eco);
+        }
+        // A Cargo *virtual workspace* (no `[package]`) declares its real crates in
+        // `[workspace].members`: descend into each member manifest and emit one
+        // entry per member with its resolved name + version, rather than a single
+        // null-named root entry.
+        if fname == "Cargo.toml" && parsed.package.is_none() {
+            if let Some(text) = text.as_deref() {
+                if push_workspace_members(repo_root, fs, text, eco, &mut packages) {
+                    continue;
+                }
+            }
+            // Not a members-bearing virtual workspace (or no member manifest
+            // resolved): fall through to the null root entry — the repo is still
+            // rust, and the null-named entry preserves today's signal.
         }
         // `Cargo.toml`/`go.mod` always yield a package entry (even without a
         // declared name); the others only when they name a package.
@@ -236,6 +252,75 @@ fn detect_manifests(repo_root: &Path, fs: &dyn Fs) -> (Vec<Ecosystem>, Vec<Packa
         ecosystems.push(Ecosystem::Binary);
     }
     (ecosystems, packages)
+}
+
+/// Enumerate a Cargo virtual workspace's members into `packages`, one entry per
+/// member manifest that resolves through `fs`. Members are read in declaration
+/// order (the `[workspace].members` array), so the emitted order is deterministic.
+///
+/// Each member reports its own `[package].name`; the version is its literal
+/// `[package].version`, or — when the member declares `version.workspace = true`
+/// (dotted) or `version = { workspace = true }` (inline) — the version inherited
+/// from the root `[workspace.package]` table.
+///
+/// Returns `true` when at least one member manifest was emitted (the caller then
+/// skips the null root entry); `false` when the root has no `members` array or no
+/// listed member manifest exists (the caller keeps today's null-entry behavior).
+fn push_workspace_members(
+    repo_root: &Path,
+    fs: &dyn Fs,
+    root_text: &str,
+    eco: Ecosystem,
+    packages: &mut Vec<Package>,
+) -> bool {
+    let ws_block = match toml_section(root_text, "workspace") {
+        Some(block) => block,
+        None => return false,
+    };
+    let members = match toml_str_array(&ws_block, "members") {
+        Some(members) if !members.is_empty() => members,
+        _ => return false,
+    };
+    let ws_pkg = toml_section(root_text, "workspace.package");
+    let before = packages.len();
+    for member in members {
+        let member = member.trim_end_matches('/');
+        // Glob members (`crates/*`) would need directory expansion — out of scope;
+        // an unexpanded glob path simply won't resolve as a manifest and is skipped.
+        let manifest_path = repo_root.join(member).join("Cargo.toml");
+        if !fs.is_file(&manifest_path) {
+            continue;
+        }
+        let Some(member_text) = read_text(fs, &manifest_path, MANIFEST_LIMIT) else {
+            continue;
+        };
+        let (package, version) = resolve_member_name_version(&member_text, ws_pkg.as_deref());
+        packages.push(Package {
+            ecosystem: eco,
+            manifest: format!("{member}/Cargo.toml"),
+            package,
+            version,
+        });
+    }
+    packages.len() > before
+}
+
+/// Resolve a workspace member's `(name, version)` from its manifest text, honoring
+/// `version.workspace = true` inheritance from the root `[workspace.package]`
+/// block. Crate names are never workspace-inherited, so `name` is taken verbatim.
+fn resolve_member_name_version(
+    member_text: &str,
+    ws_pkg: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let parsed = parse_cargo(member_text).unwrap_or_default();
+    let version = parsed.version.or_else(|| {
+        if field_inherits_workspace(member_text, "version") {
+            ws_pkg.and_then(|block| toml_str_value(block, "version", false))
+        } else {
+            None
+        }
+    });
+    (parsed.package, version)
 }
 
 /// The description: first non-empty manifest `description`, else the first
@@ -274,8 +359,16 @@ struct ParsedManifest {
 
 /// Dispatch to the per-manifest parser. `setup.py` yields nothing (its metadata
 /// is executable, not declarative — the Python detector skips it too).
+///
+/// Dispatches on the manifest's *basename* so a member path
+/// (`crates/ossctl-core/Cargo.toml`) parses like a root `Cargo.toml` — the
+/// description pass re-reads member manifests by their stored relative path.
 fn parse_manifest(fname: &str, text: &str) -> Option<ParsedManifest> {
-    match fname {
+    let base = Path::new(fname)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(fname);
+    match base {
         "Cargo.toml" => parse_cargo(text),
         "package.json" => parse_package_json(text),
         "pyproject.toml" => Some(parse_pyproject(text)),
@@ -393,6 +486,96 @@ fn toml_str_value(block: &str, key: &str, allow_empty: bool) -> Option<String> {
         return Some(value);
     }
     None
+}
+
+/// Find `key = [ "a", "b", … ]` within a TOML section body and return the quoted
+/// elements, in order. Handles both the single-line array and a multi-line array
+/// that spans several lines (Cargo `members` lists are commonly formatted either
+/// way). Only string elements are extracted; nested tables/globs pass through as
+/// their raw quoted text and are filtered upstream. `None` when the key is absent.
+fn toml_str_array(block: &str, key: &str) -> Option<Vec<String>> {
+    // Accumulate from the `key = [` line through the line holding the closing `]`.
+    let mut acc = String::new();
+    let mut collecting = false;
+    for line in block.lines() {
+        if collecting {
+            acc.push_str(line);
+            acc.push('\n');
+            if line.contains(']') {
+                break;
+            }
+            continue;
+        }
+        let rest = line.trim_start();
+        let Some(rest) = rest.strip_prefix(key) else {
+            continue;
+        };
+        // The key must be a whole token (else `members-extra` would match).
+        if !rest.starts_with(|c: char| c.is_whitespace() || c == '=') {
+            continue;
+        }
+        let Some(rest) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        acc.push_str(rest);
+        acc.push('\n');
+        collecting = true;
+        if rest.contains(']') {
+            break;
+        }
+    }
+    if !collecting {
+        return None;
+    }
+    // Slice between the first `[` and the first `]`, then pull quoted strings.
+    let start = acc.find('[')?;
+    let end = acc[start..].find(']')? + start;
+    let mut inner = &acc[start + 1..end];
+    let mut out = Vec::new();
+    while let Some(pos) = inner.find(['"', '\'']) {
+        let quote = inner.as_bytes()[pos] as char;
+        let after = &inner[pos + 1..];
+        let Some(close) = after.find(quote) else {
+            break;
+        };
+        out.push(after[..close].to_string());
+        inner = &after[close + 1..];
+    }
+    Some(out)
+}
+
+/// Whether a member manifest declares `<key>.workspace = true` (dotted) or
+/// `<key> = { workspace = true }` (inline) — the two forms of Cargo workspace
+/// field inheritance. Used to decide whether to inherit from `[workspace.package]`.
+fn field_inherits_workspace(text: &str, key: &str) -> bool {
+    let dotted = format!("{key}.workspace");
+    for line in text.lines() {
+        let t = line.trim_start();
+        // Dotted: `version.workspace = true`.
+        if let Some(rest) = t.strip_prefix(&dotted) {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                if rest.trim_start().starts_with("true") {
+                    return true;
+                }
+            }
+            continue;
+        }
+        // Inline table: `version = { workspace = true }`.
+        if let Some(rest) = t.strip_prefix(key) {
+            if !rest.starts_with(|c: char| c.is_whitespace() || c == '=') {
+                continue;
+            }
+            let Some(rest) = rest.trim_start().strip_prefix('=') else {
+                continue;
+            };
+            let v = rest.trim_start();
+            if v.starts_with('{') && v.contains("workspace") && v.contains("true") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Read a leading quoted string — `"..."` or `'...'`. TOML allows both basic
@@ -701,14 +884,105 @@ mod tests {
     }
 
     #[test]
-    fn cargo_virtual_workspace_marks_rust_with_null_package() {
-        // No `[package]` — a virtual workspace still counts as rust, and
-        // Cargo.toml always yields a package entry (with null name/version).
+    fn cargo_virtual_workspace_with_no_resolvable_member_keeps_null_entry() {
+        // A virtual workspace whose only member manifest is absent falls back to
+        // the null root entry: the repo is still rust, and the null-named entry
+        // preserves today's signal rather than emitting nothing.
         let fs = FakeFs::default().file("/repo/Cargo.toml", "[workspace]\nmembers = [\"a\"]\n");
         let facts = gather(repo(), &fs, &FakeGit::default());
         assert_eq!(facts.ecosystems, vec![Ecosystem::Rust]);
         assert_eq!(facts.packages.len(), 1);
+        assert_eq!(facts.packages[0].manifest, "Cargo.toml");
         assert_eq!(facts.packages[0].package, None);
+        assert_eq!(facts.packages[0].version, None);
+    }
+
+    #[test]
+    fn cargo_virtual_workspace_enumerates_members() {
+        // A virtual-workspace root + two members: one inherits the workspace
+        // version (`version.workspace = true`), one pins its own literal version.
+        let root = "[workspace]\nresolver = \"2\"\n\
+                    members = [\"crates/core\", \"crates/cli\"]\n\n\
+                    [workspace.package]\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+        let core = "[package]\nname = \"acme-core\"\nversion.workspace = true\n\
+                    edition.workspace = true\ndescription = \"the core lib\"\n";
+        let cli = "[package]\nname = \"acme-cli\"\nversion = \"2.3.4\"\n\
+                   description = \"the cli\"\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/crates/core/Cargo.toml", core)
+            .file("/repo/crates/cli/Cargo.toml", cli);
+        let facts = gather(repo(), &fs, &FakeGit::default());
+        assert_eq!(facts.ecosystems, vec![Ecosystem::Rust]);
+        assert_eq!(facts.packages.len(), 2);
+        // Declaration order is preserved.
+        let core_pkg = &facts.packages[0];
+        assert_eq!(core_pkg.ecosystem, Ecosystem::Rust);
+        assert_eq!(core_pkg.manifest, "crates/core/Cargo.toml");
+        assert_eq!(core_pkg.package.as_deref(), Some("acme-core"));
+        // `version.workspace = true` inherits 0.1.0 from [workspace.package].
+        assert_eq!(core_pkg.version.as_deref(), Some("0.1.0"));
+        let cli_pkg = &facts.packages[1];
+        assert_eq!(cli_pkg.manifest, "crates/cli/Cargo.toml");
+        assert_eq!(cli_pkg.package.as_deref(), Some("acme-cli"));
+        assert_eq!(cli_pkg.version.as_deref(), Some("2.3.4"));
+        // The description pass re-reads the first member manifest by its path.
+        assert_eq!(facts.description.as_deref(), Some("the core lib"));
+    }
+
+    #[test]
+    fn cargo_workspace_inline_version_inheritance() {
+        // The inline-table inheritance form `version = { workspace = true }`.
+        let root = "[workspace]\nmembers = [\"m\"]\n\n\
+                    [workspace.package]\nversion = \"1.5.0\"\n";
+        let member = "[package]\nname = \"m\"\nversion = { workspace = true }\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/m/Cargo.toml", member);
+        let facts = gather(repo(), &fs, &FakeGit::default());
+        assert_eq!(facts.packages.len(), 1);
+        assert_eq!(facts.packages[0].package.as_deref(), Some("m"));
+        assert_eq!(facts.packages[0].version.as_deref(), Some("1.5.0"));
+        // A member at >=1.0 (inherited) drives has_ge_1_0_release.
+        assert!(facts.has_ge_1_0_release);
+    }
+
+    #[test]
+    fn cargo_workspace_multiline_members_array() {
+        // Members formatted across several lines (the common rustfmt layout).
+        let root = "[workspace]\nmembers = [\n    \"a\",\n    \"b\",\n]\n\n\
+                    [workspace.package]\nversion = \"0.2.0\"\n";
+        let a = "[package]\nname = \"a\"\nversion.workspace = true\n";
+        let b = "[package]\nname = \"b\"\nversion.workspace = true\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/a/Cargo.toml", a)
+            .file("/repo/b/Cargo.toml", b);
+        let facts = gather(repo(), &fs, &FakeGit::default());
+        let names: Vec<_> = facts
+            .packages
+            .iter()
+            .map(|p| p.package.as_deref())
+            .collect();
+        assert_eq!(names, vec![Some("a"), Some("b")]);
+        assert!(facts
+            .packages
+            .iter()
+            .all(|p| p.version.as_deref() == Some("0.2.0")));
+    }
+
+    #[test]
+    fn cargo_workspace_member_without_workspace_package_table() {
+        // `version.workspace = true` but no `[workspace.package]` to inherit from:
+        // the version resolves to null (nothing to inherit), name still reported.
+        let root = "[workspace]\nmembers = [\"m\"]\n";
+        let member = "[package]\nname = \"m\"\nversion.workspace = true\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/m/Cargo.toml", member);
+        let facts = gather(repo(), &fs, &FakeGit::default());
+        assert_eq!(facts.packages.len(), 1);
+        assert_eq!(facts.packages[0].package.as_deref(), Some("m"));
         assert_eq!(facts.packages[0].version, None);
     }
 
