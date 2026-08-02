@@ -2,9 +2,12 @@
 created: 2026-08-02
 updated: 2026-08-02
 type: task
-status: open
+status: in-progress
 priority: high
 epic: ossctl-phase4-build
+commits:
+- hash: 726ce17
+  summary: publish workspace as ossctl; LICENSE; OSS-RELEASE.md sync
 ---
 
 # Make ossctl publishable to crates.io as `ossctl`
