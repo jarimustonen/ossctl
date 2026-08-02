@@ -5,6 +5,9 @@ type: task
 status: in-progress
 priority: normal
 epic: ossctl-phase4-build
+commits:
+- hash: b40a843
+  summary: add CHANGELOG, CONTRIBUTING, SECURITY, dependabot.yml
 ---
 
 # Close 4 recommended readiness gaps (changelog, contributing, security, dep-bot)
