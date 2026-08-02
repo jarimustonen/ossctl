@@ -81,6 +81,11 @@ app beyond what the ADRs already fix.
     - `crates/ossctl-core/src/contract/schema.rs` — the ONE canonical serde model
     - a shared `crates/ossctl-core/src/protocol/*.rs` module two units both edit
       (a NEW `protocol/<x>.rs` per unit is append-safe; editing an existing shared one is not)
+    - `crates/ossctl-core/src/release/coordinator.rs` and
+      `crates/ossctl-core/src/release/adapters/mod.rs` — the release-engine seam
+      (`EffectCtx` / `ReleaseArtifacts`, the phase-barrier coordinator). Semantic, not an
+      append (learned stint #8: LANE R's two units both edited the artifact-threading seam,
+      so they were sequenced strictly — parallelising them would have been a real conflict).
     - the canonical-JSON contract shape (SCHEMA) — the inter-skill contract; a change
       here ripples to every member
 - **Migration rule:** the canonical-JSON output shape is a schema-versioned compatibility
