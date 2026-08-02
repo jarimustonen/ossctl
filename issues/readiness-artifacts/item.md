@@ -2,12 +2,15 @@
 created: 2026-08-02
 updated: 2026-08-02
 type: task
-status: in-progress
+status: done
 priority: normal
 epic: ossctl-phase4-build
 commits:
 - hash: b40a843
   summary: add CHANGELOG, CONTRIBUTING, SECURITY, dependabot.yml
+- hash: 83625d1
+  summary: apply llm-review findings (5 FIX applied, 9 dropped)
+closed: 2026-08-02
 ---
 
 # Close 4 recommended readiness gaps (changelog, contributing, security, dep-bot)
