@@ -57,7 +57,8 @@ fix(facts): harden workspace member scanning
 Issue: facts-workspace-members
 ```
 
-Keep the summary imperative and concise.
+Keep the summary imperative and concise. Automated commits (Dependabot, and commits emitted
+by `ossctl release cut`) are exempt from the `Issue: <slug>` trailer requirement.
 
 ## Recording a changelog entry
 

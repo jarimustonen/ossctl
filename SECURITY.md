@@ -13,8 +13,9 @@ Include, as far as you can: the affected version or commit, the component and th
 steps or a proof-of-concept, and the impact you observed.
 
 `ossctl` is a local command-line tool: it does not run a network service, but it **invokes
-subprocesses** (`git`, `cargo`, and release adapters) and **ships prebuilt binaries** via
-GitHub Releases and a Homebrew tap. Those are its primary threat surfaces.
+subprocesses** (`git`, `cargo`, and release adapters) and is intended to **distribute prebuilt
+binaries** via GitHub Releases and a Homebrew tap. Those — subprocess execution today, and the
+release binaries once published — are its primary threat surfaces.
 
 <!-- oss-security:supported-versions-start -->
 ## Supported Versions
@@ -36,3 +37,7 @@ GitHub Releases and a Homebrew tap. Those are its primary threat surfaces.
 We consider good-faith security research conducted under this policy to be authorized. We will
 not pursue or support legal action against researchers who act in good faith, avoid privacy
 violations and service disruption, and give us a reasonable time to respond before disclosure.
+
+This safe harbor covers only assets this project controls — its source code, this repository,
+and the binaries it publishes. It does not authorize testing of GitHub, crates.io, Homebrew, or
+other third-party services, whose own policies continue to apply.
