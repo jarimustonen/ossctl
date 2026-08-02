@@ -139,6 +139,8 @@ agree). The dogfood surfaced the crates.io blockers, now the head-of-line coding
 GLOBAL HEAD-OF-LINE: prep-crates-io-publish
 LANE C — workspace/crate Cargo.toml + OSS-RELEASE.md (append-union-safe hot files)
   ▶ prep-crates-io-publish   (rename CLI crate → ossctl, publish=true on both, add LICENSE, sync config)
+LANE F — crates/ossctl-core/src/facts/mod.rs (disjoint from LANE C; parallel-safe)
+  ▶ facts-workspace-members   (enumerate Cargo workspace members instead of package:null)
 UNLANED — confirmed no shared hot files, run anytime (one slug per line):
     adapter-publish-completeness   (umbrella: cargo/python/go/node BUILD-side skeletons — non-urgent)
     migrate-oss-init               (blocked: needs ossctl installed on PATH)
