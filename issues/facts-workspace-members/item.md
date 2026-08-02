@@ -2,12 +2,15 @@
 created: 2026-08-02
 updated: 2026-08-02
 type: bug
-status: in-progress
+status: fixed
 priority: high
 epic: ossctl-phase4-build
 commits:
 - hash: eaee034
   summary: enumerate workspace members in facts detection
+- hash: '6269175'
+  summary: harden workspace scanning per llm-review (globs, comments, scoped inheritance, path guards)
+closed: 2026-08-02
 ---
 
 # facts: enumerate Cargo workspace member packages instead of null
