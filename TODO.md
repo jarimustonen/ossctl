@@ -122,7 +122,7 @@ shared-logic files (`contract/schema.rs`, a shared `protocol/*.rs` module).
 - The prose `/oss-*` skills currently referenced from homebase move here over time
   (`migrate-oss-init`, `prose-skills`); after migration, remove the homebase copies.
 
-## Execution DAG (2026-08-01)
+## Execution DAG (2026-08-02)
 
 Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
 (never copied here). Merge at Phase 0/7 (drop landed, add active, keep existing order).
@@ -130,14 +130,15 @@ Scheduling PLAN — source of truth for lane + order; issuectl is authoritative 
 `after <slug> (needs …)` = logical blocked_by mirror. `collision: <file>` = touches a
 second lane's hot file (spawn-time exclusion).
 
-Stint #8 landed LANE R (adapter-artifact-threading → adapter-skeletons-finish, both closed
-`fixed`). The release adapters ossctl needs for its own cut are now complete. The next move
-is NOT a coding lane — it's the **dogfood** (`/oss-init` → `audit` → `release cut`), which is
-a `/stint`-driven interactive/config task, not a spinoff-able hot-file unit. Remaining issues:
+Stint #9 ran the dogfood `/oss-init`: `OSS-RELEASE.md` (draft) landed on main (`8bfdb87`),
+validated clean by BOTH `check-oss-release.py` and ossctl's own `contract validate` (ports
+agree). The dogfood surfaced the crates.io blockers, now the head-of-line coding unit:
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: (dogfood) run /oss-init on this repo — see NEXT ROUND, not a lane node
+GLOBAL HEAD-OF-LINE: prep-crates-io-publish
+LANE C — workspace/crate Cargo.toml + OSS-RELEASE.md (append-union-safe hot files)
+  ▶ prep-crates-io-publish   (rename CLI crate → ossctl, publish=true on both, add LICENSE, sync config)
 UNLANED — confirmed no shared hot files, run anytime (one slug per line):
     adapter-publish-completeness   (umbrella: cargo/python/go/node BUILD-side skeletons — non-urgent)
     migrate-oss-init               (blocked: needs ossctl installed on PATH)
