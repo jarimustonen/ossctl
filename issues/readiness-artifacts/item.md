@@ -2,7 +2,7 @@
 created: 2026-08-02
 updated: 2026-08-02
 type: task
-status: open
+status: in-progress
 priority: normal
 epic: ossctl-phase4-build
 ---
