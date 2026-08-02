@@ -5,6 +5,9 @@ type: bug
 status: in-progress
 priority: high
 epic: ossctl-phase4-build
+commits:
+- hash: eaee034
+  summary: enumerate workspace members in facts detection
 ---
 
 # facts: enumerate Cargo workspace member packages instead of null

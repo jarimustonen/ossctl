@@ -255,8 +255,12 @@ fn detect_manifests(repo_root: &Path, fs: &dyn Fs) -> (Vec<Ecosystem>, Vec<Packa
 }
 
 /// Enumerate a Cargo virtual workspace's members into `packages`, one entry per
-/// member manifest that resolves through `fs`. Members are read in declaration
-/// order (the `[workspace].members` array), so the emitted order is deterministic.
+/// member manifest that resolves through `fs`. Explicit members are read in
+/// declaration order; a trailing single-level glob (`crates/*`) is expanded by
+/// listing its directory through the `Fs` port and sorting the entries, so the
+/// emitted order is deterministic regardless of the underlying read-dir order.
+/// `[workspace].exclude` entries are dropped, and duplicate member paths (e.g.
+/// an explicit member also matched by a glob) are emitted once.
 ///
 /// Each member reports its own `[package].name`; the version is its literal
 /// `[package].version`, or — when the member declares `version.workspace = true`
@@ -265,7 +269,7 @@ fn detect_manifests(repo_root: &Path, fs: &dyn Fs) -> (Vec<Ecosystem>, Vec<Packa
 ///
 /// Returns `true` when at least one member manifest was emitted (the caller then
 /// skips the null root entry); `false` when the root has no `members` array or no
-/// listed member manifest exists (the caller keeps today's null-entry behavior).
+/// listed member manifest resolved (the caller keeps today's null-entry behavior).
 fn push_workspace_members(
     repo_root: &Path,
     fs: &dyn Fs,
@@ -281,28 +285,115 @@ fn push_workspace_members(
         Some(members) if !members.is_empty() => members,
         _ => return false,
     };
+    let exclude: Vec<String> = toml_str_array(&ws_block, "exclude")
+        .unwrap_or_default()
+        .iter()
+        .map(|e| e.trim_end_matches('/').to_string())
+        .collect();
     let ws_pkg = toml_section(root_text, "workspace.package");
     let before = packages.len();
+    // Manifest-relative paths already emitted — dedup preserving first-seen order.
+    let mut seen: Vec<String> = Vec::new();
     for member in members {
         let member = member.trim_end_matches('/');
-        // Glob members (`crates/*`) would need directory expansion — out of scope;
-        // an unexpanded glob path simply won't resolve as a manifest and is skipped.
-        let manifest_path = repo_root.join(member).join("Cargo.toml");
-        if !fs.is_file(&manifest_path) {
+        // A fact detector reports the repo's OWN packages: reject a member that
+        // escapes the tree (absolute, or a `..` component) — with a real `Fs`
+        // those would read manifests outside `repo_root` and taint the facts.
+        if member.is_empty() || member.starts_with('/') || member.split('/').any(|c| c == "..") {
             continue;
         }
-        let Some(member_text) = read_text(fs, &manifest_path, MANIFEST_LIMIT) else {
+        if let Some(prefix) = glob_parent(member) {
+            // Trailing single-level glob (`crates/*`, bare `*`): expand one level.
+            let dir = if prefix.is_empty() {
+                repo_root.to_path_buf()
+            } else {
+                repo_root.join(prefix)
+            };
+            let mut names = fs.read_dir(&dir).unwrap_or_default();
+            names.sort();
+            for name in names {
+                let rel = if prefix.is_empty() {
+                    name
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                push_one_member(
+                    repo_root,
+                    fs,
+                    &rel,
+                    ws_pkg.as_deref(),
+                    eco,
+                    &exclude,
+                    &mut seen,
+                    packages,
+                );
+            }
             continue;
-        };
-        let (package, version) = resolve_member_name_version(&member_text, ws_pkg.as_deref());
-        packages.push(Package {
-            ecosystem: eco,
-            manifest: format!("{member}/Cargo.toml"),
-            package,
-            version,
-        });
+        }
+        // A glob shape we do not expand (`?`, character classes, a non-trailing
+        // `*`): skip rather than probe a literal metacharacter path.
+        if member.contains(['*', '?']) {
+            continue;
+        }
+        push_one_member(
+            repo_root,
+            fs,
+            member,
+            ws_pkg.as_deref(),
+            eco,
+            &exclude,
+            &mut seen,
+            packages,
+        );
     }
     packages.len() > before
+}
+
+/// Emit one workspace member at manifest-relative `rel` (no trailing slash needed)
+/// into `packages`, unless it is `exclude`d, already `seen`, or its `Cargo.toml`
+/// does not resolve through `fs`. Records emitted members in `seen` for dedup.
+#[allow(clippy::too_many_arguments)]
+fn push_one_member(
+    repo_root: &Path,
+    fs: &dyn Fs,
+    rel: &str,
+    ws_pkg: Option<&str>,
+    eco: Ecosystem,
+    exclude: &[String],
+    seen: &mut Vec<String>,
+    packages: &mut Vec<Package>,
+) {
+    let rel = rel.trim_end_matches('/');
+    if exclude.iter().any(|e| e == rel) || seen.iter().any(|s| s == rel) {
+        return;
+    }
+    let manifest_path = repo_root.join(rel).join("Cargo.toml");
+    if !fs.is_file(&manifest_path) {
+        return;
+    }
+    let Some(member_text) = read_text(fs, &manifest_path, MANIFEST_LIMIT) else {
+        return;
+    };
+    seen.push(rel.to_string());
+    let (package, version) = resolve_member_name_version(&member_text, ws_pkg);
+    packages.push(Package {
+        ecosystem: eco,
+        manifest: format!("{rel}/Cargo.toml"),
+        package,
+        version,
+    });
+}
+
+/// The literal parent directory of a trailing single-level glob member — `crates/*`
+/// → `Some("crates")`, bare `*` → `Some("")` — or `None` when `member` is not such
+/// a glob. A prefix that itself contains a glob metacharacter is not expandable.
+fn glob_parent(member: &str) -> Option<&str> {
+    if member == "*" {
+        return Some("");
+    }
+    member
+        .strip_suffix("/*")
+        .filter(|prefix| !prefix.contains(['*', '?']))
 }
 
 /// Resolve a workspace member's `(name, version)` from its manifest text, honoring
@@ -314,7 +405,12 @@ fn resolve_member_name_version(
 ) -> (Option<String>, Option<String>) {
     let parsed = parse_cargo(member_text).unwrap_or_default();
     let version = parsed.version.or_else(|| {
-        if field_inherits_workspace(member_text, "version") {
+        // Scope the inheritance probe to the member's own `[package]` block: a
+        // `version.workspace = true` in an unrelated table (`[package.metadata.*]`,
+        // a tool config) must not be read as `[package].version` inheritance.
+        let inherits = toml_section(member_text, "package")
+            .is_some_and(|block| field_inherits_workspace(&block, "version"));
+        if inherits {
             ws_pkg.and_then(|block| toml_str_value(block, "version", false))
         } else {
             None
@@ -490,14 +586,18 @@ fn toml_str_value(block: &str, key: &str, allow_empty: bool) -> Option<String> {
 
 /// Find `key = [ "a", "b", … ]` within a TOML section body and return the quoted
 /// elements, in order. Handles both the single-line array and a multi-line array
-/// that spans several lines (Cargo `members` lists are commonly formatted either
-/// way). Only string elements are extracted; nested tables/globs pass through as
-/// their raw quoted text and are filtered upstream. `None` when the key is absent.
+/// that spans several lines (Cargo `members`/`exclude` lists are commonly
+/// formatted either way), stripping `#` comments so a commented-out element is not
+/// returned. Elements are returned as their raw quoted text — glob expansion and
+/// path validation are the caller's job. `None` when the key is absent.
 fn toml_str_array(block: &str, key: &str) -> Option<Vec<String>> {
     // Accumulate from the `key = [` line through the line holding the closing `]`.
     let mut acc = String::new();
     let mut collecting = false;
     for line in block.lines() {
+        // Drop a trailing `#` comment first, so a commented-out element
+        // (`# "old-member"`) or a `]` inside a comment does not corrupt the scan.
+        let line = strip_toml_comment(line);
         if collecting {
             acc.push_str(line);
             acc.push('\n');
@@ -544,18 +644,20 @@ fn toml_str_array(block: &str, key: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
-/// Whether a member manifest declares `<key>.workspace = true` (dotted) or
+/// Whether a member manifest block declares `<key>.workspace = true` (dotted) or
 /// `<key> = { workspace = true }` (inline) — the two forms of Cargo workspace
 /// field inheritance. Used to decide whether to inherit from `[workspace.package]`.
-fn field_inherits_workspace(text: &str, key: &str) -> bool {
+/// Callers pass the member's `[package]` block, not the whole file, so an unrelated
+/// table cannot trip the match.
+fn field_inherits_workspace(block: &str, key: &str) -> bool {
     let dotted = format!("{key}.workspace");
-    for line in text.lines() {
-        let t = line.trim_start();
+    for line in block.lines() {
+        let t = strip_toml_comment(line).trim_start();
         // Dotted: `version.workspace = true`.
         if let Some(rest) = t.strip_prefix(&dotted) {
             let rest = rest.trim_start();
             if let Some(rest) = rest.strip_prefix('=') {
-                if rest.trim_start().starts_with("true") {
+                if is_true_literal(rest.trim_start()) {
                     return true;
                 }
             }
@@ -570,12 +672,59 @@ fn field_inherits_workspace(text: &str, key: &str) -> bool {
                 continue;
             };
             let v = rest.trim_start();
-            if v.starts_with('{') && v.contains("workspace") && v.contains("true") {
+            // Require the exact `workspace = true` entry inside the inline table —
+            // a substring test would accept `{ workspace = false, x = true }`.
+            if v.starts_with('{') && inline_table_has_workspace_true(v) {
                 return true;
             }
         }
     }
     false
+}
+
+/// Whether `s` begins with the TOML boolean `true` as a whole token (not
+/// `trueish`, not the string `"true"`), allowing a trailing comment or `}`.
+fn is_true_literal(s: &str) -> bool {
+    match s.strip_prefix("true") {
+        Some(rest) => {
+            let rest = rest.trim_start();
+            rest.is_empty() || rest.starts_with(['#', '}', ','])
+        }
+        None => false,
+    }
+}
+
+/// Whether an inline table (`{ … }`) contains an exact `workspace = true` entry.
+/// Whitespace-insensitive so `{workspace=true}` and `{ workspace = true }` both
+/// match, while `{ workspace = false, other = true }` does not.
+fn inline_table_has_workspace_true(inline: &str) -> bool {
+    let compact: String = inline.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.trim_start_matches('{').split(',').any(|entry| {
+        entry
+            .strip_prefix("workspace=true")
+            .is_some_and(|r| r.is_empty() || r == "}")
+    })
+}
+
+/// Return `line` with any trailing `#` comment removed, respecting `#` characters
+/// that fall inside a `"`/`'` quoted string (which are literal, not comments).
+fn strip_toml_comment(line: &str) -> &str {
+    let mut quote: Option<u8> = None;
+    for (i, &b) in line.as_bytes().iter().enumerate() {
+        match quote {
+            Some(q) => {
+                if b == q {
+                    quote = None;
+                }
+            }
+            None => match b {
+                b'"' | b'\'' => quote = Some(b),
+                b'#' => return &line[..i],
+                _ => {}
+            },
+        }
+    }
+    line
 }
 
 /// Read a leading quoted string — `"..."` or `'...'`. TOML allows both basic
@@ -984,6 +1133,131 @@ mod tests {
         assert_eq!(facts.packages.len(), 1);
         assert_eq!(facts.packages[0].package.as_deref(), Some("m"));
         assert_eq!(facts.packages[0].version, None);
+    }
+
+    #[test]
+    fn cargo_workspace_glob_members_are_expanded() {
+        // `members = ["crates/*"]` expands one directory level, sorted, through the
+        // Fs port. A non-crate entry (no Cargo.toml) is skipped.
+        let root = "[workspace]\nmembers = [\"crates/*\"]\n\n\
+                    [workspace.package]\nversion = \"0.4.0\"\n";
+        let a = "[package]\nname = \"za\"\nversion.workspace = true\n";
+        let b = "[package]\nname = \"mb\"\nversion.workspace = true\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/crates/za/Cargo.toml", a)
+            .file("/repo/crates/mb/Cargo.toml", b)
+            .file("/repo/crates/README.md", "not a crate\n");
+        let facts = gather(repo(), &fs, &FakeGit::default());
+        // Directory order is sorted (mb before za), not declaration order.
+        let names: Vec<_> = facts
+            .packages
+            .iter()
+            .map(|p| p.package.as_deref())
+            .collect();
+        assert_eq!(names, vec![Some("mb"), Some("za")]);
+        assert_eq!(facts.packages[0].manifest, "crates/mb/Cargo.toml");
+        assert!(facts
+            .packages
+            .iter()
+            .all(|p| p.version.as_deref() == Some("0.4.0")));
+    }
+
+    #[test]
+    fn cargo_workspace_exclude_and_dedup() {
+        // A glob and an explicit member overlap (dedup to one entry); `exclude`
+        // drops a matched member.
+        let root = "[workspace]\nmembers = [\"crates/*\", \"crates/a\"]\n\
+                    exclude = [\"crates/b\"]\n\n\
+                    [workspace.package]\nversion = \"0.1.0\"\n";
+        let a = "[package]\nname = \"a\"\nversion.workspace = true\n";
+        let b = "[package]\nname = \"b\"\nversion.workspace = true\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/crates/a/Cargo.toml", a)
+            .file("/repo/crates/b/Cargo.toml", b);
+        let facts = gather(repo(), &fs, &FakeGit::default());
+        // `b` excluded; `a` matched by both the glob and the explicit entry → once.
+        let names: Vec<_> = facts
+            .packages
+            .iter()
+            .map(|p| p.package.as_deref())
+            .collect();
+        assert_eq!(names, vec![Some("a")]);
+    }
+
+    #[test]
+    fn cargo_workspace_commented_out_member_is_ignored() {
+        // A commented-out member line must not be emitted, even if the path exists.
+        let root = "[workspace]\nmembers = [\n    \"a\",\n    # \"b\",\n]\n\n\
+                    [workspace.package]\nversion = \"0.1.0\"\n";
+        let a = "[package]\nname = \"a\"\nversion.workspace = true\n";
+        let b = "[package]\nname = \"b\"\nversion.workspace = true\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/a/Cargo.toml", a)
+            .file("/repo/b/Cargo.toml", b);
+        let facts = gather(repo(), &fs, &FakeGit::default());
+        let names: Vec<_> = facts
+            .packages
+            .iter()
+            .map(|p| p.package.as_deref())
+            .collect();
+        assert_eq!(names, vec![Some("a")]);
+    }
+
+    #[test]
+    fn cargo_workspace_rejects_escaping_member_paths() {
+        // Absolute and `..` members are rejected (a fact detector reports only the
+        // repo's own packages) → no member resolves → null root entry fallback.
+        let root = "[workspace]\nmembers = [\"../outside\", \"/abs\"]\n";
+        let outside = "[package]\nname = \"outside\"\nversion = \"9.9.9\"\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/outside/Cargo.toml", outside)
+            .file("/abs/Cargo.toml", outside);
+        let facts = gather(repo(), &fs, &FakeGit::default());
+        assert_eq!(facts.packages.len(), 1);
+        assert_eq!(facts.packages[0].manifest, "Cargo.toml");
+        assert_eq!(facts.packages[0].package, None);
+    }
+
+    #[test]
+    fn cargo_workspace_inheritance_scoped_and_boolean_strict() {
+        // `version.workspace = true` in `[package.metadata.*]` must NOT be read as
+        // `[package].version` inheritance; and `= trueish` is not the bool `true`.
+        let root = "[workspace]\nmembers = [\"m\", \"n\"]\n\n\
+                    [workspace.package]\nversion = \"7.7.7\"\n";
+        let m = "[package]\nname = \"m\"\n\n\
+                 [package.metadata.tool]\nversion.workspace = true\n";
+        let n = "[package]\nname = \"n\"\nversion.workspace = trueish\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/m/Cargo.toml", m)
+            .file("/repo/n/Cargo.toml", n);
+        let facts = gather(repo(), &fs, &FakeGit::default());
+        // Neither inherits the workspace version.
+        assert_eq!(facts.packages[0].package.as_deref(), Some("m"));
+        assert_eq!(facts.packages[0].version, None);
+        assert_eq!(facts.packages[1].package.as_deref(), Some("n"));
+        assert_eq!(facts.packages[1].version, None);
+    }
+
+    #[test]
+    fn cargo_workspace_inline_inheritance_rejects_false_positive() {
+        // `version = { workspace = false, … }` must not inherit; a genuine
+        // `{ workspace = true }` must.
+        let root = "[workspace]\nmembers = [\"yes\", \"no\"]\n\n\
+                    [workspace.package]\nversion = \"3.0.0\"\n";
+        let yes = "[package]\nname = \"yes\"\nversion = { workspace = true }\n";
+        let no = "[package]\nname = \"no\"\nversion = { workspace = false, path = \"x\" }\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/yes/Cargo.toml", yes)
+            .file("/repo/no/Cargo.toml", no);
+        let facts = gather(repo(), &fs, &FakeGit::default());
+        assert_eq!(facts.packages[0].version.as_deref(), Some("3.0.0"));
+        assert_eq!(facts.packages[1].version, None);
     }
 
     #[test]
