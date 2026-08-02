@@ -8,9 +8,9 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Core library for ossctl: contract normalizer, repo-fact detection, audit scoring, release engine, and the versioned protocol DTOs."
-# Private, early (README: not yet published). Flip to `true` when the crates.io
-# publish path is deliberately opened (dogfooded through `ossctl release cut`).
-publish = false
+# Published to crates.io: `ossctl` depends on it, and crates.io requires all
+# dependencies to be published crates.
+publish = true
 
 [lints]
 workspace = true

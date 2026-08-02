@@ -1,5 +1,8 @@
 [package]
-name = "ossctl-cli"
+# Published to crates.io as `ossctl` so `cargo install ossctl` resolves. The
+# package name differs from its directory (`crates/ossctl-cli`) on purpose —
+# Cargo permits this, and docs/AGENTS.md reference the directory path widely.
+name = "ossctl"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,9 +11,7 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Release & readiness coordinator: the AI-first Rust CLI behind the /oss-* skill family."
-# Private, early (README: not yet published). Flip to `true` when the crates.io
-# publish path is deliberately opened.
-publish = false
+publish = true
 
 [package.metadata.dist]
 dist = true

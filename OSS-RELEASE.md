@@ -4,7 +4,7 @@ status: draft
 maturity: mvp
 ecosystems: [rust]
 targets:
-  - {ecosystem: rust, package: ossctl-cli, registry: crates.io, adapter: cargo-publish}
+  - {ecosystem: rust, package: ossctl, registry: crates.io, adapter: cargo-publish}
   - {ecosystem: rust, package: ossctl, registry: gh-releases, adapter: cargo-dist}
   - {ecosystem: rust, package: ossctl, registry: homebrew, adapter: homebrew-tap}
 versioning: semver
