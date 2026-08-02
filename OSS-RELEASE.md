@@ -37,13 +37,14 @@ docs_site: none
   bin `ossctl`). `binary`/`homebrew` are distribution *targets*, never ecosystems, so this
   stays `[rust]`.
 - **targets** — the three release channels this project's own adapters are built for:
-  - **crates.io / `cargo-publish`** (`package: ossctl-cli`) — the crate that produces the
-    `ossctl` binary. **NEEDS A HUMAN DECISION** (see Release notes): both `ossctl-cli` and
-    `ossctl-core` currently carry `publish = false`, and there is no crate literally named
-    `ossctl` (so `cargo install ossctl` would not work as-is).
-  - **gh-releases / `cargo-dist`** (`package: ossctl`) — prebuilt binaries. The root
-    `Cargo.toml` already has `[package.metadata.dist]` + a `[profile.dist]`, so cargo-dist is
-    the pinned adapter, not `manual`.
+  - **crates.io / `cargo-publish`** (`package: ossctl`) — the `crates/ossctl-cli`
+    package (Cargo package and binary both named `ossctl`) that produces the `ossctl`
+    binary, so `cargo install ossctl` resolves. `ossctl` depends on the exact registry
+    version `ossctl-core = "=0.1.0"`, so publish `ossctl-core` first (both crates are
+    `publish = true`).
+  - **gh-releases / `cargo-dist`** (`package: ossctl`) — prebuilt binaries.
+    `crates/ossctl-cli/Cargo.toml` has `[package.metadata.dist]` and the root `Cargo.toml`
+    has a `[profile.dist]`, so cargo-dist is the pinned adapter, not `manual`.
   - **homebrew / `homebrew-tap`** (`package: ossctl`) — a personal tap is the norm for a
     pre-1.0 solo CLI; `homebrew-core` requires notability this project has not yet earned.
 - **versioning: semver** — workspace is `0.1.0` and heading toward a real 1.0; plain SemVer,
@@ -73,13 +74,12 @@ docs_site: none
   want, but the manifest's explicit choice is honored here rather than silently overridden.
 
 ## Release notes
-- **Blocking for the crates.io cut:** both `crates/ossctl-core/Cargo.toml` and
-  `crates/ossctl-cli/Cargo.toml` set `publish = false`. crates.io publish will refuse until
-  these are removed/flipped. Decide the published crate name too — there is no `ossctl` crate,
-  so `cargo install ossctl` won't resolve; either publish as `ossctl-cli` or rename the bin
-  crate to `ossctl`.
-- **No `LICENSE` file at the repo root** — the manifest declares MIT but the license text file
-  is missing; `/oss-readme` / `/oss-readiness` will flag it. Add one before the cut.
+- **Publish ordering (crates.io):** both crates are now `publish = true`, and the CLI package
+  is named `ossctl` (so `cargo install ossctl` resolves). `ossctl` depends on the exact
+  registry version `ossctl-core = "=0.1.0"`, so the cut must publish `ossctl-core` first, wait
+  for the index to see it, then publish `ossctl`.
+- **`LICENSE`** — present at the repo root (MIT) and symlinked into each crate directory so the
+  text ships inside both published `.crate` tarballs.
 - **crates.io publish is irreversible** — `cargo yank` is the only withdrawal, and a yanked
   version's number can never be reused. Dry-run first.
 - **A pushed git tag + GitHub Release are effectively permanent** for downstream consumers

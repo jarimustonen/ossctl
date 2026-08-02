@@ -11,6 +11,11 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Release & readiness coordinator: the AI-first Rust CLI behind the /oss-* skill family."
+keywords.workspace = true
+categories.workspace = true
+# README/LICENSE are symlinks to the repo-root files so a single source of truth
+# still ships inside the published `.crate` tarball (and renders on crates.io).
+readme = "README.md"
 publish = true
 
 [package.metadata.dist]
