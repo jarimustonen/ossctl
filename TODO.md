@@ -142,6 +142,7 @@ LANE C — workspace/crate Cargo.toml + OSS-RELEASE.md (append-union-safe hot fi
 LANE F — crates/ossctl-core/src/facts/mod.rs (disjoint from LANE C; parallel-safe)
   ▶ facts-workspace-members   (enumerate Cargo workspace members instead of package:null)
 UNLANED — confirmed no shared hot files, run anytime (one slug per line):
+    readiness-artifacts            (CHANGELOG/CONTRIBUTING/SECURITY/dependabot — new files, no hot-file overlap)
     adapter-publish-completeness   (umbrella: cargo/python/go/node BUILD-side skeletons — non-urgent)
     migrate-oss-init               (blocked: needs ossctl installed on PATH)
 ```
