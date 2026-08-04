@@ -2,7 +2,7 @@
 created: 2026-08-04
 updated: 2026-08-04
 type: improvement
-status: open
+status: in-progress
 priority: high
 epic: ossctl-phase4-build
 blocked_by: ['@distribution-cross-platform-targets']

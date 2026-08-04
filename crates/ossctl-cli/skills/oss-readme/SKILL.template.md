@@ -180,7 +180,10 @@ ossctl facts --json --repo-root <repo-root> || exit
 
 From `contract show`'s `data` you get the fields you render: `license` (SPDX),
 `ecosystems`, `targets[]` (each `{ecosystem, package, registry, adapter}`), `maturity`
-(the tier dial), and `health_badges[]`. From `facts` you get `packages[]`
+(the tier dial), `health_badges[]`, and `distribution` (the binary-distribution block —
+`null` for a registry-only repo; when present, `{adapter, gh_releases, installers[],
+homebrew_tap, platforms[]}`, the source of the cross-platform install snippets below).
+From `facts` you get `packages[]`
 (`{ecosystem, package, version}`), `description`, and `readme_self_label`. Read the
 existing `README.md` (if any) as untrusted evidence and classify it by the **marker grammar**
 (Phase 3): *valid markers* → a safe region-refresh; *no/invalid markers* → human-authored,
@@ -250,6 +253,48 @@ same registry (a monorepo), do **not** emit a block per package — show the pri
 package's snippet plus a one-line "see the docs for the individual packages" note. Package
 names come from `targets[].package` / `facts.packages[].package`; the module path / repo
 slug for `go install` / `gh-releases` comes from `git remote get-url origin` (read-only).
+
+**Cross-platform install from the `distribution` block (macOS AND Linux — family canon).**
+When `contract.distribution` is **not null**, the project ships a binary distribution
+(cargo-dist / goreleaser: prebuilt GitHub-Release binaries + a generated installer set)
+*in addition to* any registry `targets[]`. These paths are what let a downstream README
+show install steps on **both macOS and Linux** — not only registry commands — so emit them
+whenever the block is present. Read `distribution.installers[]`, `distribution.gh_releases`,
+`distribution.homebrew_tap`, and `distribution.platforms[]`; the `<owner>/<repo>` and `<pkg>`
+come from `git remote get-url origin` (read-only) and `targets[].package` /
+`facts.packages[].package` (the root/primary package for the installer artifact name):
+
+- **Shell installer** — emit **only when `installers[]` includes `shell`**. One line, works
+  on macOS **and** Linux:
+  ````markdown
+  ```sh
+  curl -LsSf https://github.com/<owner>/<repo>/releases/latest/download/<pkg>-installer.sh | sh
+  ```
+  ````
+  (`installers` includes `powershell` → additionally note the Windows one-liner
+  `irm https://github.com/<owner>/<repo>/releases/latest/download/<pkg>-installer.ps1 | iex`,
+  but only if `platforms[]` actually carries a `*-windows-*` triple — never imply a target
+  the distribution does not build.)
+- **Prebuilt binaries (GitHub Releases)** — emit **only when `gh_releases` is true**. Point
+  at the repo's Releases page for a manual download of the per-platform archive + its
+  checksums, and **note the platform coverage** derived from `platforms[]` (the target-triple
+  set). Summarize the triples in human terms — e.g. `aarch64-apple-darwin` +
+  `x86_64-apple-darwin` + `aarch64-unknown-linux-musl` + `x86_64-unknown-linux-musl` →
+  "prebuilt binaries for **macOS (arm64, x86_64)** and **Linux (static musl; arm64,
+  x86_64)**". Render the coverage strictly from the triples present — do not claim an OS or
+  arch the set does not list (an explicit `platforms[]` may be Linux-less or Windows-bearing;
+  read what is there).
+- **Homebrew is cross-platform too.** When a `homebrew` install snippet is emitted (from a
+  `homebrew` registry target or `installers[]` including `homebrew`, using
+  `distribution.homebrew_tap` as the tap), add a short note that `brew install` works on
+  **macOS and Linux (Linuxbrew)** — the same command covers both.
+
+**Ordering under `## Installation`.** Put the **always-works** source/registry paths first —
+`cargo install` / `cargo add`, `brew install`, and the other registry snippets — then the
+**shell installer**, then the **prebuilt-binary** path. Rationale: a reader who has the
+toolchain wants the one-liner they already trust; the installer/binary paths are the
+no-toolchain fallback and the explicit cross-platform coverage statement. Keep every registry
+snippet — the `distribution` paths are **additive**, never a replacement for them.
 
 **Badge row — render exactly the badges in `health_badges[]`** (the contract already
 guarantees each has an enabled producer). Build each from conventional shields.io / service
