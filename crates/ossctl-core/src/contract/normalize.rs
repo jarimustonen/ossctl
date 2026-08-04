@@ -765,28 +765,42 @@ fn parse_distribution(value: Option<&Value>, p: &mut Problems) -> Option<Distrib
         );
     }
 
-    // platforms — the binary target-triple set. Omitted/null/empty → the
-    // cross-platform default (macOS + Linux musl), so a distribution covers Linux
-    // by default (the cross-platform install requirement); this mirrors the
-    // `targets`-expanded-from-`ecosystems` "omitted → sensible default" pattern. An
-    // explicit list is validated per triple and de-duplicated, preserving the
-    // author's order (there is no canonical triple ordering to impose).
+    // platforms — the binary target-triple set. Omitted/null → the cross-platform
+    // default (macOS + Linux musl), so a distribution that doesn't specify
+    // platforms covers Linux by default (the cross-platform install requirement).
+    // An explicit list is validated per triple and de-duplicated, preserving the
+    // author's order (like the sibling `targets` list — there is no canonical
+    // triple ordering to impose). An explicit *empty* list is NOT the same as
+    // omitted: it is a mistake, and silently defaulting it would surprise the
+    // author with targets they never listed and erase the intent the downstream
+    // cross-platform audit needs — so it is a hard error.
     let platforms = match m.get("platforms") {
         None | Some(Value::Null) => default_cross_platform_targets(),
-        Some(Value::Sequence(seq)) if seq.is_empty() => default_cross_platform_targets(),
+        Some(Value::Sequence(seq)) if seq.is_empty() => {
+            // Default fallback keeps error-collection going; the contract is never
+            // emitted while `problems.errors` is non-empty.
+            p.err(
+                "distribution.platforms is an empty list — omit the key to accept the \
+                 cross-platform default (macOS + Linux) or list explicit target-triples; a \
+                 distribution with no platforms builds nothing"
+                    .to_string(),
+            );
+            default_cross_platform_targets()
+        }
         Some(Value::Sequence(seq)) => {
             let mut out: Vec<String> = Vec::new();
             for item in seq {
                 match item.as_str() {
-                    Some(s) if is_target_triple(s) => {
+                    Some(s) if looks_like_target_triple(s) => {
                         let triple = s.to_string();
                         if !out.contains(&triple) {
                             out.push(triple);
                         }
                     }
                     Some(s) => p.err(format!(
-                        "distribution.platforms: '{s}' is not a valid Rust target-triple \
-                         (e.g. x86_64-unknown-linux-musl, aarch64-apple-darwin)"
+                        "distribution.platforms: '{s}' is not a well-formed target-triple \
+                         (e.g. x86_64-unknown-linux-musl, aarch64-apple-darwin) — structural \
+                         check only; the toolchain is the final authority on what builds"
                     )),
                     None => p.err(format!(
                         "distribution.platforms: {} invalid — each entry must be a \
@@ -825,21 +839,24 @@ fn default_cross_platform_targets() -> Vec<String> {
         .collect()
 }
 
-/// Whether `s` is a plausible Rust target-triple — 2–4 `-`-separated components,
-/// each a non-empty run of `[a-z0-9_]`. Lexical only: the real triple set is
-/// open and rustc-defined, so this rejects what could never be a triple (empty
-/// parts, uppercase, whitespace, punctuation, injection chars) while accepting
-/// every standard one (`x86_64-unknown-linux-musl`, `aarch64-apple-darwin`,
-/// `x86_64-pc-windows-msvc`, `armv7-unknown-linux-gnueabihf`). The OS component
-/// stays intact and inspectable so `audit` can flag a Linux-less set downstream.
-fn is_target_triple(s: &str) -> bool {
+/// Whether `s` is a *structurally* plausible target-triple — 2–4 `-`-separated
+/// components, each a non-empty run of `[a-z0-9_.]`. Deliberately LEXICAL, not
+/// semantic: the real triple set is open and rustc-defined, so this is a
+/// well-formedness gate, not a whitelist. It rejects what could never be a triple
+/// (empty parts, uppercase, whitespace, punctuation, injection chars, wrong shape)
+/// and accepts real triples including dotted arch names like
+/// `thumbv8m.main-none-eabi` — but it also accepts structurally-valid nonsense like
+/// `aa-bb`, because the toolchain is the final authority on whether a triple
+/// actually builds. The OS component stays intact and inspectable so the
+/// cross-platform `audit` can classify a set downstream.
+fn looks_like_target_triple(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     (2..=4).contains(&parts.len())
         && parts.iter().all(|part| {
             !part.is_empty()
-                && part
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                && part.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'.')
+                })
         })
 }
 
@@ -1561,7 +1578,9 @@ mod tests {
     }
 
     /// Omitted `platforms` → the cross-platform default (macOS + Linux). The
-    /// KEYSTONE assertion: the default covers Linux, so every distribution does.
+    /// KEYSTONE assertion: the DEFAULT covers Linux, so every distribution that
+    /// omits the field does (an explicit set is the author's own choice, which the
+    /// cross-platform `audit` — not this normalizer — checks).
     #[test]
     fn distribution_platforms_default_is_cross_platform() {
         let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
@@ -1607,16 +1626,16 @@ mod tests {
         );
     }
 
-    /// An explicit but empty `platforms: []` falls back to the cross-platform
-    /// default (mirrors the empty-`targets` → expand behavior), so an empty list
-    /// can never silently drop Linux coverage.
+    /// An explicit empty `platforms: []` is a hard error — NOT silently defaulted.
+    /// Only an omitted/null field yields the cross-platform default; an empty list
+    /// is a mistake (a distribution with no platforms builds nothing) and, if
+    /// silently defaulted, would surprise the author and erase the intent the
+    /// cross-platform audit needs to see.
     #[test]
-    fn distribution_platforms_empty_falls_back_to_default() {
+    fn distribution_platforms_empty_is_rejected() {
         let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
                     distribution:\n  adapter: cargo-dist\n  platforms: []\n---\n";
-        let d = norm(text).contract.distribution.unwrap();
-        assert!(has_linux(&d.platforms));
-        assert_eq!(d.platforms.len(), 4);
+        assert_error_contains(&norm(text), "empty list — omit the key");
     }
 
     /// Duplicate triples de-duplicate, preserving first-seen order.
@@ -1637,7 +1656,7 @@ mod tests {
     fn distribution_platforms_bad_triple_rejected() {
         let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
                     distribution:\n  adapter: cargo-dist\n  platforms: [not_a_triple]\n---\n";
-        assert_error_contains(&norm(text), "is not a valid Rust target-triple");
+        assert_error_contains(&norm(text), "is not a well-formed target-triple");
     }
 
     /// A non-string entry (a nested list) is rejected structurally.
@@ -1669,24 +1688,30 @@ mod tests {
     }
 
     #[test]
-    fn is_target_triple_verdicts() {
+    fn looks_like_target_triple_verdicts() {
         // Standard triples across arch/vendor/os/env shapes.
-        assert!(is_target_triple("aarch64-apple-darwin"));
-        assert!(is_target_triple("x86_64-apple-darwin"));
-        assert!(is_target_triple("x86_64-unknown-linux-musl"));
-        assert!(is_target_triple("x86_64-unknown-linux-gnu"));
-        assert!(is_target_triple("x86_64-pc-windows-msvc"));
-        assert!(is_target_triple("armv7-unknown-linux-gnueabihf"));
-        assert!(is_target_triple("wasm32-wasi"));
+        assert!(looks_like_target_triple("aarch64-apple-darwin"));
+        assert!(looks_like_target_triple("x86_64-apple-darwin"));
+        assert!(looks_like_target_triple("x86_64-unknown-linux-musl"));
+        assert!(looks_like_target_triple("x86_64-unknown-linux-gnu"));
+        assert!(looks_like_target_triple("x86_64-pc-windows-msvc"));
+        assert!(looks_like_target_triple("armv7-unknown-linux-gnueabihf"));
+        assert!(looks_like_target_triple("wasm32-wasi"));
+        // Real dotted arch names must pass (regression: the `.` was rejected).
+        assert!(looks_like_target_triple("thumbv8m.main-none-eabi"));
+        assert!(looks_like_target_triple("thumbv8m.base-none-eabi"));
         // Rejects: too few/many components, empty parts, case, punctuation.
-        assert!(!is_target_triple("linux"));
-        assert!(!is_target_triple("a-b-c-d-e"));
-        assert!(!is_target_triple("x86_64--linux"));
-        assert!(!is_target_triple("-apple-darwin"));
-        assert!(!is_target_triple("X86_64-apple-darwin"));
-        assert!(!is_target_triple("x86_64-apple-darwin;rm"));
-        assert!(!is_target_triple("x86_64 apple darwin"));
-        assert!(!is_target_triple(""));
+        assert!(!looks_like_target_triple("linux"));
+        assert!(!looks_like_target_triple("a-b-c-d-e"));
+        assert!(!looks_like_target_triple("x86_64--linux"));
+        assert!(!looks_like_target_triple("-apple-darwin"));
+        assert!(!looks_like_target_triple("X86_64-apple-darwin"));
+        assert!(!looks_like_target_triple("x86_64-apple-darwin;rm"));
+        assert!(!looks_like_target_triple("x86_64 apple darwin"));
+        assert!(!looks_like_target_triple(""));
+        // Structural-only: nonsense that happens to be well-formed IS accepted —
+        // the toolchain, not the contract, is the authority on buildability.
+        assert!(looks_like_target_triple("aa-bb"));
     }
 
     #[test]
