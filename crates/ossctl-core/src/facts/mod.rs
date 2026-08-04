@@ -119,10 +119,14 @@ pub fn gather(repo_root: &Path, fs: &dyn Fs, git: &dyn GitRepo) -> Facts {
     let semver_tags: Vec<(u64, u64, u64, bool)> =
         tags.iter().filter_map(|t| semver_parse(t)).collect();
     let has_semver_tag = !semver_tags.is_empty();
-    // A *shipped* release: any non-prerelease SemVer tag (a `-rc`/`-alpha` tag is
-    // not a shipped release). Distinct from `has_semver_tag`, which counts
-    // prereleases too. Recomputable by a consumer from the emitted `tags`.
-    let has_stable_semver_tag = semver_tags.iter().any(|&(_, _, _, pre)| !pre);
+    // Count *shipped* releases: non-prerelease SemVer tags at `>=0.1.0`. A `0.0.x`
+    // tag is SemVer's initial-scratch space ("anything MAY change at any time"),
+    // and a `-rc`/`-alpha` prerelease is not shipped — neither is counted. A
+    // consumer can recompute this from the emitted `tags` with the same parse.
+    let shipped_release_tags = semver_tags
+        .iter()
+        .filter(|&&(major, minor, _, pre)| !pre && (major >= 1 || minor >= 1))
+        .count();
     let ge_1_0_tag = semver_tags
         .iter()
         .any(|&(major, _, _, pre)| major >= 1 && !pre);
@@ -177,21 +181,29 @@ pub fn gather(repo_root: &Path, fs: &dyn Fs, git: &dyn GitRepo) -> Facts {
 
     // ── maturity inference (SCHEMA.md §4, production first, tie → mvp) ──
     //
-    // A pre-1.0 project can still be production-grade. The version number is not
-    // release maturity: many serious projects deliberately cap the major at 0
-    // (ZeroVer). So `production` no longer requires a >=1.0 release outright — a
-    // *complete release setup* substitutes for that gate: CI **and** a
-    // dependency-update bot **and** at least one shipped (non-prerelease) SemVer
-    // release. This is deliberately substantive so a bare 0.x repo with only a
-    // tag cannot inflate: it demands active co-maintenance (>=2 recent
-    // committers), automated dependency hygiene, working CI, and evidence of an
-    // actual cut release — not merely a version string. Every input here is an
-    // already-emitted fact (`has_ci`, `dependency_bot`, `tags`,
-    // `committers_recent_year`, `has_ge_1_0_release`), so the decision stays
-    // auditable straight from the report without a new wire field.
-    let full_release_infra = has_ci && dependency_bot.is_some() && has_stable_semver_tag;
-    let production =
-        committers_recent_year >= 2 && has_ci && (has_ge_1_0_release || full_release_infra);
+    // A deliberately-pre-1.0 (ZeroVer) project can still be production-grade: the
+    // version number is not release maturity. The `>=1.0` gate is really a
+    // stability *declaration*; below 1.0 that declaration is absent, so the
+    // `zerover_release_evidence` path requires compensating evidence of a
+    // maintained release process — a dependency-update bot configured **and** a
+    // release *cadence* (>=2 shipped `>=0.1.0` releases). A single tag is a
+    // moment; two prove the project has actually iterated a release more than
+    // once, which a lone `git tag` cannot fake. Combined with the always-required
+    // CI and >=2 recent committers, this is materially harder to inflate than the
+    // old "only a tag" concern.
+    //
+    // The asymmetry (a `>=1.0` project reaches `production` without a bot, a 0.x
+    // one does not) is intentional: `>=1.0` already carries the stability signal
+    // this path has to reconstruct. These remain presence/name heuristics over a
+    // cooperative repo (CI/bot detected by path, tags by name) — not adversarial
+    // proofs — and `/oss-init` surfaces every signal to a human before it lands
+    // in the contract. Each input is already in the report (`has_ci`,
+    // `dependency_bot`, `tags` — from which `shipped_release_tags` recomputes via
+    // the same parse — `committers_recent_year`, `has_ge_1_0_release`), so the
+    // decision is re-derivable without a new wire field.
+    let zerover_release_evidence = dependency_bot.is_some() && shipped_release_tags >= 2;
+    let release_gate = has_ge_1_0_release || zerover_release_evidence;
+    let production = committers_recent_year >= 2 && has_ci && release_gate;
     let spike =
         !has_ci && !has_semver_tag && (committers_total <= 1 || readme_self_label.is_some());
     let inferred_maturity = if production {
@@ -1570,19 +1582,26 @@ mod tests {
         assert_eq!(facts.inferred_maturity, Maturity::Mvp);
     }
 
-    #[test]
-    fn pre_1_0_with_full_release_infra_is_production() {
-        // A deliberately-0.x (ZeroVer) repo with a complete release setup: CI, a
-        // dependency-update bot, ≥2 recent committers, and a shipped 0.x release
-        // tag — but NO ≥1.0 release. It must reach `production` via the
-        // release-infra path even though `has_ge_1_0_release` is false.
-        let fs = FakeFs::default()
+    /// A `ZeroVer` repo with the full release process: CI + a dependency bot +
+    /// `n` shipped `>=0.1.0` release tags. `bot` chooses the dependency-bot file.
+    fn zerover_fs(bot: &str) -> FakeFs {
+        FakeFs::default()
             .file(
                 "/repo/Cargo.toml",
                 "[package]\nname=\"a\"\nversion=\"0.6.0\"\n",
             )
             .file("/repo/.github/workflows/ci.yml", "on: push\n")
-            .file("/repo/.github/dependabot.yml", "version: 2\n");
+            .file(&format!("/repo/{bot}"), "version: 2\n")
+    }
+
+    #[test]
+    fn pre_1_0_with_full_release_infra_is_production() {
+        // A deliberately-0.x (ZeroVer) repo with a maintained release process: CI,
+        // a dependency-update bot, ≥2 recent committers, and a release cadence of
+        // two shipped ≥0.1.0 releases — but NO ≥1.0 release. It reaches
+        // `production` via the ZeroVer path even though `has_ge_1_0_release` is
+        // false.
+        let fs = zerover_fs(".github/dependabot.yml");
         let facts = gather(repo(), &fs, &git_with(3, 3, &["v0.5.0", "v0.6.0"]));
         assert!(facts.has_ci);
         assert!(!facts.has_ge_1_0_release);
@@ -1592,11 +1611,22 @@ mod tests {
     }
 
     #[test]
+    fn renovate_unlocks_the_zerover_release_path() {
+        // The ZeroVer path is bot-agnostic: a `renovate.json` unlocks it exactly
+        // as `dependabot.yml` does.
+        let fs = zerover_fs("renovate.json");
+        let facts = gather(repo(), &fs, &git_with(2, 2, &["v0.1.0", "v0.2.0"]));
+        assert_eq!(facts.dependency_bot.as_deref(), Some("renovate"));
+        assert!(facts.maturity_signals.production);
+        assert_eq!(facts.inferred_maturity, Maturity::Production);
+    }
+
+    #[test]
     fn bare_0x_with_only_a_tag_is_not_production() {
         // The guard: a 0.x repo with ONLY a SemVer tag — no CI, no dependency
-        // bot — must NOT inflate to `production` via the release-infra path. It
-        // has a shipped tag and ≥2 recent committers, but the substantive
-        // signals (CI + a dep bot) are absent.
+        // bot — must NOT inflate to `production`. It has a shipped tag and ≥2
+        // recent committers, but the substantive signals (CI + a dep bot +
+        // cadence) are absent.
         let fs = FakeFs::default().file(
             "/repo/Cargo.toml",
             "[package]\nname=\"a\"\nversion=\"0.6.0\"\n",
@@ -1611,33 +1641,59 @@ mod tests {
     }
 
     #[test]
+    fn zerover_v0_0_x_tag_is_not_a_shipped_release() {
+        // The gaming guard: CI + a dep bot + ≥2 recent committers, but the only
+        // tags are `0.0.x` — SemVer's initial-scratch space. Those are not
+        // shipped releases, so the ZeroVer path stays closed → mvp. This blocks
+        // the "empty workflow + empty dependabot.yml + `v0.0.1`" inflation.
+        let fs = zerover_fs(".github/dependabot.yml");
+        let facts = gather(repo(), &fs, &git_with(3, 3, &["v0.0.1", "v0.0.2"]));
+        assert!(facts.has_ci);
+        assert_eq!(facts.dependency_bot.as_deref(), Some("dependabot"));
+        assert!(!facts.maturity_signals.production);
+        assert_eq!(facts.inferred_maturity, Maturity::Mvp);
+    }
+
+    #[test]
+    fn pre_1_0_release_infra_requires_release_cadence() {
+        // CI + a dep bot + ≥2 recent committers + a single shipped ≥0.1.0 tag →
+        // one release is a moment, not a cadence → not production. Two shipped
+        // releases are required, so a lone `git tag` can't unlock the path.
+        let fs = zerover_fs(".github/dependabot.yml");
+        let facts = gather(repo(), &fs, &git_with(3, 3, &["v0.1.0"]));
+        assert!(!facts.maturity_signals.production);
+        assert_eq!(facts.inferred_maturity, Maturity::Mvp);
+    }
+
+    #[test]
     fn pre_1_0_release_infra_requires_dependency_bot() {
-        // CI + a shipped 0.x tag + ≥2 recent committers but NO dependency bot →
-        // the release-infra path is incomplete → mvp, not production. The dep bot
-        // is the gate that keeps "CI + a tag" from being enough.
+        // CI + a release cadence (two shipped tags) + ≥2 recent committers but NO
+        // dependency bot → the ZeroVer path is incomplete → mvp. The dep bot is
+        // the sole missing signal here, isolating its requirement.
         let fs = FakeFs::default()
             .file(
                 "/repo/Cargo.toml",
                 "[package]\nname=\"a\"\nversion=\"0.6.0\"\n",
             )
             .file("/repo/.github/workflows/ci.yml", "on: push\n");
-        let facts = gather(repo(), &fs, &git_with(3, 3, &["v0.6.0"]));
+        let facts = gather(repo(), &fs, &git_with(3, 3, &["v0.5.0", "v0.6.0"]));
+        assert_eq!(facts.dependency_bot, None);
         assert!(!facts.maturity_signals.production);
         assert_eq!(facts.inferred_maturity, Maturity::Mvp);
     }
 
     #[test]
-    fn pre_1_0_release_infra_requires_a_shipped_stable_tag() {
-        // CI + a dep bot + ≥2 recent committers, but the only SemVer tag is a
-        // prerelease (`v0.6.0-rc1`) → nothing shipped yet → not production.
-        let fs = FakeFs::default()
-            .file(
-                "/repo/Cargo.toml",
-                "[package]\nname=\"a\"\nversion=\"0.6.0\"\n",
-            )
-            .file("/repo/.github/workflows/ci.yml", "on: push\n")
-            .file("/repo/.github/dependabot.yml", "version: 2\n");
-        let facts = gather(repo(), &fs, &git_with(3, 3, &["v0.6.0-rc1"]));
+    fn pre_1_0_release_infra_ignores_prerelease_tags_for_cadence() {
+        // CI + a dep bot + ≥2 recent committers, but the tags are one shipped
+        // release plus prereleases (`v0.6.0-rc1`, `v0.7.0-rc1`) → only one
+        // non-prerelease ≥0.1.0 tag → no cadence → not production. Confirms
+        // prereleases don't pad the shipped-release count.
+        let fs = zerover_fs(".github/dependabot.yml");
+        let facts = gather(
+            repo(),
+            &fs,
+            &git_with(3, 3, &["v0.5.0", "v0.6.0-rc1", "v0.7.0-rc1"]),
+        );
         assert!(facts.has_semver_tag);
         assert!(!facts.maturity_signals.production);
         assert_eq!(facts.inferred_maturity, Maturity::Mvp);
@@ -1645,18 +1701,30 @@ mod tests {
 
     #[test]
     fn pre_1_0_release_infra_requires_two_recent_committers() {
-        // Full release infra (CI + dep bot + shipped tag) but a single recent
-        // committer → not production (solo maintenance).
+        // Full ZeroVer release evidence (CI + dep bot + cadence) but a single
+        // recent committer → not production (solo maintenance).
+        let fs = zerover_fs(".github/dependabot.yml");
+        let facts = gather(repo(), &fs, &git_with(1, 1, &["v0.5.0", "v0.6.0"]));
+        assert!(!facts.maturity_signals.production);
+        assert_eq!(facts.inferred_maturity, Maturity::Mvp);
+    }
+
+    #[test]
+    fn ge_1_0_release_reaches_production_without_a_dependency_bot() {
+        // Regression: the ≥1.0 path is unchanged — a ≥1.0 release + CI + ≥2
+        // recent committers reaches production with NO dependency bot and no
+        // cadence requirement. The bot asymmetry applies only below 1.0.
         let fs = FakeFs::default()
             .file(
                 "/repo/Cargo.toml",
-                "[package]\nname=\"a\"\nversion=\"0.6.0\"\n",
+                "[package]\nname=\"a\"\nversion=\"1.2.0\"\n",
             )
-            .file("/repo/.github/workflows/ci.yml", "on: push\n")
-            .file("/repo/.github/dependabot.yml", "version: 2\n");
-        let facts = gather(repo(), &fs, &git_with(1, 1, &["v0.6.0"]));
-        assert!(!facts.maturity_signals.production);
-        assert_eq!(facts.inferred_maturity, Maturity::Mvp);
+            .file("/repo/.github/workflows/ci.yml", "on: push\n");
+        let facts = gather(repo(), &fs, &git_with(2, 2, &["v1.2.0"]));
+        assert!(facts.has_ge_1_0_release);
+        assert_eq!(facts.dependency_bot, None);
+        assert!(facts.maturity_signals.production);
+        assert_eq!(facts.inferred_maturity, Maturity::Production);
     }
 
     #[test]

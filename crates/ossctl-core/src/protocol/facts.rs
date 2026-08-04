@@ -100,11 +100,15 @@ pub struct Package {
 /// (`production` is checked first).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct MaturitySignals {
-    /// `>=2` recent-year committers **and** CI **and** a release gate — the
-    /// release gate being either a `>=1.0` release **or** a complete release
-    /// setup (CI + a dependency-update bot + a shipped non-prerelease `SemVer`
-    /// tag). The second path lets a deliberately-pre-1.0 (`ZeroVer`) project with
-    /// full release infrastructure reach `production` without a `>=1.0` version.
+    /// `>=2` recent-year committers **and** CI **and** a release gate. The
+    /// release gate is either a `>=1.0` release **or** `ZeroVer` release evidence:
+    /// a dependency-update-bot config present **and** a release cadence of `>=2`
+    /// shipped (non-prerelease, `>=0.1.0`) `SemVer` tags. The second path lets a
+    /// deliberately-pre-1.0 (`ZeroVer`) project reach `production` without a
+    /// `>=1.0` version. The shipped-release count is not a first-class field but
+    /// is recomputable from [`Facts::tags`] with the same `SemVer` parse. These
+    /// are presence/name heuristics, not proofs — `/oss-init` presents them to a
+    /// human for confirmation before they land in the contract.
     pub production: bool,
     /// No CI **and** no `SemVer` tag **and** (single committer **or** a README
     /// self-label).
