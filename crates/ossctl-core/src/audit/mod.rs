@@ -558,44 +558,61 @@ fn workflow_mentions(repo_root: &Path, fs: &dyn Fs, tokens: &[&str]) -> Presence
     }
 }
 
-/// Emit the cross-platform gap when a declared binary distribution builds no
-/// Linux target — the "installs on macOS AND Linux" policy, self-checked.
+/// Emit the cross-platform gap(s) when a declared binary distribution omits an
+/// OS the "installs on macOS AND Linux" policy requires — self-checked. The two
+/// OSes are checked *independently*: a distribution missing both yields two gaps
+/// (`distribution-linux` + `distribution-macos`), one missing yields one.
 ///
 /// The normalizer defaults an OMITTED `platforms` to the cross-platform set
-/// (which always includes Linux), so a Linux-less set is only ever an *explicit*
-/// author choice; a registry-only repo has no `distribution` block and is never
-/// flagged. A distribution that builds no Linux target is not installable on
-/// Linux. Severity stays [`Severity::Recommended`] (the audit reserves
-/// [`Severity::Blocking`] for the gated core), but the wording escalates at
-/// production, where a one-OS release is a hard gap.
+/// (macOS + Linux) and rejects an explicit empty list, so a set missing either
+/// OS is only ever an *explicit* author choice; a registry-only repo has no
+/// `distribution` block and is never flagged. Because the check reads the
+/// contract's declared target set (not built artifacts), the wording says
+/// "declares", not "builds". Severity stays [`Severity::Recommended`] (the audit
+/// reserves [`Severity::Blocking`] for the gated core; the same idiom the
+/// `security-policy` gap uses), but the wording escalates at production, where a
+/// one-OS release is a hard gap.
 fn cross_platform_gap(gaps: &mut Vec<Gap>, contract: &Contract, maturity: Maturity) {
     let Some(dist) = &contract.distribution else {
         return;
     };
-    if dist.platforms.iter().any(|t| is_linux_triple(t)) {
-        return;
+    let production = tier_rank(maturity) >= tier_rank(Maturity::Production);
+    if !dist.platforms.iter().any(|t| is_linux_triple(t)) {
+        gaps.push(platform_gap("distribution-linux", "Linux", production));
     }
-    let detail = if tier_rank(maturity) >= tier_rank(Maturity::Production) {
-        "distribution builds no Linux target — not installable on Linux (required by the \
-         cross-platform install policy: macOS AND Linux)"
-    } else {
-        "distribution builds no Linux target — not installable on Linux (cross-platform \
-         install policy: macOS AND Linux)"
-    };
-    gaps.push(producer_gap(
-        "distribution-linux",
-        "oss-init",
-        Presence::Absent,
-        detail,
-    ));
+    if !dist.platforms.iter().any(|t| is_darwin_triple(t)) {
+        gaps.push(platform_gap("distribution-macos", "macOS", production));
+    }
 }
 
-/// Whether `triple` is a Linux target-triple (`*-unknown-linux-*`, musl or gnu).
-/// The Linux OS component of a Rust target-triple is always spelled
-/// `-unknown-linux-`, so its presence is a reliable structural signal that the
-/// distribution ships at least one Linux binary.
+/// Build one cross-platform gap for a missing `os` ("Linux"/"macOS"), escalating
+/// the wording at `production`.
+fn platform_gap(id: &str, os: &str, production: bool) -> Gap {
+    let policy = if production {
+        "required by the cross-platform install policy: macOS AND Linux"
+    } else {
+        "cross-platform install policy: macOS AND Linux"
+    };
+    producer_gap(
+        id,
+        "oss-init",
+        Presence::Absent,
+        format!("distribution declares no {os} target — not installable on {os} ({policy})"),
+    )
+}
+
+/// Whether `triple` is a desktop-Linux target-triple (`*-unknown-linux-*`, musl
+/// or gnu). Rust's std desktop-Linux triples are always spelled `-unknown-linux-`,
+/// so this reliably includes gnu/musl while excluding `*-linux-android` (Android
+/// is not a desktop-Linux install target) and non-Linux OSes.
 fn is_linux_triple(triple: &str) -> bool {
     triple.contains("-unknown-linux-")
+}
+
+/// Whether `triple` is a macOS target-triple (`*-apple-darwin`). Excludes
+/// `*-apple-ios`/`*-apple-tvos` etc., which are not macOS install targets.
+fn is_darwin_triple(triple: &str) -> bool {
+    triple.contains("-apple-darwin")
 }
 
 /// Maturity as a monotone rank for tier comparisons (`spike < mvp < production`).

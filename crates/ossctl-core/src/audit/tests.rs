@@ -563,11 +563,79 @@ fn distribution_without_linux_target_is_producer_gap() {
     assert_eq!(g.severity, Severity::Recommended);
     assert_eq!(g.member, "oss-init");
     assert!(g.detail.contains("Linux"));
+    // macOS IS covered here, so only the Linux gap fires — the two OS checks are
+    // independent.
+    assert!(!ids(&report).contains(&"distribution-macos"));
+}
+
+#[test]
+fn distribution_without_macos_target_is_producer_gap() {
+    // Symmetric to the Linux case: a Linux-only set builds no macOS binary → the
+    // macOS gap fires (and the Linux gap does not).
+    let mut contract = contract_at(Maturity::Mvp);
+    contract.distribution = Some(dist_with(&["x86_64-unknown-linux-gnu"]));
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n");
+    let report = audit(
+        repo(),
+        &contract,
+        &facts_with(Maturity::Mvp, true, None),
+        &fs,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    let g = gap(&report, "distribution-macos");
+    assert_eq!(g.category, Category::Producer);
+    assert!(g.detail.contains("macOS"));
+    assert!(!ids(&report).contains(&"distribution-linux"));
+}
+
+#[test]
+fn distribution_missing_both_oses_yields_two_gaps() {
+    // A Windows-only distribution covers neither macOS nor Linux → both gaps.
+    let mut contract = contract_at(Maturity::Mvp);
+    contract.distribution = Some(dist_with(&["x86_64-pc-windows-msvc"]));
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n");
+    let report = audit(
+        repo(),
+        &contract,
+        &facts_with(Maturity::Mvp, true, None),
+        &fs,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    assert!(ids(&report).contains(&"distribution-linux"));
+    assert!(ids(&report).contains(&"distribution-macos"));
+}
+
+#[test]
+fn android_triple_does_not_satisfy_the_linux_requirement() {
+    // `*-linux-android` is a Linux *kernel* target but not a desktop-Linux
+    // install target: it must NOT satisfy the policy. (macOS is present here, so
+    // only the Linux gap fires.)
+    let mut contract = contract_at(Maturity::Mvp);
+    contract.distribution = Some(dist_with(&[
+        "aarch64-linux-android",
+        "aarch64-apple-darwin",
+    ]));
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n");
+    let report = audit(
+        repo(),
+        &contract,
+        &facts_with(Maturity::Mvp, true, None),
+        &fs,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    assert!(ids(&report).contains(&"distribution-linux"));
+    assert!(!ids(&report).contains(&"distribution-macos"));
 }
 
 #[test]
 fn distribution_with_linux_target_yields_no_gap() {
-    // The cross-platform default set (macOS + Linux musl) covers Linux → no gap.
+    // The cross-platform default set (macOS + Linux musl) covers both → no gap.
     let mut contract = contract_at(Maturity::Mvp);
     contract.distribution = Some(dist_with(&[
         "aarch64-apple-darwin",
@@ -586,11 +654,34 @@ fn distribution_with_linux_target_yields_no_gap() {
         &FakeCmd::github(PROFILE_README_LICENSE),
     );
     assert!(!ids(&report).contains(&"distribution-linux"));
+    assert!(!ids(&report).contains(&"distribution-macos"));
+}
+
+#[test]
+fn platform_triple_classifiers() {
+    // Table check for the OS classifiers behind the cross-platform gap.
+    for t in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl"] {
+        assert!(is_linux_triple(t), "{t} is Linux");
+        assert!(!is_darwin_triple(t), "{t} is not macOS");
+    }
+    for t in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+        assert!(is_darwin_triple(t), "{t} is macOS");
+        assert!(!is_linux_triple(t), "{t} is not Linux");
+    }
+    for t in [
+        "x86_64-pc-windows-msvc",
+        "aarch64-linux-android", // Linux kernel, not desktop-Linux
+        "aarch64-apple-ios",     // Apple, not macOS
+        "wasm32-unknown-unknown",
+    ] {
+        assert!(!is_linux_triple(t), "{t} is not desktop-Linux");
+        assert!(!is_darwin_triple(t), "{t} is not macOS");
+    }
 }
 
 #[test]
 fn distribution_with_gnu_linux_target_yields_no_gap() {
-    // A gnu (not musl) Linux triple still satisfies the policy.
+    // A gnu (not musl) Linux triple + a macOS triple satisfies the policy.
     let mut contract = contract_at(Maturity::Mvp);
     contract.distribution = Some(dist_with(&[
         "aarch64-apple-darwin",
@@ -607,6 +698,7 @@ fn distribution_with_gnu_linux_target_yields_no_gap() {
         &FakeCmd::github(PROFILE_README_LICENSE),
     );
     assert!(!ids(&report).contains(&"distribution-linux"));
+    assert!(!ids(&report).contains(&"distribution-macos"));
 }
 
 #[test]
@@ -624,6 +716,7 @@ fn no_distribution_block_yields_no_cross_platform_gap() {
         &FakeCmd::github(PROFILE_README_LICENSE),
     );
     assert!(!ids(&report).contains(&"distribution-linux"));
+    assert!(!ids(&report).contains(&"distribution-macos"));
 }
 
 #[test]
