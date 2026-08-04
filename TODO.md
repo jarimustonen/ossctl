@@ -5,10 +5,42 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-08-01 (updated after stint #8). New agent: read this, then continue
-with a fresh `/stint`. **NEXT STINT STARTS WITH `/oss-init` ON THIS REPO** (dogfood — see
-NEXT ROUND). The Phase-4 build is complete AND the two SKELETON release adapters are now
-finished — ossctl's own release path (crates.io + GitHub Release + Homebrew) is code-complete._
+_Handoff written 2026-08-04 (updated after stint #9). New agent: read this, then continue
+with a fresh `/stint`._
+
+_🎉 **STINT #9 SHIPPED ossctl 0.1.0 — the first REAL release, cut by dogfooding ossctl on
+itself.** All three channels are LIVE:_
+_- **crates.io** — `ossctl-core 0.1.0` + `ossctl 0.1.0` (published in dep order, not yanked)._
+_- **GitHub Release** — `v0.1.0` with a macOS-arm64 binary asset (repo is now PUBLIC)._
+_- **Homebrew** — `brew install jarimustonen/ossctl/ossctl` works (tap `jarimustonen/homebrew-ossctl`,_
+_  hand-bootstrapped source-build formula; verified)._
+
+_HOW: `/oss-init` wrote `OSS-RELEASE.md` (approved), two blocker spinoffs landed
+(`prep-crates-io-publish` = crate renamed to publish as `ossctl` + LICENSE; `facts-workspace-members`
+= workspace member enumeration), four readiness artifacts added (`readiness-artifacts`: CHANGELOG,
+CONTRIBUTING, SECURITY, dependabot; CoC deliberately excluded). The irreversible crates.io publish
++ GitHub Release + Homebrew formula were driven BY HAND (not through `ossctl release cut`) because
+the self-cut exposed real engine gaps — see the three new issues below._
+
+_⚠️ THE SELF-CUT COULD NOT USE `ossctl release cut` END-TO-END. Three engine gaps found + filed
+(all under `ossctl-phase4-build`), high value:_
+_- **`cargo-adapter-workspace-publish`** (high) — cargo adapter publishes only `-p <package>`; no
+  workspace dep ordering, no crates.io index wait. Had to publish core→cli by hand._
+_- **`homebrew-adapter-first-formula`** (high) — `bump-formula-pr` can't create the initial formula
+  on a fresh tap. Had to hand-write `ossctl.rb`. Future cuts CAN bump it now._
+_- **`gh-release-ci-workflow`** (normal) — cargo-dist config is minimal; no cross-platform release
+  CI. The release binary is macOS-arm64 only, uploaded by hand._
+
+_✅ **`migrate-oss-init` is NOW UNBLOCKED** — ossctl is installable on PATH (brew/cargo), so
+`ossctl skill install oss-init` can take over from the homebase `/oss-init` copy. Removing the
+homebase copy (`dotfiles/src/.claude/skills/oss-init/`) is the next real step for that issue._
+
+_NEXT STINT candidates: (a) finish `ossctl release cut` so a v0.1.1 can be cut BY THE ENGINE
+(`cargo-adapter-workspace-publish` + `homebrew-adapter-first-formula` + `gh-release-ci-workflow`);
+(b) do `migrate-oss-init` now that ossctl installs; (c) the non-urgent `adapter-publish-completeness`
+non-Rust build-side skeletons. Recommend (a) then (b)._
+
+_--- prior handoff (stint #8), kept for history ---_
 
 _STINT #8 LANDED ON MAIN — the `adapter-publish-completeness` campaign, decomposed into LANE R
 and run as two sequenced spinoffs, both reviewed (4-model /llm-review + /assess-findings) and
@@ -130,21 +162,21 @@ Scheduling PLAN — source of truth for lane + order; issuectl is authoritative 
 `after <slug> (needs …)` = logical blocked_by mirror. `collision: <file>` = touches a
 second lane's hot file (spawn-time exclusion).
 
-Stint #9 ran the dogfood `/oss-init`: `OSS-RELEASE.md` (draft) landed on main (`8bfdb87`),
-validated clean by BOTH `check-oss-release.py` and ossctl's own `contract validate` (ports
-agree). The dogfood surfaced the crates.io blockers, now the head-of-line coding unit:
+Stint #9 shipped 0.1.0 (dogfood self-cut). Landed + closed this stint: `OSS-RELEASE.md`
+(approved), `prep-crates-io-publish`, `facts-workspace-members`, `readiness-artifacts` — all
+dropped from the DAG. The self-cut exposed three engine gaps (new issues) that must land before
+the ENGINE can cut v0.1.1 by itself. Next head-of-line = the engine-completion lane.
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: prep-crates-io-publish
-LANE C — workspace/crate Cargo.toml + OSS-RELEASE.md (append-union-safe hot files)
-  ▶ prep-crates-io-publish   (rename CLI crate → ossctl, publish=true on both, add LICENSE, sync config)
-LANE F — crates/ossctl-core/src/facts/mod.rs (disjoint from LANE C; parallel-safe)
-  ▶ facts-workspace-members   (enumerate Cargo workspace members instead of package:null)
+GLOBAL HEAD-OF-LINE: cargo-adapter-workspace-publish
+LANE A — release adapters + coordinator (crates/ossctl-core/src/release/**; TRUE shared-logic — SEQUENCE strictly)
+  ▶ cargo-adapter-workspace-publish   (adapters/cargo.rs: dep-order publish + index wait for a workspace)
+    homebrew-adapter-first-formula    (adapters/homebrew.rs: create initial .rb, not just bump-formula-pr)
 UNLANED — confirmed no shared hot files, run anytime (one slug per line):
-    readiness-artifacts            (CHANGELOG/CONTRIBUTING/SECURITY/dependabot — new files, no hot-file overlap)
+    gh-release-ci-workflow         (cargo-dist / release.yml — cross-platform binaries on tag push)
+    migrate-oss-init               (UNBLOCKED: ossctl now installs via brew/cargo — remove homebase /oss-init copy)
     adapter-publish-completeness   (umbrella: cargo/python/go/node BUILD-side skeletons — non-urgent)
-    migrate-oss-init               (blocked: needs ossctl installed on PATH)
 ```
 <!-- execution-dag:end -->
 
