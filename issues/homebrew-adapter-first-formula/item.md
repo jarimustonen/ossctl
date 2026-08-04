@@ -2,9 +2,12 @@
 created: 2026-08-04
 updated: 2026-08-04
 type: bug
-status: open
+status: in-progress
 priority: high
 epic: ossctl-phase4-build
+commits:
+- hash: 2332c95
+  summary: first-formula bootstrap (create vs bump) + tap/license threading
 ---
 
 # homebrew-tap adapter has no first-formula bootstrap (bump-formula-pr can't create)

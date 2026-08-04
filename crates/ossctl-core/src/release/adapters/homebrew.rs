@@ -99,9 +99,18 @@ impl HomebrewAdapter {
     /// Ask the tap whether `Formula/<name>.rb` already exists, through the runner.
     ///
     /// Uses `gh api` against the tap's contents endpoint so no local checkout is
-    /// needed for the probe. Exit `0` (the file is served) ⇒ present; any non-zero
-    /// exit (a `404`, or the file simply not there) ⇒ absent. A spawn failure
-    /// (the port could not run `gh`) is a genuine [`AdapterError::Io`].
+    /// needed for the probe. Only three outcomes are safe to act on:
+    ///
+    /// - exit `0` (the file is served) ⇒ **present** → bump.
+    /// - a genuine `404` (`gh` renders it as `Not Found (HTTP 404)`) ⇒ **absent**
+    ///   → create.
+    /// - **anything else** — auth failure, rate-limit, network error, a private or
+    ///   renamed tap, a 5xx — is an [`AdapterError::Command`], **not** "absent".
+    ///   Treating an infrastructure error as absence would trigger a spurious
+    ///   create that clones the tap and could overwrite an existing formula.
+    ///
+    /// A spawn failure (the port could not run `gh`) is a genuine
+    /// [`AdapterError::Io`].
     fn formula_exists(ctx: &EffectCtx<'_>, tap: &str, name: &str) -> Result<bool, AdapterError> {
         let endpoint = format!("repos/{tap}/contents/Formula/{name}.rb");
         let cmd = PlannedCommand::new("gh", &["api", "--silent", &endpoint]);
@@ -112,7 +121,24 @@ impl HomebrewAdapter {
                 command: cmd.rendered(),
                 source: e.to_string(),
             })?;
-        Ok(out.status == Some(0))
+        if out.status == Some(0) {
+            return Ok(true);
+        }
+        // A 404 is the only non-zero exit that means "absent". `gh` prints
+        // `Not Found (HTTP 404)`; match the stable `404` token on either stream.
+        if out.stderr.contains("404") || out.stdout.contains("404") {
+            return Ok(false);
+        }
+        let detail = if out.stderr.trim().is_empty() {
+            out.stdout
+        } else {
+            out.stderr
+        };
+        Err(AdapterError::Command {
+            command: cmd.rendered(),
+            code: out.status,
+            stderr: detail,
+        })
     }
 
     /// The `brew bump-formula-pr` command for an existing formula, carrying the
@@ -140,11 +166,21 @@ impl HomebrewAdapter {
         }
     }
 
-    /// The deterministic scratch checkout the create path clones the tap into.
-    /// Deterministic (not randomised) so a re-run reuses/overwrites the same dir
-    /// rather than leaking a new one each attempt.
-    fn workdir(name: &str, version: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("ossctl-homebrew-{name}-{version}"))
+    /// A **fresh, unpredictable** scratch checkout the create path clones the tap
+    /// into. Unique per attempt (pid + a monotonic-ish nanosecond stamp) so:
+    /// concurrent cuts/tests never collide; a retry never trips over a prior
+    /// attempt's leftover dir (the old "deterministic" path made `gh repo clone`
+    /// fail into a non-empty dir); and the unpredictable name defeats the classic
+    /// world-writable-`/tmp` symlink pre-creation (TOCTOU) attack. The file write
+    /// additionally uses create-new semantics (see [`Self::write_formula`]).
+    fn fresh_workdir(name: &str, version: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        std::env::temp_dir().join(format!(
+            "ossctl-homebrew-{name}-{version}-{}-{nanos}",
+            std::process::id()
+        ))
     }
 
     /// The branch the create path commits the new formula on.
@@ -158,42 +194,80 @@ impl HomebrewAdapter {
     }
 
     /// The ordered git/`gh` commands the create path runs (clone → branch → add →
-    /// commit → push → PR). The generated `.rb` is written to disk *between* the
-    /// clone and the `add` (see [`Self::publish`]); these are only the process
-    /// steps, shared by [`Self::dry_run`]'s preview and [`Self::publish`].
-    fn create_commands(tap: &str, name: &str, version: &str) -> Vec<PlannedCommand> {
-        let workdir = Self::workdir(name, version);
-        let workdir = workdir.to_string_lossy().to_string();
+    /// commit → push → PR), into the pre-computed `workdir`. The generated `.rb`
+    /// is written to disk *between* the clone and the `add` (see
+    /// [`Self::publish`]); these are only the process steps, shared by
+    /// [`Self::dry_run`]'s preview and [`Self::publish`].
+    ///
+    /// `sha256_present` gates two things: a **draft** PR and a blocker in the body.
+    /// When the source-tarball digest is not yet known (the coordinator threads
+    /// `sha256: None` pre-tag), the generated formula carries only a `sha256`
+    /// TODO and would fail `brew audit` / cannot install — so the PR is opened as a
+    /// draft whose body states the one remaining manual step, rather than a
+    /// mergeable-looking PR that is silently broken.
+    fn create_commands(
+        tap: &str,
+        name: &str,
+        version: &str,
+        workdir: &str,
+        sha256_present: bool,
+    ) -> Vec<PlannedCommand> {
         let branch = Self::create_branch(name, version);
         let title = Self::create_title(name, version);
         let formula_rel = format!("Formula/{name}.rb");
+        let body = if sha256_present {
+            "Automated first-formula bootstrap by ossctl.".to_string()
+        } else {
+            "Automated first-formula bootstrap by ossctl.\n\n**Blocked:** the \
+             `sha256` of the published release tarball is not yet known at cut \
+             time (the tag archive does not exist until after publish). Fill in \
+             the `sha256` once the tag is pushed, then mark this PR ready."
+                .to_string()
+        };
+        let mut pr = vec![
+            "pr".to_string(),
+            "create".to_string(),
+            "--repo".to_string(),
+            tap.to_string(),
+            "--head".to_string(),
+            branch.clone(),
+            "--title".to_string(),
+            title.clone(),
+            "--body".to_string(),
+            body,
+        ];
+        if !sha256_present {
+            pr.push("--draft".to_string());
+        }
         vec![
-            PlannedCommand::new(
-                "gh",
-                &["repo", "clone", tap, &workdir, "--", "--depth", "1"],
-            ),
-            PlannedCommand::new("git", &["-C", &workdir, "checkout", "-b", &branch]),
-            PlannedCommand::new("git", &["-C", &workdir, "add", &formula_rel]),
-            PlannedCommand::new("git", &["-C", &workdir, "commit", "-m", &title]),
+            PlannedCommand::new("gh", &["repo", "clone", tap, workdir, "--", "--depth", "1"]),
+            PlannedCommand::new("git", &["-C", workdir, "checkout", "-b", &branch]),
+            PlannedCommand::new("git", &["-C", workdir, "add", &formula_rel]),
+            // Set the commit identity explicitly (via `-c`): the freshly-cloned tap
+            // inherits no `user.name`/`user.email`, so on a clean CI runner an
+            // identity-less `git commit` fails with "Author identity unknown".
             PlannedCommand::new(
                 "git",
-                &["-C", &workdir, "push", "--set-upstream", "origin", &branch],
-            ),
-            PlannedCommand::new(
-                "gh",
                 &[
-                    "pr",
-                    "create",
-                    "--repo",
-                    tap,
-                    "--head",
-                    &branch,
-                    "--title",
+                    "-C",
+                    workdir,
+                    "-c",
+                    "user.name=ossctl",
+                    "-c",
+                    "user.email=ossctl@users.noreply.github.com",
+                    "commit",
+                    "-m",
                     &title,
-                    "--body",
-                    "Automated first-formula bootstrap by ossctl.",
                 ],
             ),
+            PlannedCommand::new(
+                "git",
+                &["-C", workdir, "push", "--set-upstream", "origin", &branch],
+            ),
+            PlannedCommand {
+                program: "gh".to_string(),
+                args: pr,
+            },
         ]
     }
 
@@ -230,39 +304,78 @@ impl HomebrewAdapter {
             license,
         );
 
-        let commands = Self::create_commands(tap, &t.package, &t.version);
+        // One workdir, computed once, used by both the clone and the write.
+        let workdir = Self::fresh_workdir(&t.package, &t.version);
+        let workdir_str = workdir.to_string_lossy().to_string();
+        let commands = Self::create_commands(
+            tap,
+            &t.package,
+            &t.version,
+            &workdir_str,
+            tarball.sha256.is_some(),
+        );
         // 1. clone the tap.
         run_all(ctx, &commands[..1])?;
-        // 2. write the generated formula into the checkout.
-        Self::write_formula(&t.package, &t.version, &formula)?;
+        // 2. write the generated formula into the checkout (create-new: refuses to
+        //    overwrite a formula that already exists in the clone — the last-line
+        //    guard against a probe/clone race or a mis-detected "absent").
+        Self::write_formula(&workdir, &t.package, &formula)?;
         // 3. branch → add → commit → push → PR.
         let outputs = run_all(ctx, &commands[1..])?;
 
-        // The PR URL `gh pr create` prints on its last line is the receipt's
-        // `remote_url` (the field already exists on the receipt — recording it is
-        // not a JSON-shape change). Absent/empty output leaves it `None`.
-        let remote_url = outputs
-            .last()
-            .map(|o| o.stdout.trim().to_string())
-            .filter(|s| !s.is_empty());
+        // Record the PR URL `gh pr create` prints as the receipt's `remote_url`
+        // (the field already existed — recording it is not a JSON-shape change).
+        // `gh` can precede the URL with status lines, so take the last line that
+        // looks like a URL rather than the whole stdout blob.
+        let remote_url = outputs.last().and_then(|o| {
+            o.stdout
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|line| line.starts_with("https://"))
+                .map(str::to_string)
+        });
         Ok(make_receipt(ctx, t, None, remote_url))
     }
 
     /// Write the generated formula to `<workdir>/Formula/<name>.rb`, creating the
-    /// `Formula/` directory if the freshly-cloned tap does not carry it yet. The
-    /// one filesystem effect in the adapter (Homebrew has no "add a formula" CLI;
-    /// a new formula *is* a committed file), mapped to a distinct
-    /// [`AdapterError::Filesystem`].
-    fn write_formula(name: &str, version: &str, formula: &str) -> Result<(), AdapterError> {
-        let dir = Self::workdir(name, version).join("Formula");
+    /// `Formula/` directory if the freshly-cloned tap does not carry it yet.
+    ///
+    /// This is the one direct-filesystem effect in the adapter — Homebrew has no
+    /// "add a formula" CLI; a new formula *is* a committed file, so `run_all`
+    /// (which only *runs processes*) cannot express it. It is deliberately scoped:
+    /// it writes exactly one file into a private, unpredictable [`Self::fresh_workdir`]
+    /// the create path just cloned into, and it uses **create-new** semantics
+    /// (`O_EXCL`) so it never follows a symlink onto, or truncates, an existing
+    /// file — which also fails loudly if the tap already carries the formula (a
+    /// last-line guard against a mis-detected "absent" formula). A general
+    /// filesystem port on `EffectCtx` is the cleaner long-term home (issue
+    /// `homebrew-adapter-fs-port`); until then this is mapped to a distinct
+    /// [`AdapterError::Filesystem`] so the effect is explicit, not hidden.
+    fn write_formula(
+        workdir: &std::path::Path,
+        name: &str,
+        formula: &str,
+    ) -> Result<(), AdapterError> {
+        let dir = workdir.join("Formula");
         std::fs::create_dir_all(&dir).map_err(|e| AdapterError::Filesystem {
             path: dir.to_string_lossy().to_string(),
             source: e.to_string(),
         })?;
         let path = dir.join(format!("{name}.rb"));
-        std::fs::write(&path, formula).map_err(|e| AdapterError::Filesystem {
-            path: path.to_string_lossy().to_string(),
-            source: e.to_string(),
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| AdapterError::Filesystem {
+                path: path.to_string_lossy().to_string(),
+                source: e.to_string(),
+            })?;
+        std::io::Write::write_all(&mut file, formula.as_bytes()).map_err(|e| {
+            AdapterError::Filesystem {
+                path: path.to_string_lossy().to_string(),
+                source: e.to_string(),
+            }
         })
     }
 }
@@ -284,12 +397,22 @@ impl ReleaseAdapter for HomebrewAdapter {
                 let tap = self
                     .tap(ctx.artifacts.homebrew.as_ref())
                     .unwrap_or_default();
+                let workdir = Self::fresh_workdir(&t.package, &t.version);
+                let sha256_present = tarball.and_then(|tb| tb.sha256.as_deref()).is_some();
                 (
-                    Self::create_commands(tap, &t.package, &t.version),
+                    Self::create_commands(
+                        tap,
+                        &t.package,
+                        &t.version,
+                        &workdir.to_string_lossy(),
+                        sha256_present,
+                    ),
                     vec![format!(
                         "create path: `{}` has no `{}.rb` yet — generating the initial \
-                         source-build formula and opening a PR",
-                        tap, t.package
+                         source-build formula and opening a{} PR",
+                        tap,
+                        t.package,
+                        if sha256_present { "" } else { " draft" }
                     )],
                 )
             }
@@ -386,22 +509,30 @@ fn render_formula(
     license: Option<&str>,
 ) -> String {
     let class = formula_class(name);
-    let homepage =
-        homepage_slug.map_or_else(|| url.to_string(), |s| format!("https://github.com/{s}"));
+    // Every value interpolated into a Ruby double-quoted literal is escaped, so a
+    // `"` / `\` in a contract-supplied value cannot break out of the string (or
+    // inject Ruby). `name` reaches only `desc` and the `bin/"…"` test — the class
+    // name is already alphanumeric-only.
+    let name_lit = ruby_escape(name);
+    let homepage = homepage_slug.map_or_else(
+        || ruby_escape(url),
+        |s| ruby_escape(&format!("https://github.com/{s}")),
+    );
+    let url_lit = ruby_escape(url);
     let sha_line = match sha256 {
-        Some(sha) => format!("  sha256 \"{sha}\""),
+        Some(sha) => format!("  sha256 \"{}\"", ruby_escape(sha)),
         None => "  # TODO: sha256 of the published release tarball \
                  (unavailable at cut time — fill in after the tag archive exists)"
             .to_string(),
     };
     let license_line = license
-        .map(|l| format!("  license \"{l}\"\n"))
+        .map(|l| format!("  license \"{}\"\n", ruby_escape(l)))
         .unwrap_or_default();
     format!(
         "class {class} < Formula\n\
-         \x20 desc \"{name}\"\n\
+         \x20 desc \"{name_lit}\"\n\
          \x20 homepage \"{homepage}\"\n\
-         \x20 url \"{url}\"\n\
+         \x20 url \"{url_lit}\"\n\
          {sha_line}\n\
          {license_line}\
          \n\
@@ -412,16 +543,28 @@ fn render_formula(
          \x20 end\n\
          \n\
          \x20 test do\n\
-         \x20   system bin/\"{name}\", \"--version\"\n\
+         \x20   system bin/\"{name_lit}\", \"--version\"\n\
          \x20 end\n\
          end\n"
     )
+}
+
+/// Escape a value for inclusion in a Ruby double-quoted string literal:
+/// backslashes first, then double quotes. Prevents a contract-supplied `"` or
+/// `\` from terminating the literal or injecting Ruby.
+fn ruby_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Homebrew's formula class name for `name`: alphanumeric runs capitalised and
 /// concatenated (`my-tool` → `MyTool`, `ossctl` → `Ossctl`). A small, faithful
 /// subset of Homebrew's `Formulary.class_s` — enough for the ordinary tap names
 /// this generator targets.
+///
+/// A Ruby constant may not begin with a digit, so a leading-digit name is
+/// prefixed with `X` (as Homebrew itself does: `2fa` → `X2fa`); a name that
+/// reduces to nothing falls back to `Formula` so the output is always a legal
+/// constant rather than a syntax error.
 fn formula_class(name: &str) -> String {
     let mut out = String::new();
     for segment in name.split(|c: char| !c.is_ascii_alphanumeric()) {
@@ -430,6 +573,12 @@ fn formula_class(name: &str) -> String {
             out.extend(first.to_uppercase());
             out.push_str(chars.as_str());
         }
+    }
+    if out.is_empty() {
+        return "Formula".to_string();
+    }
+    if out.starts_with(|c: char| c.is_ascii_digit()) {
+        out.insert(0, 'X');
     }
     out
 }

@@ -1079,6 +1079,27 @@ fn homebrew_artifacts(
     }
 }
 
+/// Locate the create path's private scratch checkout (now uniquely named
+/// `ossctl-homebrew-<name>-<version>-<pid>-<nanos>`) by scanning `temp_dir` for
+/// the `<name>-<version>` prefix, and read back the formula it wrote. Also
+/// returns the dir so the caller can clean it up.
+fn read_created_formula(name: &str, version: &str) -> (std::path::PathBuf, String) {
+    let prefix = format!("ossctl-homebrew-{name}-{version}-");
+    let dir = std::fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&prefix))
+        })
+        .expect("the create path made a scratch checkout");
+    let formula = std::fs::read_to_string(dir.join(format!("Formula/{name}.rb")))
+        .expect("the create path wrote the formula file");
+    (dir, formula)
+}
+
 #[test]
 fn homebrew_tap_bumps_when_the_formula_already_exists() {
     // The tap already serves `Formula/tool.rb` (gh api probe exits 0) → the bump
@@ -1119,9 +1140,6 @@ fn homebrew_tap_creates_the_initial_formula_when_absent() {
     // path clones the tap, writes the generated formula, commits it on a branch,
     // and opens a PR. The generated `.rb` carries url + sha256 + license + a cargo
     // source-build install stanza.
-    let workdir = std::env::temp_dir().join("ossctl-homebrew-hbcreate-1.2.3");
-    let _ = std::fs::remove_dir_all(&workdir);
-
     let cmd = FakeCmd::new().fail_calls_containing("contents/", 1, "HTTP 404: Not Found");
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
@@ -1183,8 +1201,7 @@ fn homebrew_tap_creates_the_initial_formula_when_absent() {
     );
 
     // The generated formula file carries the url, sha256, license, and cargo build.
-    let formula = std::fs::read_to_string(workdir.join("Formula/hbcreate.rb"))
-        .expect("the create path wrote the formula file");
+    let (workdir, formula) = read_created_formula("hbcreate", "1.2.3");
     assert!(formula.contains("class Hbcreate < Formula"), "{formula}");
     assert!(
         formula.contains("url \"https://github.com/o/r/archive/refs/tags/v1.2.3.tar.gz\""),
@@ -1200,18 +1217,25 @@ fn homebrew_tap_creates_the_initial_formula_when_absent() {
         formula.contains("system \"cargo\", \"install\""),
         "{formula}"
     );
+    // sha256 present ⇒ a ready (non-draft) PR.
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("gh pr create") && !c.contains("--draft")),
+        "sha256 present should open a ready PR: {calls:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&workdir);
 }
 
 #[test]
 fn homebrew_create_records_the_pr_url_as_remote_url() {
-    let workdir = std::env::temp_dir().join("ossctl-homebrew-hburl-4.5.6");
-    let _ = std::fs::remove_dir_all(&workdir);
-
     let cmd = FakeCmd::new()
         .fail_calls_containing("contents/", 1, "HTTP 404")
-        .stdout_calls_containing("pr create", "https://github.com/o/homebrew-r/pull/7\n");
+        .stdout_calls_containing(
+            "pr create",
+            "Warning: 1 uncommitted change\nhttps://github.com/o/homebrew-r/pull/7\n",
+        );
     let clock = FakeClock(9);
     let reg = FakeRegistry::new();
     let root = Path::new("/repo");
@@ -1232,14 +1256,16 @@ fn homebrew_create_records_the_pr_url_as_remote_url() {
     );
     let r = resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap();
 
-    // The receipt records the PR gh printed (the field already existed — no shape
-    // change), and stamps the injected clock.
+    // The receipt records the PR URL gh printed — the last https line, not the
+    // preceding warning (the field already existed — no shape change) — and stamps
+    // the injected clock.
     assert_eq!(
         r.remote_url.as_deref(),
         Some("https://github.com/o/homebrew-r/pull/7")
     );
     assert_eq!(r.timestamp, 9);
 
+    let (workdir, _) = read_created_formula("hburl", "4.5.6");
     let _ = std::fs::remove_dir_all(&workdir);
 }
 
@@ -1247,10 +1273,7 @@ fn homebrew_create_records_the_pr_url_as_remote_url() {
 fn homebrew_create_generates_a_sha256_placeholder_when_absent() {
     // The coordinator threads sha256=None pre-tag; the generated formula then emits
     // a TODO placeholder (a valid source template the maintainer completes) rather
-    // than a wrong digest.
-    let workdir = std::env::temp_dir().join("ossctl-homebrew-hbnosha-1.0.0");
-    let _ = std::fs::remove_dir_all(&workdir);
-
+    // than a wrong digest, and the PR is opened as a draft with a blocker note.
     let cmd = FakeCmd::new().fail_calls_containing("contents/", 1, "404");
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
@@ -1272,10 +1295,18 @@ fn homebrew_create_generates_a_sha256_placeholder_when_absent() {
     );
     resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap();
 
-    let formula = std::fs::read_to_string(workdir.join("Formula/hbnosha.rb")).unwrap();
+    let (workdir, formula) = read_created_formula("hbnosha", "1.0.0");
     assert!(formula.contains("# TODO: sha256"), "{formula}");
     // No license threaded ⇒ the stanza is omitted, not emitted empty.
     assert!(!formula.contains("license \""), "{formula}");
+    // No sha256 ⇒ the PR is opened as a draft (not silently mergeable-but-broken).
+    assert!(
+        cmd.calls()
+            .iter()
+            .any(|c| c.contains("gh pr create") && c.contains("--draft")),
+        "absent sha256 should open a draft PR: {:?}",
+        cmd.calls()
+    );
 
     let _ = std::fs::remove_dir_all(&workdir);
 }
@@ -1329,6 +1360,68 @@ fn homebrew_dry_run_reports_the_chosen_path() {
     assert!(bump.planned_commands[0]
         .rendered()
         .starts_with("brew bump-formula-pr"));
+}
+
+#[test]
+fn homebrew_probe_error_is_not_treated_as_absent() {
+    // A non-404 probe failure (auth/rate-limit/network) must abort — NOT be read as
+    // "absent" and trigger a create that could overwrite an existing formula.
+    let cmd = FakeCmd::new().fail_calls_containing("contents/", 1, "HTTP 403: rate limit exceeded");
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = homebrew_artifacts(
+        "o/homebrew-r",
+        "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz",
+        Some("deadbeef"),
+        Some("MIT"),
+    );
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target(
+        Ecosystem::Binary,
+        Registry::Homebrew,
+        Adapter::HomebrewTap,
+        "1.0.0",
+    );
+    let err = resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap_err();
+    assert!(matches!(err, AdapterError::Command { .. }), "got {err:?}");
+    // Only the probe ran — no clone, no bump, no create.
+    assert_eq!(
+        cmd.calls().len(),
+        1,
+        "must abort after the probe: {:?}",
+        cmd.calls()
+    );
+}
+
+#[test]
+fn homebrew_create_class_name_handles_a_leading_digit() {
+    // A Ruby constant cannot start with a digit; the class name is prefixed with X.
+    let cmd = FakeCmd::new().fail_calls_containing("contents/", 1, "404");
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = homebrew_artifacts(
+        "o/homebrew-r",
+        "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz",
+        Some("deadbeef"),
+        None,
+    );
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target_named(
+        Ecosystem::Binary,
+        Registry::Homebrew,
+        Adapter::HomebrewTap,
+        "3d-tool",
+        "1.0.0",
+    );
+    resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap();
+
+    let (workdir, formula) = read_created_formula("3d-tool", "1.0.0");
+    assert!(formula.contains("class X3dTool < Formula"), "{formula}");
+    let _ = std::fs::remove_dir_all(&workdir);
 }
 
 // ── classify_receipt: the pure verify core, all four outcomes ────────────────
