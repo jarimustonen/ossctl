@@ -180,6 +180,7 @@ LANE B — contract schema (crates/ossctl-core/src/contract/schema.rs — THE ca
     distribution-monorepo-vec            (post-release: Vec<Distribution> + per-package association)
     distribution-extra-fields            (post-release: extra_fields forward-compat on nested distribution structs)
 UNLANED cross-platform (run after keystone unless noted):
+    linux-release-binaries         (A) ossctl-own: config DONE via gh-release-ci (musl); CLOSES when 0.1.1 cut publishes Linux artifacts
     ossctl-readme-refresh          (README.md + AGENTS policy — no keystone dep, run anytime)
     oss-readme-cross-platform-install   after distribution-cross-platform-targets (needs target field)
     oss-release-cross-platform-dist     after distribution-cross-platform-targets (needs target field)
