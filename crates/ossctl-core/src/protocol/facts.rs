@@ -100,7 +100,11 @@ pub struct Package {
 /// (`production` is checked first).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct MaturitySignals {
-    /// `>=2` recent-year committers **and** a `>=1.0` release **and** CI.
+    /// `>=2` recent-year committers **and** CI **and** a release gate — the
+    /// release gate being either a `>=1.0` release **or** a complete release
+    /// setup (CI + a dependency-update bot + a shipped non-prerelease `SemVer`
+    /// tag). The second path lets a deliberately-pre-1.0 (`ZeroVer`) project with
+    /// full release infrastructure reach `production` without a `>=1.0` version.
     pub production: bool,
     /// No CI **and** no `SemVer` tag **and** (single committer **or** a README
     /// self-label).

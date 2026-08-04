@@ -292,7 +292,10 @@ ossctl contract show --json --repo-root <repo-root>
 ### Phase 2 — Infer maturity + the dials
 
 - **`maturity`** — take `inferred_maturity` from the `ossctl facts` JSON (it applies the truth
-  table exactly: `production` iff ≥2 recent-year committers **and** a ≥1.0 release **and** CI;
+  table exactly: `production` iff ≥2 recent-year committers **and** CI **and** a release gate —
+  the release gate being *either* a ≥1.0 release *or* a complete release setup (CI + a
+  dependency-update bot + a shipped non-prerelease SemVer tag), so a deliberately-pre-1.0
+  (ZeroVer) project with full release infrastructure still infers `production`;
   `spike` iff no CI **and** no SemVer tag **and** (single committer **or** README self-label);
   else `mvp`). State the inference + the signals behind it so the human can correct it. **If
   `--maturity` was passed, use it verbatim** and note "maturity: <value> — overridden via
