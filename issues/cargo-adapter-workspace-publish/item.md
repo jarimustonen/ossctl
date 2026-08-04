@@ -5,6 +5,9 @@ type: bug
 status: in-progress
 priority: high
 epic: ossctl-phase4-build
+commits:
+- hash: ed5c65c
+  summary: publish multi-crate workspaces in dep order with index-wait
 ---
 
 # cargo-publish adapter can't publish a multi-crate workspace (ordering + index wait)

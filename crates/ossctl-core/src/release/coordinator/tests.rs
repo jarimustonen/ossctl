@@ -142,6 +142,17 @@ impl CommandRunner for FakeCmd {
                 });
             }
         }
+        // Serve a single-crate (`tool`) workspace graph for the cargo adapter's
+        // `cargo metadata` probe, so the rust target resolves to one publishable
+        // member (these coordinator tests exercise the phase machinery, not the
+        // multi-crate publish order — that lives in the adapter's own tests).
+        if program == "cargo" && args.contains(&"metadata") {
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: r#"{"packages":[{"name":"tool","version":"1.0.0","id":"tool 1.0.0","dependencies":[],"publish":null}],"workspace_members":["tool 1.0.0"]}"#.to_string(),
+                stderr: String::new(),
+            });
+        }
         let fails = self
             .fail_contains
             .as_ref()

@@ -245,14 +245,26 @@ fn target(
     adapter: Adapter,
     version: &str,
 ) -> AdapterTarget {
+    target_named(ecosystem, registry, adapter, "tool", version)
+}
+
+/// Like [`target`], but with an explicit package name — the cargo workspace path
+/// requires the target package to be a real publishable member.
+fn target_named(
+    ecosystem: Ecosystem,
+    registry: Registry,
+    adapter: Adapter,
+    package: &str,
+    version: &str,
+) -> AdapterTarget {
     AdapterTarget {
         target: Target {
             ecosystem,
-            package: Some("tool".to_string()),
+            package: Some(package.to_string()),
             registry,
             adapter,
         },
-        package: "tool".to_string(),
+        package: package.to_string(),
         version: version.to_string(),
     }
 }
@@ -502,18 +514,21 @@ fn cargo_dist_publish_is_unsupported_from_host() {
 #[test]
 fn workspace_publishes_members_in_dependency_order_with_index_wait() {
     // `bin` depends on `lib`, so `lib` must publish first and be index-visible
-    // before `bin` publishes. `lib` is visible on the second poll — exercising a
-    // real (bounded) wait that succeeds mid-loop.
+    // before `bin` publishes. `lib` is visible only on a later poll — exercising a
+    // real (bounded) wait that succeeds mid-loop after sleeping.
     let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "1.0.0"));
     let clock = AdvancingClock::new();
-    let reg = DelayedRegistry::new("lib", "1.0.0", 1);
+    // visible_after=2: one call is consumed by the pre-publish idempotency probe
+    // for `lib` (empty ⇒ not yet published), then the wait polls until visible.
+    let reg = DelayedRegistry::new("lib", "1.0.0", 2);
     let root = Path::new("/repo");
     let c = ctx_advancing(&cmd, &clock, &reg, root);
 
-    let t = target(
+    let t = target_named(
         Ecosystem::Rust,
         Registry::CratesIo,
         Adapter::CargoPublish,
+        "bin",
         "1.0.0",
     );
     let r = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap();
@@ -527,38 +542,43 @@ fn workspace_publishes_members_in_dependency_order_with_index_wait() {
             "cargo publish -p bin",
         ]
     );
-    // The receipt names the target's primary package (published last).
-    assert_eq!(r.package, "tool");
+    // The wait actually slept (advanced the virtual clock) before lib became
+    // visible.
+    assert!(clock.now_unix() > 0, "the index-wait never polled/slept");
+    // The receipt names the target's primary package.
+    assert_eq!(r.package, "bin");
     assert_eq!(r.version, "1.0.0");
 }
 
 #[test]
-fn workspace_index_wait_succeeds_when_version_already_visible() {
-    // `lib` is already on the index, so the wait returns on the first poll (the
-    // clock never has to advance).
+fn workspace_skips_already_published_members_on_resume() {
+    // Idempotent re-entry: `lib` is already on the index (a prior attempt landed
+    // it), so the adapter must NOT re-run `cargo publish -p lib` — that would hard
+    // fail on crates.io and wedge the resume. It publishes only the missing `bin`.
     let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "1.0.0"));
     let clock = AdvancingClock::new();
     let reg = FakeRegistry::new().with("rust", "lib", &["1.0.0"]);
     let root = Path::new("/repo");
     let c = ctx_advancing(&cmd, &clock, &reg, root);
 
-    let t = target(
+    let t = target_named(
         Ecosystem::Rust,
         Registry::CratesIo,
         Adapter::CargoPublish,
+        "bin",
         "1.0.0",
     );
     resolve(Adapter::CargoPublish).publish(&c, &t).unwrap();
 
+    // No `cargo publish -p lib` — it was skipped as already-published; only bin ran.
     assert_eq!(
         cmd.calls(),
         vec![
             "cargo metadata --no-deps --format-version 1",
-            "cargo publish -p lib",
             "cargo publish -p bin",
         ]
     );
-    // The wait never had to sleep — the version was visible immediately.
+    // lib was already visible, so its dependent-gated wait returned immediately.
     assert_eq!(clock.now_unix(), 0);
 }
 
@@ -572,10 +592,11 @@ fn workspace_index_wait_times_out_and_stops_before_the_dependent() {
     let root = Path::new("/repo");
     let c = ctx_advancing(&cmd, &clock, &reg, root);
 
-    let t = target(
+    let t = target_named(
         Ecosystem::Rust,
         Registry::CratesIo,
         Adapter::CargoPublish,
+        "bin",
         "1.0.0",
     );
     let err = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap_err();
@@ -607,10 +628,11 @@ fn workspace_dry_run_reports_the_ordered_plan_and_waits() {
     let root = Path::new("/repo");
     let c = ctx(&cmd, &clock, &reg, root);
 
-    let t = target(
+    let t = target_named(
         Ecosystem::Rust,
         Registry::CratesIo,
         Adapter::CargoPublish,
+        "bin",
         "1.0.0",
     );
     let report = resolve(Adapter::CargoPublish).dry_run(&c, &t).unwrap();
@@ -628,7 +650,7 @@ fn workspace_dry_run_reports_the_ordered_plan_and_waits() {
             "cargo publish -p bin --dry-run",
         ]
     );
-    // The notes describe the order and the index-wait between dependent publishes.
+    // The notes describe the order and the index-wait before the dependent bin.
     assert!(
         report.notes.iter().any(|n| n.contains("lib → bin")),
         "notes missing the publish order: {:?}",
@@ -648,6 +670,132 @@ fn workspace_dry_run_reports_the_ordered_plan_and_waits() {
         "dry_run executed a publish: {:?}",
         cmd.calls()
     );
+}
+
+#[test]
+fn workspace_target_package_must_be_a_publishable_member() {
+    // The contract's package is not a member of the workspace graph → hard error
+    // rather than silently publishing something else.
+    let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "1.0.0"));
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target_named(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "ghost",
+        "1.0.0",
+    );
+    let err = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap_err();
+    match err {
+        AdapterError::Command { stderr, .. } => {
+            assert!(stderr.contains("ghost"), "message should name the package");
+        }
+        other => panic!("expected Command error, got {other:?}"),
+    }
+    // Nothing was published.
+    assert!(!cmd.calls().iter().any(|call| call.contains("publish")));
+}
+
+#[test]
+fn workspace_excludes_unpublishable_and_foreign_registry_members() {
+    // `helper` is `publish = false`; `internal` is restricted to another registry.
+    // Publishing the closure of `bin` (which depends only on `lib`) must publish
+    // exactly `lib` then `bin` and ignore both non-crates.io members — even though
+    // `bin` is alphabetically after them.
+    let meta = r#"{"packages":[
+        {"name":"bin","version":"1.0.0","id":"bin 1.0.0","publish":null,
+          "dependencies":[{"name":"lib","kind":null}]},
+        {"name":"lib","version":"1.0.0","id":"lib 1.0.0","publish":null,"dependencies":[]},
+        {"name":"helper","version":"1.0.0","id":"helper 1.0.0","publish":[],"dependencies":[]},
+        {"name":"internal","version":"1.0.0","id":"internal 1.0.0","publish":["other-reg"],"dependencies":[]}
+    ],"workspace_members":["bin 1.0.0","lib 1.0.0","helper 1.0.0","internal 1.0.0"]}"#;
+    let cmd = FakeCmd::new().with_metadata(meta);
+    let clock = AdvancingClock::new();
+    // Probe for lib misses (not yet published), then the index-wait sees it.
+    let reg = DelayedRegistry::new("lib", "1.0.0", 1);
+    let root = Path::new("/repo");
+    let c = ctx_advancing(&cmd, &clock, &reg, root);
+
+    let t = target_named(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "bin",
+        "1.0.0",
+    );
+    resolve(Adapter::CargoPublish).publish(&c, &t).unwrap();
+
+    // Exactly lib then bin — helper (publish=false) and internal (foreign
+    // registry) are excluded despite sorting before bin.
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "cargo metadata --no-deps --format-version 1",
+            "cargo publish -p lib",
+            "cargo publish -p bin",
+        ]
+    );
+}
+
+#[test]
+fn empty_cargo_metadata_output_is_a_hard_error() {
+    // A successful `cargo metadata` with no output must not silently degrade to a
+    // single-crate publish — it is a broken host/runner and must fail loudly.
+    let cmd = FakeCmd::new(); // no metadata stubbed ⇒ empty stdout
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.0.0",
+    );
+    let err = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap_err();
+    match err {
+        AdapterError::Command { stderr, .. } => {
+            assert!(stderr.contains("no output"), "got: {stderr}");
+        }
+        other => panic!("expected Command error, got {other:?}"),
+    }
+    assert!(!cmd.calls().iter().any(|call| call.contains("publish")));
+}
+
+#[test]
+fn workspace_dependency_cycle_is_reported() {
+    // A normal-dependency cycle among publishable members cannot be ordered.
+    let meta = r#"{"packages":[
+        {"name":"a","version":"1.0.0","id":"a 1.0.0","publish":null,
+          "dependencies":[{"name":"b","kind":null}]},
+        {"name":"b","version":"1.0.0","id":"b 1.0.0","publish":null,
+          "dependencies":[{"name":"a","kind":null}]}
+    ],"workspace_members":["a 1.0.0","b 1.0.0"]}"#;
+    let cmd = FakeCmd::new().with_metadata(meta);
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target_named(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "a",
+        "1.0.0",
+    );
+    let err = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap_err();
+    match err {
+        AdapterError::Command { stderr, .. } => {
+            assert!(stderr.contains("cycle"), "got: {stderr}");
+        }
+        other => panic!("expected Command error, got {other:?}"),
+    }
 }
 
 #[test]
