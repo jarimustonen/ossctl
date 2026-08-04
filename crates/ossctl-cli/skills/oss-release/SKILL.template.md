@@ -132,6 +132,47 @@ prompts and never derives the version. This skill supplies the two things the
 binary cannot: the **approved SemVer bump** and the **human approval** between
 sealing the plan and executing it.
 
+### Release-infra generation — cross-platform by default (Mac + Linux)
+
+The downstream project's binary-release infrastructure — the cargo-dist config
+(`dist-workspace.toml`) and the tag-triggered `.github/workflows/release.yml`
+generated from it via `dist generate` — MUST be **cross-platform by default**.
+This is `/oss-*` family canon (see `AGENTS.md` → "Cross-platform is a hard
+requirement (macOS AND Linux)"): a release path that builds on only one OS is an
+incomplete release, not a valid one. When establishing or refreshing that config,
+map the contract's `distribution` block straight through — never invent a
+narrower target set:
+
+- **`distribution.platforms` → cargo-dist `[dist] targets`.** The contract's
+  platform list is a set of Rust target-triples. Copy it verbatim into `targets`.
+  When the contract **omits** `platforms`, the normalizer's cross-platform
+  default applies — `aarch64-apple-darwin`, `x86_64-apple-darwin`,
+  `aarch64-unknown-linux-musl`, `x86_64-unknown-linux-musl` (macOS arm64 + x86_64
+  and **statically-linked musl Linux** arm64 + x86_64). **Never emit a
+  macOS-only matrix.** Add `x86_64-pc-windows-msvc` only when the contract lists
+  it.
+- **`distribution.installers` → cargo-dist `[dist] installers`.** Ensure `shell`
+  is present so the generated curl-installer covers **both macOS and Linux** on
+  the Unix side; carry `powershell`/`msi` through only when a Windows triple is in
+  the target set. A `homebrew` installer requires `distribution.homebrew_tap`
+  (the contract already enforces this floor).
+- **Mirror `ossctl`'s own `dist-workspace.toml`** (repo root) as the reference
+  shape: pinned `cargo-dist-version`, `ci = "github"`, `hosting = "github"`,
+  `github-attestations = true`, `pr-run-mode = "skip"` (tag-triggered only).
+- **`dist generate` is the sole author of `release.yml`** — edit config in
+  `dist-workspace.toml`, then regenerate; never hand-edit the workflow. Owning
+  `release.yml` (the tag-triggered publish/build/sign workflow) is the
+  release-cut's job, **not** `/oss-ci`'s (which owns `ci*.yml`).
+
+> **Status (engine gap).** The `ossctl` release engine does **not yet** generate
+> `dist-workspace.toml` / `release.yml` from `distribution` — it currently
+> consumes only `distribution.homebrew_tap` for the Homebrew adapter (see the
+> `gh-release-ci-workflow` issue). Until that lands, the mapping above is the
+> **documented default the generator (current or future) reads from the
+> contract**, and any hand-driven release-infra setup MUST follow it. This makes
+> the cross-platform (Mac + Linux) target set the binding default regardless of
+> who authors the config.
+
 **1. Gate.** First, check for an already-active run so two cuts never race — if
 one is in flight, reconcile it (`resume` / `verify` below) instead of sealing a
 second plan. Then require an approved contract, a complete core, and a clean
