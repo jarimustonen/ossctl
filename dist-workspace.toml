@@ -21,16 +21,29 @@ ci = "github"
 # `homebrew-adapter-first-formula` issue.
 installers = ["shell", "powershell"]
 # Cross-platform binary matrix (Rust target-triple syntax): macOS (arm64 +
-# x86_64), Linux (arm64 + x86_64), and Windows x86_64.
+# x86_64), Linux (arm64 + x86_64), and Windows x86_64. The Linux targets use
+# `musl`, not `gnu`, so the binaries are statically linked and run on any distro
+# regardless of its glibc vintage — ossctl is pure Rust with no C dependencies,
+# so musl is a clean fit and avoids a `GLIBC_x.y not found` cliff on older LTS
+# systems.
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-musl",
     "x86_64-pc-windows-msvc",
 ]
 # Where to host releases.
 hosting = "github"
-# Never build/publish on normal branch pushes or PRs — the workflow's only real
-# trigger is a `v*` version tag. `skip` also drops the PR plan-only job.
+# Generate GitHub build-provenance attestations for the release artifacts
+# (`gh attestation verify`). A native, secret-free supply-chain signal for a CLI
+# whose install path is curl-to-shell; cargo-dist scopes the extra `id-token` /
+# `attestations` permissions to the publishing job.
+github-attestations = true
+# `pr-run-mode = skip` drops the PR plan-only job, so the workflow never runs on
+# pull requests, and on pushes it fires only on tags. NOTE the tag filter is
+# broader than `vX.Y.Z`: cargo-dist emits a semver-shaped glob
+# (`**[0-9]+.[0-9]+.[0-9]+*`) that also matches e.g. `pkg/1.2.3`. Glob filtering
+# is not an authorization boundary — enforce release-tag discipline (who may
+# create `v*` tags, on which commits) with a GitHub tag-protection ruleset.
 pr-run-mode = "skip"
