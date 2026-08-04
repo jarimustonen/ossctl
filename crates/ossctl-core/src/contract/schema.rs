@@ -22,6 +22,14 @@ use serde::Serialize;
 /// on. Distinct from the wire-envelope [`crate::SCHEMA_VERSION`]; both are `1`
 /// today but version different things (the contract document vs. the JSON
 /// envelope). Mirrors the Python `KNOWN_SCHEMA_VERSION`.
+///
+/// Stays `1` across a *purely additive* field (a new optional top-level key that
+/// defaults to absent/`null`, e.g. [`Distribution`]): an older reader preserves
+/// the unknown key under [`Contract::extra_fields`] and warns rather than
+/// failing, and every existing contract's shape is unchanged. The migration rule
+/// bumps only on a **breaking** change — renaming/removing a field or re-meaning
+/// an existing one — never on a pure addition, which is the case the
+/// forward-compat mechanism is built to absorb.
 pub const KNOWN_SCHEMA_VERSION: u32 = 1;
 
 /// The changelog fragment directory materialized when the config omits it.
@@ -181,6 +189,25 @@ wire_enum! {
     }
 }
 
+wire_enum! {
+    /// The binary-distribution engine that produces multi-platform GitHub-Release
+    /// artifacts plus a generated installer set (distinct from a registry
+    /// [`Adapter`]). Owned by a tag-triggered `release.yml` the family must NOT
+    /// regenerate — hence first-class in the contract.
+    DistributionAdapter {
+        CargoDist => "cargo-dist", Goreleaser => "goreleaser", Manual => "manual"
+    }
+}
+
+wire_enum! {
+    /// An installer flavor a [`Distribution`] emits. `homebrew` requires a
+    /// [`Distribution::homebrew_tap`] (floor).
+    Installer {
+        Shell => "shell", Powershell => "powershell", Homebrew => "homebrew",
+        Msi => "msi", Npm => "npm"
+    }
+}
+
 impl Ecosystem {
     /// The default registry for this ecosystem when `targets` is expanded
     /// (SCHEMA.md §1 default-expansion table).
@@ -230,6 +257,37 @@ pub struct Target {
     pub adapter: Adapter,
 }
 
+/// The binary-distribution block: multi-platform GitHub-Release binaries, a
+/// generated installer set, and an optional Homebrew tap — produced by a
+/// tag-triggered release workflow (cargo-dist / goreleaser).
+///
+/// SEPARATE from [`Target`] (registry publishes): a cargo-dist repo attaches
+/// per-platform binaries to its GitHub Release, ships a shell/Homebrew installer,
+/// **and** independently publishes its crate to crates.io — the crates.io publish
+/// is a [`Target`]; everything binary-distribution is this block. The two coexist,
+/// which is exactly the "registry publish alongside a cargo-dist release" the
+/// contract could not express before. First-class (not prose) so downstream
+/// members SEE the tap + installer and neither under-describe the release nor
+/// regenerate the existing `release.yml`.
+///
+/// `Option` on [`Contract`]: `null` for a registry-only repo (the common case),
+/// so this addition leaves every existing contract's shape unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Distribution {
+    /// The binary-distribution engine that owns the tag-triggered release
+    /// workflow.
+    pub adapter: DistributionAdapter,
+    /// Whether multi-platform binaries are attached to the GitHub Release.
+    pub gh_releases: bool,
+    /// Installer flavors this release produces (may be empty), canonically
+    /// ordered and de-duplicated.
+    pub installers: Vec<Installer>,
+    /// The Homebrew tap repo (`owner/repo`) the generated formula is pushed to,
+    /// or `null` when no tap is used. Required when `installers` includes
+    /// `homebrew` (floor).
+    pub homebrew_tap: Option<String>,
+}
+
 /// The changelog block of the contract (SCHEMA.md §1). `fragment_dir` is always
 /// present, even for non-`fragment` modes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -269,8 +327,13 @@ pub struct Contract {
     pub maturity: Maturity,
     /// Packaging ecosystems, de-duplicated to canonical order.
     pub ecosystems: Vec<Ecosystem>,
-    /// Concrete publish targets (expanded from `ecosystems` when omitted).
+    /// Concrete registry publish targets (expanded from `ecosystems` when
+    /// omitted).
     pub targets: Vec<Target>,
+    /// The binary-distribution block (cargo-dist / goreleaser binaries +
+    /// installers + Homebrew tap), or `null` for a registry-only repo. Coexists
+    /// with `targets` — a cargo-dist repo has both.
+    pub distribution: Option<Distribution>,
     /// Base versioning scheme.
     pub versioning: VersioningBase,
     /// The calver pattern string, or `null` for non-calver schemes.

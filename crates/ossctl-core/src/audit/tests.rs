@@ -186,6 +186,7 @@ fn contract_at(maturity: Maturity) -> Contract {
             registry: Registry::CratesIo,
             adapter: crate::contract::schema::Adapter::CargoPublish,
         }],
+        distribution: None,
         versioning: VersioningBase::Semver,
         versioning_pattern: None,
         changelog: Changelog {

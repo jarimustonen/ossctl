@@ -19,9 +19,9 @@ use serde_yaml::{Mapping, Value};
 
 use crate::contract::schema::{
     Adapter, Changelog, ChangelogMode, ChangelogSource, Contract, ContributionProvenance,
-    DependencyBot, DocsSite, Ecosystem, HealthBadge, Maturity, ProvenanceLevel, Registry, Release,
-    ReleaseLayout, ReleaseModel, Status, Target, VersioningBase, DEFAULT_FRAGMENT_DIR,
-    KNOWN_SCHEMA_VERSION,
+    DependencyBot, Distribution, DistributionAdapter, DocsSite, Ecosystem, HealthBadge, Installer,
+    Maturity, ProvenanceLevel, Registry, Release, ReleaseLayout, ReleaseModel, Status, Target,
+    VersioningBase, DEFAULT_FRAGMENT_DIR, KNOWN_SCHEMA_VERSION,
 };
 use crate::contract::spdx::spdx_valid;
 use crate::ports::Fs;
@@ -47,6 +47,7 @@ const KNOWN_KEYS: &[&str] = &[
     "maturity",
     "ecosystems",
     "targets",
+    "distribution",
     "versioning",
     "changelog",
     "conventional_commits",
@@ -280,6 +281,10 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
         }
     };
 
+    // distribution — the binary-distribution block (cargo-dist/goreleaser); a
+    // registry-only repo omits it (→ None), leaving its contract shape unchanged.
+    let distribution = parse_distribution(map.get("distribution"), p);
+
     // changelog (mode + source + fragment_dir).
     let changelog = match map.get("changelog") {
         None | Some(Value::Null) => Changelog {
@@ -468,6 +473,7 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
         maturity,
         ecosystems,
         targets,
+        distribution,
         versioning,
         versioning_pattern,
         changelog,
@@ -617,6 +623,120 @@ fn validate_targets(
         });
     }
     out
+}
+
+/// Canonical installer order — used to de-duplicate and stably order the
+/// `distribution.installers` list (mirrors [`ECOSYSTEM_ORDER`]'s role).
+const INSTALLER_ORDER: [Installer; 5] = [
+    Installer::Shell,
+    Installer::Powershell,
+    Installer::Homebrew,
+    Installer::Msi,
+    Installer::Npm,
+];
+
+/// Parse the optional `distribution` block (the cargo-dist/goreleaser binary
+/// layer). Absent/null → `None`, leaving a registry-only contract unchanged. A
+/// present-but-non-mapping value is an error (with `None` on the error path — the
+/// document is never emitted while `problems.errors` is non-empty).
+fn parse_distribution(value: Option<&Value>, p: &mut Problems) -> Option<Distribution> {
+    let m = match value {
+        None | Some(Value::Null) => return None,
+        Some(Value::Mapping(m)) => m,
+        Some(_) => {
+            p.err(
+                "distribution must be a mapping with {adapter?, gh_releases?, installers?, \
+                 homebrew_tap?}"
+                    .to_string(),
+            );
+            return None;
+        }
+    };
+
+    let adapter = enum_field!(
+        m,
+        "adapter",
+        DistributionAdapter,
+        DistributionAdapter::CargoDist,
+        p
+    );
+
+    let gh_releases = match m.get("gh_releases") {
+        // cargo-dist/goreleaser attach per-platform binaries by default.
+        None => true,
+        Some(Value::Bool(b)) => *b,
+        Some(v) => {
+            p.err(format!(
+                "distribution.gh_releases must be true|false, got {}",
+                yaml_display(v)
+            ));
+            true
+        }
+    };
+
+    // installers — validate each, then de-dup into canonical order.
+    let mut parsed_installers: Vec<Installer> = Vec::new();
+    for item in as_list(m.get("installers")) {
+        match item.as_str().and_then(Installer::parse) {
+            Some(i) => parsed_installers.push(i),
+            None => p.err(format!(
+                "distribution.installers: {} invalid — must be one of {:?}",
+                yaml_display(&item),
+                Installer::VALID
+            )),
+        }
+    }
+    let installers: Vec<Installer> = INSTALLER_ORDER
+        .into_iter()
+        .filter(|i| parsed_installers.contains(i))
+        .collect();
+
+    let homebrew_tap = match m.get("homebrew_tap") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_str() {
+            Some(s) if is_tap_slug(s) => Some(s.to_string()),
+            Some(s) => {
+                p.err(format!(
+                    "distribution.homebrew_tap '{s}' invalid — must be an 'owner/repo' slug"
+                ));
+                Some(s.to_string())
+            }
+            None => {
+                p.err("distribution.homebrew_tap must be an 'owner/repo' string".to_string());
+                None
+            }
+        },
+    };
+
+    // Floor: a `homebrew` installer needs a tap to push the generated formula to.
+    if installers.contains(&Installer::Homebrew) && homebrew_tap.is_none() {
+        p.err(
+            "floor: distribution.installers includes 'homebrew' but no distribution.homebrew_tap \
+             is set — the generated formula has nowhere to be pushed"
+                .to_string(),
+        );
+    }
+
+    Some(Distribution {
+        adapter,
+        gh_releases,
+        installers,
+        homebrew_tap,
+    })
+}
+
+/// Whether `s` is a plausible `owner/repo` tap slug: exactly one `/`, both parts
+/// non-empty and free of whitespace. Lexical only — existence is not checked.
+fn is_tap_slug(s: &str) -> bool {
+    match s.split_once('/') {
+        Some((owner, repo)) => {
+            !owner.is_empty()
+                && !repo.is_empty()
+                && !repo.contains('/')
+                && !s.chars().any(char::is_whitespace)
+        }
+        None => false,
+    }
 }
 
 /// A floor-clean default badge set: `ci` at mvp+, `registry` when a publishable
@@ -1119,6 +1239,7 @@ mod tests {
             "maturity",
             "ecosystems",
             "targets",
+            "distribution",
             "versioning",
             "versioning_pattern",
             "changelog",
@@ -1136,5 +1257,131 @@ mod tests {
             assert!(json.get(key).is_some(), "missing §4 key {key}");
         }
         assert!(json["versioning_pattern"].is_null());
+        // A registry-only contract carries an explicit `distribution: null` — the
+        // additive field is present but shape-neutral for existing configs.
+        assert!(json["distribution"].is_null());
+    }
+
+    // ── distribution (cargo-dist binary layer) ───────────────────────────────
+
+    /// A registry-only contract is unchanged by the additive `distribution`
+    /// field: it normalizes clean and `distribution` is `None`.
+    #[test]
+    fn registry_only_contract_has_no_distribution() {
+        let c = norm("---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\n---\n").contract;
+        assert_eq!(c.distribution, None);
+        assert_eq!(c.targets.len(), 1);
+        assert_eq!(c.targets[0].registry, Registry::CratesIo);
+    }
+
+    /// A cargo-dist repo: a `distribution` block (binaries + shell/Homebrew
+    /// installers + a tap) coexisting with a crates.io registry target.
+    #[test]
+    fn cargo_dist_distribution_coexists_with_registry() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    targets:\n  - {ecosystem: rust, package: issuectl, registry: crates.io, adapter: cargo-publish}\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [shell, homebrew]\n  \
+                    homebrew_tap: jarimustonen/homebrew-issuectl\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        let c = n.contract;
+        // The registry publish is still a Target.
+        assert_eq!(c.targets.len(), 1);
+        assert_eq!(c.targets[0].registry, Registry::CratesIo);
+        assert_eq!(c.targets[0].adapter, Adapter::CargoPublish);
+        // The binary layer is the Distribution block.
+        let d = c.distribution.expect("distribution present");
+        assert_eq!(d.adapter, DistributionAdapter::CargoDist);
+        assert!(d.gh_releases); // default true
+        assert_eq!(d.installers, vec![Installer::Shell, Installer::Homebrew]);
+        assert_eq!(
+            d.homebrew_tap.as_deref(),
+            Some("jarimustonen/homebrew-issuectl")
+        );
+    }
+
+    /// Round-trip: the serialized JSON shape a downstream `/oss-*` member reads.
+    #[test]
+    fn distribution_json_round_trip_shape() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  gh_releases: true\n  \
+                    installers: [shell, homebrew]\n  homebrew_tap: jarimustonen/homebrew-issuectl\n---\n";
+        let json = serde_json::to_value(&norm(text).contract).unwrap();
+        let d = &json["distribution"];
+        assert_eq!(d["adapter"], "cargo-dist");
+        assert_eq!(d["gh_releases"], true);
+        assert_eq!(d["installers"], serde_json::json!(["shell", "homebrew"]));
+        assert_eq!(d["homebrew_tap"], "jarimustonen/homebrew-issuectl");
+    }
+
+    /// Installers de-dup into canonical order regardless of source order.
+    #[test]
+    fn distribution_installers_dedup_canonical_order() {
+        let text = "---\nstatus: approved\nmaturity: mvp\n\
+                    distribution:\n  installers: [homebrew, shell, homebrew]\n  \
+                    homebrew_tap: owner/tap\n---\n";
+        let d = norm(text).contract.distribution.unwrap();
+        assert_eq!(d.installers, vec![Installer::Shell, Installer::Homebrew]);
+    }
+
+    /// A `homebrew` installer without a tap is a floor error.
+    #[test]
+    fn distribution_homebrew_installer_requires_tap() {
+        let text = "---\nstatus: approved\nmaturity: mvp\n\
+                    distribution:\n  installers: [shell, homebrew]\n---\n";
+        assert_error_contains(
+            &norm(text),
+            "includes 'homebrew' but no distribution.homebrew_tap",
+        );
+    }
+
+    /// A malformed tap slug (not `owner/repo`) is rejected.
+    #[test]
+    fn distribution_bad_tap_slug_rejected() {
+        let text = "---\nstatus: approved\nmaturity: mvp\n\
+                    distribution:\n  homebrew_tap: not-a-slug\n---\n";
+        assert_error_contains(&norm(text), "must be an 'owner/repo' slug");
+    }
+
+    /// An unknown installer flavor surfaces an error listing the valid set.
+    #[test]
+    fn distribution_bad_installer_rejected() {
+        let text = "---\nstatus: approved\nmaturity: mvp\n\
+                    distribution:\n  installers: [snap]\n---\n";
+        assert_error_contains(&norm(text), "distribution.installers");
+    }
+
+    /// A goreleaser distribution with no installers and no tap is valid — the
+    /// block is minimal and forward-compatible.
+    #[test]
+    fn distribution_goreleaser_minimal_is_valid() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [go]\n\
+                    distribution:\n  adapter: goreleaser\n  gh_releases: true\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        let d = n.contract.distribution.unwrap();
+        assert_eq!(d.adapter, DistributionAdapter::Goreleaser);
+        assert!(d.installers.is_empty());
+        assert_eq!(d.homebrew_tap, None);
+    }
+
+    /// A non-mapping `distribution` value is a structural error.
+    #[test]
+    fn distribution_non_mapping_rejected() {
+        assert_error_contains(
+            &norm("---\nstatus: approved\nmaturity: mvp\ndistribution: [nope]\n---\n"),
+            "distribution must be a mapping",
+        );
+    }
+
+    #[test]
+    fn is_tap_slug_verdicts() {
+        assert!(is_tap_slug("owner/repo"));
+        assert!(is_tap_slug("jarimustonen/homebrew-issuectl"));
+        assert!(!is_tap_slug("no-slash"));
+        assert!(!is_tap_slug("/repo"));
+        assert!(!is_tap_slug("owner/"));
+        assert!(!is_tap_slug("owner/repo/extra"));
+        assert!(!is_tap_slug("owner / repo"));
     }
 }

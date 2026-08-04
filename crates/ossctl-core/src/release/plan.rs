@@ -249,7 +249,7 @@ const SEAL_DOMAIN: &str = "ossctl.release-plan";
 /// versions. Bump this (never silently) whenever the pre-image shape changes
 /// (e.g. once resolved adapter versions are folded in), so old and new plan ids
 /// are intentionally disjoint rather than accidentally colliding.
-const SEAL_VERSION: u32 = 1;
+const SEAL_VERSION: u32 = 2;
 
 /// The canonical hashed pre-image (see the module docs for the exact contents).
 /// A dedicated struct rather than an ad-hoc byte concatenation so the field set
