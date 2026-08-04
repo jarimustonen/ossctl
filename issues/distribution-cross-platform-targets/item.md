@@ -8,6 +8,8 @@ epic: ossctl-phase4-build
 commits:
 - hash: b815583
   summary: add distribution.platforms cross-platform target set (schema_version stays 1, additive)
+- hash: 34d04e0
+  summary: apply /llm-review findings (empty->error, honest triple validator, tempered docs, 2 spin-offs)
 ---
 
 # Distribution block needs a cross-platform target set with a Mac+Linux default
@@ -22,16 +24,16 @@ REQUIREMENT (user directive): all OSS software the /oss-* family produces MUST i
 
 **Field name:** `distribution.platforms` — a `Vec<String>` of Rust target-triples. `targets` was already taken (the registry-publish `Vec<Target>`), and `binary_targets` reads awkwardly next to it; `platforms` is unambiguous and matches how the cargo-dist ecosystem talks about the set.
 
-**Default (omitted OR empty `[]` → this set):**
+**Default (omitted/null → this set):**
 ```
 aarch64-apple-darwin
 x86_64-apple-darwin
 aarch64-unknown-linux-musl
 x86_64-unknown-linux-musl
 ```
-macOS + Linux, `musl` over `gnu` (statically-linked pure-Rust CLI has no glibc-version cliff). Windows is a deliberate omission — a bonus a repo opts into by listing `x86_64-pc-windows-msvc` explicitly, never the default. The default always contains ≥1 Linux triple, so every distribution covers Linux by default. Empty falls back to the default too (mirrors empty-`targets` → expand), so an empty list can never silently drop Linux.
+macOS + Linux, `musl` over `gnu` (for a pure-Rust CLI a musl target links statically and sidesteps the glibc-version cliff — a C/native-dep repo may override to `-gnu`). Windows is a deliberate omission — a bonus a repo opts into by listing `x86_64-pc-windows-msvc` explicitly, never the default. The default always contains ≥1 Linux triple, so a distribution that OMITS the field covers Linux. (An explicit `[]` is a hard error, NOT defaulted — see the Review section; only omitted/null default. This corrects the first-draft behavior.)
 
-**Validation:** each triple is lexically validated (`is_target_triple`: 2–4 `-`-separated `[a-z0-9_]` components) — rejects malformed/uppercase/injection strings while accepting every standard triple; the OS component stays inspectable so the downstream `audit-cross-platform-gap` issue can flag Linux-less explicit sets. Explicit lists are de-duplicated preserving author order. This issue only guarantees the field is present + well-formed; it does NOT implement the Linux-coverage audit.
+**Validation:** each triple is STRUCTURALLY validated (`looks_like_target_triple`: 2–4 `-`-separated `[a-z0-9_.]` components) — rejects malformed/uppercase/injection/wrong-shape strings and accepts real dotted targets (`thumbv8m.main-none-eabi`); it is a well-formedness gate, not semantic rustc-validity (structurally-valid nonsense like `aa-bb` passes — the toolchain is the final authority). The OS component stays inspectable so the downstream `audit-cross-platform-gap` issue can flag Linux-less explicit sets. Explicit lists are de-duplicated preserving author order. This issue only guarantees the field is present + well-formed; it does NOT implement the Linux-coverage audit.
 
 **schema_version decision: STAYS 1 (additive).** `platforms` is a NEW optional key added inside the already-optional `distribution` block — no existing field is renamed, removed, or re-meant. A reader keying into `distribution.adapter`/`installers`/… is unaffected; the new key never existed before, so there is no prior shape for it to be incompatible with (a pure addition, exactly the case `KNOWN_SCHEMA_VERSION`'s doc and the migration rule call additive-safe). Registry-only contracts (`distribution: null`) are wholly unchanged. The one nuance — omitted resolves to a populated set rather than `null` — does not make it breaking: it only ever ADDS a key, never alters an existing one.
 
