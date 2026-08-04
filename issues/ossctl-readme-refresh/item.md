@@ -2,9 +2,13 @@
 created: 2026-08-04
 updated: 2026-08-04
 type: task
-status: in-progress
+status: fixed
 priority: high
 epic: ossctl-phase4-build
+commits:
+- hash: 52be241
+  summary: 'docs(readme): refresh status/license + cross-platform Install; AGENTS cross-platform policy'
+closed: 2026-08-04
 ---
 
 # Refresh ossctl's own stale README + add a cross-platform Install section
