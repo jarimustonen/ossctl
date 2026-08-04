@@ -5,11 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The first tagged release, `0.1.0`, is being prepared; the entries under `[Unreleased]`
-below are the initial feature set it will ship.
-
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
+<!-- oss-changelog:unreleased-end -->
+
+## [0.1.0] - 2026-08-04
+
+First release — published to crates.io, GitHub Releases, and the `jarimustonen/ossctl`
+Homebrew tap by dogfooding ossctl on itself (`/oss-init` → `audit` → release).
 
 ### Added
 - `ossctl contract show` / `ossctl contract validate` — the single normalizer and
@@ -26,4 +29,6 @@ below are the initial feature set it will ship.
   (`oss-init`, `oss-readme`, `oss-ci`, `oss-changelog`, `oss-contributing`,
   `oss-security-policy`, `oss-architecture`, `oss-release`), installable into a repo.
 - `ossctl doctor` and `ossctl version` — self-diagnostics and the version/schema surface.
-<!-- oss-changelog:unreleased-end -->
+
+[Unreleased]: https://github.com/jarimustonen/ossctl/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/jarimustonen/ossctl/releases/tag/v0.1.0
