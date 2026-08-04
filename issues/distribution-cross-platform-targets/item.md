@@ -2,7 +2,7 @@
 created: 2026-08-04
 updated: 2026-08-04
 type: feature
-status: in-progress
+status: fixed
 priority: high
 epic: ossctl-phase4-build
 commits:
@@ -10,6 +10,7 @@ commits:
   summary: add distribution.platforms cross-platform target set (schema_version stays 1, additive)
 - hash: 34d04e0
   summary: apply /llm-review findings (empty->error, honest triple validator, tempered docs, 2 spin-offs)
+closed: 2026-08-04
 ---
 
 # Distribution block needs a cross-platform target set with a Mac+Linux default
