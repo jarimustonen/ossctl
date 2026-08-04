@@ -153,6 +153,17 @@ impl CommandRunner for FakeCmd {
                 stderr: String::new(),
             });
         }
+        // Serve the node adapter's `npm pack --json` probe the packed tarball name,
+        // so the node build phase can identify its artifact (the build fails hard on
+        // unparseable output, so an empty default would abort the phase machinery
+        // these tests exercise).
+        if program == "npm" && args.contains(&"pack") {
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: r#"[{"filename":"tool-1.0.0.tgz"}]"#.to_string(),
+                stderr: String::new(),
+            });
+        }
         let fails = self
             .fail_contains
             .as_ref()

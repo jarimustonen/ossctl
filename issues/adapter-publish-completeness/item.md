@@ -8,6 +8,8 @@ epic: ossctl-phase4-build
 commits:
 - hash: d8518b5
   summary: audit 6 adapter publish() bodies; analysis.md verdict table + completion sketch
+- hash: b3b7186
+  summary: node release-please Unsupported + real npm-pack tarball name; all 6 adapters honest
 ---
 
 # Audit + complete the 6 ecosystem adapter publish() bodies before a real release cut

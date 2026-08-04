@@ -72,32 +72,35 @@ impl ReleaseAdapter for NodeAdapter {
     fn build(
         &self,
         ctx: &EffectCtx<'_>,
-        t: &AdapterTarget,
+        _t: &AdapterTarget,
     ) -> Result<BuildArtifacts, AdapterError> {
         // `npm pack --json` reports the packed tarball's exact filename, which is
         // not always `{package}-{version}.tgz`: a scoped package `@scope/pkg` packs
         // to `scope-pkg-{version}.tgz`. Read the name npm actually produced so the
         // asset the coordinator threads into the binary / GitHub-Release upload set
-        // is correct, rather than reconstructing a name that is wrong for scoped
-        // packages.
+        // is correct. (`--json` machine output requires npm ≥ 7.20.3.)
         let cmd = PlannedCommand::new("npm", &["pack", "--json"]);
         let outputs = run_all(ctx, std::slice::from_ref(&cmd))?;
-        let (artifacts, notes) = match parse_pack_filenames(outputs[0].stdout.trim()) {
-            Some(names) if !names.is_empty() => (names, vec![]),
-            // npm succeeded but emitted no parseable `--json` payload (e.g. an older
-            // npm) — fall back to the conventional name so a node build never
-            // hard-fails on an npm output quirk, and record that it did.
-            _ => (
-                vec![format!("{}-{}.tgz", t.package, t.version)],
-                vec!["npm pack emitted no parseable --json filename; using the \
-                      conventional tarball name"
-                    .to_string()],
-            ),
+        let stdout = outputs[0].stdout.trim();
+        // A build that cannot identify its own artifact must fail hard, never guess:
+        // reconstructing `{package}-{version}.tgz` is wrong for scoped packages (the
+        // exact plausible-but-wrong artifact this engine must not fabricate), and a
+        // guessed path only fails later, opaquely, at upload time. This mirrors how
+        // the cargo adapter treats an unparseable `cargo metadata`.
+        let Some(artifacts) = parse_pack_filenames(stdout).filter(|names| !names.is_empty()) else {
+            return Err(AdapterError::Command {
+                command: cmd.rendered(),
+                code: None,
+                stderr: format!(
+                    "`npm pack --json` produced no parseable tarball filename \
+                     (npm ≥ 7.20.3 is required for --json); output was: {stdout}"
+                ),
+            });
         };
         Ok(BuildArtifacts {
             adapter: self.adapter,
             artifacts,
-            notes,
+            notes: vec![],
         })
     }
 
@@ -118,6 +121,11 @@ impl ReleaseAdapter for NodeAdapter {
         }
         // PER-TARGET IRREVERSIBLE.
         let cmds = match self.adapter {
+            // `changeset publish` is workspace-wide — it publishes every unpublished
+            // package in one shot — so the coordinator must drive a Changesets target
+            // at most once per workspace; a truthful per-target receipt for a batch
+            // publish is a broader change tracked as a spin-off (see the terminal
+            // report). The command itself is the genuine publish, not a placeholder.
             Adapter::Changesets => vec![PlannedCommand::new("changeset", &["publish"])],
             _ => vec![PlannedCommand::new("npm", &["publish"])],
         };
@@ -143,8 +151,8 @@ struct NpmPackEntry {
 }
 
 /// Parse the packed tarball filename(s) from `npm pack --json` output. `None` when
-/// the payload is empty or not the expected array shape, so the caller can fall
-/// back to the conventional `{package}-{version}.tgz` name rather than failing.
+/// the payload is empty or not the expected array shape; the caller then fails the
+/// build rather than guessing a name (see [`NodeAdapter::build`]).
 fn parse_pack_filenames(stdout: &str) -> Option<Vec<String>> {
     if stdout.is_empty() {
         return None;

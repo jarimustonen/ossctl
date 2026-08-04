@@ -563,13 +563,16 @@ fn release_please_publish_is_unsupported_from_host() {
         "1.0.0",
     );
     let err = resolve(Adapter::ReleasePlease).publish(&c, &t).unwrap_err();
-    assert!(matches!(
-        err,
-        AdapterError::Unsupported {
-            operation: "publish",
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            err,
+            AdapterError::Unsupported {
+                adapter: Adapter::ReleasePlease,
+                operation: "publish",
+            }
+        ),
+        "expected Unsupported publish for release-please, got {err:?}"
+    );
     assert!(
         cmd.calls().is_empty(),
         "an unsupported publish must run no command"
@@ -639,9 +642,11 @@ fn node_build_reads_the_real_tarball_name_from_npm_pack_json() {
 }
 
 #[test]
-fn node_build_falls_back_to_the_conventional_name_without_parseable_json() {
-    // An npm that emits no parseable --json payload must not fail the build; it
-    // falls back to `{package}-{version}.tgz` and records a note.
+fn node_build_errors_when_npm_pack_emits_no_parseable_json() {
+    // A build that cannot read npm's reported filename must fail hard rather than
+    // guess a `{package}-{version}.tgz` name — that reconstruction is wrong for
+    // scoped packages and would only surface as an opaque upload failure later.
+    // (`FakeCmd::new()` serves empty stdout for `npm pack --json`.)
     let cmd = FakeCmd::new();
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
@@ -649,9 +654,26 @@ fn node_build_falls_back_to_the_conventional_name_without_parseable_json() {
     let c = ctx(&cmd, &clock, &reg, root);
 
     let t = target(Ecosystem::Node, Registry::Npm, Adapter::NpmPublish, "1.0.0");
-    let b = resolve(Adapter::NpmPublish).build(&c, &t).unwrap();
-    assert_eq!(b.artifacts, vec!["tool-1.0.0.tgz".to_string()]);
-    assert!(!b.notes.is_empty(), "the fallback records a note");
+    let err = resolve(Adapter::NpmPublish).build(&c, &t).unwrap_err();
+    assert!(
+        matches!(err, AdapterError::Command { code: None, .. }),
+        "expected a hard Command error on unparseable npm pack output, got {err:?}"
+    );
+}
+
+#[test]
+fn node_build_errors_on_an_empty_npm_pack_json_array() {
+    // An empty JSON array parses cleanly but names no artifact — still a hard error,
+    // never a fabricated filename.
+    let cmd = FakeCmd::new().stdout_calls_containing("pack", "[]");
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target(Ecosystem::Node, Registry::Npm, Adapter::NpmPublish, "1.0.0");
+    let err = resolve(Adapter::NpmPublish).build(&c, &t).unwrap_err();
+    assert!(matches!(err, AdapterError::Command { code: None, .. }));
 }
 
 // ── Multi-crate workspace: dep-order publish + crates.io index-wait ──────────
