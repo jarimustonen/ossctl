@@ -2,23 +2,35 @@
 members = ["cargo:."]
 
 # Config for 'dist' (cargo-dist). ossctl is a portable, POSIX-friendly CLI
-# (no fork/tmux/signal machinery), so the target set is broader than
-# orchestratectl's. Release wiring is not yet active — the project is private
-# and unpublished (README) — but the dist config is stood up here so the
-# release pipeline is near-copyable when publishing is deliberately opened.
+# (no fork/tmux/signal machinery), so the target set is broad. The tag-triggered
+# `.github/workflows/release.yml` is GENERATED from this [dist] section via
+# `dist generate` — edit config here, then regenerate; never hand-edit the
+# workflow. Only `crates/ossctl-cli` is marked distributable (its
+# `[package.metadata.dist] dist = true`), so the produced binary artifact is
+# `ossctl`.
 [dist]
-# The preferred dist version to use in CI (Cargo.toml SemVer syntax).
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax). Pinned to
+# the version this config was generated against so a regenerated workflow and
+# the local `dist` stay in lockstep.
 cargo-dist-version = "0.28.2"
 # CI backend.
 ci = "github"
-# Installers to generate for each app.
-installers = ["shell"]
-# Target platforms (Rust target-triple syntax).
+# Installer scripts generated as release assets: curl-to-shell (Unix) and
+# iwr-to-powershell (Windows). Homebrew auto-publish is deliberately NOT enabled
+# here — that needs a tap write token and is owned by the separate
+# `homebrew-adapter-first-formula` issue.
+installers = ["shell", "powershell"]
+# Cross-platform binary matrix (Rust target-triple syntax): macOS (arm64 +
+# x86_64), Linux (arm64 + x86_64), and Windows x86_64.
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
 ]
 # Where to host releases.
 hosting = "github"
+# Never build/publish on normal branch pushes or PRs — the workflow's only real
+# trigger is a `v*` version tag. `skip` also drops the PR plan-only job.
+pr-run-mode = "skip"
