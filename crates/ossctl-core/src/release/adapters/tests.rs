@@ -24,6 +24,13 @@ struct FakeCmd {
     /// Canned stdout served for `cargo metadata` (the workspace graph). `None`
     /// means empty output — the adapter then degrades to a single-crate publish.
     metadata: Option<String>,
+    /// Fail (non-zero exit) any call whose rendered form contains this substring —
+    /// for the homebrew formula-existence probe, where a `404` must read as
+    /// "absent" while sibling `gh`/`git` calls still succeed.
+    fail_containing: Option<(String, i32, String)>,
+    /// Serve this stdout for any call whose rendered form contains the key — e.g.
+    /// the PR URL `gh pr create` prints.
+    stdout_containing: Option<(String, String)>,
 }
 
 impl FakeCmd {
@@ -33,7 +40,19 @@ impl FakeCmd {
             fail: None,
             spawn_err: false,
             metadata: None,
+            fail_containing: None,
+            stdout_containing: None,
         }
+    }
+    /// Fail every call whose rendered form contains `needle` with `code`/`stderr`.
+    fn fail_calls_containing(mut self, needle: &str, code: i32, stderr: &str) -> Self {
+        self.fail_containing = Some((needle.to_string(), code, stderr.to_string()));
+        self
+    }
+    /// Serve `stdout` for any call whose rendered form contains `needle`.
+    fn stdout_calls_containing(mut self, needle: &str, stdout: &str) -> Self {
+        self.stdout_containing = Some((needle.to_string(), stdout.to_string()));
+        self
     }
     fn failing(program: &str, code: i32, stderr: &str) -> Self {
         Self {
@@ -60,11 +79,28 @@ impl FakeCmd {
 
 impl CommandRunner for FakeCmd {
     fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
-        self.calls
-            .borrow_mut()
-            .push(format!("{program} {}", args.join(" ")));
+        let rendered = format!("{program} {}", args.join(" "));
+        self.calls.borrow_mut().push(rendered.clone());
         if self.spawn_err {
             return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+        if let Some((needle, code, stderr)) = &self.fail_containing {
+            if rendered.contains(needle) {
+                return Ok(CommandOutput {
+                    status: Some(*code),
+                    stdout: String::new(),
+                    stderr: stderr.clone(),
+                });
+            }
+        }
+        if let Some((needle, stdout)) = &self.stdout_containing {
+            if rendered.contains(needle) {
+                return Ok(CommandOutput {
+                    status: Some(0),
+                    stdout: stdout.clone(),
+                    stderr: String::new(),
+                });
+            }
         }
         if let Some((p, code, stderr)) = &self.fail {
             if p == program {
@@ -860,6 +896,7 @@ fn binary_publish_uploads_the_threaded_asset_paths() {
         ],
         source_tarball: None,
         repo_slug: None,
+        homebrew: None,
     };
     let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
 
@@ -891,6 +928,7 @@ fn binary_publish_records_the_release_url_from_the_threaded_slug() {
         assets: vec!["dist/tool-1.0.0-x86_64.tar.gz".to_string()],
         source_tarball: None,
         repo_slug: Some("o/r".to_string()),
+        homebrew: None,
     };
     let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
 
@@ -931,6 +969,7 @@ fn binary_publish_records_no_url_without_a_slug() {
         assets: vec!["dist/tool-1.0.0-x86_64.tar.gz".to_string()],
         source_tarball: None,
         repo_slug: None,
+        homebrew: None,
     };
     let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
 
@@ -958,6 +997,7 @@ fn homebrew_publish_reads_the_threaded_tarball_url_and_sha256() {
             sha256: Some("deadbeef".to_string()),
         }),
         repo_slug: Some("o/r".to_string()),
+        homebrew: None,
     };
     let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
 
@@ -995,6 +1035,7 @@ fn homebrew_core_publish_omits_sha256_when_not_yet_computed() {
             sha256: None,
         }),
         repo_slug: Some("o/r".to_string()),
+        homebrew: None,
     };
     let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
 
@@ -1013,6 +1054,281 @@ fn homebrew_core_publish_omits_sha256_when_not_yet_computed() {
              https://github.com/o/r/archive/refs/tags/v2.0.0.tar.gz -- tool"
         ]
     );
+}
+
+// ── Homebrew first-formula bootstrap: create vs. bump ────────────────────────
+
+/// The threaded homebrew inputs for a configured tap.
+fn homebrew_artifacts(
+    tap: &str,
+    url: &str,
+    sha256: Option<&str>,
+    license: Option<&str>,
+) -> ReleaseArtifacts {
+    ReleaseArtifacts {
+        assets: vec![],
+        source_tarball: Some(SourceTarball {
+            url: url.to_string(),
+            sha256: sha256.map(str::to_string),
+        }),
+        repo_slug: Some("o/r".to_string()),
+        homebrew: Some(HomebrewFormula {
+            tap: Some(tap.to_string()),
+            license: license.map(str::to_string),
+        }),
+    }
+}
+
+#[test]
+fn homebrew_tap_bumps_when_the_formula_already_exists() {
+    // The tap already serves `Formula/tool.rb` (gh api probe exits 0) → the bump
+    // path runs, carrying the threaded url/sha256 — preceded only by the probe.
+    let cmd = FakeCmd::new();
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = homebrew_artifacts(
+        "o/homebrew-r",
+        "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz",
+        Some("deadbeef"),
+        Some("MIT"),
+    );
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target(
+        Ecosystem::Binary,
+        Registry::Homebrew,
+        Adapter::HomebrewTap,
+        "1.0.0",
+    );
+    resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap();
+
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "gh api --silent repos/o/homebrew-r/contents/Formula/tool.rb",
+            "brew bump-formula-pr --url \
+             https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz --sha256 deadbeef -- tool",
+        ]
+    );
+}
+
+#[test]
+fn homebrew_tap_creates_the_initial_formula_when_absent() {
+    // A fresh tap has no `Formula/hbcreate.rb` (the gh api probe 404s) → the create
+    // path clones the tap, writes the generated formula, commits it on a branch,
+    // and opens a PR. The generated `.rb` carries url + sha256 + license + a cargo
+    // source-build install stanza.
+    let workdir = std::env::temp_dir().join("ossctl-homebrew-hbcreate-1.2.3");
+    let _ = std::fs::remove_dir_all(&workdir);
+
+    let cmd = FakeCmd::new().fail_calls_containing("contents/", 1, "HTTP 404: Not Found");
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = homebrew_artifacts(
+        "o/homebrew-r",
+        "https://github.com/o/r/archive/refs/tags/v1.2.3.tar.gz",
+        Some("cafef00d"),
+        Some("MIT"),
+    );
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target_named(
+        Ecosystem::Binary,
+        Registry::Homebrew,
+        Adapter::HomebrewTap,
+        "hbcreate",
+        "1.2.3",
+    );
+    resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap();
+
+    // The probe, then the git/gh create sequence (no `bump-formula-pr`).
+    let calls = cmd.calls();
+    assert_eq!(
+        calls[0],
+        "gh api --silent repos/o/homebrew-r/contents/Formula/hbcreate.rb"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("gh repo clone o/homebrew-r")),
+        "expected a tap clone: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("checkout -b ossctl-homebrew-hbcreate-1.2.3")),
+        "expected a create branch: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c.contains("add Formula/hbcreate.rb")),
+        "expected the new formula to be staged: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("push --set-upstream origin ossctl-homebrew-hbcreate-1.2.3")),
+        "expected the branch to be pushed: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("gh pr create --repo o/homebrew-r")),
+        "expected a PR to be opened: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.contains("bump-formula-pr")),
+        "the create path must not bump: {calls:?}"
+    );
+
+    // The generated formula file carries the url, sha256, license, and cargo build.
+    let formula = std::fs::read_to_string(workdir.join("Formula/hbcreate.rb"))
+        .expect("the create path wrote the formula file");
+    assert!(formula.contains("class Hbcreate < Formula"), "{formula}");
+    assert!(
+        formula.contains("url \"https://github.com/o/r/archive/refs/tags/v1.2.3.tar.gz\""),
+        "{formula}"
+    );
+    assert!(formula.contains("sha256 \"cafef00d\""), "{formula}");
+    assert!(formula.contains("license \"MIT\""), "{formula}");
+    assert!(
+        formula.contains("homepage \"https://github.com/o/r\""),
+        "{formula}"
+    );
+    assert!(
+        formula.contains("system \"cargo\", \"install\""),
+        "{formula}"
+    );
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn homebrew_create_records_the_pr_url_as_remote_url() {
+    let workdir = std::env::temp_dir().join("ossctl-homebrew-hburl-4.5.6");
+    let _ = std::fs::remove_dir_all(&workdir);
+
+    let cmd = FakeCmd::new()
+        .fail_calls_containing("contents/", 1, "HTTP 404")
+        .stdout_calls_containing("pr create", "https://github.com/o/homebrew-r/pull/7\n");
+    let clock = FakeClock(9);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = homebrew_artifacts(
+        "o/homebrew-r",
+        "https://github.com/o/r/archive/refs/tags/v4.5.6.tar.gz",
+        Some("beefcafe"),
+        Some("MIT"),
+    );
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target_named(
+        Ecosystem::Binary,
+        Registry::Homebrew,
+        Adapter::HomebrewTap,
+        "hburl",
+        "4.5.6",
+    );
+    let r = resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap();
+
+    // The receipt records the PR gh printed (the field already existed — no shape
+    // change), and stamps the injected clock.
+    assert_eq!(
+        r.remote_url.as_deref(),
+        Some("https://github.com/o/homebrew-r/pull/7")
+    );
+    assert_eq!(r.timestamp, 9);
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn homebrew_create_generates_a_sha256_placeholder_when_absent() {
+    // The coordinator threads sha256=None pre-tag; the generated formula then emits
+    // a TODO placeholder (a valid source template the maintainer completes) rather
+    // than a wrong digest.
+    let workdir = std::env::temp_dir().join("ossctl-homebrew-hbnosha-1.0.0");
+    let _ = std::fs::remove_dir_all(&workdir);
+
+    let cmd = FakeCmd::new().fail_calls_containing("contents/", 1, "404");
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = homebrew_artifacts(
+        "o/homebrew-r",
+        "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz",
+        None,
+        None,
+    );
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target_named(
+        Ecosystem::Binary,
+        Registry::Homebrew,
+        Adapter::HomebrewTap,
+        "hbnosha",
+        "1.0.0",
+    );
+    resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap();
+
+    let formula = std::fs::read_to_string(workdir.join("Formula/hbnosha.rb")).unwrap();
+    assert!(formula.contains("# TODO: sha256"), "{formula}");
+    // No license threaded ⇒ the stanza is omitted, not emitted empty.
+    assert!(!formula.contains("license \""), "{formula}");
+
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn homebrew_dry_run_reports_the_chosen_path() {
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = homebrew_artifacts(
+        "o/homebrew-r",
+        "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz",
+        Some("deadbeef"),
+        Some("MIT"),
+    );
+
+    // Formula absent ⇒ dry-run previews the create path.
+    let create_cmd = FakeCmd::new().fail_calls_containing("contents/", 1, "404");
+    let cc = ctx_with(&create_cmd, &clock, &reg, root, &artifacts);
+    let t = target(
+        Ecosystem::Binary,
+        Registry::Homebrew,
+        Adapter::HomebrewTap,
+        "1.0.0",
+    );
+    let create = resolve(Adapter::HomebrewTap).dry_run(&cc, &t).unwrap();
+    assert!(
+        create.notes.iter().any(|n| n.contains("create path")),
+        "{:?}",
+        create.notes
+    );
+    assert!(
+        create
+            .planned_commands
+            .iter()
+            .any(|c| c.rendered().contains("gh pr create")),
+        "create dry-run should preview the PR: {:?}",
+        create.planned_commands
+    );
+
+    // Formula present ⇒ dry-run previews the bump path.
+    let bump_cmd = FakeCmd::new();
+    let bc = ctx_with(&bump_cmd, &clock, &reg, root, &artifacts);
+    let bump = resolve(Adapter::HomebrewTap).dry_run(&bc, &t).unwrap();
+    assert!(
+        bump.notes.iter().any(|n| n.contains("bump path")),
+        "{:?}",
+        bump.notes
+    );
+    assert_eq!(bump.planned_commands.len(), 1);
+    assert!(bump.planned_commands[0]
+        .rendered()
+        .starts_with("brew bump-formula-pr"));
 }
 
 // ── classify_receipt: the pure verify core, all four outcomes ────────────────

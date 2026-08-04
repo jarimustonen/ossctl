@@ -111,6 +111,33 @@ pub struct ReleaseArtifacts {
     /// this slug as its receipt's [`PublishReceipt::remote_url`](crate::protocol::release::PublishReceipt::remote_url).
     /// `None` for a cut with no such target or no resolvable GitHub remote.
     pub repo_slug: Option<String>,
+    /// The Homebrew formula inputs the [`homebrew`](self::homebrew) adapter's
+    /// first-formula bootstrap needs beyond the [`Self::source_tarball`] URL +
+    /// sha256 — the destination tap and the SPDX license the generated `.rb`
+    /// records. `None` for a cut with no homebrew target (and always `None` for
+    /// every other adapter, which never reads it). Threaded from the plan by the
+    /// coordinator alongside [`Self::source_tarball`].
+    pub homebrew: Option<HomebrewFormula>,
+}
+
+/// The Homebrew-formula inputs a first-formula *create* needs that the source
+/// tarball alone does not carry — the destination tap and the formula's license.
+///
+/// The [`homebrew`](self::homebrew) adapter chooses its **create** vs **bump**
+/// path from whether the target formula already exists in [`Self::tap`]; a
+/// `None` tap (a `homebrew-core` target, or a `homebrew-tap` the contract left
+/// unconfigured) has no bootstrap destination, so the adapter falls back to the
+/// plain `bump-formula-pr` path. Like the rest of [`ReleaseArtifacts`] this is an
+/// in-memory coordinator↔adapter hand-off, never serialized, so it carries no
+/// schema version of its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HomebrewFormula {
+    /// The destination tap repo as an `owner/repo` slug (from the contract's
+    /// `distribution.homebrew_tap`), or `None` when the contract configured none.
+    pub tap: Option<String>,
+    /// The SPDX license expression the generated formula's `license` stanza
+    /// records, or `None` to omit the stanza.
+    pub license: Option<String>,
 }
 
 /// A shared empty artifact set — the value carried through the dry-run / build
@@ -125,6 +152,7 @@ pub static EMPTY_ARTIFACTS: ReleaseArtifacts = ReleaseArtifacts {
     assets: Vec::new(),
     source_tarball: None,
     repo_slug: None,
+    homebrew: None,
 };
 
 /// The published source tarball a Homebrew formula bump consumes (`--url` /
@@ -207,6 +235,17 @@ pub enum AdapterError {
         /// The underlying I/O error rendered as text.
         source: String,
     },
+    /// A local filesystem write an adapter performs *between* commands failed —
+    /// distinct from [`Self::Io`] (a process that could not be spawned). The
+    /// [`homebrew`](super::homebrew) first-formula create writes the generated
+    /// `.rb` into the tap checkout between the clone and the commit; a failure
+    /// there is this.
+    Filesystem {
+        /// The path the write targeted, for the operator-facing message.
+        path: String,
+        /// The underlying I/O error rendered as text.
+        source: String,
+    },
     /// The adapter has no real implementation of this operation from this host
     /// (e.g. a CI-only trusted-publisher publish). Named so the coordinator can
     /// surface a precise, honest message rather than a fabricated receipt.
@@ -244,6 +283,9 @@ impl std::fmt::Display for AdapterError {
                 write!(f, "`{command}` failed (exit {code}): {}", stderr.trim())
             }
             Self::Io { command, source } => write!(f, "cannot run `{command}`: {source}"),
+            Self::Filesystem { path, source } => {
+                write!(f, "cannot write `{path}`: {source}")
+            }
             Self::Unsupported { adapter, operation } => write!(
                 f,
                 "adapter `{}` does not support `{operation}` from this host",

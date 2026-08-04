@@ -114,6 +114,8 @@ fn rust_plan() -> ReleasePlan {
             Adapter::CargoPublish,
         )],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
     }
 }
 
@@ -129,6 +131,8 @@ fn two_target_plan() -> ReleasePlan {
             plan_target(Ecosystem::Node, Registry::Npm, Adapter::NpmPublish),
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
     }
 }
 

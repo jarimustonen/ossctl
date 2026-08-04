@@ -91,6 +91,13 @@ pub fn build(contract: &Contract, facts: &Facts, head_sha: &str, version: &str) 
         version: version.to_string(),
         targets,
         phases: PlanPhase::SEQUENCE.to_vec(),
+        // Carried from the (already-hashed) contract so the coordinator can hand
+        // the Homebrew adapter its tap + license without re-reading the contract.
+        homebrew_tap: contract
+            .distribution
+            .as_ref()
+            .and_then(|d| d.homebrew_tap.clone()),
+        license: Some(contract.license.clone()),
     }
 }
 

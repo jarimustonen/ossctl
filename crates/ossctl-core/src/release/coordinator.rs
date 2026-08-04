@@ -61,8 +61,8 @@ use crate::protocol::plan::ReleasePlan;
 use crate::protocol::release::PublishReceipt as AdapterReceipt;
 
 use super::adapters::{
-    resolve, AdapterTarget, EcosystemAdapter, EffectCtx, ReleaseAdapter, ReleaseArtifacts,
-    SourceTarball,
+    resolve, AdapterTarget, EcosystemAdapter, EffectCtx, HomebrewFormula, ReleaseAdapter,
+    ReleaseArtifacts, SourceTarball,
 };
 use super::journal::Journal;
 use crate::contract::schema::{Adapter, Ecosystem, Target};
@@ -171,22 +171,41 @@ pub fn execute(
 ) -> Result<(), CutError> {
     let targets = resolve_target_plans(plan)?;
 
+    // Resolve the GitHub slug, source-tarball URL, and homebrew formula inputs up
+    // front — they depend only on the plan + `origin` remote, never on any build
+    // output — so the dry-run and build phases preview the *real*, fully
+    // parameterized commands (the homebrew adapter needs the tap to even decide
+    // create-vs-bump). Only `assets` (the binary upload set) is build-produced, so
+    // it is empty for these pre-build phases and accumulated during build-all.
+    let repo_slug = resolve_repo_slug(ctx, &targets);
+    let source_tarball = repo_slug
+        .as_deref()
+        .and_then(|slug| source_tarball(slug, plan, &targets));
+    let homebrew = homebrew_inputs(plan, &targets);
+    let pre_artifacts = ReleaseArtifacts {
+        assets: Vec::new(),
+        source_tarball: source_tarball.clone(),
+        repo_slug: repo_slug.clone(),
+        homebrew: homebrew.clone(),
+    };
+    let pre_ctx = ctx.with_artifacts(&pre_artifacts);
+
     // dry-run-all → build-all: re-runnable, side-effect-free barriers. build-all
     // is where the concrete asset paths become known, so it accumulates them.
-    reversible_phase(journal, sink, ctx, Phase::DryRun, &targets, None)?;
+    reversible_phase(journal, sink, &pre_ctx, Phase::DryRun, &targets, None)?;
     let mut assets = Vec::new();
     reversible_phase(
         journal,
         sink,
-        ctx,
+        &pre_ctx,
         Phase::Build,
         &targets,
         Some(&mut assets),
     )?;
 
     // Thread the build's concrete artifacts into publish-all: the aggregated
-    // asset paths (binary), the resolved GitHub slug (binary's receipt URL +
-    // upload target), and the source tarball URL (homebrew).
+    // asset paths (binary) join the already-resolved slug / source-tarball /
+    // homebrew inputs.
     //
     // Resume caveat: a resume that skipped a completed build phase re-gathers
     // nothing here (`assets` stays empty), so the binary adapter would see an
@@ -194,17 +213,14 @@ pub fn execute(
     // aggregated build manifest survive resume (journaling it per target) is a
     // documented follow-up. See `threads_no_assets_when_build_phase_is_resumed`
     // for the pinned current behavior.
-    let repo_slug = resolve_repo_slug(ctx, &targets);
-    let source_tarball = repo_slug
-        .as_deref()
-        .and_then(|slug| source_tarball(slug, plan, &targets));
     let artifacts = ReleaseArtifacts {
         assets,
         source_tarball,
         repo_slug,
+        homebrew,
     };
     // publish-all: per-target irreversible; receipts journalled per target. The
-    // publish phase is the only one that sees the computed artifacts.
+    // publish phase is the only one that sees the build-complete artifacts.
     publish_phase(journal, sink, &ctx.with_artifacts(&artifacts), &targets)?;
     // tag-once: coordinator-only, only after every publish succeeded.
     tag_phase(journal, sink, tagger, plan)?;
@@ -355,6 +371,30 @@ fn source_tarball(slug: &str, plan: &ReleasePlan, targets: &[TargetPlan]) -> Opt
     Some(SourceTarball {
         url: format!("https://github.com/{slug}/archive/refs/tags/{tag}.tar.gz"),
         sha256: None,
+    })
+}
+
+/// Resolve the Homebrew formula inputs — the destination tap + license — the
+/// [`homebrew`](super::adapters::homebrew) adapter's first-formula bootstrap
+/// needs beyond the source-tarball URL.
+///
+/// Only produced when a homebrew target is in the cut; other cuts thread `None`.
+/// Both values are carried on the (already content-addressed) plan, copied there
+/// from the normalized contract, so this is a pure re-projection — no external
+/// state, no re-reading the contract.
+fn homebrew_inputs(plan: &ReleasePlan, targets: &[TargetPlan]) -> Option<HomebrewFormula> {
+    let needed = targets.iter().any(|tp| {
+        matches!(
+            tp.input.target.adapter,
+            Adapter::HomebrewTap | Adapter::HomebrewCore
+        )
+    });
+    if !needed {
+        return None;
+    }
+    Some(HomebrewFormula {
+        tap: plan.homebrew_tap.clone(),
+        license: plan.license.clone(),
     })
 }
 

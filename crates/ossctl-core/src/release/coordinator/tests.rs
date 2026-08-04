@@ -273,6 +273,8 @@ fn two_target_plan() -> ReleasePlan {
             plan_target(Ecosystem::Node, Registry::Npm, Adapter::NpmPublish),
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
     }
 }
 
@@ -521,6 +523,8 @@ fn a_failed_build_never_publishes_or_tags() {
             Adapter::CargoPublish,
         )],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
     };
     // `dry_run` shells out to nothing, so fail the build step (`cargo package`)
     // and assert publish never runs and no tag is created.
@@ -714,6 +718,8 @@ fn threads_build_assets_into_binary_publish() {
             plan_target(Ecosystem::Binary, Registry::GhReleases, Adapter::Manual),
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
     };
     execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
 
@@ -761,6 +767,8 @@ fn threads_source_tarball_url_into_homebrew_publish() {
             plan_target(Ecosystem::Binary, Registry::Homebrew, Adapter::HomebrewTap),
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
     };
     execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
 
@@ -826,6 +834,8 @@ fn no_slug_lookup_without_a_github_distribution_target() {
             plan_target(Ecosystem::Python, Registry::Pypi, Adapter::Twine),
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
     };
     execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
 
@@ -868,6 +878,8 @@ fn threads_repo_slug_into_binary_receipt() {
             plan_target(Ecosystem::Binary, Registry::GhReleases, Adapter::Manual),
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
     };
     execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
 
@@ -923,6 +935,8 @@ fn threads_no_assets_when_build_phase_is_resumed() {
             plan_target(Ecosystem::Binary, Registry::GhReleases, Adapter::Manual),
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
     };
 
     // First attempt: the binary publish fails after build completed, leaving the
@@ -1004,6 +1018,8 @@ fn refuses_a_target_with_no_resolved_package() {
             adapter: Adapter::CargoPublish,
         }],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
     };
     let err = execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap_err();
     assert!(matches!(err, CutError::Plan(_)));

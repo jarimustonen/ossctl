@@ -65,6 +65,19 @@ pub struct ReleasePlan {
     /// therefore *not* part of the content address (an invariant cannot drift);
     /// carried here so the sealed artifact is self-describing for the approver.
     pub phases: Vec<PlanPhase>,
+    /// The Homebrew tap repo (`owner/repo`) the cut's generated formula is
+    /// pushed to, or `null` when the contract configured none. Copied verbatim
+    /// from the (already content-addressed) normalized contract's
+    /// `distribution.homebrew_tap` — carried on the plan, like [`Self::phases`],
+    /// only so the coordinator can hand it to the Homebrew adapter's
+    /// first-formula bootstrap without re-reading the contract. Being a copy of a
+    /// value the pre-image already hashes, it changes no `plan_id`.
+    pub homebrew_tap: Option<String>,
+    /// The SPDX license expression the cut's generated Homebrew formula records,
+    /// copied from the normalized contract's `license`. Carried for the same
+    /// reason (and with the same content-address neutrality) as
+    /// [`Self::homebrew_tap`].
+    pub license: Option<String>,
 }
 
 /// One concrete publish destination in a sealed plan.
