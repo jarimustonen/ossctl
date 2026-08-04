@@ -2,11 +2,14 @@
 created: 2026-08-04
 updated: 2026-08-04
 type: feature
-status: in-progress
+status: fixed
 priority: normal
 commits:
 - hash: c8354e2
   summary: fix(facts) pre-1.0 full-release-infra reaches production
+- hash: 55caf51
+  summary: review(facts) harden ZeroVer path — 0.1.0 floor + release cadence
+closed: 2026-08-04
 ---
 
 # maturity inference: production-grade pre-1.0 repos can't reach `production` tier
