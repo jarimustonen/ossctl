@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use super::*;
 use crate::contract::schema::{
     Changelog, ChangelogMode, ChangelogSource, Contract, ContributionProvenance, DependencyBot,
-    DocsSite, Ecosystem, HealthBadge, Maturity, ProvenanceLevel, Registry, Release, ReleaseLayout,
-    ReleaseModel, Status, Target, VersioningBase,
+    Distribution, DistributionAdapter, DocsSite, Ecosystem, HealthBadge, Maturity, ProvenanceLevel,
+    Registry, Release, ReleaseLayout, ReleaseModel, Status, Target, VersioningBase,
 };
 use crate::ports::{CommandOutput, CommandRunner};
 use crate::protocol::facts::{Facts, MaturitySignals};
@@ -207,6 +207,17 @@ fn contract_at(maturity: Maturity) -> Contract {
         docs_site: DocsSite::None,
         extra_fields: serde_json::Map::new(),
         warnings: vec![],
+    }
+}
+
+/// A binary-distribution block that builds exactly the given `platforms`.
+fn dist_with(platforms: &[&str]) -> Distribution {
+    Distribution {
+        adapter: DistributionAdapter::CargoDist,
+        gh_releases: true,
+        installers: vec![],
+        homebrew_tap: None,
+        platforms: platforms.iter().map(|s| (*s).to_string()).collect(),
     }
 }
 
@@ -528,6 +539,110 @@ fn registry_target_without_license_is_producer_gap() {
     let g = gap(&report, "registry-license");
     assert_eq!(g.category, Category::Producer);
     assert_eq!(g.member, "oss-readme");
+}
+
+// ── Cross-platform distribution policy (macOS AND Linux) ───────────────────
+
+#[test]
+fn distribution_without_linux_target_is_producer_gap() {
+    // An explicit, macOS-only platform set builds no Linux binary → gap.
+    let mut contract = contract_at(Maturity::Mvp);
+    contract.distribution = Some(dist_with(&["aarch64-apple-darwin", "x86_64-apple-darwin"]));
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n");
+    let report = audit(
+        repo(),
+        &contract,
+        &facts_with(Maturity::Mvp, true, None),
+        &fs,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    let g = gap(&report, "distribution-linux");
+    assert_eq!(g.category, Category::Producer);
+    assert_eq!(g.severity, Severity::Recommended);
+    assert_eq!(g.member, "oss-init");
+    assert!(g.detail.contains("Linux"));
+}
+
+#[test]
+fn distribution_with_linux_target_yields_no_gap() {
+    // The cross-platform default set (macOS + Linux musl) covers Linux → no gap.
+    let mut contract = contract_at(Maturity::Mvp);
+    contract.distribution = Some(dist_with(&[
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-musl",
+        "x86_64-unknown-linux-musl",
+    ]));
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n");
+    let report = audit(
+        repo(),
+        &contract,
+        &facts_with(Maturity::Mvp, true, None),
+        &fs,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    assert!(!ids(&report).contains(&"distribution-linux"));
+}
+
+#[test]
+fn distribution_with_gnu_linux_target_yields_no_gap() {
+    // A gnu (not musl) Linux triple still satisfies the policy.
+    let mut contract = contract_at(Maturity::Mvp);
+    contract.distribution = Some(dist_with(&[
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+    ]));
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n");
+    let report = audit(
+        repo(),
+        &contract,
+        &facts_with(Maturity::Mvp, true, None),
+        &fs,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    assert!(!ids(&report).contains(&"distribution-linux"));
+}
+
+#[test]
+fn no_distribution_block_yields_no_cross_platform_gap() {
+    // A registry-only repo (no `distribution`) is never flagged for Linux.
+    let contract = contract_at(Maturity::Production); // distribution: None
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n");
+    let report = audit(
+        repo(),
+        &contract,
+        &facts_with(Maturity::Production, true, None),
+        &fs,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    assert!(!ids(&report).contains(&"distribution-linux"));
+}
+
+#[test]
+fn distribution_without_linux_escalates_wording_at_production() {
+    // Same gap fires at production, but the detail marks it as policy-required.
+    let mut contract = contract_at(Maturity::Production);
+    contract.distribution = Some(dist_with(&["aarch64-apple-darwin"]));
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n");
+    let report = audit(
+        repo(),
+        &contract,
+        &facts_with(Maturity::Production, true, None),
+        &fs,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    let g = gap(&report, "distribution-linux");
+    assert!(g.detail.contains("required"), "detail: {}", g.detail);
 }
 
 // ── GitHub community standards + the unknown discipline ────────────────────
