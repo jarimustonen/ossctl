@@ -173,17 +173,24 @@ backlog, none urgent). Next act = cut v0.1.1 (engine-driven, user go + crates.io
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: (release-blocking backlog CLEARED — remaining lanes are post-release hardening)
-LANE A — release adapters + coordinator + plan/seal (crates/ossctl-core/src/release/**; TRUE shared-logic — SEQUENCE strictly)
-  ▶ cargo-per-member-receipts        (per-member publish receipts for multi-crate cuts — verify/reconcile visibility)
+GLOBAL HEAD-OF-LINE: distribution-cross-platform-targets   (cross-platform campaign keystone; blocks release)
+CROSS-PLATFORM CAMPAIGN (pre-release, user directive: all /oss-* output installs on Mac+Linux)
+LANE B — contract schema (crates/ossctl-core/src/contract/schema.rs — THE canonical serde model; SEQUENCE strictly)
+  ▶ distribution-cross-platform-targets  (KEYSTONE: platform target-set + Mac+Linux default; blocks readme/dist/audit)
+    distribution-monorepo-vec            (post-release: Vec<Distribution> + per-package association)
+    distribution-extra-fields            (post-release: extra_fields forward-compat on nested distribution structs)
+UNLANED cross-platform (run after keystone unless noted):
+    ossctl-readme-refresh          (README.md + AGENTS policy — no keystone dep, run anytime)
+    oss-readme-cross-platform-install   after distribution-cross-platform-targets (needs target field)
+    oss-release-cross-platform-dist     after distribution-cross-platform-targets (needs target field)
+    audit-cross-platform-gap            after distribution-cross-platform-targets (needs target field)
+LANE A — release adapters + coordinator + plan/seal (crates/ossctl-core/src/release/**; SEQUENCE strictly) — POST-RELEASE hardening
+    cargo-per-member-receipts        (per-member publish receipts for multi-crate cuts)
     plan-preimage-projection          (release/plan: hash a release-relevant projection, not the whole Contract)
     seal-verify-drift-dx              (release/plan: ergonomic SEAL_VERSION bump + golden-vector regen)
     homebrew-adapter-fs-port          (EffectCtx filesystem-write port — homebrew create path)
     homebrew-create-resume-journaling (journal homebrew create sub-steps / reconcile remote)
     homebrew-formula-non-rust         (generate non-Rust Homebrew formulas)
-LANE B — contract schema + facts inference (crates/ossctl-core/src/contract/schema.rs — THE canonical serde model; TRUE shared-logic — SEQUENCE strictly)
-  ▶ distribution-monorepo-vec         (schema.rs: Vec<Distribution> + per-package association)
-    distribution-extra-fields         (schema.rs: extra_fields forward-compat on nested distribution structs)
 ```
 <!-- execution-dag:end -->
 
