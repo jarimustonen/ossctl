@@ -2,12 +2,17 @@
 created: 2026-08-04
 updated: 2026-08-04
 type: improvement
-status: in-progress
+status: fixed
 priority: normal
 epic: ossctl-phase4-build
 commits:
 - hash: b7cf415
   summary: 'ci(release): wire cross-platform release.yml via cargo-dist'
+- hash: 6c05e06
+  summary: 'review(release): apply /llm-review findings to dist config'
+- hash: 25ad10a
+  summary: 'issues(gh-release-ci-workflow): record outcome'
+closed: 2026-08-04
 ---
 
 # gh-releases/cargo-dist: no real multi-platform release workflow
