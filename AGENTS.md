@@ -52,9 +52,23 @@ app beyond what the ADRs already fix.
   - `cargo build --workspace` (release build not required per-unit)
 - **Deploy: none per stint.** `ossctl` is a CLI library/binary; units land on `main`,
   they are not deployed to a server. *Publishing `ossctl` itself* (crates.io / GitHub
-  Release) is a deliberate future act — eventually dogfooded through `ossctl`'s own
-  `release cut` — never an automatic per-stint step. So `/stint` **skips Phase 4
-  (deploy)** here and says so.
+  Release / Homebrew) is a deliberate release act, never an automatic per-stint step —
+  so `/stint` **skips Phase 4 (deploy)** here and says so.
+  - **0.1.0 shipped 2026-08-04** (dogfood self-cut): crates.io `ossctl` + `ossctl-core`,
+    GitHub Release `v0.1.0`, Homebrew tap `jarimustonen/homebrew-ossctl` (source-build
+    formula). Repo is now **public**.
+  - **Releases are currently HAND-DRIVEN**, not via `ossctl release cut` — the self-cut
+    proved the engine can't yet publish a multi-crate workspace (dep order + index wait),
+    bootstrap a first Homebrew formula, or build cross-platform (issues
+    `cargo-adapter-workspace-publish`, `homebrew-adapter-first-formula`,
+    `gh-release-ci-workflow`). Until those land, the recipe is: `cargo publish -p
+    ossctl-core` → wait for index → `cargo publish -p ossctl`; `git tag vX.Y.Z && git push
+    --tags`; `gh release create`; bump the tap formula's `url`+`sha256`. Landing those three
+    issues makes v0.1.1 the first ENGINE-driven cut.
+- **No Code of Conduct — deliberate.** This project intentionally ships **no**
+  `CODE_OF_CONDUCT.md` (maintainer decision: no value seen). `ossctl audit` lists it as a
+  `recommended` gap — that is **expected and accepted**; do **not** propose adding one or
+  treat its absence as a defect.
 - **Live-version check:** `ossctl version --json` (once the binary builds); before that,
   `git log --oneline` against `main`.
 - **Hot files.** Two classes — do not treat them the same (learned across parallel
