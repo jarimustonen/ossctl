@@ -21,7 +21,7 @@ use crate::contract::schema::{
     Adapter, Changelog, ChangelogMode, ChangelogSource, Contract, ContributionProvenance,
     DependencyBot, Distribution, DistributionAdapter, DocsSite, Ecosystem, HealthBadge, Installer,
     Maturity, ProvenanceLevel, Registry, Release, ReleaseLayout, ReleaseModel, Status, Target,
-    VersioningBase, DEFAULT_FRAGMENT_DIR, KNOWN_SCHEMA_VERSION,
+    VersioningBase, DEFAULT_CROSS_PLATFORM_TARGETS, DEFAULT_FRAGMENT_DIR, KNOWN_SCHEMA_VERSION,
 };
 use crate::contract::spdx::spdx_valid;
 use crate::ports::Fs;
@@ -650,6 +650,7 @@ const INSTALLER_ORDER: [Installer; 5] = [
 /// layer). Absent/null → `None`, leaving a registry-only contract unchanged. A
 /// present-but-non-mapping value is an error (with `None` on the error path — the
 /// document is never emitted while `problems.errors` is non-empty).
+#[allow(clippy::too_many_lines)]
 fn parse_distribution(value: Option<&Value>, p: &mut Problems) -> Option<Distribution> {
     let m = match value {
         None | Some(Value::Null) => return None,
@@ -657,7 +658,7 @@ fn parse_distribution(value: Option<&Value>, p: &mut Problems) -> Option<Distrib
         Some(_) => {
             p.err(
                 "distribution must be a mapping with {adapter?, gh_releases?, installers?, \
-                 homebrew_tap?}"
+                 homebrew_tap?, platforms?}"
                     .to_string(),
             );
             return None;
@@ -764,12 +765,82 @@ fn parse_distribution(value: Option<&Value>, p: &mut Problems) -> Option<Distrib
         );
     }
 
+    // platforms — the binary target-triple set. Omitted/null/empty → the
+    // cross-platform default (macOS + Linux musl), so a distribution covers Linux
+    // by default (the cross-platform install requirement); this mirrors the
+    // `targets`-expanded-from-`ecosystems` "omitted → sensible default" pattern. An
+    // explicit list is validated per triple and de-duplicated, preserving the
+    // author's order (there is no canonical triple ordering to impose).
+    let platforms = match m.get("platforms") {
+        None | Some(Value::Null) => default_cross_platform_targets(),
+        Some(Value::Sequence(seq)) if seq.is_empty() => default_cross_platform_targets(),
+        Some(Value::Sequence(seq)) => {
+            let mut out: Vec<String> = Vec::new();
+            for item in seq {
+                match item.as_str() {
+                    Some(s) if is_target_triple(s) => {
+                        let triple = s.to_string();
+                        if !out.contains(&triple) {
+                            out.push(triple);
+                        }
+                    }
+                    Some(s) => p.err(format!(
+                        "distribution.platforms: '{s}' is not a valid Rust target-triple \
+                         (e.g. x86_64-unknown-linux-musl, aarch64-apple-darwin)"
+                    )),
+                    None => p.err(format!(
+                        "distribution.platforms: {} invalid — each entry must be a \
+                         target-triple string",
+                        yaml_display(item)
+                    )),
+                }
+            }
+            out
+        }
+        Some(v) => {
+            p.err(format!(
+                "distribution.platforms must be a list of target-triple strings, got {}",
+                yaml_display(v)
+            ));
+            default_cross_platform_targets()
+        }
+    };
+
     Some(Distribution {
         adapter,
         gh_releases,
         installers,
         homebrew_tap,
+        platforms,
     })
+}
+
+/// The cross-platform default `distribution.platforms` set as owned strings —
+/// materialized when the block omits `platforms` (or gives an empty list). Always
+/// contains at least one Linux triple (the cross-platform install requirement).
+fn default_cross_platform_targets() -> Vec<String> {
+    DEFAULT_CROSS_PLATFORM_TARGETS
+        .iter()
+        .map(|&s| s.to_string())
+        .collect()
+}
+
+/// Whether `s` is a plausible Rust target-triple — 2–4 `-`-separated components,
+/// each a non-empty run of `[a-z0-9_]`. Lexical only: the real triple set is
+/// open and rustc-defined, so this rejects what could never be a triple (empty
+/// parts, uppercase, whitespace, punctuation, injection chars) while accepting
+/// every standard one (`x86_64-unknown-linux-musl`, `aarch64-apple-darwin`,
+/// `x86_64-pc-windows-msvc`, `armv7-unknown-linux-gnueabihf`). The OS component
+/// stays intact and inspectable so `audit` can flag a Linux-less set downstream.
+fn is_target_triple(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    (2..=4).contains(&parts.len())
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        })
 }
 
 /// Whether `s` is a plausible `owner/repo` tap slug — exactly one `/`, and each
@@ -1478,6 +1549,144 @@ mod tests {
             &norm("---\nstatus: approved\nmaturity: mvp\ndistribution: [nope]\n---\n"),
             "distribution must be a mapping",
         );
+    }
+
+    // ── distribution.platforms (cross-platform target set) ───────────────────
+
+    /// Helper: does a platform list contain any Linux triple? The cross-platform
+    /// install requirement is "at least one Linux triple", inspected via the OS
+    /// component of the triple (exactly how `audit` will read this field).
+    fn has_linux(platforms: &[String]) -> bool {
+        platforms.iter().any(|t| t.contains("-linux"))
+    }
+
+    /// Omitted `platforms` → the cross-platform default (macOS + Linux). The
+    /// KEYSTONE assertion: the default covers Linux, so every distribution does.
+    #[test]
+    fn distribution_platforms_default_is_cross_platform() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n---\n";
+        let d = norm(text)
+            .contract
+            .distribution
+            .expect("distribution present");
+        assert_eq!(
+            d.platforms,
+            vec![
+                "aarch64-apple-darwin",
+                "x86_64-apple-darwin",
+                "aarch64-unknown-linux-musl",
+                "x86_64-unknown-linux-musl",
+            ]
+        );
+        assert!(
+            has_linux(&d.platforms),
+            "the default set MUST contain a Linux triple: {:?}",
+            d.platforms
+        );
+    }
+
+    /// An explicit `platforms` list round-trips through normalization and the
+    /// serialized JSON downstream members read, order + values preserved.
+    #[test]
+    fn distribution_platforms_explicit_round_trips() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  \
+                    platforms: [x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc]\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        let d = n.contract.clone().distribution.unwrap();
+        assert_eq!(
+            d.platforms,
+            vec!["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+        );
+        let json = serde_json::to_value(&n.contract).unwrap();
+        assert_eq!(
+            json["distribution"]["platforms"],
+            serde_json::json!(["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"])
+        );
+    }
+
+    /// An explicit but empty `platforms: []` falls back to the cross-platform
+    /// default (mirrors the empty-`targets` → expand behavior), so an empty list
+    /// can never silently drop Linux coverage.
+    #[test]
+    fn distribution_platforms_empty_falls_back_to_default() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  platforms: []\n---\n";
+        let d = norm(text).contract.distribution.unwrap();
+        assert!(has_linux(&d.platforms));
+        assert_eq!(d.platforms.len(), 4);
+    }
+
+    /// Duplicate triples de-duplicate, preserving first-seen order.
+    #[test]
+    fn distribution_platforms_dedup_preserves_order() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  \
+                    platforms: [aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-darwin]\n---\n";
+        let d = norm(text).contract.distribution.unwrap();
+        assert_eq!(
+            d.platforms,
+            vec!["aarch64-apple-darwin", "x86_64-apple-darwin"]
+        );
+    }
+
+    /// A malformed triple is rejected with a message naming the field.
+    #[test]
+    fn distribution_platforms_bad_triple_rejected() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  platforms: [not_a_triple]\n---\n";
+        assert_error_contains(&norm(text), "is not a valid Rust target-triple");
+    }
+
+    /// A non-string entry (a nested list) is rejected structurally.
+    #[test]
+    fn distribution_platforms_non_string_entry_rejected() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  platforms: [[nope]]\n---\n";
+        assert_error_contains(&norm(text), "each entry must be a target-triple string");
+    }
+
+    /// A `platforms` value that is not a list is a structural error.
+    #[test]
+    fn distribution_platforms_non_list_rejected() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  platforms: x86_64-apple-darwin\n---\n";
+        assert_error_contains(&norm(text), "must be a list of target-triple strings");
+    }
+
+    /// Regression: a registry-only contract (no distribution block at all) is
+    /// wholly unaffected by the additive `platforms` field — no distribution, so
+    /// no `platforms` in the emitted shape.
+    #[test]
+    fn registry_only_contract_unaffected_by_platforms() {
+        let json = serde_json::to_value(
+            &norm("---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\n---\n").contract,
+        )
+        .unwrap();
+        assert!(json["distribution"].is_null());
+    }
+
+    #[test]
+    fn is_target_triple_verdicts() {
+        // Standard triples across arch/vendor/os/env shapes.
+        assert!(is_target_triple("aarch64-apple-darwin"));
+        assert!(is_target_triple("x86_64-apple-darwin"));
+        assert!(is_target_triple("x86_64-unknown-linux-musl"));
+        assert!(is_target_triple("x86_64-unknown-linux-gnu"));
+        assert!(is_target_triple("x86_64-pc-windows-msvc"));
+        assert!(is_target_triple("armv7-unknown-linux-gnueabihf"));
+        assert!(is_target_triple("wasm32-wasi"));
+        // Rejects: too few/many components, empty parts, case, punctuation.
+        assert!(!is_target_triple("linux"));
+        assert!(!is_target_triple("a-b-c-d-e"));
+        assert!(!is_target_triple("x86_64--linux"));
+        assert!(!is_target_triple("-apple-darwin"));
+        assert!(!is_target_triple("X86_64-apple-darwin"));
+        assert!(!is_target_triple("x86_64-apple-darwin;rm"));
+        assert!(!is_target_triple("x86_64 apple darwin"));
+        assert!(!is_target_triple(""));
     }
 
     #[test]

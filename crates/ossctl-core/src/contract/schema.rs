@@ -35,6 +35,22 @@ pub const KNOWN_SCHEMA_VERSION: u32 = 1;
 /// The changelog fragment directory materialized when the config omits it.
 pub const DEFAULT_FRAGMENT_DIR: &str = "changelog/fragments";
 
+/// The cross-platform default [`Distribution::platforms`] set materialized when a
+/// distribution block omits `platforms`: macOS (`aarch64` + `x86_64`) and Linux
+/// (`aarch64` + `x86_64`). This is the KEYSTONE of the cross-platform install
+/// requirement — every downstream cargo-dist distribution the `/oss-*` family
+/// models covers Linux **by default**, so a repo that never thinks about it still
+/// ships Linux binaries. musl over gnu for Linux: a statically-linked pure-binary
+/// CLI has no glibc-version cliff. Windows is a deliberate omission (a bonus a repo
+/// opts into by listing it explicitly, never the default). The set always contains
+/// at least one Linux triple.
+pub const DEFAULT_CROSS_PLATFORM_TARGETS: [&str; 4] = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-musl",
+];
+
 /// Define a closed enum whose variants each map to a fixed wire string.
 ///
 /// Generates the enum (with the standard derives), [`as_str`] (variant → wire),
@@ -286,6 +302,16 @@ pub struct Distribution {
     /// or `null` when no tap is used. Required when `installers` includes
     /// `homebrew` (floor).
     pub homebrew_tap: Option<String>,
+    /// The platform target set — the Rust target-triples this binary distribution
+    /// builds and ships. Always non-empty in the canonical output: defaulted to the
+    /// cross-platform [`DEFAULT_CROSS_PLATFORM_TARGETS`] set (macOS + Linux) when the
+    /// source omits it, so every distribution covers Linux by default (the
+    /// cross-platform install requirement). An explicit set is validated per triple
+    /// and de-duplicated, preserving the author's order. Each entry is a lexically
+    /// validated triple whose OS component stays inspectable, so `audit` can flag a
+    /// Linux-less set — the normalizer only guarantees the field is present and every
+    /// triple well-formed, not that the set covers any particular OS.
+    pub platforms: Vec<String>,
 }
 
 /// The changelog block of the contract (SCHEMA.md §1). `fragment_dir` is always
