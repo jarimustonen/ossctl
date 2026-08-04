@@ -162,30 +162,29 @@ Scheduling PLAN — source of truth for lane + order; issuectl is authoritative 
 `after <slug> (needs …)` = logical blocked_by mirror. `collision: <file>` = touches a
 second lane's hot file (spawn-time exclusion).
 
-Stint #10 cleared the entire RELEASE-BLOCKING backlog. Landed + closed `fixed` (all reviewed):
-`maturity-inference-pre-1-0-production`, `contract-cannot-model-cargo-dist-release`,
-`cargo-adapter-workspace-publish` (dep-order + index-wait workspace publish),
-`gh-release-ci-workflow` (cross-platform release.yml), `homebrew-adapter-first-formula`
-(create-vs-bump bootstrap), `adapter-publish-completeness` (all 6 adapters now REAL/honest).
-`ossctl release plan --version 0.1.1` now seals a valid engine plan — the release path is GREEN.
-The 8 remaining issues are ALL review-spawned hardening/forward-compat spin-offs (post-release
-backlog, none urgent). Next act = cut v0.1.1 (engine-driven, user go + crates.io token required).
+Stint #10 cleared the release-blocking backlog AND the cross-platform (Mac+Linux) campaign
+(user directive: all /oss-* output must install on macOS AND Linux). Landed + closed `fixed`
+(all reviewed): maturity-inference, contract-cargo-dist-modeling, cargo-workspace-publish,
+gh-release-ci (cross-platform release.yml, musl+shell), homebrew-first-formula,
+adapter-publish-completeness (all 6 adapters REAL/honest), distribution-cross-platform-targets
+(`distribution.platforms`, Linux-by-default), oss-readme/oss-release cross-platform docs,
+audit-cross-platform-gap, ossctl-readme-refresh (+ AGENTS cross-platform policy).
+`ossctl release plan --version 0.1.1` seals a valid engine plan; 342 tests green. ALL remaining
+issues are post-release hardening/future spin-offs. Next act = cut v0.1.1 (engine-driven, user
+go + crates.io token required); that publishes Linux artifacts and closes linux-release-binaries.
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: distribution-cross-platform-targets   (cross-platform campaign keystone; blocks release)
-CROSS-PLATFORM CAMPAIGN (pre-release, user directive: all /oss-* output installs on Mac+Linux)
-LANE B — contract schema (crates/ossctl-core/src/contract/schema.rs — THE canonical serde model; SEQUENCE strictly)
-  ▶ distribution-cross-platform-targets  (KEYSTONE: platform target-set + Mac+Linux default; blocks readme/dist/audit)
-    distribution-monorepo-vec            (post-release: Vec<Distribution> + per-package association)
-    distribution-extra-fields            (post-release: extra_fields forward-compat on nested distribution structs)
-UNLANED cross-platform (run after keystone unless noted):
-    linux-release-binaries         (A) ossctl-own: config DONE via gh-release-ci (musl); CLOSES when 0.1.1 cut publishes Linux artifacts
-    ossctl-readme-refresh          (README.md + AGENTS policy — no keystone dep, run anytime)
-    oss-readme-cross-platform-install   after distribution-cross-platform-targets (needs target field)
-    oss-release-cross-platform-dist     after distribution-cross-platform-targets (needs target field)
-    audit-cross-platform-gap            after distribution-cross-platform-targets (needs target field)
-LANE A — release adapters + coordinator + plan/seal (crates/ossctl-core/src/release/**; SEQUENCE strictly) — POST-RELEASE hardening
+GLOBAL HEAD-OF-LINE: (cross-platform campaign DONE + release-blocking backlog CLEARED — cut v0.1.1 next; all lanes below are POST-RELEASE)
+UNLANED — release-gated:
+    linux-release-binaries         (A) config DONE via gh-release-ci (musl); CLOSES when 0.1.1 cut publishes Linux artifacts
+LANE B — contract schema (crates/ossctl-core/src/contract/schema.rs — SEQUENCE strictly) — POST-RELEASE hardening
+    distribution-monorepo-vec            (Vec<Distribution> + per-package association)
+    distribution-extra-fields            (extra_fields forward-compat on nested distribution structs)
+    distribution-installer-platform-crosscheck (validate installer/platform coherence)
+    distribution-platforms-adapter-neutral     (platforms field adapter-neutrality)
+LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly) — POST-RELEASE
+    release-engine-dist-config-generator (BUILD the downstream cargo-dist config generator — currently only documented)
     cargo-per-member-receipts        (per-member publish receipts for multi-crate cuts)
     plan-preimage-projection          (release/plan: hash a release-relevant projection, not the whole Contract)
     seal-verify-drift-dx              (release/plan: ergonomic SEAL_VERSION bump + golden-vector regen)
