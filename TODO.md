@@ -154,7 +154,7 @@ shared-logic files (`contract/schema.rs`, a shared `protocol/*.rs` module).
 - The prose `/oss-*` skills currently referenced from homebase move here over time
   (`migrate-oss-init`, `prose-skills`); after migration, remove the homebase copies.
 
-## Execution DAG (2026-08-02)
+## Execution DAG (2026-08-04)
 
 Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
 (never copied here). Merge at Phase 0/7 (drop landed, add active, keep existing order).
@@ -162,29 +162,29 @@ Scheduling PLAN — source of truth for lane + order; issuectl is authoritative 
 `after <slug> (needs …)` = logical blocked_by mirror. `collision: <file>` = touches a
 second lane's hot file (spawn-time exclusion).
 
-Stint #9 shipped 0.1.0 (dogfood self-cut). Landed + closed this stint: `OSS-RELEASE.md`
-(approved), `prep-crates-io-publish`, `facts-workspace-members`, `readiness-artifacts` — all
-dropped from the DAG. The self-cut exposed three engine gaps (new issues) that must land before
-the ENGINE can cut v0.1.1 by itself. Next head-of-line = the engine-completion lane.
+Stint #10 (this round, user-directed) targets **LANE B** — the two dogfood feedback issues
+from running `/oss-init` on issuectl. `migrate-oss-init` closed (homebase copy removed) — dropped
+from the DAG. Both LANE B units touch `contract/schema.rs` (the canonical serde model: `Maturity`
+enum + the `Target`/adapter model) → TRUE shared-logic hot file → **sequenced, not parallel**.
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: cargo-adapter-workspace-publish
+GLOBAL HEAD-OF-LINE: maturity-inference-pre-1-0-production   (this round, per user direction)
 LANE A — release adapters + coordinator (crates/ossctl-core/src/release/**; TRUE shared-logic — SEQUENCE strictly)
   ▶ cargo-adapter-workspace-publish   (adapters/cargo.rs: dep-order publish + index wait for a workspace)
     homebrew-adapter-first-formula    (adapters/homebrew.rs: create initial .rb, not just bump-formula-pr)
+LANE B — contract schema + facts inference (crates/ossctl-core/src/contract/schema.rs — THE canonical serde model; TRUE shared-logic — SEQUENCE strictly)
+  ▶ maturity-inference-pre-1-0-production        (facts/mod.rs truth table + Maturity signal — decouple ≥1.0 gate / add override)
+    contract-cannot-model-cargo-dist-release     (schema.rs: binary/gh-releases target type + cargo-dist sub-config + schema_version bump)
 UNLANED — confirmed no shared hot files, run anytime (one slug per line):
     gh-release-ci-workflow         (cargo-dist / release.yml — cross-platform binaries on tag push)
-    migrate-oss-init               (UNBLOCKED: ossctl now installs via brew/cargo — remove homebase /oss-init copy)
     adapter-publish-completeness   (umbrella: cargo/python/go/node BUILD-side skeletons — non-urgent)
 ```
 <!-- execution-dag:end -->
 
-Note: the head-of-line is the dogfood sequence (config authoring + real release cut), tracked
-in NEXT ROUND above rather than as a DAG lane node — it produces `OSS-RELEASE.md` and cuts
-0.1.0, it is not a hot-file coding unit. `adapter-publish-completeness` stays open only for
-the non-Rust BUILD-side adapter skeletons. `migrate-oss-init` cannot start until ossctl
-installs on PATH (which the dogfood cut delivers).
+Note: LANE A (engine-completion) stays the priority path for an ENGINE-driven v0.1.1 cut but is
+out of scope this round. `adapter-publish-completeness` stays open only for the non-Rust
+BUILD-side adapter skeletons.
 
 ## Backlog
 
