@@ -162,20 +162,25 @@ Scheduling PLAN — source of truth for lane + order; issuectl is authoritative 
 `after <slug> (needs …)` = logical blocked_by mirror. `collision: <file>` = touches a
 second lane's hot file (spawn-time exclusion).
 
-Stint #10 (this round, user-directed) targets **LANE B** — the two dogfood feedback issues
-from running `/oss-init` on issuectl. `migrate-oss-init` closed (homebase copy removed) — dropped
-from the DAG. Both LANE B units touch `contract/schema.rs` (the canonical serde model: `Maturity`
-enum + the `Target`/adapter model) → TRUE shared-logic hot file → **sequenced, not parallel**.
+Stint #10 landed both dogfood feedback issues from running `/oss-init` on issuectl:
+`maturity-inference-pre-1-0-production` (decoupled the ≥1.0 gate) and
+`contract-cannot-model-cargo-dist-release` (first-class `distribution` block; SEAL_VERSION 1→2) —
+both reviewed (4-model `/llm-review`), green, closed `fixed`, dropped from the DAG. Its review
+filed 4 follow-up spin-offs, now added to the lanes: `distribution-monorepo-vec` +
+`distribution-extra-fields` (LANE B, schema.rs), `plan-preimage-projection` + `seal-verify-drift-dx`
+(LANE A, release/plan seal). None urgent.
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: maturity-inference-pre-1-0-production   (this round, per user direction)
-LANE A — release adapters + coordinator (crates/ossctl-core/src/release/**; TRUE shared-logic — SEQUENCE strictly)
+GLOBAL HEAD-OF-LINE: cargo-adapter-workspace-publish   (highest priority; LANE A engine-completion path)
+LANE A — release adapters + coordinator + plan/seal (crates/ossctl-core/src/release/**; TRUE shared-logic — SEQUENCE strictly)
   ▶ cargo-adapter-workspace-publish   (adapters/cargo.rs: dep-order publish + index wait for a workspace)
     homebrew-adapter-first-formula    (adapters/homebrew.rs: create initial .rb, not just bump-formula-pr)
+    plan-preimage-projection          (release/plan: hash a release-relevant projection, not the whole Contract)
+    seal-verify-drift-dx              (release/plan: ergonomic SEAL_VERSION bump + golden-vector regen)
 LANE B — contract schema + facts inference (crates/ossctl-core/src/contract/schema.rs — THE canonical serde model; TRUE shared-logic — SEQUENCE strictly)
-  ▶ maturity-inference-pre-1-0-production        (facts/mod.rs truth table + Maturity signal — decouple ≥1.0 gate / add override)
-    contract-cannot-model-cargo-dist-release     (schema.rs: binary/gh-releases target type + cargo-dist sub-config + schema_version bump)
+  ▶ distribution-monorepo-vec         (schema.rs: Vec<Distribution> + per-package association)
+    distribution-extra-fields         (schema.rs: extra_fields forward-compat on nested distribution structs)
 UNLANED — confirmed no shared hot files, run anytime (one slug per line):
     gh-release-ci-workflow         (cargo-dist / release.yml — cross-platform binaries on tag push)
     adapter-publish-completeness   (umbrella: cargo/python/go/node BUILD-side skeletons — non-urgent)
