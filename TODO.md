@@ -162,28 +162,28 @@ Scheduling PLAN — source of truth for lane + order; issuectl is authoritative 
 `after <slug> (needs …)` = logical blocked_by mirror. `collision: <file>` = touches a
 second lane's hot file (spawn-time exclusion).
 
-Stint #10 landed both dogfood feedback issues from running `/oss-init` on issuectl:
-`maturity-inference-pre-1-0-production` (decoupled the ≥1.0 gate) and
-`contract-cannot-model-cargo-dist-release` (first-class `distribution` block; SEAL_VERSION 1→2) —
-both reviewed (4-model `/llm-review`), green, closed `fixed`, dropped from the DAG. Its review
-filed 4 follow-up spin-offs, now added to the lanes: `distribution-monorepo-vec` +
-`distribution-extra-fields` (LANE B, schema.rs), `plan-preimage-projection` + `seal-verify-drift-dx`
-(LANE A, release/plan seal). None urgent.
+Stint #10 cleared the entire RELEASE-BLOCKING backlog. Landed + closed `fixed` (all reviewed):
+`maturity-inference-pre-1-0-production`, `contract-cannot-model-cargo-dist-release`,
+`cargo-adapter-workspace-publish` (dep-order + index-wait workspace publish),
+`gh-release-ci-workflow` (cross-platform release.yml), `homebrew-adapter-first-formula`
+(create-vs-bump bootstrap), `adapter-publish-completeness` (all 6 adapters now REAL/honest).
+`ossctl release plan --version 0.1.1` now seals a valid engine plan — the release path is GREEN.
+The 8 remaining issues are ALL review-spawned hardening/forward-compat spin-offs (post-release
+backlog, none urgent). Next act = cut v0.1.1 (engine-driven, user go + crates.io token required).
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: cargo-adapter-workspace-publish   (highest priority; LANE A engine-completion path)
+GLOBAL HEAD-OF-LINE: (release-blocking backlog CLEARED — remaining lanes are post-release hardening)
 LANE A — release adapters + coordinator + plan/seal (crates/ossctl-core/src/release/**; TRUE shared-logic — SEQUENCE strictly)
-  ▶ cargo-adapter-workspace-publish   (adapters/cargo.rs: dep-order publish + index wait for a workspace)
-    homebrew-adapter-first-formula    (adapters/homebrew.rs: create initial .rb, not just bump-formula-pr)
+  ▶ cargo-per-member-receipts        (per-member publish receipts for multi-crate cuts — verify/reconcile visibility)
     plan-preimage-projection          (release/plan: hash a release-relevant projection, not the whole Contract)
     seal-verify-drift-dx              (release/plan: ergonomic SEAL_VERSION bump + golden-vector regen)
+    homebrew-adapter-fs-port          (EffectCtx filesystem-write port — homebrew create path)
+    homebrew-create-resume-journaling (journal homebrew create sub-steps / reconcile remote)
+    homebrew-formula-non-rust         (generate non-Rust Homebrew formulas)
 LANE B — contract schema + facts inference (crates/ossctl-core/src/contract/schema.rs — THE canonical serde model; TRUE shared-logic — SEQUENCE strictly)
   ▶ distribution-monorepo-vec         (schema.rs: Vec<Distribution> + per-package association)
     distribution-extra-fields         (schema.rs: extra_fields forward-compat on nested distribution structs)
-UNLANED — confirmed no shared hot files, run anytime (one slug per line):
-    gh-release-ci-workflow         (cargo-dist / release.yml — cross-platform binaries on tag push)
-    adapter-publish-completeness   (umbrella: cargo/python/go/node BUILD-side skeletons — non-urgent)
 ```
 <!-- execution-dag:end -->
 
