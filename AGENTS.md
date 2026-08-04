@@ -65,6 +65,14 @@ app beyond what the ADRs already fix.
     ossctl-core` → wait for index → `cargo publish -p ossctl`; `git tag vX.Y.Z && git push
     --tags`; `gh release create`; bump the tap formula's `url`+`sha256`. Landing those three
     issues makes v0.1.1 the first ENGINE-driven cut.
+- **Cross-platform is a hard requirement (macOS AND Linux).** All software the `/oss-*`
+  family produces — and `ossctl` itself — MUST install and run on **both macOS and Linux**
+  (arm64 and x86_64). This is `/oss-*` family canon, not a nice-to-have: a release path
+  that works on only one OS is incomplete. In practice that means every shipped tool
+  offers a source path (`cargo install` / equivalent) plus prebuilt binaries and installers
+  covering macOS (arm64 + x86_64) and Linux (statically-linked `musl`, arm64 + x86_64). For
+  `ossctl` this is wired via `dist-workspace.toml` (cargo-dist) and the Homebrew tap
+  (macOS + Linuxbrew). Treat a macOS-only or Linux-only install story as a release gap.
 - **No Code of Conduct — deliberate.** This project intentionally ships **no**
   `CODE_OF_CONDUCT.md` (maintainer decision: no value seen). `ossctl audit` lists it as a
   `recommended` gap — that is **expected and accepted**; do **not** propose adding one or
