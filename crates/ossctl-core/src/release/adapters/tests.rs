@@ -545,6 +545,115 @@ fn cargo_dist_publish_is_unsupported_from_host() {
     assert!(cmd.calls().is_empty());
 }
 
+#[test]
+fn release_please_publish_is_unsupported_from_host() {
+    // release-please publishes on merge via a CI job keyed off the GitHub release;
+    // there is no faithful host publish, so it must report Unsupported rather than
+    // run a representative command and fabricate an npm receipt.
+    let cmd = FakeCmd::new();
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Node,
+        Registry::Npm,
+        Adapter::ReleasePlease,
+        "1.0.0",
+    );
+    let err = resolve(Adapter::ReleasePlease).publish(&c, &t).unwrap_err();
+    assert!(matches!(
+        err,
+        AdapterError::Unsupported {
+            operation: "publish",
+            ..
+        }
+    ));
+    assert!(
+        cmd.calls().is_empty(),
+        "an unsupported publish must run no command"
+    );
+}
+
+#[test]
+fn npm_publish_runs_the_real_publish_and_returns_a_receipt() {
+    // Guards the REAL npm path: `npm publish` runs and the receipt records the
+    // npmjs.com URL for the published version.
+    let cmd = FakeCmd::new();
+    let clock = FakeClock(7);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target(Ecosystem::Node, Registry::Npm, Adapter::NpmPublish, "1.0.0");
+    let r = resolve(Adapter::NpmPublish).publish(&c, &t).unwrap();
+    assert_eq!(cmd.calls(), vec!["npm publish".to_string()]);
+    assert_eq!(r.package, "tool");
+    assert_eq!(r.version, "1.0.0");
+    assert_eq!(
+        r.remote_url.as_deref(),
+        Some("https://www.npmjs.com/package/tool/v/1.0.0")
+    );
+}
+
+#[test]
+fn changeset_publish_runs_the_real_publish() {
+    // Guards the REAL changesets path: `changeset publish` runs.
+    let cmd = FakeCmd::new();
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target(Ecosystem::Node, Registry::Npm, Adapter::Changesets, "1.0.0");
+    resolve(Adapter::Changesets).publish(&c, &t).unwrap();
+    assert_eq!(cmd.calls(), vec!["changeset publish".to_string()]);
+}
+
+#[test]
+fn node_build_reads_the_real_tarball_name_from_npm_pack_json() {
+    // A scoped package `@scope/pkg` packs to `scope-pkg-{ver}.tgz`, not
+    // `{pkg}-{ver}.tgz`; build must report the name npm actually produced so the
+    // asset threaded to the binary upload set is correct.
+    let cmd = FakeCmd::new().stdout_calls_containing(
+        "pack",
+        r#"[{"filename":"scope-pkg-1.0.0.tgz","name":"@scope/pkg","version":"1.0.0"}]"#,
+    );
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target_named(
+        Ecosystem::Node,
+        Registry::Npm,
+        Adapter::NpmPublish,
+        "@scope/pkg",
+        "1.0.0",
+    );
+    let b = resolve(Adapter::NpmPublish).build(&c, &t).unwrap();
+    assert_eq!(cmd.calls(), vec!["npm pack --json".to_string()]);
+    assert_eq!(b.artifacts, vec!["scope-pkg-1.0.0.tgz".to_string()]);
+    assert!(b.notes.is_empty());
+}
+
+#[test]
+fn node_build_falls_back_to_the_conventional_name_without_parseable_json() {
+    // An npm that emits no parseable --json payload must not fail the build; it
+    // falls back to `{package}-{version}.tgz` and records a note.
+    let cmd = FakeCmd::new();
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target(Ecosystem::Node, Registry::Npm, Adapter::NpmPublish, "1.0.0");
+    let b = resolve(Adapter::NpmPublish).build(&c, &t).unwrap();
+    assert_eq!(b.artifacts, vec!["tool-1.0.0.tgz".to_string()]);
+    assert!(!b.notes.is_empty(), "the fallback records a note");
+}
+
 // ── Multi-crate workspace: dep-order publish + crates.io index-wait ──────────
 
 #[test]
