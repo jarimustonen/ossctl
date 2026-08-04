@@ -2,13 +2,14 @@
 created: 2026-08-04
 updated: 2026-08-04
 type: feature
-status: in-progress
+status: fixed
 priority: normal
 commits:
 - hash: 2ce27d7
   summary: first-class distribution block + normalize/validate + SEAL_VERSION bump + tests
 - hash: ed3854a
   summary: apply /llm-review panel findings (adapter-required, spike floor, tap-slug hardening, dead-config warn)
+closed: 2026-08-04
 ---
 
 # OSS-RELEASE contract can't model a cargo-dist release (binaries + installer + Homebrew tap) alongside registry publishes
