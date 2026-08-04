@@ -35,6 +35,20 @@ pub trait CommandRunner {
 pub trait Clock {
     /// Current time as whole seconds since the Unix epoch.
     fn now_unix(&self) -> u64;
+
+    /// Block for `dur` before returning — the passage of real time, injected so
+    /// waits are deterministic and instant under test.
+    ///
+    /// The release engine's crates.io index-wait (the multi-crate workspace
+    /// publish path, [`crate::release::adapters::cargo`]) polls between attempts
+    /// through this method. The default performs a genuine
+    /// [`std::thread::sleep`], so the production [`Clock`] waits for real without
+    /// implementing anything extra; a deterministic test fake overrides it to
+    /// advance a virtual clock instead of sleeping, so a bounded-wait loop
+    /// terminates instantly and without a real delay.
+    fn sleep(&self, dur: std::time::Duration) {
+        std::thread::sleep(dur);
+    }
 }
 
 /// Generates opaque, unique, non-deterministic identifiers — run ids and the

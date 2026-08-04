@@ -216,6 +216,20 @@ pub enum AdapterError {
         /// The operation that is unsupported (`"publish"`, `"build"`, …).
         operation: &'static str,
     },
+    /// A just-published artifact did not become visible on its registry index
+    /// within the wait ceiling, so a dependent artifact could not be published
+    /// safely. Distinct from [`Self::Command`]: the publish itself *succeeded* —
+    /// only the between-publishes index-wait timed out (the multi-crate cargo
+    /// workspace path, where a dependent crate must not publish until its
+    /// workspace dependency is index-visible; see [`cargo`](super::cargo)).
+    IndexTimeout {
+        /// The published package still absent from the index.
+        package: String,
+        /// The version being waited for.
+        version: String,
+        /// How long the wait lasted before giving up, in seconds.
+        waited_secs: u64,
+    },
 }
 
 impl std::fmt::Display for AdapterError {
@@ -234,6 +248,16 @@ impl std::fmt::Display for AdapterError {
                 f,
                 "adapter `{}` does not support `{operation}` from this host",
                 adapter.as_str()
+            ),
+            Self::IndexTimeout {
+                package,
+                version,
+                waited_secs,
+            } => write!(
+                f,
+                "`{package}@{version}` did not appear on the registry index within \
+                 {waited_secs}s after publishing; a dependent crate cannot be published \
+                 until it is visible"
             ),
         }
     }

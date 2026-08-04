@@ -3,7 +3,7 @@
 //! injected runner, and `verify` classification across all four outcomes —
 //! including the outage ⇒ `Unknown` path (never a false `Missing`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
@@ -21,6 +21,9 @@ struct FakeCmd {
     calls: RefCell<Vec<String>>,
     fail: Option<(String, i32, String)>,
     spawn_err: bool,
+    /// Canned stdout served for `cargo metadata` (the workspace graph). `None`
+    /// means empty output — the adapter then degrades to a single-crate publish.
+    metadata: Option<String>,
 }
 
 impl FakeCmd {
@@ -29,6 +32,7 @@ impl FakeCmd {
             calls: RefCell::new(Vec::new()),
             fail: None,
             spawn_err: false,
+            metadata: None,
         }
     }
     fn failing(program: &str, code: i32, stderr: &str) -> Self {
@@ -42,6 +46,12 @@ impl FakeCmd {
             spawn_err: true,
             ..Self::new()
         }
+    }
+    /// Serve `json` as the `cargo metadata` output so the adapter discovers a
+    /// workspace graph.
+    fn with_metadata(mut self, json: &str) -> Self {
+        self.metadata = Some(json.to_string());
+        self
     }
     fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
@@ -65,6 +75,13 @@ impl CommandRunner for FakeCmd {
                 });
             }
         }
+        if args.contains(&"metadata") {
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: self.metadata.clone().unwrap_or_default(),
+                stderr: String::new(),
+            });
+        }
         Ok(CommandOutput {
             status: Some(0),
             stdout: String::new(),
@@ -78,6 +95,55 @@ struct FakeClock(u64);
 impl Clock for FakeClock {
     fn now_unix(&self) -> u64 {
         self.0
+    }
+}
+
+/// A clock whose `sleep` advances virtual time instead of waiting, so a bounded
+/// index-wait loop terminates instantly and deterministically under test.
+struct AdvancingClock(Cell<u64>);
+impl AdvancingClock {
+    fn new() -> Self {
+        Self(Cell::new(0))
+    }
+}
+impl Clock for AdvancingClock {
+    fn now_unix(&self) -> u64 {
+        self.0.get()
+    }
+    fn sleep(&self, dur: Duration) {
+        // Advance at least a second per sleep so a zero-second interval can never
+        // stall the timeout comparison.
+        self.0.set(self.0.get() + dur.as_secs().max(1));
+    }
+}
+
+/// A registry where a package becomes visible only after `visible_after` polls —
+/// exercises the index-wait poll/sleep loop reaching success mid-wait.
+struct DelayedRegistry {
+    package: String,
+    version: String,
+    visible_after: Cell<u32>,
+}
+impl DelayedRegistry {
+    fn new(package: &str, version: &str, visible_after: u32) -> Self {
+        Self {
+            package: package.to_string(),
+            version: version.to_string(),
+            visible_after: Cell::new(visible_after),
+        }
+    }
+}
+impl RegistryQuery for DelayedRegistry {
+    fn published_versions(&self, _ecosystem: &str, package: &str) -> io::Result<Vec<String>> {
+        if package != self.package {
+            return Ok(vec![]);
+        }
+        let remaining = self.visible_after.get();
+        if remaining == 0 {
+            return Ok(vec![self.version.clone()]);
+        }
+        self.visible_after.set(remaining - 1);
+        Ok(vec![])
     }
 }
 
@@ -155,6 +221,24 @@ fn ctx_with<'a>(
     }
 }
 
+/// Like [`ctx`], but with an [`AdvancingClock`] and a trait-object registry — for
+/// the multi-crate publish path, which polls the registry and sleeps between
+/// index checks.
+fn ctx_advancing<'a>(
+    runner: &'a FakeCmd,
+    clock: &'a AdvancingClock,
+    registry: &'a dyn RegistryQuery,
+    root: &'a Path,
+) -> EffectCtx<'a> {
+    EffectCtx {
+        runner,
+        clock,
+        registry,
+        repo_root: root,
+        artifacts: &EMPTY_ARTIFACTS,
+    }
+}
+
 fn target(
     ecosystem: Ecosystem,
     registry: Registry,
@@ -171,6 +255,30 @@ fn target(
         package: "tool".to_string(),
         version: version.to_string(),
     }
+}
+
+/// `cargo metadata` JSON for a single-crate workspace named `name`@`version`.
+fn metadata_single(name: &str, version: &str) -> String {
+    let id = format!("{name} {version}");
+    format!(
+        r#"{{"packages":[{{"name":"{name}","version":"{version}","id":"{id}","dependencies":[],"publish":null}}],"workspace_members":["{id}"]}}"#
+    )
+}
+
+/// `cargo metadata` JSON for a two-crate workspace where `bin` depends on `lib`
+/// (and `lib` dev-depends back on `bin` — a legitimate cycle the ordering must
+/// ignore). Both share `version`.
+fn metadata_two_crate(lib: &str, bin: &str, version: &str) -> String {
+    let lib_id = format!("{lib} {version}");
+    let bin_id = format!("{bin} {version}");
+    format!(
+        r#"{{"packages":[
+            {{"name":"{bin}","version":"{version}","id":"{bin_id}","publish":null,
+              "dependencies":[{{"name":"{lib}","kind":null}}]}},
+            {{"name":"{lib}","version":"{version}","id":"{lib_id}","publish":null,
+              "dependencies":[{{"name":"{bin}","kind":"dev"}}]}}
+        ],"workspace_members":["{lib_id}","{bin_id}"]}}"#
+    )
 }
 
 fn receipt(ecosystem: Ecosystem, version: &str, digest: Option<&str>) -> PublishReceipt {
@@ -234,7 +342,7 @@ fn every_adapter_has_a_nonzero_timeout() {
 
 #[test]
 fn dry_run_plans_commands_without_running_them() {
-    let cmd = FakeCmd::new();
+    let cmd = FakeCmd::new().with_metadata(&metadata_single("tool", "1.2.3"));
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
     let root = Path::new("/repo");
@@ -254,8 +362,12 @@ fn dry_run_plans_commands_without_running_them() {
         report.planned_commands[0].rendered(),
         "cargo publish -p tool --dry-run"
     );
-    // dry_run must not execute anything.
-    assert!(cmd.calls().is_empty(), "dry_run ran a command");
+    // dry_run reads the workspace graph (read-only) but must not execute any
+    // publish — the only command it runs is the `cargo metadata` query.
+    assert_eq!(
+        cmd.calls(),
+        vec!["cargo metadata --no-deps --format-version 1"]
+    );
 }
 
 #[test]
@@ -295,7 +407,7 @@ fn dry_run_available_for_every_ecosystem() {
 
 #[test]
 fn publish_runs_the_registry_command_and_returns_a_receipt() {
-    let cmd = FakeCmd::new();
+    let cmd = FakeCmd::new().with_metadata(&metadata_single("tool", "2.0.0"));
     let clock = FakeClock(42);
     let reg = FakeRegistry::new();
     let root = Path::new("/repo");
@@ -309,7 +421,14 @@ fn publish_runs_the_registry_command_and_returns_a_receipt() {
     );
     let r = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap();
 
-    assert_eq!(cmd.calls(), vec!["cargo publish -p tool"]);
+    // A single-crate workspace publishes exactly once, with no index-wait after.
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "cargo metadata --no-deps --format-version 1",
+            "cargo publish -p tool"
+        ]
+    );
     assert_eq!(r.adapter, Adapter::CargoPublish);
     assert_eq!(r.ecosystem, Ecosystem::Rust);
     assert_eq!(r.package, "tool");
@@ -376,6 +495,159 @@ fn cargo_dist_publish_is_unsupported_from_host() {
         }
     ));
     assert!(cmd.calls().is_empty());
+}
+
+// ── Multi-crate workspace: dep-order publish + crates.io index-wait ──────────
+
+#[test]
+fn workspace_publishes_members_in_dependency_order_with_index_wait() {
+    // `bin` depends on `lib`, so `lib` must publish first and be index-visible
+    // before `bin` publishes. `lib` is visible on the second poll — exercising a
+    // real (bounded) wait that succeeds mid-loop.
+    let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "1.0.0"));
+    let clock = AdvancingClock::new();
+    let reg = DelayedRegistry::new("lib", "1.0.0", 1);
+    let root = Path::new("/repo");
+    let c = ctx_advancing(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.0.0",
+    );
+    let r = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap();
+
+    // lib is published, then waited-for, then bin — never the other order.
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "cargo metadata --no-deps --format-version 1",
+            "cargo publish -p lib",
+            "cargo publish -p bin",
+        ]
+    );
+    // The receipt names the target's primary package (published last).
+    assert_eq!(r.package, "tool");
+    assert_eq!(r.version, "1.0.0");
+}
+
+#[test]
+fn workspace_index_wait_succeeds_when_version_already_visible() {
+    // `lib` is already on the index, so the wait returns on the first poll (the
+    // clock never has to advance).
+    let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "1.0.0"));
+    let clock = AdvancingClock::new();
+    let reg = FakeRegistry::new().with("rust", "lib", &["1.0.0"]);
+    let root = Path::new("/repo");
+    let c = ctx_advancing(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.0.0",
+    );
+    resolve(Adapter::CargoPublish).publish(&c, &t).unwrap();
+
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "cargo metadata --no-deps --format-version 1",
+            "cargo publish -p lib",
+            "cargo publish -p bin",
+        ]
+    );
+    // The wait never had to sleep — the version was visible immediately.
+    assert_eq!(clock.now_unix(), 0);
+}
+
+#[test]
+fn workspace_index_wait_times_out_and_stops_before_the_dependent() {
+    // `lib` never becomes index-visible, so the wait after publishing it exhausts
+    // the timeout — and `bin` (which depends on it) must NOT publish.
+    let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "1.0.0"));
+    let clock = AdvancingClock::new();
+    let reg = FakeRegistry::new(); // empty — lib never appears
+    let root = Path::new("/repo");
+    let c = ctx_advancing(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.0.0",
+    );
+    let err = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap_err();
+
+    match err {
+        AdapterError::IndexTimeout {
+            package, version, ..
+        } => {
+            assert_eq!(package, "lib");
+            assert_eq!(version, "1.0.0");
+        }
+        other => panic!("expected IndexTimeout, got {other:?}"),
+    }
+    // lib published; the timeout stopped the cut before the dependent bin.
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "cargo metadata --no-deps --format-version 1",
+            "cargo publish -p lib",
+        ]
+    );
+}
+
+#[test]
+fn workspace_dry_run_reports_the_ordered_plan_and_waits() {
+    let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "1.0.0"));
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.0.0",
+    );
+    let report = resolve(Adapter::CargoPublish).dry_run(&c, &t).unwrap();
+
+    // One dry-run publish per member, in dependency order.
+    let rendered: Vec<String> = report
+        .planned_commands
+        .iter()
+        .map(crate::protocol::release::PlannedCommand::rendered)
+        .collect();
+    assert_eq!(
+        rendered,
+        vec![
+            "cargo publish -p lib --dry-run",
+            "cargo publish -p bin --dry-run",
+        ]
+    );
+    // The notes describe the order and the index-wait between dependent publishes.
+    assert!(
+        report.notes.iter().any(|n| n.contains("lib → bin")),
+        "notes missing the publish order: {:?}",
+        report.notes
+    );
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("wait for crates.io to index `lib@1.0.0`")),
+        "notes missing the index-wait: {:?}",
+        report.notes
+    );
+    // dry_run runs only the read-only metadata query — no publish.
+    assert!(
+        !cmd.calls().iter().any(|call| call.contains("publish")),
+        "dry_run executed a publish: {:?}",
+        cmd.calls()
+    );
 }
 
 #[test]
