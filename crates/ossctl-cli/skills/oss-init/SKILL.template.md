@@ -198,7 +198,7 @@ docs_site: none
 | `maturity` | `spike` \| `mvp` \| `production` | inferred (tie → `mvp`) | Master dial. Take it from `ossctl facts`'s `inferred_maturity`. Required. |
 | `ecosystems` | `rust` \| `node` \| `python` \| `go` \| `binary` | inferred from manifests | Multi-valued. `homebrew` is a target, not an ecosystem. `binary` only when NO package ecosystem was detected — never additive to `rust`/`node`/`python`/`go`. |
 | `targets` | list of `{ecosystem, package?, registry, adapter?}` | derived from `ecosystems` | Expanded by the normalizer when omitted. `package` may be `null`. **Registry publishes only** — the binary/installer/tap layer is `distribution`. |
-| `distribution` | `{adapter?, gh_releases?, installers?, homebrew_tap?}` or omitted | omitted → `null` | The cargo-dist/goreleaser binary layer, **coexisting with** `targets`. `adapter`: `cargo-dist` \| `goreleaser` \| `manual` (default `cargo-dist`). `gh_releases`: bool, default `true`. `installers`: any of `shell`/`powershell`/`homebrew`/`msi`/`npm`. `homebrew_tap`: `owner/repo` slug — **required when** `installers` includes `homebrew` (floor). Emit this for a cargo-dist repo so downstream members SEE the tap + installer and do NOT regenerate `release.yml`. |
+| `distribution` | `{adapter, gh_releases?, installers?, homebrew_tap?}` or omitted | omitted → `null` | The cargo-dist/goreleaser binary layer, **coexisting with** `targets`. `adapter` (**required when the block is present** — not inferred): `cargo-dist` \| `goreleaser` \| `manual`. `gh_releases`: bool, default `true`. `installers`: any of `shell`/`powershell`/`homebrew`/`msi`/`npm`. `homebrew_tap`: `owner/repo` slug — **required when** `installers` includes `homebrew` (floor); a tap without a `homebrew` installer is a *warning* (dead config). Emit this for a cargo-dist repo so downstream members SEE the tap + installer and do NOT regenerate `release.yml`. |
 | `versioning` | `semver` \| `calver:<pattern>` \| `zerover` | `semver` | `calver` carries its pattern. `contract show` splits this into `versioning` + `versioning_pattern`. |
 | `changelog.mode` | `curated` \| `automated` \| `fragment` | `fragment` if multi-contributor, else `curated` | |
 | `changelog.source` | `issuectl-trailers` \| `conventional-commits` \| `manual` | `issuectl-trailers` if `issues/` present, else `manual` | |
@@ -228,6 +228,7 @@ docs_site: none
 5. `schema_version` must not exceed what the tool knows.
 6. `changelog.fragment_dir` must be a **relative path inside the repo**.
 7. `distribution.installers` including `homebrew` requires a `distribution.homebrew_tap` (`owner/repo`).
+8. A `distribution` block requires an explicit `adapter` and is forbidden at `maturity: spike` (a spike is not published).
 
 > **A not-yet-created producer is a warning, never a failure.** A config that points at a
 > `changelog/fragments` dir `/oss-changelog` will make later yields a *note*, not an error —

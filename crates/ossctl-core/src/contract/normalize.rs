@@ -429,6 +429,17 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
         ));
     }
     check_badge_producers(&health_badges, maturity, &targets, p);
+    // A distribution block ships public binaries (GH-Release artifacts, a curl-pipe
+    // installer, a Homebrew tap PR) — that is publishing, and a spike is not being
+    // published. Mirrors the `release.model: auto` floor: raise maturity or drop the
+    // block. (Absent block → no constraint; registry-only spikes are unaffected.)
+    if distribution.is_some() && maturity == Maturity::Spike {
+        p.err(
+            "floor: a distribution block ships public binaries (installer + tap) — not allowed on \
+             maturity 'spike' (a spike is not being published); raise maturity or drop distribution"
+                .to_string(),
+        );
+    }
 
     // ── Filesystem/producer-existence semantic check — ADVISORY, never fatal ─
     if changelog.mode == ChangelogMode::Fragment
@@ -653,13 +664,33 @@ fn parse_distribution(value: Option<&Value>, p: &mut Problems) -> Option<Distrib
         }
     };
 
-    let adapter = enum_field!(
-        m,
-        "adapter",
-        DistributionAdapter,
-        DistributionAdapter::CargoDist,
-        p
-    );
+    // adapter — required when the block is present. Which tool OWNS the existing
+    // tag-triggered release workflow is not the normalizer's to guess (it renames
+    // release semantics and picks a Rust-specific default); inference is
+    // /oss-init's job, exactly as for `maturity`. A bare `distribution: {}` is
+    // therefore an error, not a silent "cargo-dist owns this repo".
+    let adapter = match m.get("adapter") {
+        None => {
+            p.err(
+                "distribution.adapter is required when a distribution block is present \
+                 (cargo-dist|goreleaser|manual) — /oss-init infers it"
+                    .to_string(),
+            );
+            DistributionAdapter::CargoDist
+        }
+        Some(v) => {
+            if let Some(a) = v.as_str().and_then(DistributionAdapter::parse) {
+                a
+            } else {
+                p.err(format!(
+                    "distribution.adapter {} invalid — must be one of {:?}",
+                    yaml_display(v),
+                    DistributionAdapter::VALID
+                ));
+                DistributionAdapter::CargoDist
+            }
+        }
+    };
 
     let gh_releases = match m.get("gh_releases") {
         // cargo-dist/goreleaser attach per-platform binaries by default.
@@ -695,11 +726,16 @@ fn parse_distribution(value: Option<&Value>, p: &mut Problems) -> Option<Distrib
         None | Some(Value::Null) => None,
         Some(v) => match v.as_str() {
             Some(s) if is_tap_slug(s) => Some(s.to_string()),
+            // An invalid slug substitutes `None` (not the bad value) so the
+            // built `Distribution` never carries a malformed tap — matching the
+            // "placeholders keep the strong type" error-path rule the rest of the
+            // normalizer follows, and letting the homebrew-needs-tap floor below
+            // still fire (a present-but-invalid tap is no tap).
             Some(s) => {
                 p.err(format!(
                     "distribution.homebrew_tap '{s}' invalid — must be an 'owner/repo' slug"
                 ));
-                Some(s.to_string())
+                None
             }
             None => {
                 p.err("distribution.homebrew_tap must be an 'owner/repo' string".to_string());
@@ -708,11 +744,22 @@ fn parse_distribution(value: Option<&Value>, p: &mut Problems) -> Option<Distrib
         },
     };
 
+    let wants_homebrew = installers.contains(&Installer::Homebrew);
     // Floor: a `homebrew` installer needs a tap to push the generated formula to.
-    if installers.contains(&Installer::Homebrew) && homebrew_tap.is_none() {
+    if wants_homebrew && homebrew_tap.is_none() {
         p.err(
             "floor: distribution.installers includes 'homebrew' but no distribution.homebrew_tap \
              is set — the generated formula has nowhere to be pushed"
+                .to_string(),
+        );
+    }
+    // Advisory: a tap with no `homebrew` installer is dead config — the formula
+    // is never generated, so the tap is never pushed to. A warning, not a floor:
+    // the contract is internally consistent, just wasteful.
+    if homebrew_tap.is_some() && !wants_homebrew {
+        p.warn(
+            "distribution.homebrew_tap is set but 'homebrew' is not in distribution.installers — \
+             no formula is generated, so the tap will never be updated"
                 .to_string(),
         );
     }
@@ -725,16 +772,23 @@ fn parse_distribution(value: Option<&Value>, p: &mut Problems) -> Option<Distrib
     })
 }
 
-/// Whether `s` is a plausible `owner/repo` tap slug: exactly one `/`, both parts
-/// non-empty and free of whitespace. Lexical only — existence is not checked.
+/// Whether `s` is a plausible `owner/repo` tap slug — exactly one `/`, and each
+/// part a non-empty run of the GitHub-name character set (ASCII alphanumeric plus
+/// `-`, `_`, `.`), with `.`/`..` rejected. Lexical only — existence is not
+/// checked. Deliberately strict: this value flows into `brew tap` and repo URLs
+/// downstream, so arbitrary punctuation, whitespace, or path traversal
+/// (`owner/..`) must not pass.
 fn is_tap_slug(s: &str) -> bool {
+    fn valid_part(part: &str) -> bool {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    }
     match s.split_once('/') {
-        Some((owner, repo)) => {
-            !owner.is_empty()
-                && !repo.is_empty()
-                && !repo.contains('/')
-                && !s.chars().any(char::is_whitespace)
-        }
+        Some((owner, repo)) => valid_part(owner) && valid_part(repo) && !repo.contains('/'),
         None => false,
     }
 }
@@ -1318,7 +1372,7 @@ mod tests {
     #[test]
     fn distribution_installers_dedup_canonical_order() {
         let text = "---\nstatus: approved\nmaturity: mvp\n\
-                    distribution:\n  installers: [homebrew, shell, homebrew]\n  \
+                    distribution:\n  adapter: cargo-dist\n  installers: [homebrew, shell, homebrew]\n  \
                     homebrew_tap: owner/tap\n---\n";
         let d = norm(text).contract.distribution.unwrap();
         assert_eq!(d.installers, vec![Installer::Shell, Installer::Homebrew]);
@@ -1328,27 +1382,79 @@ mod tests {
     #[test]
     fn distribution_homebrew_installer_requires_tap() {
         let text = "---\nstatus: approved\nmaturity: mvp\n\
-                    distribution:\n  installers: [shell, homebrew]\n---\n";
+                    distribution:\n  adapter: cargo-dist\n  installers: [shell, homebrew]\n---\n";
         assert_error_contains(
             &norm(text),
             "includes 'homebrew' but no distribution.homebrew_tap",
         );
     }
 
-    /// A malformed tap slug (not `owner/repo`) is rejected.
+    /// A malformed tap slug (not `owner/repo`) is rejected AND, because the
+    /// invalid value substitutes `None`, the homebrew-needs-tap floor still fires
+    /// — a present-but-invalid tap must not slip a `homebrew` installer through.
     #[test]
     fn distribution_bad_tap_slug_rejected() {
         let text = "---\nstatus: approved\nmaturity: mvp\n\
-                    distribution:\n  homebrew_tap: not-a-slug\n---\n";
-        assert_error_contains(&norm(text), "must be an 'owner/repo' slug");
+                    distribution:\n  adapter: cargo-dist\n  installers: [homebrew]\n  \
+                    homebrew_tap: not-a-slug\n---\n";
+        let n = norm(text);
+        assert_error_contains(&n, "must be an 'owner/repo' slug");
+        assert!(
+            n.problems
+                .errors
+                .iter()
+                .any(|e| e.contains("includes 'homebrew' but no distribution.homebrew_tap")),
+            "the tap floor must still fire on an invalid (→None) tap: {:?}",
+            n.problems.errors
+        );
+        // The malformed slug never leaks into the built block.
+        assert_eq!(n.contract.distribution.unwrap().homebrew_tap, None);
     }
 
     /// An unknown installer flavor surfaces an error listing the valid set.
     #[test]
     fn distribution_bad_installer_rejected() {
         let text = "---\nstatus: approved\nmaturity: mvp\n\
-                    distribution:\n  installers: [snap]\n---\n";
+                    distribution:\n  adapter: cargo-dist\n  installers: [snap]\n---\n";
         assert_error_contains(&norm(text), "distribution.installers");
+    }
+
+    /// `adapter` is required when a distribution block is present — a bare
+    /// `distribution: {}` must not silently claim cargo-dist ownership.
+    #[test]
+    fn distribution_adapter_is_required() {
+        assert_error_contains(
+            &norm("---\nstatus: approved\nmaturity: mvp\ndistribution: {}\n---\n"),
+            "distribution.adapter is required",
+        );
+    }
+
+    /// A distribution block ships public binaries — forbidden at maturity 'spike'
+    /// (mirrors the `release.model: auto`-on-spike floor).
+    #[test]
+    fn distribution_forbidden_on_spike() {
+        let text = "---\nstatus: approved\nmaturity: spike\n\
+                    distribution:\n  adapter: cargo-dist\n---\n";
+        assert_error_contains(&norm(text), "not allowed on maturity 'spike'");
+    }
+
+    /// A `homebrew_tap` set without a `homebrew` installer is dead config — a
+    /// warning, not a floor (the contract is still valid).
+    #[test]
+    fn distribution_tap_without_installer_warns() {
+        let text = "---\nstatus: approved\nmaturity: mvp\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [shell]\n  \
+                    homebrew_tap: owner/tap\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("homebrew_tap is set but 'homebrew' is not")),
+            "expected dead-tap warning: {:?}",
+            n.problems.warnings
+        );
     }
 
     /// A goreleaser distribution with no installers and no tap is valid — the
@@ -1376,12 +1482,21 @@ mod tests {
 
     #[test]
     fn is_tap_slug_verdicts() {
+        // Valid GitHub-style slugs.
         assert!(is_tap_slug("owner/repo"));
         assert!(is_tap_slug("jarimustonen/homebrew-issuectl"));
+        assert!(is_tap_slug("Owner_1/repo.rb"));
+        // Structural rejects.
         assert!(!is_tap_slug("no-slash"));
         assert!(!is_tap_slug("/repo"));
         assert!(!is_tap_slug("owner/"));
         assert!(!is_tap_slug("owner/repo/extra"));
         assert!(!is_tap_slug("owner / repo"));
+        // Strict-charset rejects: path traversal, punctuation, injection chars.
+        assert!(!is_tap_slug("owner/.."));
+        assert!(!is_tap_slug("../repo"));
+        assert!(!is_tap_slug("owner/repo;rm -rf"));
+        assert!(!is_tap_slug("owner/@repo"));
+        assert!(!is_tap_slug("ownér/repo"));
     }
 }

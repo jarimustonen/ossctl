@@ -2,8 +2,11 @@
 created: 2026-08-04
 updated: 2026-08-04
 type: feature
-status: open
+status: in-progress
 priority: normal
+commits:
+- hash: 2ce27d7
+  summary: first-class distribution block + normalize/validate + SEAL_VERSION bump + tests
 ---
 
 # OSS-RELEASE contract can't model a cargo-dist release (binaries + installer + Homebrew tap) alongside registry publishes
