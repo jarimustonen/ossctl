@@ -2,13 +2,16 @@
 created: 2026-08-05
 updated: 2026-08-05
 type: feature
-status: in-progress
+status: done
 priority: high
 epic: ossctl-phase4-build
 blocked_by: ['@release-cut-multi-target-ecosystem']
 commits:
 - hash: 24c1946
   summary: coordinator drives cargo-dist+homebrew flow (CI-delegated skip + post-tag homebrew sha256)
+- hash: d849753
+  summary: apply /llm-review fixes (cross-platform hash, temp cleanup, fetch retry, v1 completion, resume delegated-by-capability); file 3 follow-ups
+closed: 2026-08-05
 ---
 
 # release cut can't drive the cargo-dist + homebrew flow (skip CI-delegated targets + post-tag homebrew)
