@@ -1,9 +1,10 @@
 ---
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-08-05
 type: feature
-status: open
+status: fixed
 priority: normal
+closed: 2026-08-05
 ---
 
 # Publish Linux release binaries (x86_64/aarch64-unknown-linux-gnu)
