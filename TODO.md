@@ -105,14 +105,13 @@ LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly)
   [DONE stint #12] cargo-publish-pin-crates-io-registry     (fixed — pinned cargo adapter to crates.io, rejects other registries)
   [DONE stint #12] release-list-abandon-not-implemented     (fixed — `release list` + `abandon` implemented over the journal; in-flight gate + recovery net)
   --- minimal safe path to the 0.2.0 engine cut: COMPLETE (all 6 above landed & green) ---
-  ▶ << cut 0.2.0 THROUGH the engine — the dogfooding proof that retires the 4-step manual recipe.
-       PROCEDURE: (1) update ossctl's OSS-RELEASE.md contract to declare the full target set
-       (2 crates.io: ossctl-core+ossctl; gh-releases/cargo-dist; homebrew) if not already;
-       (2) `ossctl release cut --dry-run` (or seal/plan stage) to validate the plan WITHOUT
-       publishing; (3) real engine cut; (4) manual post-cut `gh release view v0.2.0` check that
-       cargo-dist CI created the Release + assets (Option 1 delegates it), until
-       release-verify-delegated-github-release automates it. crates.io is irreversible — never
-       publish red; dry-run first. >>
+  ▶ << CUT 0.2.0 THROUGH the engine — the dogfooding proof that retires the 4-step manual recipe.
+     · PROCEDURE (1) update ossctl's OSS-RELEASE.md contract to declare the full target set
+     · — 2 crates.io (ossctl-core + ossctl) + gh-releases/cargo-dist + homebrew — if not already;
+     · (2) `ossctl release cut --dry-run` / seal-plan stage to validate the plan WITHOUT publishing;
+     · (3) real engine cut; (4) manual post-cut `gh release view v0.2.0` check that CI created the
+     · Release + assets (Option 1 delegates it), until release-verify-delegated-github-release
+     · automates it. crates.io is irreversible — dry-run first, never cut red. >>
   --- production-safe hardening (deferred PAST the first cut — do not gate 0.2.0 on these) ---
     resume-publish-phase-never-reached  (bug — `release resume` demands --allow-unverified even when publish phase was never entered; safe to pass it meanwhile. Filed by list-abandon review)
     release-abandon-break-stale-lock    (improvement — `abandon` can't auto-break a stale single-active-cut lock after a hard-kill; shipped stopgap names the lock-file path for manual clearing. All 4 reviewers flagged. Filed by list-abandon review)
