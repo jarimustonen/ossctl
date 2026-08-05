@@ -96,15 +96,15 @@ homebase-adjacent. So do NOT harden LANE C now — that polishes a manual path w
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: cargo-publish-pin-crates-io-registry   (LANE A — small registry-pin safety fix; last code prereq before release-list-abandon + the 0.2.0 cut)
+GLOBAL HEAD-OF-LINE: release-list-abandon-not-implemented   (LANE A — LAST code prereq before the 0.2.0 engine cut: in-flight gate + recovery net)
 LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly) — Track B: make `ossctl release cut` cut ossctl ITSELF (0.2.0 dogfooding proof)
   [DONE stint #12] release-cut-multi-target-ecosystem       (fixed — >1 target/ecosystem now cut in dep order)
   [DONE stint #12] cargo-adapter-multitarget-double-publish (fixed — Option 1 "one target = one publish unit"; ADR-0004; no more double-publish of ossctl-core)
   [DONE stint #12] release-engine-cut-cargo-dist-flow       (done — coordinator skips CI-delegated targets + post-tag homebrew phase with real sha256)
   [DONE stint #12] coordinator-release-vs-cargo-dist-ownership (done — Option 1: coordinator delegates GH Release to CI when a CI-delegated target is present; ci_owns_github_release flag, seal v3)
+  [DONE stint #12] cargo-publish-pin-crates-io-registry     (fixed — pinned cargo adapter to crates.io, rejects other registries)
   --- minimal safe path to the 0.2.0 engine cut (all gate the cut) ---
-  ▶ cargo-publish-pin-crates-io-registry (bug — pin `--registry crates-io` + reject non-crates.io target; guards vs silent wrong-registry publish. Small, cheap insurance before an IRREVERSIBLE publish. Filed by ADR-0004 review)
-    release-list-abandon-not-implemented (bug — `release list`/`abandon` unimplemented; recovery net BEFORE trusting the engine with a real cut)
+  ▶ release-list-abandon-not-implemented (bug — `release list`/`abandon` unimplemented (cli/src/release.rs:137-138); implement enough for the /oss-release in-flight gate + recovery. LAST code prereq before the cut)
     << then: cut 0.2.0 THROUGH the engine — the dogfooding proof that retires the 4-step manual recipe. NOTE: Option 1 means the GH Release is created by cargo-dist CI, so the cut procedure MUST include a manual post-cut `gh release view vX.Y.Z` check that CI created the Release + assets (until release-verify-delegated-github-release automates it) >>
   --- production-safe hardening (deferred PAST the first cut — do not gate 0.2.0 on these) ---
     release-verify-delegated-github-release (task — `ossctl release verify` should query GitHub to confirm CI actually created a delegated Release, instead of assuming success. Automates the manual post-cut check above. Filed by ownership review)
