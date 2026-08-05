@@ -754,70 +754,129 @@ fn tag_archive_url(slug: &str, version: &str) -> String {
     format!("https://github.com/{slug}/archive/refs/tags/v{version}.tar.gz")
 }
 
+/// How many times to (re)fetch the tag archive before giving up. GitHub's archive
+/// endpoint is eventually consistent with a just-pushed tag — it can 404 for a few
+/// seconds after `push_tag` — so a single fetch would spuriously fail the dist phase
+/// on an otherwise-healthy cut.
+const TAG_ARCHIVE_FETCH_ATTEMPTS: u32 = 5;
+
+/// Backoff between tag-archive fetch attempts (through [`Clock::sleep`], so tests
+/// advance a virtual clock rather than sleeping for real).
+///
+/// [`Clock::sleep`]: crate::ports::Clock::sleep
+const TAG_ARCHIVE_FETCH_BACKOFF: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Compute the `sha256` of the pushed tag archive at `url` by downloading and
 /// hashing it through the injected [`CommandRunner`](crate::ports::CommandRunner)
 /// — the coordinator never touches the network or filesystem directly.
 ///
-/// Two commands, both through the runner: `curl` streams the archive to a private,
-/// unpredictable temp file, then `shasum -a 256` hashes it (its digest lands on
-/// stdout, so a test fake supplies it deterministically and the coordinator never
-/// reads the file itself). The temp file is best-effort removed (again through the
-/// runner). This hashes the EXACT bytes the formula's `url` serves — GitHub's tag
-/// archive for the just-pushed tag — matching the working manual recipe; a local
-/// `git archive` is deliberately NOT used (its gzip framing diverges from GitHub's
-/// served tarball, so its digest would be wrong and `brew` would reject the
-/// download).
+/// Both effects go through the runner: `curl` streams the archive to a private,
+/// unpredictable temp file (with a bounded retry, since the archive can be briefly
+/// 404 right after the tag is pushed), then a SHA-256 CLI hashes it (its digest
+/// lands on stdout, so a test fake supplies it deterministically and the coordinator
+/// never reads the file itself). The temp file is removed on **every** exit path.
+/// This hashes the EXACT bytes the formula's `url` serves — GitHub's tag archive for
+/// the just-pushed tag — matching the working manual recipe; a local `git archive`
+/// is deliberately NOT used (its gzip framing diverges from GitHub's served tarball,
+/// so its digest would be wrong and `brew` would reject the download).
 ///
 /// Returns the lowercase 64-hex digest, or an operator-facing error string when the
 /// download/hash could not be performed or produced no usable digest.
 fn compute_source_tarball_sha256(ctx: &EffectCtx<'_>, url: &str) -> Result<String, String> {
     let tmp = source_tarball_tmp_path();
     let tmp_str = tmp.to_string_lossy().to_string();
-
-    // 1. Download the tag archive to the temp file (`-f` fails on an HTTP error,
-    //    `-L` follows GitHub's redirect to codeload).
-    let dl = ctx
-        .runner
-        .run("curl", &["-sSfL", "-o", &tmp_str, url], ctx.repo_root)
-        .map_err(|e| format!("cannot run `curl` to fetch the source tarball `{url}`: {e}"))?;
-    if dl.status != Some(0) {
-        return Err(format!(
-            "`curl` could not fetch the source tarball `{url}` (exit {}): {}",
-            dl.status
-                .map_or_else(|| "signal".to_string(), |c| c.to_string()),
-            dl.stderr.trim()
-        ));
-    }
-
-    // 2. Hash it. `shasum -a 256 <file>` prints `<hex>  <file>` on stdout.
-    let out = ctx
-        .runner
-        .run("shasum", &["-a", "256", &tmp_str], ctx.repo_root)
-        .map_err(|e| format!("cannot run `shasum` to hash the source tarball: {e}"))?;
-    // Best-effort cleanup, routed through the runner so the coordinator performs no
-    // direct filesystem effect. Its outcome is irrelevant to the digest.
+    let result = fetch_and_hash(ctx, url, &tmp_str);
+    // Clean up on EVERY path (success or failure), routed through the runner so the
+    // coordinator performs no direct filesystem effect. Its outcome is irrelevant.
     let _ = ctx.runner.run("rm", &["-f", &tmp_str], ctx.repo_root);
-    if out.status != Some(0) {
-        return Err(format!(
-            "`shasum` could not hash the source tarball (exit {}): {}",
+    result
+}
+
+/// Download the tag archive to `tmp` (with retry) then hash it. Split from
+/// [`compute_source_tarball_sha256`] so the caller can guarantee temp-file cleanup
+/// regardless of which step fails.
+fn fetch_and_hash(ctx: &EffectCtx<'_>, url: &str, tmp: &str) -> Result<String, String> {
+    fetch_tag_archive(ctx, url, tmp)?;
+    hash_file(ctx, tmp)
+}
+
+/// Fetch `url` to `tmp` via `curl`, retrying a non-zero exit (a transient 404 on the
+/// not-yet-consistent tag archive) up to [`TAG_ARCHIVE_FETCH_ATTEMPTS`] with backoff.
+/// A spawn failure (`curl` absent) is fatal immediately — retrying cannot help.
+/// `--` terminates option parsing so a `url` starting with `-` can never be read as
+/// a flag.
+fn fetch_tag_archive(ctx: &EffectCtx<'_>, url: &str, tmp: &str) -> Result<(), String> {
+    let mut last = String::new();
+    for attempt in 0..TAG_ARCHIVE_FETCH_ATTEMPTS {
+        let out = ctx
+            .runner
+            .run("curl", &["-sSfL", "-o", tmp, "--", url], ctx.repo_root)
+            .map_err(|e| format!("cannot run `curl` to fetch the source tarball `{url}`: {e}"))?;
+        if out.status == Some(0) {
+            return Ok(());
+        }
+        last = format!(
+            "exit {}: {}",
             out.status
                 .map_or_else(|| "signal".to_string(), |c| c.to_string()),
             out.stderr.trim()
-        ));
+        );
+        if attempt + 1 < TAG_ARCHIVE_FETCH_ATTEMPTS {
+            ctx.clock.sleep(TAG_ARCHIVE_FETCH_BACKOFF);
+        }
     }
-    let digest = out
-        .stdout
+    Err(format!(
+        "`curl` could not fetch the source tarball `{url}` after {TAG_ARCHIVE_FETCH_ATTEMPTS} \
+         attempts ({last}); the tag archive may not be published yet"
+    ))
+}
+
+/// Hash the file at `tmp` with a SHA-256 CLI, returning the lowercase 64-hex digest.
+///
+/// Cross-platform: tries `sha256sum` (GNU coreutils — the Linux default) then
+/// `shasum -a 256` (Perl — the macOS default), so a homebrew cut works on both
+/// (`shasum` alone is absent on many Linux hosts — the portability landmine every
+/// reviewer flagged). Both print the digest as the first whitespace token, which
+/// [`parse_sha256_hex`] extracts; a missing tool (spawn error) or non-zero exit
+/// falls through to the next candidate.
+fn hash_file(ctx: &EffectCtx<'_>, tmp: &str) -> Result<String, String> {
+    let candidates: [(&str, Vec<&str>); 2] =
+        [("sha256sum", vec![tmp]), ("shasum", vec!["-a", "256", tmp])];
+    let mut last = String::from("no SHA-256 tool succeeded");
+    for (program, args) in &candidates {
+        match ctx.runner.run(program, args, ctx.repo_root) {
+            Ok(out) if out.status == Some(0) => match parse_sha256_hex(&out.stdout) {
+                Some(digest) => return Ok(digest),
+                None => {
+                    last = format!(
+                        "`{program}` produced no parseable sha256: {:?}",
+                        out.stdout.trim()
+                    );
+                }
+            },
+            Ok(out) => {
+                last = format!(
+                    "`{program}` exited {}",
+                    out.status
+                        .map_or_else(|| "signal".to_string(), |c| c.to_string())
+                );
+            }
+            Err(e) => last = format!("cannot run `{program}`: {e}"),
+        }
+    }
+    Err(format!(
+        "could not compute the source tarball sha256 (tried sha256sum, shasum): {last}"
+    ))
+}
+
+/// Extract the first whitespace-delimited 64-hex token from a SHA-256 CLI's stdout,
+/// lowercased — the digest `sha256sum`/`shasum` both print first (`<hex>  <file>`).
+/// `None` when no such token is present (an unexpected output shape).
+fn parse_sha256_hex(stdout: &str) -> Option<String> {
+    stdout
         .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(format!(
-            "could not parse a sha256 from `shasum` output: {:?}",
-            out.stdout.trim()
-        ));
-    }
-    Ok(digest)
+        .find(|tok| tok.len() == 64 && tok.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
 }
 
 /// A fresh, unpredictable temp path for the downloaded source tarball — unique per

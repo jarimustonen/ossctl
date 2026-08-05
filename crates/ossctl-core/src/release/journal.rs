@@ -189,14 +189,26 @@ pub fn apply(state: &mut RunState, event: &JournalEvent) {
             if state.current_phase == Some(*phase) {
                 state.current_phase = None;
             }
-            // The final barrier completing OK is the run's completion signal.
-            // Dist (post-tag finalize) is the last phase — it runs after Tag for
-            // every cut (a no-op when there is no post-tag target), so its `Ok` is
-            // the single, uniform completion signal (ADR-0002 §2, extended by
-            // `release-engine-cut-cargo-dist-flow`). A v1 log that ended at Tag `Ok`
-            // (no Dist phase) reduces to InProgress and self-heals to Completed on
-            // the next resume, which re-enters `execute` and runs the Dist no-op.
-            if *phase == Phase::Dist && *outcome == PhaseOutcome::Ok {
+            // The final barrier completing OK is the run's completion signal. For a
+            // v2 cut that is the post-tag Dist barrier — it runs after Tag for every
+            // cut (a no-op when there is no post-tag target), so `Dist Ok` is the
+            // single, uniform completion signal (ADR-0002 §2, extended by
+            // `release-engine-cut-cargo-dist-flow`).
+            //
+            // A **v1** log has no Dist phase and ended at `Tag Ok`; that event
+            // carries `schema_version < 2`, so it still completes the run. Without
+            // this, a v1-completed run would reduce to InProgress — misreporting a
+            // finished release and making the manifest cache (which the old reducer
+            // wrote as Completed) disagree with a fresh reduce of the same log. A
+            // v2 `Tag Ok` (schema_version >= 2) does NOT complete: a Dist barrier
+            // always follows it, and completing early would freeze the projection
+            // before Dist runs.
+            let completes = match phase {
+                Phase::Dist => true,
+                Phase::Tag => event.schema_version < 2,
+                _ => false,
+            };
+            if completes && *outcome == PhaseOutcome::Ok {
                 state.status = RunStatus::Completed;
             }
         }
@@ -1007,10 +1019,35 @@ mod tests {
                 },
             );
         };
-        // Tag `Ok` no longer completes the run — the post-tag Dist barrier does.
+        // A v2 Tag `Ok` no longer completes the run — the post-tag Dist barrier does.
         push(&mut state, Phase::Tag);
         assert_eq!(state.status, RunStatus::InProgress);
         push(&mut state, Phase::Dist);
+        assert_eq!(state.status, RunStatus::Completed);
+    }
+
+    #[test]
+    fn a_v1_tag_ok_completes_the_run_for_backward_compat() {
+        // A v1 journal (schema_version 1, no Dist phase) ended at `Tag Ok`. The
+        // reducer must still read it as Completed, or an upgraded binary would
+        // misreport a finished release as InProgress (and disagree with the manifest
+        // cache the old reducer wrote as Completed).
+        let mut state = reduce(&sample_events());
+        assert_eq!(state.status, RunStatus::InProgress);
+        let seq = state.applied_seq + 1;
+        apply(
+            &mut state,
+            &JournalEvent {
+                schema_version: 1,
+                seq,
+                ts: 9000,
+                idempotency_key: "phase_completed:tag".into(),
+                kind: EventKind::PhaseCompleted {
+                    phase: Phase::Tag,
+                    outcome: PhaseOutcome::Ok,
+                },
+            },
+        );
         assert_eq!(state.status, RunStatus::Completed);
     }
 

@@ -161,7 +161,7 @@ impl CommandRunner for FakeCmd {
         // prints `<hex>  <file>`. A fixed canned digest lets the homebrew finalize
         // thread a real `--sha256` deterministically (the fake `curl` that "wrote"
         // the temp file succeeds by default, and the coordinator never reads it).
-        if program == "shasum" {
+        if program == "shasum" || program == "sha256sum" {
             return Ok(CommandOutput {
                 status: Some(0),
                 stdout: format!("{CANNED_SHA256}  /tmp/ossctl-src-tarball.tar.gz"),
@@ -821,7 +821,9 @@ fn threads_source_tarball_url_into_homebrew_publish() {
         cmd.calls()
     );
     assert!(
-        cmd.calls().iter().any(|c| c.starts_with("shasum -a 256 ")),
+        cmd.calls()
+            .iter()
+            .any(|c| c.starts_with("sha256sum ") || c.starts_with("shasum -a 256 ")),
         "the fetched tag archive was not hashed: {:?}",
         cmd.calls()
     );
@@ -1070,7 +1072,7 @@ impl CommandRunner for WorkspaceCmd {
             });
         }
         // Serve the post-tag source-tarball hash for the dist phase.
-        if program == "shasum" {
+        if program == "shasum" || program == "sha256sum" {
             return Ok(CommandOutput {
                 status: Some(0),
                 stdout: format!("{CANNED_SHA256}  /tmp/ossctl-src-tarball.tar.gz"),

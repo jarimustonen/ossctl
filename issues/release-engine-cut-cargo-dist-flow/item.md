@@ -6,6 +6,9 @@ status: in-progress
 priority: high
 epic: ossctl-phase4-build
 blocked_by: ['@release-cut-multi-target-ecosystem']
+commits:
+- hash: 24c1946
+  summary: coordinator drives cargo-dist+homebrew flow (CI-delegated skip + post-tag homebrew sha256)
 ---
 
 # release cut can't drive the cargo-dist + homebrew flow (skip CI-delegated targets + post-tag homebrew)

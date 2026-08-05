@@ -1082,7 +1082,10 @@ fn release_resume_rejects_bad_run_id() {
 }
 
 /// Resuming an already-`completed` run is idempotent success (exit 0) — it
-/// short-circuits before touching the repo or any registry.
+/// short-circuits before touching the repo or any registry. This is a **v1**
+/// journal (ended at `Tag Ok`, no Dist phase, `schema_version` 1): the reducer still
+/// reads it as completed (back-compat), so an upgraded binary short-circuits rather
+/// than trying to re-plan under the new seal version.
 #[test]
 fn release_resume_completed_run_is_idempotent_success() {
     let repo = tempfile::tempdir().unwrap();
@@ -1091,8 +1094,6 @@ fn release_resume_completed_run_is_idempotent_success() {
         &[
             r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUNC","plan_id":"plan-done","version":"1.0.0","targets":["rust"]}"#,
             r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"phase_completed:tag","kind":"phase_completed","phase":"tag","outcome":"ok"}"#,
-            // The post-tag dist barrier is the completion signal (v2).
-            r#"{"schema_version":2,"seq":3,"ts":1002,"idempotency_key":"phase_completed:dist","kind":"phase_completed","phase":"dist","outcome":"ok"}"#,
         ],
     );
     let out = ossctl()

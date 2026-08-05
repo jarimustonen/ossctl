@@ -414,6 +414,73 @@ fn a_cancelled_target_blocks_even_with_the_go_ahead() {
     assert!(r.is_blocked());
 }
 
+// ── CI-delegated targets are non-blocking skips, never publish candidates ─────
+
+/// A rust plan whose single target is the CI-delegated `cargo-dist` adapter.
+fn cargo_dist_plan() -> ReleasePlan {
+    ReleasePlan {
+        plan_id: "plan-abc".into(),
+        contract_schema_version: 1,
+        head_sha: "deadbeef".into(),
+        version: "1.0.0".into(),
+        targets: vec![plan_target(
+            Ecosystem::Rust,
+            Registry::GhReleases,
+            Adapter::CargoDist,
+        )],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
+    }
+}
+
+#[test]
+fn a_journalled_delegated_target_is_a_non_blocking_skip() {
+    // The original run recorded `target_delegated`; resume classifies it Delegated
+    // (non-blocking) and never queries a registry that cannot observe it.
+    let mut state = state_with(&[], &["rust"]);
+    state.delegated.insert("rust".to_string());
+    let (cmd, clock) = (RecordingCmd::default(), FixedClock);
+    let reg = FakeRegistry::new().with("rust", "tool", &["1.0.0"]);
+    let r = reconcile(&state, &cargo_dist_plan(), &cmd, &clock, &reg, false);
+
+    let d = &r.decisions[0];
+    assert_eq!(d.journal_state, JournalState::Delegated);
+    assert_eq!(d.action, ResumeAction::Delegated);
+    assert!(
+        !d.action.is_blocker(),
+        "a delegated target must not block resume"
+    );
+    assert!(!r.is_blocked());
+    assert!(d.adopted_receipt.is_none());
+    assert!(
+        reg.queried.borrow().is_empty(),
+        "a delegated target must not hit the registry"
+    );
+}
+
+#[test]
+fn a_delegated_target_is_recognized_by_adapter_capability_without_a_journal_event() {
+    // The load-bearing case: a run that failed on cargo-dist's `Unsupported` BEFORE
+    // `target_delegated` existed (a v1 journal, or a crash before the append). The
+    // journal has no delegation fact, but the resolved adapter still declares itself
+    // CI-delegated — so resume must NOT treat it as a not-recorded publish candidate
+    // (which would drive a spurious re-publish attempt), it stays a Delegated skip.
+    let state = state_with(&[], &["rust"]); // note: no `delegated` entry
+    let (cmd, clock) = (RecordingCmd::default(), FixedClock);
+    let reg = FakeRegistry::new();
+    let r = reconcile(&state, &cargo_dist_plan(), &cmd, &clock, &reg, false);
+
+    let d = &r.decisions[0];
+    assert_eq!(d.journal_state, JournalState::Delegated);
+    assert_eq!(d.action, ResumeAction::Delegated);
+    assert!(!r.is_blocked());
+    assert!(
+        reg.queried.borrow().is_empty(),
+        "a capability-delegated target must not hit the registry"
+    );
+}
+
 // ── Multi-target roll-up + the resume-facing helpers ─────────────────────────
 
 #[test]

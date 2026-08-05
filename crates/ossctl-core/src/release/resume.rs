@@ -265,7 +265,15 @@ pub fn reconcile_for_resume(
         // its artifact, so there is nothing for the engine to resume. Classify it as
         // a non-blocking Delegated skip rather than querying a registry that cannot
         // observe it (which would misread as `Missing` → a spurious re-publish).
-        if state.delegated.contains(&target) {
+        //
+        // Delegation is decided by EITHER the journal (`target_delegated` was
+        // recorded) OR the adapter's live capability. The latter is load-bearing for
+        // two cases the journal alone misses: a **v1** run that failed on this
+        // adapter's `Unsupported` before the event existed, and a crash after the
+        // publish phase entered but before `target_delegated` was appended. In both,
+        // the resolved adapter still declares itself delegated, so resume never tries
+        // to publish it.
+        if state.delegated.contains(&target) || resolve(pt.adapter).is_ci_delegated() {
             decisions.push(TargetDecision {
                 target,
                 ecosystem: pt.ecosystem,
