@@ -2,12 +2,15 @@
 created: 2026-08-05
 updated: 2026-08-05
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 epic: ossctl-phase4-build
 commits:
 - hash: c605eaa
   summary: pin cargo adapter to crates.io, reject other registries
+- hash: 36de728
+  summary: review fix — UnsupportedRegistry uses self.adapter
+closed: 2026-08-05
 ---
 
 ## Description
