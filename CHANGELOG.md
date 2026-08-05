@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 <!-- oss-changelog:unreleased-end -->
 
+## [0.1.1] - 2026-08-05
+
+Cross-platform release: ossctl now installs on Linux as well as macOS.
+
+### Added
+- **Cross-platform release artifacts** — prebuilt binaries for macOS (arm64 + x86_64)
+  and Linux (arm64 + x86_64, statically linked via `musl` so they run on any distro
+  regardless of glibc vintage), plus a `curl … | sh` shell installer, built by cargo-dist
+  on tag push.
+- `distribution.platforms` in the `OSS-RELEASE.md` contract — a cross-platform binary
+  target set that defaults to macOS + Linux, so every project the `/oss-*` family sets up
+  produces Linux builds by default.
+- `ossctl audit` now flags a `distribution` whose targets omit Linux as a cross-platform
+  readiness gap.
+
+### Changed
+- The cargo release adapter publishes a multi-crate workspace in dependency order, waiting
+  for each crate to appear on the crates.io index before publishing its dependents.
+- The Homebrew adapter bootstraps a first formula on an empty tap (create vs. bump).
+- Maturity inference no longer conflates version number with release maturity: a
+  production-grade pre-1.0 (ZeroVer) repository can reach the `production` tier.
+- `/oss-readme` emits cross-platform install instructions (shell installer + prebuilt
+  binaries); the contract can model a cargo-dist distribution alongside registry publishes.
+
+### Fixed
+- All six ecosystem release adapters now either perform a real publish or return an explicit
+  `Unsupported`, instead of a placeholder receipt.
+
 ## [0.1.0] - 2026-08-04
 
 First release — published to crates.io, GitHub Releases, and the `jarimustonen/ossctl`

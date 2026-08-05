@@ -50,21 +50,28 @@ app beyond what the ADRs already fix.
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace`
   - `cargo build --workspace` (release build not required per-unit)
-- **Deploy: none per stint.** `ossctl` is a CLI library/binary; units land on `main`,
-  they are not deployed to a server. *Publishing `ossctl` itself* (crates.io / GitHub
-  Release / Homebrew) is a deliberate release act, never an automatic per-stint step —
-  so `/stint` **skips Phase 4 (deploy)** here and says so.
-  - **0.1.0 shipped 2026-08-04** (dogfood self-cut): crates.io `ossctl` + `ossctl-core`,
-    GitHub Release `v0.1.0`, Homebrew tap `jarimustonen/homebrew-ossctl` (source-build
-    formula). Repo is now **public**.
-  - **Releases are currently HAND-DRIVEN**, not via `ossctl release cut` — the self-cut
-    proved the engine can't yet publish a multi-crate workspace (dep order + index wait),
-    bootstrap a first Homebrew formula, or build cross-platform (issues
-    `cargo-adapter-workspace-publish`, `homebrew-adapter-first-formula`,
-    `gh-release-ci-workflow`). Until those land, the recipe is: `cargo publish -p
-    ossctl-core` → wait for index → `cargo publish -p ossctl`; `git tag vX.Y.Z && git push
-    --tags`; `gh release create`; bump the tap formula's `url`+`sha256`. Landing those three
-    issues makes v0.1.1 the first ENGINE-driven cut.
+- **Releases MAY be cut automatically whenever there is something to release** (maintainer
+  decision, 2026-08-05). Publishing `ossctl` itself (crates.io / GitHub Release / Homebrew)
+  no longer requires an explicit per-release go: when `main` carries unreleased user-facing
+  changes, `/stint` may bump the version, finalize the CHANGELOG, and run the release recipe
+  as an owned Phase-3 act — no confirmation needed. Preconditions still hold: the green gate
+  passes, and `cargo publish` runs `--dry-run` first. crates.io publishes are irreversible
+  (yank-only), so never publish red, and report each step.
+  - **0.1.0 shipped 2026-08-04**; **0.1.1 shipped 2026-08-05** (cross-platform: macOS +
+    Linux musl binaries + shell installer). crates.io `ossctl` + `ossctl-core`, GitHub
+    Release, Homebrew tap `jarimustonen/homebrew-ossctl`. Repo is **public**.
+  - **The recipe is still HAND-DRIVEN (auto-run), not `ossctl release cut`.** The three
+    engine blockers landed (workspace publish, homebrew first-formula, cross-platform CI),
+    but the engine cut is still **not safe** for ossctl's cargo-dist+homebrew flow: the
+    `gh-releases / cargo-dist` target returns `Unsupported` in `publish()` (a partial-publish
+    trap — crates.io would publish, then the cut sticks with no rollback), and the homebrew
+    tarball sha256 only exists post-tag (engine opens a draft PR needing a hand-filled hash).
+    Until the coordinator SKIPS CI-delegated targets and does post-tag homebrew (issue
+    `release-engine-cut-cargo-dist-flow`), the recipe is: `cargo publish -p ossctl-core`
+    (`--dry-run` first) → wait for index → `cargo publish -p ossctl`; bump the internal
+    `=X.Y.Z` dep in lockstep; `git tag vX.Y.Z && git push origin main --tags` (the tag
+    triggers the cargo-dist CI that builds the cross-platform binaries + installer + GitHub
+    Release); after the release exists, bump the tap formula's `url`+`sha256`.
 - **Cross-platform is a hard requirement (macOS AND Linux).** All software the `/oss-*`
   family produces — and `ossctl` itself — MUST install and run on **both macOS and Linux**
   (arm64 and x86_64). This is `/oss-*` family canon, not a nice-to-have: a release path
