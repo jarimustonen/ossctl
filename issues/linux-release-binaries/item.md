@@ -45,3 +45,7 @@ issuectl/orchestratectl already do (same cargo-dist setup). Also worth adding
 Once a Linux build exists, the homebase ossctl hook can be extended to the same
 version-gated release-installer fallback the other two now use (that change is
 trivial and tracked on the homebase side).
+
+## Resolution (done)
+
+ossctl v0.1.2 now ships Linux release binaries — `ossctl-{x86_64,aarch64}-unknown-linux-musl.tar.xz` + `ossctl-installer.sh` (also a Windows zip + PS1 installer). The homebase `dotfiles/setup.d/ossctl.sh` hook gained the brew(macOS)/release-installer(Linux) split (same as issuectl/orchestratectl), so ossctl is now provisioned on haapa and any Linux clone. Verified: ossctl 0.1.2 installed on haapa and across the Mac fleet via the fleet-updater.
