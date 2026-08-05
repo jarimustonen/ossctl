@@ -4,6 +4,7 @@ updated: 2026-08-05
 type: task
 status: open
 priority: normal
+epic: ossctl-phase4-build
 ---
 
 # release verify should confirm CI created a delegated GitHub Release
