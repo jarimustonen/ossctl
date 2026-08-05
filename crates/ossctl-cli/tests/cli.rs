@@ -1,5 +1,5 @@
-//! Integration tests for the `ossctl` binary surface (the scaffold's live
-//! contract: `version`, `doctor`, and the `not_implemented` stub envelope).
+//! Integration tests for the `ossctl` binary surface (`version`, `doctor`,
+//! `contract`, `facts`, `audit`, `dist`, `skill`, and the `release` verbs).
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -83,19 +83,6 @@ fn doctor_json_fix_leaves_stderr_clean() {
     );
     // stdout is still valid envelope JSON.
     let _: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
-}
-
-/// A stub subcommand returns a clean `not_implemented` error envelope on
-/// stderr and exits 2 — not a panic.
-#[test]
-fn stub_subcommand_returns_not_implemented() {
-    let out = ossctl().args(["release", "list"]).output().unwrap();
-    assert_eq!(out.status.code(), Some(2), "not_implemented → exit 2");
-
-    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
-    assert_eq!(v["schema_version"], 1);
-    assert_eq!(v["error"]["code"], "not_implemented");
-    assert!(out.stdout.is_empty(), "no data on stdout for an error");
 }
 
 /// An unknown subcommand is a clap error rendered through the §10 envelope.
@@ -889,6 +876,308 @@ fn release_show_unknown_and_bad_run_ids_are_user_errors() {
 
     let bad = ossctl()
         .args(["release", "show", "../escape", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&bad.stderr).unwrap();
+    assert_eq!(v["error"]["code"], "invalid_run_id");
+}
+
+// ── release list: enumerate runs for the in-flight gate ──────────────────────
+
+/// Seed several runs (each `(run_id, journal-lines)`) into one journal root, so a
+/// `release list` sees more than one run.
+fn seed_journal_multi(runs: &[(&str, &[&str])]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for (run_id, lines) in runs {
+        let run_dir = dir.path().join(run_id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("journal.jsonl"),
+            format!("{}\n", lines.join("\n")),
+        )
+        .unwrap();
+    }
+    dir
+}
+
+const RUN_CREATED_A: &str = r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUNA","plan_id":"plan-aaa","version":"1.0.0","targets":["cargo"]}"#;
+
+/// An empty journal root lists zero runs and is a normal success, not an error.
+#[test]
+fn release_list_empty_is_a_normal_empty_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = ossctl()
+        .args(["release", "list", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "empty list must exit 0: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout JSON");
+    assert_eq!(v["schema_version"], 1);
+    assert_eq!(v["data"]["runs"].as_array().unwrap().len(), 0);
+    assert_eq!(v["data"]["in_flight_count"], 0);
+}
+
+/// A single in-flight run is reported with its status, tag, and the `in_flight`
+/// gate field the `/oss-release` skill keys on.
+#[test]
+fn release_list_reports_a_single_in_flight_run() {
+    let dir = seed_journal_multi(&[("RUNA", &[RUN_CREATED_A])]);
+    let out = ossctl()
+        .args(["release", "list", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "list must exit 0: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout JSON");
+    let runs = v["data"]["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["run_id"], "RUNA");
+    assert_eq!(runs[0]["status"], "in_progress");
+    assert_eq!(runs[0]["version"], "1.0.0");
+    assert_eq!(runs[0]["tag"], "v1.0.0");
+    assert_eq!(runs[0]["plan_id"], "plan-aaa");
+    assert_eq!(runs[0]["in_flight"], true);
+    assert_eq!(runs[0]["started_ts"], 1000);
+    assert_eq!(v["data"]["in_flight_count"], 1);
+}
+
+/// N runs of every status enumerate together, sorted deterministically by start
+/// time, with `in_flight_count` counting only the live one.
+#[test]
+fn release_list_reports_all_statuses_sorted_by_start_time() {
+    // Deliberately seed out of start-time order (B starts before A) to prove the
+    // output is sorted by `started_ts`, not by directory/run-id order.
+    let in_progress = &[RUN_CREATED_A][..];
+    let completed = &[
+        r#"{"schema_version":1,"seq":1,"ts":500,"idempotency_key":"run_created","kind":"run_created","run_id":"RUNB","plan_id":"plan-bbb","version":"2.0.0","targets":["cargo"]}"#,
+        // A v1 `tag ok` completes the run (backward-compat completion signal).
+        r#"{"schema_version":1,"seq":2,"ts":501,"idempotency_key":"phase_completed:tag","kind":"phase_completed","phase":"tag","outcome":"ok"}"#,
+    ][..];
+    let abandoned = &[
+        r#"{"schema_version":1,"seq":1,"ts":1500,"idempotency_key":"run_created","kind":"run_created","run_id":"RUNC","plan_id":"plan-ccc","version":"3.0.0","targets":["cargo"]}"#,
+        r#"{"schema_version":1,"seq":2,"ts":1501,"idempotency_key":"run_abandoned","kind":"run_abandoned","reason":"gave up"}"#,
+    ][..];
+    let dir = seed_journal_multi(&[
+        ("RUNA", in_progress),
+        ("RUNB", completed),
+        ("RUNC", abandoned),
+    ]);
+
+    let out = ossctl()
+        .args(["release", "list", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "list must exit 0: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout JSON");
+    let runs = v["data"]["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 3);
+    // Sorted by started_ts: RUNB (500) < RUNA (1000) < RUNC (1500).
+    let ids: Vec<&str> = runs.iter().map(|r| r["run_id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["RUNB", "RUNA", "RUNC"]);
+    let statuses: Vec<&str> = runs.iter().map(|r| r["status"].as_str().unwrap()).collect();
+    assert_eq!(statuses, vec!["completed", "in_progress", "abandoned"]);
+    assert_eq!(v["data"]["in_flight_count"], 1);
+    // The abandoned run carries its reason for triage.
+    assert_eq!(runs[2]["abandon_reason"], "gave up");
+}
+
+// ── release abandon: terminal, event-sourced, no rollback ─────────────────────
+
+/// Abandoning a non-terminal run appends the abandonment fact (history is not
+/// rewritten) and marks it terminal; already-published targets are reported as
+/// still-live because abandon does not roll back.
+#[test]
+fn release_abandon_marks_a_non_terminal_run_and_keeps_publishes() {
+    let dir = seed_journal(
+        "RUN01",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN01","plan_id":"plan-abc","version":"1.0.0","targets":["cargo","gh"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"published:cargo","kind":"target_published","target":"cargo","receipt":{"ecosystem":"rust","package":"tool","version":"1.0.0","registry_url":null,"digest":null}}"#,
+        ],
+    );
+
+    let out = ossctl()
+        .args([
+            "release",
+            "abandon",
+            "RUN01",
+            "--reason",
+            "registry outage",
+            "--json",
+            "--journal-dir",
+        ])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "abandon must exit 0: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout JSON");
+    assert_eq!(v["data"]["run_id"], "RUN01");
+    assert_eq!(v["data"]["status"], "abandoned");
+    assert_eq!(v["data"]["reason"], "registry outage");
+    // The already-published target is named as still-live, and a warning says so.
+    assert_eq!(v["data"]["published_targets"], serde_json::json!(["cargo"]));
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("cargo")),
+        "a published target must be surfaced as still-live: {warnings:?}"
+    );
+
+    // The abandonment is a durable, appended fact: `show` now reads terminal.
+    let show = ossctl()
+        .args(["release", "show", "RUN01", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(show.status.success());
+    let sv: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(sv["data"]["state"]["status"], "abandoned");
+    assert_eq!(sv["data"]["state"]["abandon_reason"], "registry outage");
+    // History was appended to, not rewritten: the RunCreated + publish + the new
+    // RunAbandoned are all present (last_seq advanced to 3).
+    assert_eq!(sv["data"]["last_seq"], 3);
+}
+
+/// `release abandon` with no `--reason` records a generic default reason.
+#[test]
+fn release_abandon_without_reason_uses_a_default() {
+    let dir = seed_journal("RUN01", &[RUN_CREATED_A.replace("RUNA", "RUN01").as_str()]);
+    let out = ossctl()
+        .args(["release", "abandon", "RUN01", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "abandon must exit 0: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout JSON");
+    assert_eq!(v["data"]["status"], "abandoned");
+    assert!(
+        v["data"]["reason"].as_str().unwrap().contains("no reason"),
+        "default reason expected: {}",
+        v["data"]["reason"]
+    );
+    assert_eq!(v["data"]["published_targets"].as_array().unwrap().len(), 0);
+}
+
+/// A blank `--reason` is a caller-fixable input error (a journaled reason must be
+/// meaningful).
+#[test]
+fn release_abandon_rejects_a_blank_reason() {
+    let dir = seed_journal("RUN01", &[RUN_CREATED_A.replace("RUNA", "RUN01").as_str()]);
+    let out = ossctl()
+        .args([
+            "release",
+            "abandon",
+            "RUN01",
+            "--reason",
+            "   ",
+            "--json",
+            "--journal-dir",
+        ])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(v["error"]["code"], "invalid_reason");
+}
+
+/// A terminal run cannot be abandoned: a completed run and an already-abandoned
+/// run each refuse with their own caller-fixable code, and no second terminal fact
+/// is appended.
+#[test]
+fn release_abandon_refuses_terminal_runs() {
+    // A completed run (v1 `tag ok`).
+    let completed = seed_journal(
+        "DONE1",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"DONE1","plan_id":"plan-abc","version":"1.0.0","targets":["cargo"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"phase_completed:tag","kind":"phase_completed","phase":"tag","outcome":"ok"}"#,
+        ],
+    );
+    let out = ossctl()
+        .args([
+            "release",
+            "abandon",
+            "DONE1",
+            "--reason",
+            "too late",
+            "--json",
+            "--journal-dir",
+        ])
+        .arg(completed.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "completed → user error: {out:?}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(v["error"]["code"], "run_completed");
+
+    // An already-abandoned run.
+    let abandoned = seed_journal(
+        "GONE1",
+        &[
+            r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"GONE1","plan_id":"plan-abc","version":"1.0.0","targets":["cargo"]}"#,
+            r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"run_abandoned","kind":"run_abandoned","reason":"first"}"#,
+        ],
+    );
+    let out = ossctl()
+        .args([
+            "release",
+            "abandon",
+            "GONE1",
+            "--reason",
+            "again",
+            "--json",
+            "--journal-dir",
+        ])
+        .arg(abandoned.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(v["error"]["code"], "run_already_abandoned");
+}
+
+/// Abandoning a run with no journal is a caller-fixable (exit 1) error, and a
+/// path-traversal run id is rejected before any journal work.
+#[test]
+fn release_abandon_unknown_and_bad_run_ids_are_user_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = ossctl()
+        .args([
+            "release",
+            "abandon",
+            "NOPE",
+            "--reason",
+            "x",
+            "--json",
+            "--journal-dir",
+        ])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&missing.stderr).unwrap();
+    assert_eq!(v["error"]["code"], "run_not_found");
+
+    let bad = ossctl()
+        .args([
+            "release",
+            "abandon",
+            "../escape",
+            "--reason",
+            "x",
+            "--json",
+            "--journal-dir",
+        ])
         .arg(dir.path())
         .output()
         .unwrap();

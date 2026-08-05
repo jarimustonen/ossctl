@@ -1,13 +1,13 @@
 //! `ossctl release …` handlers.
 //!
-//! `release plan` is implemented (the sealed content-addressed approval seam,
-//! ADR-0002 §3); the remaining verbs (`cut`/`resume`/`verify`/`show`/`list`/
-//! `abandon`) live in `ossctl-core::release` and land with their sibling units,
-//! returning a clean `not_implemented` envelope until then. The argument shapes
-//! are real so the surface and `--help` are accurate.
+//! The full verb set (`plan`/`cut`/`resume`/`verify`/`show`/`list`/`abandon`) is
+//! implemented here as a thin dispatcher over `ossctl-core::release`: the plan
+//! seam, the phase-barrier coordinator, and the event-sourced journal all live in
+//! the core crate; this module wires them to argument parsing, the journal-root
+//! resolution, and the canonical `--json` envelope.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 
@@ -115,15 +115,41 @@ pub struct ResumeArgs {
     pub allow_unverified: bool,
 }
 
+/// Arguments for `release list` — the journal-location flags only (`list` takes
+/// no run id: it enumerates every run under the journal root).
+#[derive(Args, Debug)]
+pub struct ListArgs {
+    /// Repository whose release journal to enumerate (default: current
+    /// directory). The journal is rooted at `<git-common-dir>/ossctl/releases`,
+    /// so any linked worktree of the repo resolves to the same run set.
+    #[arg(long, value_name = "PATH")]
+    pub repo_root: Option<PathBuf>,
+    /// List the runs in this directory instead of resolving it from git
+    /// (`<git-common-dir>/ossctl/releases`). For CI, tests, and post-mortem
+    /// queries against an archived journal (needs no repository).
+    #[arg(long, value_name = "PATH")]
+    pub journal_dir: Option<PathBuf>,
+}
+
 /// Arguments for `release abandon`.
 #[derive(Args, Debug)]
 pub struct AbandonArgs {
     /// The run id to abandon.
     #[arg(value_name = "RUN_ID")]
     pub run_id: String,
-    /// Why the run is being abandoned (journaled).
+    /// Why the run is being abandoned (journaled). Optional; a generic reason is
+    /// recorded when omitted.
     #[arg(long, value_name = "TEXT")]
-    pub reason: String,
+    pub reason: Option<String>,
+    /// Repository whose release journal to write to (default: current directory).
+    /// The journal is rooted at `<git-common-dir>/ossctl/releases`, so any linked
+    /// worktree of the repo resolves to the same run state.
+    #[arg(long, value_name = "PATH")]
+    pub repo_root: Option<PathBuf>,
+    /// Read/write the journal in this directory instead of resolving it from git
+    /// (`<git-common-dir>/ossctl/releases`). For CI and tests.
+    #[arg(long, value_name = "PATH")]
+    pub journal_dir: Option<PathBuf>,
 }
 
 /// Dispatch a `release` subcommand to its handler.
@@ -134,8 +160,8 @@ pub fn dispatch(action: ReleaseAction, format: OutputFormat) -> Result<(), CliEr
         ReleaseAction::Resume(args) => resume(&args, format),
         ReleaseAction::Verify(args) => verify(&args, format),
         ReleaseAction::Show(args) => show(&args, format),
-        ReleaseAction::List => Err(CliError::not_implemented("release list")),
-        ReleaseAction::Abandon(_) => Err(CliError::not_implemented("release abandon")),
+        ReleaseAction::List(args) => list(&args, format),
+        ReleaseAction::Abandon(args) => abandon(&args, format),
     }
 }
 
@@ -437,38 +463,7 @@ pub fn show(args: &RunIdArgs, format: OutputFormat) -> Result<(), CliError> {
     // needs neither a repository nor a valid cwd (a post-mortem query against an
     // archived journal must work from anywhere). Only the git-resolved default
     // requires a repo root.
-    let paths = if let Some(dir) = args.journal_dir.as_deref() {
-        JournalPaths::new(dir)
-    } else {
-        let repo_root = resolve_repo_root(args.repo_root.as_ref())?;
-        if !repo_root.is_dir() {
-            return Err(CliError::user(
-                "invalid_repo_root",
-                format!("repo_root '{}' is not a directory", repo_root.display()),
-            )
-            .with_invalid_value(repo_root.display().to_string()));
-        }
-        let root = std::fs::canonicalize(&repo_root).map_err(|e| {
-            CliError::system(
-                "io_error",
-                format!(
-                    "cannot canonicalize repo_root '{}': {e}",
-                    repo_root.display()
-                ),
-            )
-        })?;
-        let git = RealGitRepo::new(&root);
-        JournalPaths::from_git(&git, None).map_err(|e| {
-            CliError::system(
-                "journal_root_unresolved",
-                format!(
-                    "cannot locate the release journal root (is '{}' a git repository? pass \
-                     --journal-dir to override): {e}",
-                    root.display()
-                ),
-            )
-        })?
-    };
+    let paths = resolve_journal_paths(args.repo_root.as_ref(), args.journal_dir.as_deref())?;
 
     // Read-only read of both the event log and its projection.
     let store = ReadOnlyJournalStore;
@@ -597,6 +592,357 @@ fn render_show_text(state: &RunState, events: &[JournalEvent]) {
     for event in events {
         println!("  {}", render_event_line(event));
     }
+}
+
+/// One run's summary row in `release list` — enough for the `/oss-release`
+/// skill's in-flight-run gate ("is there an active run?") plus post-mortem
+/// triage. Additive `--json` fields only (§10): a new column is appended, never a
+/// rename/removal of one already published.
+#[derive(serde::Serialize)]
+struct RunSummary {
+    /// The run's unique id (a ULID; lexicographically sortable by start time).
+    run_id: String,
+    /// Derived status wire string: `in_progress` / `completed` / `abandoned`.
+    status: &'static str,
+    /// The chosen release version this run publishes.
+    version: String,
+    /// The git tag this run creates (`v{version}`, the coordinator's tag phase).
+    tag: String,
+    /// The sealed, content-addressed plan id this run executes.
+    plan_id: String,
+    /// `true` while the run is neither completed nor abandoned — the gate an agent
+    /// keys on to refuse sealing a second plan while one is live.
+    in_flight: bool,
+    /// Unix timestamp of the `RunCreated` event (run start).
+    started_ts: u64,
+    /// Unix timestamp of the most recently applied event.
+    updated_ts: u64,
+    /// The recorded abandon reason, when the run was abandoned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    abandon_reason: Option<String>,
+}
+
+impl RunSummary {
+    fn from_state(state: &RunState) -> Self {
+        let terminal = matches!(state.status, RunStatus::Completed | RunStatus::Abandoned);
+        Self {
+            run_id: state.run_id.clone(),
+            status: state.status.as_str(),
+            version: state.version.clone(),
+            tag: format!("v{}", state.version),
+            plan_id: state.plan_id.clone(),
+            in_flight: !terminal,
+            started_ts: state.created_ts,
+            updated_ts: state.updated_ts,
+            abandon_reason: state.abandon_reason.clone(),
+        }
+    }
+}
+
+/// The `data` body of `release list`: the run set plus a pre-computed count of the
+/// in-flight ones, so an agent's "already-active run?" gate is a single field read
+/// rather than a client-side filter it might get wrong.
+#[derive(serde::Serialize)]
+struct RunListBody {
+    /// Every run under the journal root, in deterministic order (by start time,
+    /// then run id). An empty list is a normal result, not an error.
+    runs: Vec<RunSummary>,
+    /// How many of [`Self::runs`] are still in flight (`in_progress`).
+    in_flight_count: usize,
+}
+
+/// `ossctl release list` — enumerate every release run under the journal root with
+/// its status (ADR-0003 §3), for the `/oss-release` skill's in-flight-run gate.
+///
+/// Reads each run's state authoritatively from its event log (never the possibly-
+/// stale manifest cache) through the read-only journal store — no lock, no writes.
+/// The set is sorted deterministically by start time (then run id) so the output
+/// is stable across invocations. An empty journal root is a normal empty list, not
+/// an error. A single unreadable run (a corrupt or too-new journal) is surfaced as
+/// a warning and skipped rather than failing the whole enumeration — one bad
+/// journal must not blind the gate to the other runs.
+pub fn list(args: &ListArgs, format: OutputFormat) -> Result<(), CliError> {
+    let paths = resolve_journal_paths(args.repo_root.as_ref(), args.journal_dir.as_deref())?;
+
+    let store = ReadOnlyJournalStore;
+    let run_ids = journal::list_runs(&store, &paths).map_err(|e| {
+        CliError::system(
+            "journal_error",
+            format!(
+                "cannot enumerate release runs under {}: {e}",
+                paths.releases_dir().display()
+            ),
+        )
+    })?;
+
+    let mut runs = Vec::with_capacity(run_ids.len());
+    let mut warnings = Vec::new();
+    for run_id in run_ids {
+        match journal::read_run_state(&store, &paths, &run_id) {
+            Ok(Some(state)) => runs.push(RunSummary::from_state(&state)),
+            // `list_runs` only returns ids with a non-empty journal, so an empty
+            // read here is a benign race (the run was removed mid-list); skip it.
+            Ok(None) => {}
+            Err(e) => warnings.push(format!(
+                "run '{run_id}' could not be read and was skipped: {e}"
+            )),
+        }
+    }
+    // Deterministic order: by start time, then run id as a stable tiebreak for two
+    // runs sharing a timestamp.
+    runs.sort_by(|a, b| {
+        a.started_ts
+            .cmp(&b.started_ts)
+            .then_with(|| a.run_id.cmp(&b.run_id))
+    });
+
+    let in_flight_count = runs.iter().filter(|r| r.in_flight).count();
+    let body = RunListBody {
+        runs,
+        in_flight_count,
+    };
+
+    match format {
+        OutputFormat::Json => crate::output::emit_json(&body, &warnings)?,
+        OutputFormat::Text => render_list_text(&body, &warnings),
+    }
+    Ok(())
+}
+
+/// Render the run list as a human table (text mode).
+fn render_list_text(body: &RunListBody, warnings: &[String]) {
+    if body.runs.is_empty() {
+        println!("no release runs found");
+    } else {
+        println!(
+            "{} run(s), {} in flight",
+            body.runs.len(),
+            body.in_flight_count
+        );
+        for r in &body.runs {
+            let flight = if r.in_flight { " *" } else { "  " };
+            println!(
+                "{flight} {:<28} {:<12} {:<10} plan {}",
+                r.run_id,
+                r.status,
+                r.tag,
+                short_sha(&r.plan_id),
+            );
+            if let Some(reason) = &r.abandon_reason {
+                println!("     └─ abandoned: {reason}");
+            }
+        }
+    }
+    for w in warnings {
+        println!("warning: {w}");
+    }
+}
+
+/// The generic reason recorded when `release abandon` is run without `--reason`.
+const DEFAULT_ABANDON_REASON: &str = "abandoned by operator (no reason given)";
+
+/// The `data` body of `release abandon`: what the run looked like at abandonment,
+/// with the irreversibility semantics made explicit.
+#[derive(serde::Serialize)]
+struct AbandonReport {
+    /// The abandoned run's id.
+    run_id: String,
+    /// Always `abandoned` — the run's new terminal status.
+    status: &'static str,
+    /// The recorded abandon reason (the supplied `--reason`, or the default).
+    reason: String,
+    /// The version the run was cutting.
+    version: String,
+    /// Targets that were **already published** under this run before abandonment.
+    /// They remain published — abandoning records that the operator is giving up
+    /// on the run, it does **not** (and cannot) undo an irreversible publish
+    /// (ADR-0003 §4). Empty when nothing had landed yet.
+    published_targets: Vec<String>,
+    /// The explicit semantics of this abandonment, so a caller never reads it as a
+    /// rollback.
+    note: &'static str,
+}
+
+/// `ossctl release abandon <run_id>` — terminally mark a non-terminal run
+/// un-resumable by appending a `run_abandoned` event to its journal (ADR-0002 /
+/// ADR-0003).
+///
+/// Event-sourced: history is **appended to, never rewritten or deleted** — the
+/// abandonment is one more fact on the durable log, after which the reducer
+/// freezes the projection (a later stray event cannot un-abandon the run). Opens
+/// the run under the single-active-cut lock (so it never races a live cut/resume),
+/// refuses a run that is already terminal (a `completed` run succeeded; an
+/// `abandoned` run stays abandoned) with a distinct, caller-fixable error, and —
+/// critically — does **not** roll anything back: any target already published
+/// under this run stays published, and the output says so explicitly.
+pub fn abandon(args: &AbandonArgs, format: OutputFormat) -> Result<(), CliError> {
+    // An explicitly-blank `--reason` is a caller mistake (a journaled reason must
+    // be meaningful); an *absent* flag falls back to the generic default.
+    let reason = match args.reason.as_deref() {
+        Some(r) if r.trim().is_empty() => {
+            return Err(CliError::user(
+                "invalid_reason",
+                "the abandon reason must not be blank — omit --reason for the default, or give a \
+                 real reason",
+            ));
+        }
+        Some(r) => r.to_string(),
+        None => DEFAULT_ABANDON_REASON.to_string(),
+    };
+
+    let paths = resolve_journal_paths(args.repo_root.as_ref(), args.journal_dir.as_deref())?;
+
+    let store = RealJournalStore;
+    let clock = RealClock;
+
+    // Open under the single-active-cut lock: an abandonment mutates the journal, so
+    // it takes the same lock a cut/resume does and must never race one. (A run whose
+    // process died leaving a stale lock file is a `doctor` recovery concern, not
+    // abandon's — abandon refuses rather than stomping a possibly-live run.)
+    let mut journal = Journal::open(&store, &clock, paths, &args.run_id)
+        .map_err(|e| open_run_error(&args.run_id, e))?;
+
+    // A terminal run cannot be abandoned: recording a second terminal fact would be
+    // meaningless. Distinguish the two cases so the caller gets an actionable code.
+    match journal.state().status {
+        RunStatus::Completed => {
+            return Err(CliError::user(
+                "run_completed",
+                format!(
+                    "run {} already completed successfully — there is nothing to abandon",
+                    args.run_id
+                ),
+            )
+            .with_invalid_value(args.run_id.clone()));
+        }
+        RunStatus::Abandoned => {
+            return Err(CliError::user(
+                "run_already_abandoned",
+                format!(
+                    "run {} was already abandoned{} — it stays abandoned",
+                    args.run_id,
+                    journal
+                        .state()
+                        .abandon_reason
+                        .as_deref()
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default(),
+                ),
+            )
+            .with_invalid_value(args.run_id.clone()));
+        }
+        RunStatus::InProgress => {}
+    }
+
+    // Snapshot what already landed *before* appending — these publishes survive the
+    // abandonment (it is not a rollback), and the report names them.
+    let published_targets: Vec<String> = journal.state().published.keys().cloned().collect();
+    let version = journal.state().version.clone();
+
+    let state = journal
+        .append(EventKind::RunAbandoned {
+            reason: reason.clone(),
+        })
+        .map_err(|e| {
+            CliError::system(
+                "journal_error",
+                format!(
+                    "run {}: could not journal the abandonment: {e} — the run may be in an unknown \
+                     state",
+                    args.run_id
+                ),
+            )
+        })?;
+    debug_assert_eq!(state.status, RunStatus::Abandoned);
+
+    let report = AbandonReport {
+        run_id: args.run_id.clone(),
+        status: RunStatus::Abandoned.as_str(),
+        reason,
+        version,
+        published_targets: published_targets.clone(),
+        note: "the run is marked abandoned and cannot be resumed; abandoning does NOT undo any \
+               publish that already landed — reconcile or yank those manually if needed",
+    };
+
+    // Surface already-published targets as a warning too: they are the one thing an
+    // operator abandoning a run most needs to be reminded still exists remotely.
+    let mut warnings = Vec::new();
+    if !published_targets.is_empty() {
+        warnings.push(format!(
+            "{} target(s) were already published under this run and remain published \
+             (abandon does not roll back): {}",
+            published_targets.len(),
+            published_targets.join(", ")
+        ));
+    }
+
+    match format {
+        OutputFormat::Json => crate::output::emit_json(&report, &warnings)?,
+        OutputFormat::Text => render_abandon_text(&report, &warnings),
+    }
+    Ok(())
+}
+
+/// Render the abandonment outcome as human lines (text mode).
+fn render_abandon_text(report: &AbandonReport, warnings: &[String]) {
+    println!("run {} abandoned", report.run_id);
+    println!("version: {}", report.version);
+    println!("reason:  {}", report.reason);
+    if report.published_targets.is_empty() {
+        println!("published: none (nothing had landed)");
+    } else {
+        println!(
+            "published (still live): {}",
+            report.published_targets.join(", ")
+        );
+    }
+    println!("note: {}", report.note);
+    for w in warnings {
+        println!("warning: {w}");
+    }
+}
+
+/// Resolve the release-journal paths for a pure journal operation
+/// (`list`/`show`/`abandon`): an explicit `--journal-dir` is used verbatim and
+/// needs neither a repository nor a valid cwd (a post-mortem query or an archived
+/// journal must work from anywhere); otherwise the root is resolved from git as
+/// `<git-common-dir>/ossctl/releases`.
+fn resolve_journal_paths(
+    repo_root: Option<&PathBuf>,
+    journal_dir: Option<&Path>,
+) -> Result<JournalPaths, CliError> {
+    if let Some(dir) = journal_dir {
+        return Ok(JournalPaths::new(dir));
+    }
+    let repo_root = resolve_repo_root(repo_root)?;
+    if !repo_root.is_dir() {
+        return Err(CliError::user(
+            "invalid_repo_root",
+            format!("repo_root '{}' is not a directory", repo_root.display()),
+        )
+        .with_invalid_value(repo_root.display().to_string()));
+    }
+    let root = std::fs::canonicalize(&repo_root).map_err(|e| {
+        CliError::system(
+            "io_error",
+            format!(
+                "cannot canonicalize repo_root '{}': {e}",
+                repo_root.display()
+            ),
+        )
+    })?;
+    let git = RealGitRepo::new(&root);
+    JournalPaths::from_git(&git, None).map_err(|e| {
+        CliError::system(
+            "journal_root_unresolved",
+            format!(
+                "cannot locate the release journal root (is '{}' a git repository? pass \
+                 --journal-dir to override): {e}",
+                root.display()
+            ),
+        )
+    })
 }
 
 /// `ossctl release resume <run_id>` — reconcile an interrupted run against remote

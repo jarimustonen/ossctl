@@ -1,8 +1,8 @@
 //! Clap-based CLI dispatch and the `version` handler.
 //!
-//! The full noun-verb taxonomy (ADR-0001 §1) is wired here. At founding only
-//! `version` and `doctor` do real work; every other subcommand routes to a stub
-//! that returns a clean `not_implemented` error envelope (never a panic).
+//! The full noun-verb taxonomy (ADR-0001 §1) is wired here, each subcommand
+//! routing to its handler module; a failure always surfaces as the §10 error
+//! envelope (never a panic).
 
 use std::process::ExitCode;
 
@@ -97,7 +97,7 @@ pub enum ReleaseAction {
     /// Query a run's progress (live) or post-mortem.
     Show(crate::release::RunIdArgs),
     /// List runs (active and past).
-    List,
+    List(crate::release::ListArgs),
     /// Terminally mark a run un-resumable (journaled).
     Abandon(crate::release::AbandonArgs),
 }

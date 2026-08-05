@@ -3,9 +3,7 @@
 //!
 //! Failures emit a JSON object to **stderr** regardless of the stdout format:
 //! the AI caller must parse failures the same way every time. Exit codes follow
-//! §2: `0` success, `1` user/validation error, `2` system error (which the
-//! scaffold also uses for `not_implemented` — the feature is absent from the
-//! tool, not a caller mistake).
+//! §2: `0` success, `1` user/validation error, `2` system error.
 
 use ossctl_core::SCHEMA_VERSION;
 use serde::Serialize;
@@ -83,17 +81,6 @@ impl CliError {
             expected: None,
             problems: None,
         }
-    }
-
-    /// A "feature not built yet" error for a stub handler (exit `2`). The
-    /// scaffold wires the whole taxonomy but only `version` and `doctor` do
-    /// real work; every other subcommand returns this clean envelope rather
-    /// than panicking.
-    pub fn not_implemented(command: &str) -> Self {
-        Self::system(
-            "not_implemented",
-            format!("`ossctl {command}` is not yet implemented (workspace scaffold)"),
-        )
     }
 
     /// Attach the offending value (§4).
