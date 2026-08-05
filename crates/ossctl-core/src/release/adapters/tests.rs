@@ -433,7 +433,7 @@ fn dry_run_plans_commands_without_running_them() {
     assert_eq!(report.planned_commands.len(), 1);
     assert_eq!(
         report.planned_commands[0].rendered(),
-        "cargo publish -p tool --dry-run"
+        "cargo publish --registry crates-io -p tool --dry-run"
     );
     // dry_run reads the workspace graph (read-only) but must not execute any
     // publish — the only command it runs is the `cargo metadata` query.
@@ -499,7 +499,7 @@ fn publish_runs_the_registry_command_and_returns_a_receipt() {
         cmd.calls(),
         vec![
             "cargo metadata --no-deps --format-version 1",
-            "cargo publish -p tool"
+            "cargo publish --registry crates-io -p tool"
         ]
     );
     assert_eq!(r.adapter, Adapter::CargoPublish);
@@ -512,6 +512,75 @@ fn publish_runs_the_registry_command_and_returns_a_receipt() {
         r.remote_url.as_deref(),
         Some("https://crates.io/crates/tool/2.0.0")
     );
+}
+
+#[test]
+fn cargo_build_pins_the_package_command_to_crates_io() {
+    // `cargo package` must carry `--registry crates-io` too, so the build phase
+    // verify-packages against the same registry the publish phase targets — never a
+    // registry resolved from ambient config.
+    let cmd = FakeCmd::new();
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.2.3",
+    );
+    let b = resolve(Adapter::CargoPublish).build(&c, &t).unwrap();
+
+    assert_eq!(b.adapter, Adapter::CargoPublish);
+    assert_eq!(
+        cmd.calls(),
+        vec!["cargo package --registry crates-io -p tool"]
+    );
+}
+
+#[test]
+fn cargo_rejects_a_non_crates_io_registry_before_any_action() {
+    // crates.io is the only rust registry ossctl supports. A cargo-publish target
+    // pointed at any other registry is a misconfiguration that must fail fast with a
+    // typed error — never shell out (which could publish to the wrong destination).
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+
+    // `Registry::Npm` stands in for any non-crates.io registry a rust target could be
+    // misconfigured with; the guard keys off `registry != CratesIo`, not the value.
+    let t = target(
+        Ecosystem::Rust,
+        Registry::Npm,
+        Adapter::CargoPublish,
+        "1.0.0",
+    );
+
+    // dry_run, build, and publish each reject the target up front, running NO command.
+    for op in ["dry_run", "build", "publish"] {
+        let cmd = FakeCmd::new();
+        let c = ctx(&cmd, &clock, &reg, root);
+        let adapter = resolve(Adapter::CargoPublish);
+        let err = match op {
+            "dry_run" => adapter.dry_run(&c, &t).unwrap_err(),
+            "build" => adapter.build(&c, &t).unwrap_err(),
+            _ => adapter.publish(&c, &t).unwrap_err(),
+        };
+        match err {
+            AdapterError::UnsupportedRegistry { adapter, registry } => {
+                assert_eq!(adapter, Adapter::CargoPublish);
+                assert_eq!(registry, Registry::Npm);
+            }
+            other => panic!("{op}: expected UnsupportedRegistry, got {other:?}"),
+        }
+        assert!(
+            cmd.calls().is_empty(),
+            "{op} shelled out before rejecting a non-crates.io registry: {:?}",
+            cmd.calls()
+        );
+    }
 }
 
 #[test]
@@ -732,7 +801,7 @@ fn target_waits_for_its_workspace_deps_before_publishing_only_its_own_crate() {
         cmd.calls(),
         vec![
             "cargo metadata --no-deps --format-version 1",
-            "cargo publish -p bin",
+            "cargo publish --registry crates-io -p bin",
         ]
     );
     // The wait actually slept (advanced the virtual clock) before lib became
@@ -769,7 +838,7 @@ fn target_without_workspace_deps_publishes_immediately() {
         cmd.calls(),
         vec![
             "cargo metadata --no-deps --format-version 1",
-            "cargo publish -p lib",
+            "cargo publish --registry crates-io -p lib",
         ]
     );
     assert_eq!(
@@ -818,7 +887,7 @@ fn two_targets_never_double_publish_the_shared_dependency() {
     assert_eq!(
         cmd.calls()
             .iter()
-            .filter(|c| *c == "cargo publish -p lib")
+            .filter(|c| *c == "cargo publish --registry crates-io -p lib")
             .count(),
         1,
         "the shared dependency was published more than once: {:?}",
@@ -827,7 +896,7 @@ fn two_targets_never_double_publish_the_shared_dependency() {
     assert_eq!(
         cmd.calls()
             .iter()
-            .filter(|c| *c == "cargo publish -p bin")
+            .filter(|c| *c == "cargo publish --registry crates-io -p bin")
             .count(),
         1
     );
@@ -998,7 +1067,10 @@ fn target_dry_run_reports_its_own_publish_and_the_dep_wait() {
         .iter()
         .map(crate::protocol::release::PlannedCommand::rendered)
         .collect();
-    assert_eq!(rendered, vec!["cargo publish -p bin --dry-run"]);
+    assert_eq!(
+        rendered,
+        vec!["cargo publish --registry crates-io -p bin --dry-run"]
+    );
     // The note names the workspace dependency the real cut waits to index first.
     assert!(
         report
@@ -1085,7 +1157,7 @@ fn target_only_waits_for_crates_io_publishable_deps() {
         cmd.calls(),
         vec![
             "cargo metadata --no-deps --format-version 1",
-            "cargo publish -p bin",
+            "cargo publish --registry crates-io -p bin",
         ]
     );
 }

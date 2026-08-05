@@ -39,7 +39,7 @@ pub mod python;
 
 use std::time::Duration;
 
-use crate::contract::schema::{Adapter, Ecosystem, Target};
+use crate::contract::schema::{Adapter, Ecosystem, Registry, Target};
 use crate::ports::{Clock, CommandOutput, CommandRunner, RegistryQuery};
 use crate::protocol::release::{
     BuildArtifacts, DryRunReport, PlannedCommand, PublishReceipt, VerifyOutcome,
@@ -296,6 +296,21 @@ pub enum AdapterError {
         /// The underlying registry lookup error, rendered as text.
         source: String,
     },
+    /// An adapter was handed a target whose declared [`registry`](Target::registry)
+    /// it does not support, so it refuses the target **before any external action**
+    /// rather than risk publishing to an unexpected destination. Raised by the
+    /// [`cargo`] adapter for any rust target whose registry is not
+    /// [`Registry::CratesIo`] (the only rust registry ossctl supports today): cargo
+    /// honors ambient registry config, so an unpinned publish could land on the
+    /// wrong registry while the engine probes crates.io and records a crates.io
+    /// receipt. A typed error keeps this a fail-fast misconfiguration, distinct from
+    /// a command failure ([`Self::Command`]).
+    UnsupportedRegistry {
+        /// The adapter identity that rejected the target.
+        adapter: Adapter,
+        /// The declared registry that this adapter does not support.
+        registry: Registry,
+    },
 }
 
 impl std::fmt::Display for AdapterError {
@@ -338,6 +353,14 @@ impl std::fmt::Display for AdapterError {
                 "cannot reach the registry to determine the published state of \
                  `{package}@{version}` (registry unreachable: {source}); failing closed rather \
                  than risk an unsafe publish decision"
+            ),
+            Self::UnsupportedRegistry { adapter, registry } => write!(
+                f,
+                "adapter `{}` does not support publishing to registry `{}`; it publishes only to \
+                 crates.io. Refusing before any publish rather than risk landing on the wrong \
+                 registry — fix the target's `registry` in the contract",
+                adapter.as_str(),
+                registry.as_str()
             ),
         }
     }

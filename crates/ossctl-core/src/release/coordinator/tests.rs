@@ -678,7 +678,7 @@ fn re_execution_resumes_without_re_publishing_landed_targets() {
 
     // The already-landed rust publish was NOT re-run…
     assert!(
-        !cmd.calls().iter().any(|c| c == "cargo publish -p tool"),
+        !cmd.calls().iter().any(|c| c == "cargo publish --registry crates-io -p tool"),
         "resume re-published an already-landed target: {:?}",
         cmd.calls()
     );
@@ -1204,11 +1204,11 @@ fn two_crates_io_targets_in_one_ecosystem_cut_in_dependency_order() {
     let calls = cmd.calls();
     let core_pub = calls
         .iter()
-        .position(|c| c == "cargo publish -p ossctl-core")
+        .position(|c| c == "cargo publish --registry crates-io -p ossctl-core")
         .expect("ossctl-core was published");
     let cli_pub = calls
         .iter()
-        .position(|c| c == "cargo publish -p ossctl")
+        .position(|c| c == "cargo publish --registry crates-io -p ossctl")
         .expect("ossctl was published");
     assert!(
         core_pub < cli_pub,
@@ -1217,7 +1217,7 @@ fn two_crates_io_targets_in_one_ecosystem_cut_in_dependency_order() {
     assert_eq!(
         calls
             .iter()
-            .filter(|c| *c == "cargo publish -p ossctl-core")
+            .filter(|c| *c == "cargo publish --registry crates-io -p ossctl-core")
             .count(),
         1,
         "the dependency crate was published more than once: {calls:?}"
@@ -1323,7 +1323,7 @@ fn two_targets_do_not_double_publish_a_shared_dependency_under_index_lag() {
     assert_eq!(
         calls
             .iter()
-            .filter(|c| *c == "cargo publish -p ossctl-core")
+            .filter(|c| *c == "cargo publish --registry crates-io -p ossctl-core")
             .count(),
         1,
         "the shared dependency was published more than once under lag: {calls:?}"
@@ -1331,18 +1331,18 @@ fn two_targets_do_not_double_publish_a_shared_dependency_under_index_lag() {
     assert_eq!(
         calls
             .iter()
-            .filter(|c| *c == "cargo publish -p ossctl")
+            .filter(|c| *c == "cargo publish --registry crates-io -p ossctl")
             .count(),
         1
     );
     // Dependency before dependent.
     let core = calls
         .iter()
-        .position(|c| c == "cargo publish -p ossctl-core")
+        .position(|c| c == "cargo publish --registry crates-io -p ossctl-core")
         .unwrap();
     let cli = calls
         .iter()
-        .position(|c| c == "cargo publish -p ossctl")
+        .position(|c| c == "cargo publish --registry crates-io -p ossctl")
         .unwrap();
     assert!(
         core < cli,
@@ -1561,24 +1561,24 @@ fn ossctl_like_contract_cuts_end_to_end_across_target_classes() {
     assert_eq!(
         calls
             .iter()
-            .filter(|c| *c == "cargo publish -p ossctl-core")
+            .filter(|c| *c == "cargo publish --registry crates-io -p ossctl-core")
             .count(),
         1
     );
     assert_eq!(
         calls
             .iter()
-            .filter(|c| *c == "cargo publish -p ossctl")
+            .filter(|c| *c == "cargo publish --registry crates-io -p ossctl")
             .count(),
         1
     );
     let core = calls
         .iter()
-        .position(|c| c == "cargo publish -p ossctl-core")
+        .position(|c| c == "cargo publish --registry crates-io -p ossctl-core")
         .unwrap();
     let cli = calls
         .iter()
-        .position(|c| c == "cargo publish -p ossctl")
+        .position(|c| c == "cargo publish --registry crates-io -p ossctl")
         .unwrap();
     assert!(
         core < cli,

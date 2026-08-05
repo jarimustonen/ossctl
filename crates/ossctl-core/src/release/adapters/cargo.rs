@@ -46,7 +46,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::contract::schema::{Adapter, Ecosystem};
+use crate::contract::schema::{Adapter, Ecosystem, Registry};
 use crate::protocol::release::{BuildArtifacts, DryRunReport, PlannedCommand, PublishReceipt};
 
 use super::{make_receipt, run_all, AdapterError, AdapterTarget, EffectCtx, ReleaseAdapter};
@@ -63,9 +63,12 @@ const INDEX_WAIT_TIMEOUT_SECS: u64 = 300;
 /// version to appear.
 const INDEX_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
-/// Cargo's registry alias for crates.io in a manifest's `publish` allow-list.
-/// A member restricted to a *different* registry (`publish = ["…"]` not
-/// containing this) is not publishable to crates.io and must be excluded.
+/// Cargo's registry alias for crates.io. Used two ways: as the value of every
+/// `cargo publish/package --registry <alias>` this adapter emits (so the publish
+/// destination is pinned and never resolved from ambient registry config —
+/// `registry.default`, `.cargo/config.toml`, `CARGO_REGISTRY_DEFAULT`), and as the
+/// token a manifest's `publish` allow-list must contain to be crates.io-publishable
+/// (a member restricted to a *different* registry is excluded).
 const CRATES_IO_ALIAS: &str = "crates-io";
 
 /// The rust release adapter, operating as either `cargo-publish` or `cargo-dist`.
@@ -125,16 +128,27 @@ impl ReleaseAdapter for CargoAdapter {
                 notes: vec![],
             });
         }
+        // Reject a non-crates.io target before planning anything — the dry-run
+        // preview must show the exact registry-pinned command a real cut runs, and a
+        // misconfigured registry is a fail-fast error, not a plannable command.
+        let registry = crates_io_registry(t)?;
         // One plan target = one publish unit: exactly one `cargo publish … --dry-run`
-        // for this target's own package, with a note listing the publishable
-        // workspace dependencies a real cut waits to be index-visible first.
-        // `cargo metadata` is read-only, so running it here keeps dry-run
+        // for this target's own package, pinned to crates.io, with a note listing the
+        // publishable workspace dependencies a real cut waits to be index-visible
+        // first. `cargo metadata` is read-only, so running it here keeps dry-run
         // side-effect-free (and validates that the target package is a publishable
         // member before a real cut would try to publish it).
         let deps = target_workspace_deps(ctx, t)?;
         let planned_commands = vec![PlannedCommand::new(
             "cargo",
-            &["publish", "-p", &t.package, "--dry-run"],
+            &[
+                "publish",
+                "--registry",
+                registry,
+                "-p",
+                &t.package,
+                "--dry-run",
+            ],
         )];
         let mut notes = Vec::new();
         if !deps.is_empty() {
@@ -163,15 +177,23 @@ impl ReleaseAdapter for CargoAdapter {
     ) -> Result<BuildArtifacts, AdapterError> {
         // `dist build` emits per-platform tarballs/installers, not a `.crate`;
         // name the artifact set to match what each identity actually produces.
-        let (cmds, artifacts) = match self.adapter {
-            Adapter::CargoDist => (
+        let (cmds, artifacts) = if matches!(self.adapter, Adapter::CargoDist) {
+            (
                 vec![PlannedCommand::new("dist", &["build"])],
                 vec!["dist/".to_string()],
-            ),
-            _ => (
-                vec![PlannedCommand::new("cargo", &["package", "-p", &t.package])],
+            )
+        } else {
+            // Pin `cargo package` to crates.io too (rejecting a non-crates.io
+            // target up front) so the build phase can never verify-package
+            // against a different registry than the publish phase will target.
+            let registry = crates_io_registry(t)?;
+            (
+                vec![PlannedCommand::new(
+                    "cargo",
+                    &["package", "--registry", registry, "-p", &t.package],
+                )],
                 vec![format!("{}-{}.crate", t.package, t.version)],
-            ),
+            )
         };
         run_all(ctx, &cmds)?;
         // SKELETON: a production build parses the exact packaged `.crate` /
@@ -198,6 +220,10 @@ impl ReleaseAdapter for CargoAdapter {
                 operation: "publish",
             });
         }
+        // Reject a non-crates.io target BEFORE the idempotency probe or any publish —
+        // the whole publish path (probe, index-wait, receipt URL) assumes crates.io,
+        // so a mismatched registry must fail closed here, never reach `cargo publish`.
+        let registry = crates_io_registry(t)?;
         // PER-TARGET IRREVERSIBLE — drives the real `cargo publish` through the
         // injected runner (the port is the safety seam under test). ADR-0004: one
         // plan target = one publish unit, so this publishes ONLY `t.package`; the
@@ -213,7 +239,8 @@ impl ReleaseAdapter for CargoAdapter {
         // duplicate upload of a crate that in fact landed. It fails the publish
         // closed ([`AdapterError::RegistryUnavailable`]), mirroring the reconcile
         // layer's outage ⇒ `Unknown` ⇒ never-`Missing` discipline.
-        if is_published(ctx, &t.package, &t.version)? {
+        let ecosystem = t.ecosystem();
+        if is_published(ctx, ecosystem, &t.package, &t.version)? {
             return Ok(make_receipt(ctx, t, None, Some(remote_url(t))));
         }
         // crates.io rejects a crate whose sibling dependency is not yet indexed, so
@@ -221,11 +248,14 @@ impl ReleaseAdapter for CargoAdapter {
         // index-visible before publishing it. Each dependency's target was cut
         // earlier by the coordinator; this only closes the publish→index lag window.
         for dep in &target_workspace_deps(ctx, t)? {
-            wait_for_index(ctx, &dep.name, &dep.version)?;
+            wait_for_index(ctx, ecosystem, &dep.name, &dep.version)?;
         }
         run_all(
             ctx,
-            &[PlannedCommand::new("cargo", &["publish", "-p", &t.package])],
+            &[PlannedCommand::new(
+                "cargo",
+                &["publish", "--registry", registry, "-p", &t.package],
+            )],
         )?;
         // SKELETON: a production publish parses the crates.io checksum from the
         // `cargo publish` output for `digest`; the canonical URL is well-known. One
@@ -239,8 +269,29 @@ impl ReleaseAdapter for CargoAdapter {
     }
 }
 
+/// The cargo `--registry` alias to pin this target's `cargo publish`/`package`
+/// invocations to, derived from the target's declared registry.
+///
+/// crates.io is the only rust registry ossctl supports today, so any other
+/// declared registry is a misconfiguration that must fail **fast, before any
+/// external action** — never a silent publish to an unexpected destination.
+/// Returns [`CRATES_IO_ALIAS`] for [`Registry::CratesIo`], else
+/// [`AdapterError::UnsupportedRegistry`]. Threading the flag value through here
+/// (rather than hard-coding it at each call site) keeps the destination tied to
+/// the contract's `registry` field and the rejection in one place.
+fn crates_io_registry(t: &AdapterTarget) -> Result<&'static str, AdapterError> {
+    match t.target.registry {
+        Registry::CratesIo => Ok(CRATES_IO_ALIAS),
+        registry => Err(AdapterError::UnsupportedRegistry {
+            adapter: Adapter::CargoPublish,
+            registry,
+        }),
+    }
+}
+
 /// The canonical crates.io URL for a target's own package at its version — the
-/// receipt's `remote_url`.
+/// receipt's `remote_url`. Correct because the publish paths call this only after
+/// [`crates_io_registry`] has confirmed the target's registry is crates.io.
 fn remote_url(t: &AdapterTarget) -> String {
     format!("https://crates.io/crates/{}/{}", t.package, t.version)
 }
@@ -369,11 +420,13 @@ fn publishable_to_crates_io(publish: Option<&[String]>) -> bool {
 /// read as "not published" (which would permit a duplicate, irreversible upload);
 /// the caller fails closed, mirroring the reconcile layer's outage ⇒ `Unknown`
 /// discipline.
-fn is_published(ctx: &EffectCtx<'_>, package: &str, version: &str) -> Result<bool, AdapterError> {
-    match ctx
-        .registry
-        .published_versions(Ecosystem::Rust.as_str(), package)
-    {
+fn is_published(
+    ctx: &EffectCtx<'_>,
+    ecosystem: Ecosystem,
+    package: &str,
+    version: &str,
+) -> Result<bool, AdapterError> {
+    match ctx.registry.published_versions(ecosystem.as_str(), package) {
         Ok(versions) => Ok(versions.iter().any(|v| v == version)),
         Err(e) => Err(AdapterError::RegistryUnavailable {
             package: package.to_string(),
@@ -395,17 +448,19 @@ fn is_published(ctx: &EffectCtx<'_>, package: &str, version: &str) -> Result<boo
 /// registry could not be reached at all (the last poll errored), that is
 /// [`AdapterError::RegistryUnavailable`] carrying the underlying error — a
 /// sustained outage is never masked as "did not index".
-fn wait_for_index(ctx: &EffectCtx<'_>, package: &str, version: &str) -> Result<(), AdapterError> {
+fn wait_for_index(
+    ctx: &EffectCtx<'_>,
+    ecosystem: Ecosystem,
+    package: &str,
+    version: &str,
+) -> Result<(), AdapterError> {
     let start = ctx.clock.now_unix();
     // The last poll's registry error, if it errored; cleared on any successful
     // observation. Assigned on every path of the match below before it is read at
     // the timeout check, so it needs no initializer. Drives the classification.
     let mut last_err: Option<String>;
     loop {
-        match ctx
-            .registry
-            .published_versions(Ecosystem::Rust.as_str(), package)
-        {
+        match ctx.registry.published_versions(ecosystem.as_str(), package) {
             Ok(versions) => {
                 if versions.iter().any(|v| v == version) {
                     return Ok(());
