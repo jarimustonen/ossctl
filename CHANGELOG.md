@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 <!-- oss-changelog:unreleased-end -->
 
+## [0.1.2] - 2026-08-05
+
+### Added
+- **`ossctl dist generate`** — the release engine now generates a downstream project's
+  cross-platform binary-release infrastructure from its `OSS-RELEASE.md` contract: a
+  `dist-workspace.toml` (cargo-dist) whose targets come from `distribution.platforms`
+  (defaulting to macOS + Linux musl, arm64 + x86_64 — never single-OS) and installers
+  from `distribution.installers`, plus the tag-triggered `.github/workflows/release.yml`
+  produced via `dist generate` (never hand-templated). This is the piece that makes
+  "release through ossctl" real.
+
 ## [0.1.1] - 2026-08-05
 
 Cross-platform release: ossctl now installs on Linux as well as macOS.
