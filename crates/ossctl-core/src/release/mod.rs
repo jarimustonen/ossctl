@@ -15,3 +15,6 @@ pub mod journal;
 pub mod plan;
 pub mod reconcile;
 pub mod resume;
+pub mod target_id;
+
+pub use target_id::journal_target_ids;

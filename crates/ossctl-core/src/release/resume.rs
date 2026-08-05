@@ -129,7 +129,9 @@ impl ResumeAction {
 /// resume needs to act on it.
 #[derive(Debug, Clone)]
 pub struct TargetDecision {
-    /// The journal/coordinator target id (its ecosystem wire string).
+    /// The journal/coordinator target id — the ecosystem wire string for a
+    /// lone-in-its-ecosystem target, else a per-target key
+    /// ([`journal_target_ids`](crate::release::journal_target_ids)).
     pub target: String,
     /// The ecosystem this target publishes to.
     pub ecosystem: Ecosystem,
@@ -221,10 +223,14 @@ pub fn reconcile_for_resume(
         .map(|t| (t.target.as_str(), (t.outcome, t.detail.clone())))
         .collect();
 
+    // The same per-target journal ids the coordinator keyed `state.published` by
+    // (and the CLI journalled as `RunCreated.targets`) — derived from the same
+    // plan, so a resume looks up the right receipt for every target even when an
+    // ecosystem carries several (never the bare ecosystem, which would collide and
+    // risk re-publishing an already-landed crate).
+    let target_ids = super::journal_target_ids(&plan.targets);
     let mut decisions = Vec::with_capacity(plan.targets.len());
-    for pt in &plan.targets {
-        let target = pt.ecosystem.as_str().to_string();
-
+    for (pt, target) in plan.targets.iter().zip(target_ids) {
         // A cancelled target is a deliberate skip, not a publish candidate. The
         // coordinator's publish-all skips only *published* targets, so continuing
         // would re-publish it — block instead of silently un-cancelling.

@@ -996,6 +996,177 @@ fn threads_no_assets_when_build_phase_is_resumed() {
     );
 }
 
+// ── Multiple targets in one ecosystem (dep-ordered) ──────────────────────────
+
+/// A crates.io world shared by the command runner and the registry query: a
+/// `cargo publish -p <crate>` (a real publish, not `--dry-run`) marks the crate
+/// published, and the registry then reports it. Lets a multi-target rust cut
+/// exercise the real is-published/index-wait skip logic the cargo adapter runs
+/// between dependent crates.
+#[derive(Clone, Default)]
+struct CratesWorld {
+    published: Rc<RefCell<HashSet<String>>>,
+}
+
+/// `git`-less command runner over a two-crate workspace (`ossctl-core` ← `ossctl`)
+/// that records publishes into the shared [`CratesWorld`].
+struct WorkspaceCmd {
+    world: CratesWorld,
+    calls: RefCell<Vec<String>>,
+}
+impl WorkspaceCmd {
+    fn new(world: CratesWorld) -> Self {
+        Self {
+            world,
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+    fn calls(&self) -> Vec<String> {
+        self.calls.borrow().clone()
+    }
+}
+impl CommandRunner for WorkspaceCmd {
+    fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
+        let line = format!("{program} {}", args.join(" "));
+        self.calls.borrow_mut().push(line.clone());
+        if program == "cargo" && args.contains(&"metadata") {
+            // Two publishable members: `ossctl` depends on `ossctl-core`.
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: r#"{"packages":[
+                    {"name":"ossctl-core","version":"1.2.3","id":"ossctl-core 1.2.3","dependencies":[],"publish":null},
+                    {"name":"ossctl","version":"1.2.3","id":"ossctl 1.2.3","dependencies":[{"name":"ossctl-core"}],"publish":null}
+                ],"workspace_members":["ossctl-core 1.2.3","ossctl 1.2.3"]}"#.to_string(),
+                stderr: String::new(),
+            });
+        }
+        // A real publish (`cargo publish -p X`, no `--dry-run`) lands the crate.
+        if program == "cargo" && args.first() == Some(&"publish") && !args.contains(&"--dry-run") {
+            if let Some(pos) = args.iter().position(|a| *a == "-p") {
+                if let Some(pkg) = args.get(pos + 1) {
+                    self.world.published.borrow_mut().insert((*pkg).to_string());
+                }
+            }
+        }
+        Ok(CommandOutput {
+            status: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    }
+}
+
+/// Registry view over the shared [`CratesWorld`]: reports `1.2.3` once a crate has
+/// been published.
+struct WorldRegistry {
+    world: CratesWorld,
+}
+impl RegistryQuery for WorldRegistry {
+    fn published_versions(&self, _ecosystem: &str, package: &str) -> io::Result<Vec<String>> {
+        Ok(if self.world.published.borrow().contains(package) {
+            vec!["1.2.3".to_string()]
+        } else {
+            Vec::new()
+        })
+    }
+}
+
+fn crates_target(package: &str) -> PlanTarget {
+    PlanTarget {
+        ecosystem: Ecosystem::Rust,
+        package: Some(package.to_string()),
+        registry: Registry::CratesIo,
+        adapter: Adapter::CargoPublish,
+    }
+}
+
+#[test]
+fn two_crates_io_targets_in_one_ecosystem_cut_in_dependency_order() {
+    // The `release-cut-multi-target-ecosystem` regression: a contract with two
+    // crates.io targets in the `rust` ecosystem (`ossctl-core`, then `ossctl`) is
+    // no longer rejected as `invalid_plan`; it cuts, keying each target by a
+    // distinct journal id and publishing the dependency before its dependent.
+    let world = CratesWorld::default();
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = WorkspaceCmd::new(world.clone());
+    let reg = WorldRegistry {
+        world: world.clone(),
+    };
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+
+    let plan = ReleasePlan {
+        plan_id: "plan-multi".into(),
+        contract_schema_version: 1,
+        head_sha: "deadbeef".into(),
+        version: "1.2.3".into(),
+        targets: vec![crates_target("ossctl-core"), crates_target("ossctl")],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
+    };
+
+    // The plan preflights (this is the check that used to hard-fail `invalid_plan`)
+    // and its two targets carry distinct, dependency-ordered journal ids.
+    validate_plan(&plan).expect("two same-ecosystem targets must be a valid plan");
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    assert_eq!(ids, vec!["rust:ossctl-core", "rust:ossctl"]);
+
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "plan-multi".into(),
+        "1.2.3".into(),
+        ids.clone(),
+    )
+    .unwrap();
+    let mut sink = NullSink;
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+
+    let state = journal.state();
+    assert_eq!(state.status, RunStatus::Completed);
+    // Both targets published under their distinct ids — no ecosystem collision.
+    assert!(state.published.contains_key("rust:ossctl-core"));
+    assert!(state.published.contains_key("rust:ossctl"));
+    assert_eq!(state.published.len(), 2);
+
+    // Dependency order at the process level: `ossctl-core` publishes before
+    // `ossctl`, and exactly once (the dependent's closure sees it already indexed
+    // and skips it rather than re-publishing).
+    let calls = cmd.calls();
+    let core_pub = calls
+        .iter()
+        .position(|c| c == "cargo publish -p ossctl-core")
+        .expect("ossctl-core was published");
+    let cli_pub = calls
+        .iter()
+        .position(|c| c == "cargo publish -p ossctl")
+        .expect("ossctl was published");
+    assert!(
+        core_pub < cli_pub,
+        "dependency published after its dependent: {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| *c == "cargo publish -p ossctl-core")
+            .count(),
+        1,
+        "the dependency crate was published more than once: {calls:?}"
+    );
+}
+
 // ── Plan validation (before any external action) ─────────────────────────────
 
 #[test]

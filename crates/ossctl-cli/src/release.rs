@@ -1000,11 +1000,12 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     let tagger = RealTagger::new(&root);
 
     // Create the run under the single-active-cut lock (RunCreated is journalled).
-    let target_ids: Vec<String> = current
-        .targets
-        .iter()
-        .map(|t| t.ecosystem.as_str().to_string())
-        .collect();
+    // Derive the per-target journal ids through the same shared helper the
+    // coordinator keys its facts by, so `RunCreated.targets` matches the
+    // `published`/`built`/`dry_run` keys even when an ecosystem carries several
+    // targets (two crates.io crates, or a crate plus its gh-releases/homebrew
+    // channels — all under `rust`).
+    let target_ids = ossctl_core::release::journal_target_ids(&current.targets);
     let mut journal = Journal::create(
         &store,
         &clock,

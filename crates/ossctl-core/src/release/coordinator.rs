@@ -65,7 +65,8 @@ use super::adapters::{
     ReleaseArtifacts, SourceTarball,
 };
 use super::journal::Journal;
-use crate::contract::schema::{Adapter, Ecosystem, Target};
+use super::journal_target_ids;
+use crate::contract::schema::{Adapter, Target};
 
 /// A destination for the coordinator's progress events, so a real cut can stream
 /// them (`--output=jsonl`, §12) while the same events are durably journalled.
@@ -230,26 +231,37 @@ pub fn execute(
 
 /// Preflight a plan **without** touching external state or creating a run: check
 /// it resolves into executable targets (every package resolved, no two targets
-/// colliding on one ecosystem id).
+/// sharing a journal id).
 ///
 /// `release cut` calls this *before* `Journal::create` so an unexecutable plan is
 /// refused up front rather than leaving an orphaned `run_created` run behind.
 /// [`execute`] re-runs the same resolution (defense in depth).
 ///
 /// # Errors
-/// [`CutError::Plan`] when a target has no resolved package or two targets share
-/// an ecosystem journal id.
+/// [`CutError::Plan`] when a target has no resolved package or two *identical*
+/// targets (same ecosystem, package, registry, and adapter) collide on one
+/// journal id.
 pub fn validate_plan(plan: &ReleasePlan) -> Result<(), CutError> {
     resolve_target_plans(plan).map(|_| ())
 }
 
 /// Turn the sealed plan's abstract targets into concrete, adapter-backed units of
-/// work — the one place a `null`-package or a duplicate-ecosystem plan is refused
-/// (before any external action).
+/// work — the one place a `null`-package or a duplicate target is refused (before
+/// any external action).
+///
+/// Several targets in one ecosystem are supported (e.g. `ossctl-core` then
+/// `ossctl` on crates.io): each is keyed by a distinct per-target journal id
+/// ([`journal_target_ids`]), and the plan's (normalizer-canonical) order — which
+/// lists a dependency before its dependents — is the publish order the barriers
+/// walk. Intra-ecosystem dependency ordering *within* a single target (a
+/// workspace's crates) is the adapter's own concern (the cargo adapter topo-sorts
+/// and index-waits); the only collision left here is two byte-identical targets,
+/// which is a degenerate contract duplicate.
 fn resolve_target_plans(plan: &ReleasePlan) -> Result<Vec<TargetPlan>, CutError> {
+    let ids = journal_target_ids(&plan.targets);
     let mut out = Vec::with_capacity(plan.targets.len());
     let mut seen: Vec<String> = Vec::new();
-    for t in &plan.targets {
+    for (t, id) in plan.targets.iter().zip(ids) {
         // A target whose package is still unresolved at cut time cannot publish —
         // the plan warned it would need inference; refuse rather than guess.
         let package = t.package.clone().ok_or_else(|| {
@@ -259,11 +271,11 @@ fn resolve_target_plans(plan: &ReleasePlan) -> Result<Vec<TargetPlan>, CutError>
                 t.ecosystem.as_str()
             ))
         })?;
-        let id = target_id(t.ecosystem);
         if seen.contains(&id) {
             return Err(CutError::Plan(format!(
-                "two targets resolve to the same journal id `{id}`; multiple targets in one \
-                 ecosystem are not supported by a single cut"
+                "two targets resolve to the same journal id `{id}` — the plan has two \
+                 identical targets (same ecosystem, package, registry, and adapter); \
+                 remove the duplicate target in OSS-RELEASE.md"
             )));
         }
         seen.push(id.clone());
@@ -284,14 +296,6 @@ fn resolve_target_plans(plan: &ReleasePlan) -> Result<Vec<TargetPlan>, CutError>
         });
     }
     Ok(out)
-}
-
-/// The stable journal key for a target — its ecosystem wire string (`rust`,
-/// `node`, …). A cut publishes at most one target per ecosystem (the normalizer
-/// expands `ecosystems` 1:1); [`resolve_target_plans`] refuses a plan that would
-/// collide here.
-fn target_id(ecosystem: Ecosystem) -> String {
-    ecosystem.as_str().to_string()
 }
 
 /// Whether the cut carries a GitHub-backed distribution target — the binary
