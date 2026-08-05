@@ -379,6 +379,25 @@ pub trait ReleaseAdapter {
         false
     }
 
+    /// Whether this adapter's tag-triggered CI **owns the shared GitHub Release** —
+    /// its workflow creates and finalizes the Release object (and uploads the
+    /// cross-platform binaries into it), so the coordinator must NOT create the
+    /// Release itself or the two clash over the same tag
+    /// (`coordinator-release-vs-cargo-dist-ownership`).
+    ///
+    /// This is a **strict subset** of [`is_ci_delegated`](Self::is_ci_delegated), not
+    /// a synonym: an adapter can be CI-delegated for its *publish* yet not own the
+    /// GitHub Release. `gh-action-pypi-publish` uploads to **`PyPI`** (not GitHub) and
+    /// `release-please` is publish-on-merge — neither runs `gh release create` for
+    /// this tag, so for those the coordinator still creates the Release. Only
+    /// `cargo-dist`, whose generated `release.yml` runs `gh release create <tag> …
+    /// artifacts/*` (a create, not an upsert — it errors if the Release pre-exists),
+    /// overrides this to `true`. Defaults to `false` (the coordinator owns the
+    /// Release, the ADR-0002 default).
+    fn ci_owns_github_release(&self) -> bool {
+        false
+    }
+
     /// Re-runnable, side-effect-free preview: the exact commands a real cut
     /// would run for `target`.
     ///
@@ -506,6 +525,9 @@ impl ReleaseAdapter for EcosystemAdapter {
     }
     fn is_ci_delegated(&self) -> bool {
         self.inner().is_ci_delegated()
+    }
+    fn ci_owns_github_release(&self) -> bool {
+        self.inner().ci_owns_github_release()
     }
     fn dry_run(
         &self,

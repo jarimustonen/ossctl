@@ -17,12 +17,16 @@
 //!   (`tag_created_local` → `tag_pushed_remote` → `github_release_created` /
 //!   `github_release_delegated`) are independently journalled so an interrupted tag
 //!   phase resumes step-by-step. The **GitHub Release** step is conditional on
-//!   ownership: for a plan with a CI-delegated target (e.g. `cargo-dist`) the
-//!   tag-triggered CI owns Release creation + the cross-platform binary upload, so
-//!   the coordinator pushes the tag (which triggers CI) but journals
+//!   ownership: for a plan with a target whose CI owns the Release
+//!   ([`ci_owns_github_release`](super::adapters::ReleaseAdapter::ci_owns_github_release)
+//!   — `cargo-dist`) the tag-triggered CI owns Release creation + the cross-platform
+//!   binary upload, so the coordinator pushes the tag (which triggers CI) but journals
 //!   `github_release_delegated` and does **not** create the Release — avoiding a
-//!   double-create clash. For a plan with no CI-delegated target the coordinator
-//!   creates the Release itself (`github_release_created`), the ADR-0002 default
+//!   double-create clash. Otherwise the coordinator creates the Release itself
+//!   (`github_release_created`), the ADR-0002 default. This is a strict subset of
+//!   CI-delegation: a PyPI-trusted-publisher or `release-please` target is
+//!   CI-delegated for its *publish* yet does not own the GitHub Release, so those
+//!   plans still get an engine-created Release
 //!   (`coordinator-release-vs-cargo-dist-ownership`).
 //! - **CI-delegated targets are skipped, not failed.** A target whose adapter
 //!   declares [`is_ci_delegated`](ReleaseAdapter::is_ci_delegated) (its artifact is
@@ -252,11 +256,15 @@ pub fn execute(
     // and defers post-tag targets (homebrew) to the dist phase below.
     publish_phase(journal, sink, &ctx.with_artifacts(&artifacts), &targets)?;
     // tag-once: coordinator-only, only after every publish succeeded. When the plan
-    // carries a CI-delegated target (cargo-dist et al.), the tag-triggered CI owns
-    // the GitHub Release, so the coordinator creates + pushes the tag but does NOT
-    // create the Release itself (it would clash with CI over the same Release).
-    let delegate_github_release = targets.iter().any(|tp| tp.adapter.is_ci_delegated());
-    tag_phase(journal, sink, tagger, plan, delegate_github_release)?;
+    // carries a target whose tag-triggered CI OWNS the GitHub Release (cargo-dist),
+    // the coordinator creates + pushes the tag but does NOT create the Release itself
+    // (it would clash with CI over the same Release). This is the narrow
+    // `ci_owns_github_release()` capability, NOT the broader `is_ci_delegated()`: a
+    // PyPI-trusted-publisher or release-please target is CI-delegated for its publish
+    // yet does not own the GitHub Release, so those plans still get an engine-created
+    // Release (`coordinator-release-vs-cargo-dist-ownership`).
+    let release_owner = github_release_owner(&targets);
+    tag_phase(journal, sink, tagger, plan, release_owner.as_deref())?;
     // dist (post-tag finalize): now the tag archive exists, finalize homebrew with
     // its real sha256. Runs for every cut (a no-op when there is no post-tag
     // target); its Ok completion flips the run to Completed. (`repo_slug` /
@@ -341,6 +349,22 @@ fn resolve_target_plans(plan: &ReleasePlan) -> Result<Vec<TargetPlan>, CutError>
         });
     }
     Ok(out)
+}
+
+/// The adapter identity of the target whose tag-triggered CI **owns the shared
+/// GitHub Release** (via [`ci_owns_github_release`](ReleaseAdapter::ci_owns_github_release)),
+/// or `None` when the coordinator owns it. `Some(_)` makes the tag phase delegate
+/// Release creation to CI instead of creating it
+/// (`coordinator-release-vs-cargo-dist-ownership`).
+///
+/// Returns the **first** such target's adapter (there is at most one in practice —
+/// only `cargo-dist` claims Release ownership); the identity is journalled on the
+/// delegation fact for the operator-facing record.
+fn github_release_owner(targets: &[TargetPlan]) -> Option<String> {
+    targets
+        .iter()
+        .find(|tp| tp.adapter.ci_owns_github_release())
+        .map(|tp| tp.input.target.adapter.as_str().to_string())
 }
 
 /// Whether the cut carries a GitHub-backed distribution target — the binary
@@ -595,28 +619,33 @@ fn publish_phase(
 /// # GitHub Release ownership (`coordinator-release-vs-cargo-dist-ownership`)
 ///
 /// The tag (`create_tag` → `push_tag`) is **always** created and pushed here —
-/// that pushed tag is what triggers a CI-delegated target's release workflow. The
-/// third step, the GitHub Release, is conditional on `delegate_github_release`:
+/// that pushed tag is what triggers a CI-owned target's release workflow. The
+/// third step, the GitHub Release, is conditional on `release_owner`:
 ///
-/// - `false` (no CI-delegated target): the coordinator creates the Release itself
-///   through the injected [`Tagger`], exactly the ADR-0002 behavior, journalling
-///   [`EventKind::GithubReleaseCreated`].
-/// - `true` (≥1 CI-delegated target, e.g. `cargo-dist`): the tag-triggered CI owns
-///   Release creation and the cross-platform binary upload, so the coordinator does
-///   **not** create it — creating it first would clash with CI (which then either
-///   fails on "release already exists" or uploads into an empty engine-created
-///   stub). It records [`EventKind::GithubReleaseDelegated`] instead, so
+/// - `None` (no target whose CI owns the Release): the coordinator creates the
+///   Release itself through the injected [`Tagger`], exactly the ADR-0002 behavior,
+///   journalling [`EventKind::GithubReleaseCreated`].
+/// - `Some(adapter)` (a target whose CI owns the Release, e.g. `cargo-dist`): the
+///   tag-triggered CI owns Release creation and the cross-platform binary upload, so
+///   the coordinator does **not** create it — creating it first would clash with CI
+///   (its `gh release create` then fails on "release already exists"). It records
+///   [`EventKind::GithubReleaseDelegated`] (carrying `adapter`) instead, so
 ///   resume/verify treat the missing engine-created Release as intentional and a
 ///   resumed run never re-attempts it.
 ///
 /// Either way exactly one Release-disposition fact is journalled per tag, and the
-/// step is idempotent on resume (skipped once its fact is recorded).
+/// step is idempotent on resume (skipped once its fact is recorded). A
+/// **contradictory** already-recorded disposition — a delegation demanded when the
+/// journal already carries an engine-created Release, or vice versa — is refused as
+/// a tag-phase failure rather than silently producing a dual-disposition state (it
+/// is unreachable for a fixed `plan_id`, so it can only mean the adapter's ownership
+/// classification changed under a resumed run's binary).
 fn tag_phase(
     journal: &mut Journal<'_>,
     sink: &mut dyn ProgressSink,
     tagger: &dyn Tagger,
     plan: &ReleasePlan,
-    delegate_github_release: bool,
+    release_owner: Option<&str>,
 ) -> Result<(), CutError> {
     let phase = Phase::Tag;
     if phase_completed_ok(journal.state(), phase) {
@@ -649,16 +678,51 @@ fn tag_phase(
             EventKind::TagPushedRemote { tag: tag.clone() },
         )?;
     }
-    if delegate_github_release {
-        // A CI-delegated target owns the GitHub Release: the tag pushed above
-        // triggers its workflow, which creates+finalizes the Release and uploads the
-        // cross-platform binaries. Record the delegation (skipped on resume once
-        // recorded) and do NOT create the Release — creating it would clash with CI.
+    // Refuse a contradictory already-recorded disposition before acting: the two
+    // Release outcomes are mutually exclusive, so a delegation demanded over an
+    // engine-created Release (or the reverse) is an invariant violation, not a step
+    // to append on top of the other. Fail-and-journal, never a dual-disposition state.
+    if let Some(adapter) = release_owner {
+        if tag_step_done(journal.state(), &tag, |s| s.github_release) {
+            return fail_phase(
+                journal,
+                sink,
+                phase,
+                None,
+                format!(
+                    "tag {tag} already has an engine-created GitHub Release, but the plan \
+                     delegates the Release to CI ({adapter}); the adapter's ownership \
+                     classification changed between attempts — reconcile the tag by hand"
+                ),
+            );
+        }
+    } else if tag_step_done(journal.state(), &tag, |s| s.github_release_delegated) {
+        return fail_phase(
+            journal,
+            sink,
+            phase,
+            None,
+            format!(
+                "tag {tag}'s GitHub Release was already delegated to CI, but the plan now \
+                 has the coordinator create it; the adapter's ownership classification \
+                 changed between attempts — reconcile the tag by hand"
+            ),
+        );
+    }
+
+    if let Some(adapter) = release_owner {
+        // A target's CI owns the GitHub Release: the tag pushed above triggers its
+        // workflow, which creates+finalizes the Release and uploads the cross-platform
+        // binaries. Record the delegation (skipped on resume once recorded) and do NOT
+        // create the Release — creating it would clash with CI.
         if !tag_step_done(journal.state(), &tag, |s| s.github_release_delegated) {
             record(
                 journal,
                 sink,
-                EventKind::GithubReleaseDelegated { tag: tag.clone() },
+                EventKind::GithubReleaseDelegated {
+                    tag: tag.clone(),
+                    delegated_to: adapter.to_string(),
+                },
             )?;
         }
     } else if !tag_step_done(journal.state(), &tag, |s| s.github_release) {

@@ -1214,8 +1214,8 @@ fn render_event_line(event: &JournalEvent) -> String {
             Some(u) => format!("  release: {tag} ({u})"),
             None => format!("  release: {tag}"),
         },
-        EventKind::GithubReleaseDelegated { tag } => {
-            format!("  release delegated to CI: {tag}")
+        EventKind::GithubReleaseDelegated { tag, delegated_to } => {
+            format!("  release delegated to CI: {tag} ({delegated_to})")
         }
         EventKind::RunAbandoned { reason } => format!("run abandoned: {reason}"),
     }

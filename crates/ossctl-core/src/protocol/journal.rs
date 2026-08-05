@@ -39,16 +39,25 @@ use serde::{Deserialize, Serialize};
 /// Bump on a breaking event/state change (removing/renaming fields, changing a
 /// variant's semantics); additive optional fields do not bump it.
 ///
-/// **v2** (2026-08-05): added the [`EventKind::TargetDelegated`] event class, the
-/// post-tag [`Phase::Dist`] barrier, and the [`EventKind::GithubReleaseDelegated`]
-/// event class (all new event *kinds* / a phase value an older reader cannot
-/// interpret, so the version is bumped per the migration rule — a v1 `ossctl`
-/// refuses a v2 line rather than misreading it). These three additions all land
-/// under the single unreleased v2 (no shipped `ossctl` has emitted a v2 journal —
-/// the engine has never cut `ossctl` itself), so they fold into one bump rather
-/// than a v3. A v2 run carries no v1-incompatible receipt shape; the reduce path
-/// stays backward-tolerant of v1 logs (which simply lack these events).
-pub const JOURNAL_SCHEMA_VERSION: u32 = 2;
+/// **v2** (2026-08-05): added the [`EventKind::TargetDelegated`] event class and
+/// the post-tag [`Phase::Dist`] barrier (a new event *kind* / phase value an
+/// older reader cannot interpret, so the version is bumped per the migration
+/// rule — a v1 `ossctl` refuses a v2 line rather than misreading it). A v2 run
+/// carries no v1-incompatible receipt shape; the reduce path stays
+/// backward-tolerant of v1 logs (which simply lack these events).
+///
+/// **v3** (2026-08-05): added the [`EventKind::GithubReleaseDelegated`] event class
+/// (the coordinator delegating GitHub Release creation to a target's CI, e.g.
+/// `cargo-dist`). This is a **new event kind a v2 reader cannot interpret**, so the
+/// migration rule requires its own bump — folding it into v2 would defeat the
+/// version gate ([`read_events`](crate::release::journal::read_events)), letting a
+/// v2 binary silently choke on a `github_release_delegated` line instead of refusing
+/// it with an upgrade error. (This matters even though the engine has never cut a
+/// release itself: a build from `main` between the v2 and v3 commits can emit a v2
+/// journal, and that journal must stay readable while a v3 line is refused by the
+/// older binary.) The reduce path stays backward-tolerant of v1/v2 logs (which lack
+/// this event); `TagState::github_release_delegated` is `#[serde(default)]`.
+pub const JOURNAL_SCHEMA_VERSION: u32 = 3;
 
 /// The five coordinator phases, in barrier order (ADR-0002): the derived
 /// `PartialOrd`/`Ord` follows declaration order, so `DryRun < Build < Publish <
@@ -150,13 +159,18 @@ pub struct PublishReceipt {
     pub digest: Option<String>,
 }
 
-/// The progress of one release tag through its landing steps. Every field is an
-/// independent, monotonic (`false → true`) fact, so re-applying a tag event is a
-/// no-op. These are orthogonal recorded facts (each set by its own journal event),
-/// not the states of a single machine, so a flat set of flags — not a two-variant
-/// enum per `clippy::struct_excessive_bools` — is the faithful shape;
-/// `github_release` and `github_release_delegated` are the two mutually-exclusive
-/// Release dispositions (created-by-engine vs delegated-to-CI).
+/// The progress of one release tag through its landing steps. Every field is a
+/// monotonic (`false → true`) fact set by its own journal event, so re-applying a
+/// tag event is a no-op. `created_local` and `pushed_remote` are orthogonal landing
+/// facts; `github_release` vs `github_release_delegated` are the two
+/// **mutually-exclusive** dispositions of the Release step (created-by-engine vs
+/// delegated-to-CI) — the coordinator writes exactly one, and refuses to record a
+/// second contradictory one (`crate::release::coordinator`'s tag phase), so the
+/// illegal both-true state is unreachable for a valid run. They stay flat flags
+/// (with a `clippy::struct_excessive_bools` allow) rather than a
+/// `ReleaseDisposition` enum for consistency with the surrounding flat-flag style
+/// and a `#[serde(default)]`-friendly additive wire shape; folding them into an
+/// enum is a tracked cleanup, not a correctness fix given the write-time guard.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TagState {
@@ -299,6 +313,10 @@ pub enum EventKind {
     GithubReleaseDelegated {
         /// The tag name whose Release creation was delegated to CI.
         tag: String,
+        /// The adapter identity whose CI owns the Release (its wire string, e.g.
+        /// `"cargo-dist"`) — the operator-facing record of *what* the Release was
+        /// delegated to, mirroring [`Self::TargetDelegated`]'s `adapter`.
+        delegated_to: String,
     },
     /// The run was abandoned. Terminal; there is **no** auto-rollback (ADR-0002).
     RunAbandoned {
@@ -367,7 +385,7 @@ impl EventKind {
             Self::TagCreatedLocal { tag } => format!("tag_created_local:{tag}"),
             Self::TagPushedRemote { tag } => format!("tag_pushed_remote:{tag}"),
             Self::GithubReleaseCreated { tag, .. } => format!("github_release_created:{tag}"),
-            Self::GithubReleaseDelegated { tag } => format!("github_release_delegated:{tag}"),
+            Self::GithubReleaseDelegated { tag, .. } => format!("github_release_delegated:{tag}"),
             Self::RunAbandoned { .. } => "run_abandoned".to_string(),
         }
     }

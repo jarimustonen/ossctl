@@ -1894,3 +1894,46 @@ fn ci_delegation_matches_the_unsupported_publishers() {
         );
     }
 }
+
+/// `ci_owns_github_release()` is a **strict subset** of `is_ci_delegated()`: only
+/// `cargo-dist` (whose `release.yml` runs `gh release create`) owns the shared
+/// GitHub Release. The regression this guards
+/// (`coordinator-release-vs-cargo-dist-ownership`): a CI-delegated *publish* that
+/// does NOT touch the GitHub Release — `gh-action-pypi-publish` (uploads to `PyPI`) and
+/// `release-please` (publish-on-merge) — must NOT suppress the coordinator's Release
+/// creation, or a pure-Python trusted-publisher plan would silently lose its
+/// engine-created GitHub Release.
+#[test]
+fn only_cargo_dist_owns_the_github_release_and_it_is_a_subset_of_ci_delegation() {
+    let all = [
+        Adapter::CargoPublish,
+        Adapter::CargoDist,
+        Adapter::ReleasePlease,
+        Adapter::Changesets,
+        Adapter::NpmPublish,
+        Adapter::GhActionPypiPublish,
+        Adapter::Twine,
+        Adapter::Goreleaser,
+        Adapter::HomebrewTap,
+        Adapter::HomebrewCore,
+        Adapter::Manual,
+    ];
+    for id in all {
+        let owns = resolve(id).ci_owns_github_release();
+        assert_eq!(
+            owns,
+            id == Adapter::CargoDist,
+            "ci_owns_github_release() is wrong for {id:?}"
+        );
+        // Subset invariant: owning the Release implies CI-delegation.
+        if owns {
+            assert!(
+                resolve(id).is_ci_delegated(),
+                "{id:?} owns the Release but is not CI-delegated"
+            );
+        }
+    }
+    // The two delegated-but-not-Release-owning adapters explicitly do NOT own it.
+    assert!(!resolve(Adapter::GhActionPypiPublish).ci_owns_github_release());
+    assert!(!resolve(Adapter::ReleasePlease).ci_owns_github_release());
+}

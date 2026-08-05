@@ -100,6 +100,16 @@ impl ReleaseAdapter for CargoAdapter {
         matches!(self.adapter, Adapter::CargoDist)
     }
 
+    fn ci_owns_github_release(&self) -> bool {
+        // `cargo-dist`'s generated `release.yml` runs `gh release create <tag> …
+        // artifacts/*` — it creates AND finalizes the shared GitHub Release and
+        // uploads the cross-platform binaries. So the coordinator must not create
+        // the Release itself (a pre-existing Release makes `gh release create`
+        // error). `cargo-publish` owns no GitHub Release. See
+        // `coordinator-release-vs-cargo-dist-ownership`.
+        matches!(self.adapter, Adapter::CargoDist)
+    }
+
     fn dry_run(
         &self,
         ctx: &EffectCtx<'_>,

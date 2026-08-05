@@ -1711,14 +1711,17 @@ fn a_ci_delegated_plan_delegates_the_github_release_and_never_creates_it() {
         tagger.calls()
     );
     assert_eq!(tagger.calls(), vec!["create:v1.0.0@d", "push:v1.0.0"]);
-    // Exactly one delegation event was streamed (and no created event), after the push.
+    // Exactly one delegation event was streamed (and no created event), after the push,
+    // and it names the owning adapter (cargo-dist) for the operator record.
     let k = &sink.kinds;
     assert_eq!(
         k.iter()
-            .filter(|e| matches!(e, EventKind::GithubReleaseDelegated { .. }))
+            .filter(
+                |e| matches!(e, EventKind::GithubReleaseDelegated { delegated_to, .. } if delegated_to == "cargo-dist")
+            )
             .count(),
         1,
-        "expected exactly one github_release_delegated event"
+        "expected exactly one github_release_delegated event naming cargo-dist"
     );
     assert!(
         !k.iter()
@@ -1821,4 +1824,117 @@ fn a_resumed_delegated_run_completes_without_ever_creating_the_release() {
             .count(),
         1
     );
+}
+
+/// Build a journal whose tag is already through `created_local` + `pushed_remote`,
+/// plus whichever Release-disposition event `disposition` appends — the setup for
+/// the contradictory-disposition guard tests.
+fn journal_with_tag_disposition<'a>(
+    store: &'a FakeStore,
+    clock: &'a FakeClock,
+    idgen: &'a FakeIdGen,
+    disposition: EventKind,
+) -> Journal<'a> {
+    let mut journal = Journal::create(
+        store,
+        clock,
+        idgen,
+        paths(),
+        "p".into(),
+        "1.0.0".into(),
+        vec!["rust".into()],
+    )
+    .unwrap();
+    for ev in [
+        EventKind::TagCreatedLocal {
+            tag: "v1.0.0".into(),
+        },
+        EventKind::TagPushedRemote {
+            tag: "v1.0.0".into(),
+        },
+        disposition,
+    ] {
+        journal.append(ev).unwrap();
+    }
+    journal
+}
+
+#[test]
+fn delegating_over_an_already_created_release_is_refused_not_double_recorded() {
+    // Contradictory disposition (unreachable for a fixed plan_id, but possible if a
+    // resumed run's binary reclassifies the adapter): the journal already has an
+    // engine-created Release, yet the plan now delegates it to CI. The tag phase must
+    // FAIL — never append a delegation on top of a creation (dual-disposition state).
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let tagger = FakeTagger::new();
+    let mut sink = RecordingSink::default();
+    let mut journal = journal_with_tag_disposition(
+        &store,
+        &clock,
+        &idgen,
+        EventKind::GithubReleaseCreated {
+            tag: "v1.0.0".into(),
+            url: Some("https://github.com/x/y/releases/v1.0.0".into()),
+        },
+    );
+
+    let plan = delegated_plan();
+    let err = tag_phase(&mut journal, &mut sink, &tagger, &plan, Some("cargo-dist")).unwrap_err();
+    match err {
+        CutError::PhaseFailed { phase, target, .. } => {
+            assert_eq!(phase, Phase::Tag);
+            assert_eq!(target, None);
+        }
+        other => panic!("expected a tag PhaseFailed, got {other:?}"),
+    }
+    // No delegation event was recorded, and the Release flag stays created-only.
+    let tag = journal.state().tags.get("v1.0.0").unwrap();
+    assert!(tag.github_release && !tag.github_release_delegated);
+    assert!(!sink
+        .kinds
+        .iter()
+        .any(|e| matches!(e, EventKind::GithubReleaseDelegated { .. })));
+}
+
+#[test]
+fn creating_over_an_already_delegated_release_is_refused() {
+    // The reverse contradiction: the journal already delegated the Release to CI, yet
+    // the plan now has the coordinator create it. Creating it would clash with the CI
+    // that may already have created it, so the tag phase must FAIL rather than call
+    // create_github_release.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let tagger = FakeTagger::new();
+    let mut sink = RecordingSink::default();
+    let mut journal = journal_with_tag_disposition(
+        &store,
+        &clock,
+        &idgen,
+        EventKind::GithubReleaseDelegated {
+            tag: "v1.0.0".into(),
+            delegated_to: "cargo-dist".into(),
+        },
+    );
+
+    // A non-delegated (coordinator-owned) plan at the same version as the journal tag
+    // (v1.0.0): release_owner = None.
+    let plan = ReleasePlan {
+        version: "1.0.0".into(),
+        ..two_target_plan()
+    };
+    let err = tag_phase(&mut journal, &mut sink, &tagger, &plan, None).unwrap_err();
+    assert!(matches!(
+        err,
+        CutError::PhaseFailed {
+            phase: Phase::Tag,
+            ..
+        }
+    ));
+    // create_github_release was never called; the flag stays delegated-only.
+    assert!(!tagger.calls().iter().any(|c| c.starts_with("release:")));
+    let tag = journal.state().tags.get("v1.0.0").unwrap();
+    assert!(tag.github_release_delegated && !tag.github_release);
 }

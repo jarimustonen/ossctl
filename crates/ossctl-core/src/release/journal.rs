@@ -238,7 +238,7 @@ pub fn apply(state: &mut RunState, event: &JournalEvent) {
             t.github_release = true;
             t.github_release_url.clone_from(url);
         }
-        EventKind::GithubReleaseDelegated { tag } => {
+        EventKind::GithubReleaseDelegated { tag, .. } => {
             state
                 .tags
                 .entry(tag.clone())
@@ -1043,6 +1043,7 @@ mod tests {
                 3,
                 EventKind::GithubReleaseDelegated {
                     tag: "v1.0.0".into(),
+                    delegated_to: "cargo-dist".into(),
                 },
             ),
         );
