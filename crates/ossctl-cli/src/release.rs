@@ -587,6 +587,9 @@ fn render_show_text(state: &RunState, events: &[JournalEvent]) {
         if tstate.github_release {
             steps.push("release");
         }
+        if tstate.github_release_delegated {
+            steps.push("release→CI");
+        }
         println!("tag {tag}: {}", steps.join(", "));
     }
 
@@ -1211,6 +1214,9 @@ fn render_event_line(event: &JournalEvent) -> String {
             Some(u) => format!("  release: {tag} ({u})"),
             None => format!("  release: {tag}"),
         },
+        EventKind::GithubReleaseDelegated { tag } => {
+            format!("  release delegated to CI: {tag}")
+        }
         EventKind::RunAbandoned { reason } => format!("run abandoned: {reason}"),
     }
 }

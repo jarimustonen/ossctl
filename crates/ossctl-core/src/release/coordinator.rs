@@ -11,11 +11,19 @@
 //!   enters the next. A publish can never precede an all-targets build; a tag can
 //!   never precede an all-targets publish. A failure in phase *K* blocks entry to
 //!   *K+1* and records a `phase_completed { phase, outcome: failed }` fact.
-//! - **Coordinator-only tagging.** The shared git tag + GitHub Release are
-//!   created here, exactly once, only after every publish has succeeded, through
-//!   the injected [`Tagger`] port. The three tag steps
-//!   (`tag_created_local` → `tag_pushed_remote` → `github_release_created`) are
-//!   independently journalled so an interrupted tag phase resumes step-by-step.
+//! - **Coordinator-only tagging.** The shared git tag is created and pushed here,
+//!   exactly once, only after every publish has succeeded, through the injected
+//!   [`Tagger`] port. The three tag steps
+//!   (`tag_created_local` → `tag_pushed_remote` → `github_release_created` /
+//!   `github_release_delegated`) are independently journalled so an interrupted tag
+//!   phase resumes step-by-step. The **GitHub Release** step is conditional on
+//!   ownership: for a plan with a CI-delegated target (e.g. `cargo-dist`) the
+//!   tag-triggered CI owns Release creation + the cross-platform binary upload, so
+//!   the coordinator pushes the tag (which triggers CI) but journals
+//!   `github_release_delegated` and does **not** create the Release — avoiding a
+//!   double-create clash. For a plan with no CI-delegated target the coordinator
+//!   creates the Release itself (`github_release_created`), the ADR-0002 default
+//!   (`coordinator-release-vs-cargo-dist-ownership`).
 //! - **CI-delegated targets are skipped, not failed.** A target whose adapter
 //!   declares [`is_ci_delegated`](ReleaseAdapter::is_ci_delegated) (its artifact is
 //!   produced by the tag-triggered CI, e.g. `cargo-dist`'s `release.yml`) is
@@ -49,7 +57,7 @@
 //! phase_entered dry_run ; target_dry_run … ; phase_completed dry_run ok
 //! phase_entered build   ; target_built …   ; phase_completed build ok
 //! phase_entered publish ; target_published …(receipt each) / target_delegated …(CI-owned) ; phase_completed publish ok
-//! phase_entered tag     ; tag_created_local ; tag_pushed_remote ; github_release_created ; phase_completed tag ok
+//! phase_entered tag     ; tag_created_local ; tag_pushed_remote ; github_release_created (or github_release_delegated when a CI-delegated target owns the Release) ; phase_completed tag ok
 //! phase_entered dist    ; target_published …(homebrew, real sha256) ; phase_completed dist ok
 //! ```
 //!
@@ -243,8 +251,12 @@ pub fn execute(
     // publishes the engine-owned targets, journals CI-delegated targets as skipped,
     // and defers post-tag targets (homebrew) to the dist phase below.
     publish_phase(journal, sink, &ctx.with_artifacts(&artifacts), &targets)?;
-    // tag-once: coordinator-only, only after every publish succeeded.
-    tag_phase(journal, sink, tagger, plan)?;
+    // tag-once: coordinator-only, only after every publish succeeded. When the plan
+    // carries a CI-delegated target (cargo-dist et al.), the tag-triggered CI owns
+    // the GitHub Release, so the coordinator creates + pushes the tag but does NOT
+    // create the Release itself (it would clash with CI over the same Release).
+    let delegate_github_release = targets.iter().any(|tp| tp.adapter.is_ci_delegated());
+    tag_phase(journal, sink, tagger, plan, delegate_github_release)?;
     // dist (post-tag finalize): now the tag archive exists, finalize homebrew with
     // its real sha256. Runs for every cut (a no-op when there is no post-tag
     // target); its Ok completion flips the run to Completed. (`repo_slug` /
@@ -577,14 +589,34 @@ fn publish_phase(
 
 /// Run the tag-once barrier — coordinator-owned, reached only after every publish
 /// succeeded. Drives the three tag steps in order, each journalled separately and
-/// each skipped if already recorded (resume), then completes the phase `Ok`
-/// (which flips the run to `Completed`). Any step failure records
+/// each skipped if already recorded (resume). Any step failure records
 /// `phase_completed tag failed` and stops, leaving completed steps journalled.
+///
+/// # GitHub Release ownership (`coordinator-release-vs-cargo-dist-ownership`)
+///
+/// The tag (`create_tag` → `push_tag`) is **always** created and pushed here —
+/// that pushed tag is what triggers a CI-delegated target's release workflow. The
+/// third step, the GitHub Release, is conditional on `delegate_github_release`:
+///
+/// - `false` (no CI-delegated target): the coordinator creates the Release itself
+///   through the injected [`Tagger`], exactly the ADR-0002 behavior, journalling
+///   [`EventKind::GithubReleaseCreated`].
+/// - `true` (≥1 CI-delegated target, e.g. `cargo-dist`): the tag-triggered CI owns
+///   Release creation and the cross-platform binary upload, so the coordinator does
+///   **not** create it — creating it first would clash with CI (which then either
+///   fails on "release already exists" or uploads into an empty engine-created
+///   stub). It records [`EventKind::GithubReleaseDelegated`] instead, so
+///   resume/verify treat the missing engine-created Release as intentional and a
+///   resumed run never re-attempts it.
+///
+/// Either way exactly one Release-disposition fact is journalled per tag, and the
+/// step is idempotent on resume (skipped once its fact is recorded).
 fn tag_phase(
     journal: &mut Journal<'_>,
     sink: &mut dyn ProgressSink,
     tagger: &dyn Tagger,
     plan: &ReleasePlan,
+    delegate_github_release: bool,
 ) -> Result<(), CutError> {
     let phase = Phase::Tag;
     if phase_completed_ok(journal.state(), phase) {
@@ -617,7 +649,19 @@ fn tag_phase(
             EventKind::TagPushedRemote { tag: tag.clone() },
         )?;
     }
-    if !tag_step_done(journal.state(), &tag, |s| s.github_release) {
+    if delegate_github_release {
+        // A CI-delegated target owns the GitHub Release: the tag pushed above
+        // triggers its workflow, which creates+finalizes the Release and uploads the
+        // cross-platform binaries. Record the delegation (skipped on resume once
+        // recorded) and do NOT create the Release — creating it would clash with CI.
+        if !tag_step_done(journal.state(), &tag, |s| s.github_release_delegated) {
+            record(
+                journal,
+                sink,
+                EventKind::GithubReleaseDelegated { tag: tag.clone() },
+            )?;
+        }
+    } else if !tag_step_done(journal.state(), &tag, |s| s.github_release) {
         match tagger.create_github_release(&tag, &title) {
             Ok(url) => record(
                 journal,

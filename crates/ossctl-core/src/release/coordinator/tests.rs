@@ -453,6 +453,12 @@ fn tags_exactly_once_after_all_publishes_and_completes_the_run() {
     assert_eq!(state.published.len(), 2);
     let tag = state.tags.get("v1.2.3").expect("tag recorded");
     assert!(tag.created_local && tag.pushed_remote && tag.github_release);
+    // Non-delegated branch (no CI-delegated target): the coordinator OWNS the
+    // Release — it is created, not delegated (coordinator-release-vs-cargo-dist-ownership).
+    assert!(
+        !tag.github_release_delegated,
+        "a non-delegated plan must not delegate the Release"
+    );
     assert_eq!(
         tag.github_release_url.as_deref(),
         Some("https://github.com/x/y/releases/v1.2.3")
@@ -1617,5 +1623,202 @@ fn ossctl_like_contract_cuts_end_to_end_across_target_classes() {
     assert!(
         pub_done < tag_local && tag_local < dist_entered,
         "phase order publish → tag → dist was violated"
+    );
+}
+
+// ── GitHub Release ownership vs CI (coordinator-release-vs-cargo-dist-ownership) ─
+
+/// A plan with a crates.io target + a cargo-dist (CI-delegated) target.
+fn delegated_plan() -> ReleasePlan {
+    ReleasePlan {
+        plan_id: "p".into(),
+        contract_schema_version: 1,
+        head_sha: "d".into(),
+        version: "1.0.0".into(),
+        targets: vec![
+            plan_target(Ecosystem::Rust, Registry::CratesIo, Adapter::CargoPublish),
+            PlanTarget {
+                ecosystem: Ecosystem::Rust,
+                package: Some("tool".into()),
+                registry: Registry::GhReleases,
+                adapter: Adapter::CargoDist,
+            },
+        ],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
+    }
+}
+
+#[test]
+fn a_ci_delegated_plan_delegates_the_github_release_and_never_creates_it() {
+    // Option 1 (coordinator-release-vs-cargo-dist-ownership): when the plan carries
+    // a CI-delegated target (cargo-dist), the coordinator creates AND pushes the tag
+    // — that pushed tag is what triggers cargo-dist's `release.yml` — but does NOT
+    // create the GitHub Release: CI owns Release creation + the cross-platform binary
+    // upload. The delegation is journalled so resume/verify don't treat the missing
+    // engine-created Release as a step to re-attempt.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::new();
+    let reg = FakeRegistry;
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = RecordingSink::default();
+
+    let plan = delegated_plan();
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "p".into(),
+        "1.0.0".into(),
+        ids.clone(),
+    )
+    .unwrap();
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+
+    let state = journal.state();
+    assert_eq!(state.status, RunStatus::Completed);
+    let tag = state.tags.get("v1.0.0").expect("tag recorded");
+    // Tag created + pushed, but the Release was DELEGATED, not created.
+    assert!(
+        tag.created_local && tag.pushed_remote,
+        "the tag itself must still be created and pushed"
+    );
+    assert!(
+        tag.github_release_delegated,
+        "the Release delegation was not journalled"
+    );
+    assert!(
+        !tag.github_release,
+        "the coordinator created a Release for a CI-delegated plan (double-create clash)"
+    );
+    // The Tagger's create_github_release was NEVER called; create + push still were.
+    assert!(
+        !tagger.calls().iter().any(|c| c.starts_with("release:")),
+        "coordinator created a GitHub Release despite CI delegation: {:?}",
+        tagger.calls()
+    );
+    assert_eq!(tagger.calls(), vec!["create:v1.0.0@d", "push:v1.0.0"]);
+    // Exactly one delegation event was streamed (and no created event), after the push.
+    let k = &sink.kinds;
+    assert_eq!(
+        k.iter()
+            .filter(|e| matches!(e, EventKind::GithubReleaseDelegated { .. }))
+            .count(),
+        1,
+        "expected exactly one github_release_delegated event"
+    );
+    assert!(
+        !k.iter()
+            .any(|e| matches!(e, EventKind::GithubReleaseCreated { .. })),
+        "a github_release_created event was streamed for a delegated plan"
+    );
+    let deleg = first_idx(k, |e| matches!(e, EventKind::GithubReleaseDelegated { .. })).unwrap();
+    let push = first_idx(k, |e| matches!(e, EventKind::TagPushedRemote { .. })).unwrap();
+    assert!(push < deleg, "delegation must follow the tag push");
+}
+
+#[test]
+fn a_resumed_delegated_run_completes_without_ever_creating_the_release() {
+    // A cut interrupted mid-tag (the push failed) must, on resume, retry the push,
+    // record the delegation, and complete — and across BOTH attempts the coordinator
+    // must never create the GitHub Release. This is the resume-safety the issue
+    // requires: a resumed CI-delegated run does not re-attempt (nor first-attempt)
+    // the engine-owned Release.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let reg = FakeRegistry;
+    let root = PathBuf::from("/repo");
+    let plan = delegated_plan();
+    let ids = crate::release::journal_target_ids(&plan.targets);
+
+    // First attempt: the tag push fails, after the local tag is created but before
+    // any Release step.
+    let first_tagger = FakeTagger::failing("push");
+    {
+        let cmd = FakeCmd::new();
+        let ctx = EffectCtx {
+            runner: &cmd,
+            clock: &clock,
+            registry: &reg,
+            repo_root: &root,
+            artifacts: &EMPTY_ARTIFACTS,
+        };
+        let mut sink = NullSink;
+        let mut journal = Journal::create(
+            &store,
+            &clock,
+            &idgen,
+            paths(),
+            "p".into(),
+            "1.0.0".into(),
+            ids.clone(),
+        )
+        .unwrap();
+        execute(&mut journal, &plan, &ctx, &first_tagger, &mut sink).unwrap_err();
+        let tag = journal
+            .state()
+            .tags
+            .get("v1.0.0")
+            .expect("local tag recorded");
+        assert!(tag.created_local && !tag.pushed_remote);
+        assert!(!tag.github_release && !tag.github_release_delegated);
+    } // journal drops → releases the lock
+
+    // Resume: the push succeeds now, the delegation is recorded, the run completes.
+    let resume_tagger = FakeTagger::new();
+    let cmd = FakeCmd::new();
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = RecordingSink::default();
+    let mut journal = Journal::open(&store, &clock, paths(), "RUN01").unwrap();
+    execute(&mut journal, &plan, &ctx, &resume_tagger, &mut sink).unwrap();
+
+    let state = journal.state();
+    assert_eq!(state.status, RunStatus::Completed);
+    let tag = state.tags.get("v1.0.0").unwrap();
+    assert!(tag.created_local && tag.pushed_remote);
+    assert!(
+        tag.github_release_delegated && !tag.github_release,
+        "resume must delegate the Release, never create it"
+    );
+    // The already-created local tag was NOT re-created; only the push was retried.
+    assert_eq!(resume_tagger.calls(), vec!["push:v1.0.0"]);
+    // Neither attempt's tagger ever created a Release.
+    assert!(
+        !first_tagger
+            .calls()
+            .iter()
+            .chain(resume_tagger.calls().iter())
+            .any(|c| c.starts_with("release:")),
+        "a GitHub Release was created across the resumed CI-delegated run: {:?} / {:?}",
+        first_tagger.calls(),
+        resume_tagger.calls()
+    );
+    // The delegation was recorded exactly once (on the resume that completed the tag).
+    assert_eq!(
+        sink.kinds
+            .iter()
+            .filter(|e| matches!(e, EventKind::GithubReleaseDelegated { .. }))
+            .count(),
+        1
     );
 }

@@ -238,6 +238,13 @@ pub fn apply(state: &mut RunState, event: &JournalEvent) {
             t.github_release = true;
             t.github_release_url.clone_from(url);
         }
+        EventKind::GithubReleaseDelegated { tag } => {
+            state
+                .tags
+                .entry(tag.clone())
+                .or_default()
+                .github_release_delegated = true;
+        }
         EventKind::RunAbandoned { reason } => {
             state.status = RunStatus::Abandoned;
             state.abandon_reason = Some(reason.clone());
@@ -994,6 +1001,59 @@ mod tests {
                 pushed_remote: true,
                 github_release: false,
                 github_release_url: None,
+                github_release_delegated: false,
+            })
+        );
+    }
+
+    #[test]
+    fn github_release_delegation_reduces_to_the_tag_state_flag() {
+        // A CI-delegated cut records `github_release_delegated` in place of
+        // `github_release_created`: the reducer sets the delegation flag and leaves
+        // `github_release` false (coordinator-release-vs-cargo-dist-ownership).
+        let mut state = RunState::empty();
+        let mk = |seq: u64, kind: EventKind| JournalEvent {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            seq,
+            ts: seq,
+            idempotency_key: kind.idempotency_key(),
+            kind,
+        };
+        apply(
+            &mut state,
+            &mk(
+                1,
+                EventKind::TagCreatedLocal {
+                    tag: "v1.0.0".into(),
+                },
+            ),
+        );
+        apply(
+            &mut state,
+            &mk(
+                2,
+                EventKind::TagPushedRemote {
+                    tag: "v1.0.0".into(),
+                },
+            ),
+        );
+        apply(
+            &mut state,
+            &mk(
+                3,
+                EventKind::GithubReleaseDelegated {
+                    tag: "v1.0.0".into(),
+                },
+            ),
+        );
+        assert_eq!(
+            state.tags.get("v1.0.0"),
+            Some(&TagState {
+                created_local: true,
+                pushed_remote: true,
+                github_release: false,
+                github_release_url: None,
+                github_release_delegated: true,
             })
         );
     }

@@ -39,12 +39,15 @@ use serde::{Deserialize, Serialize};
 /// Bump on a breaking event/state change (removing/renaming fields, changing a
 /// variant's semantics); additive optional fields do not bump it.
 ///
-/// **v2** (2026-08-05): added the [`EventKind::TargetDelegated`] event class and
-/// the post-tag [`Phase::Dist`] barrier (a new event *kind* / phase value an
-/// older reader cannot interpret, so the version is bumped per the migration
-/// rule — a v1 `ossctl` refuses a v2 line rather than misreading it). A v2 run
-/// carries no v1-incompatible receipt shape; the reduce path stays
-/// backward-tolerant of v1 logs (which simply lack these events).
+/// **v2** (2026-08-05): added the [`EventKind::TargetDelegated`] event class, the
+/// post-tag [`Phase::Dist`] barrier, and the [`EventKind::GithubReleaseDelegated`]
+/// event class (all new event *kinds* / a phase value an older reader cannot
+/// interpret, so the version is bumped per the migration rule — a v1 `ossctl`
+/// refuses a v2 line rather than misreading it). These three additions all land
+/// under the single unreleased v2 (no shipped `ossctl` has emitted a v2 journal —
+/// the engine has never cut `ossctl` itself), so they fold into one bump rather
+/// than a v3. A v2 run carries no v1-incompatible receipt shape; the reduce path
+/// stays backward-tolerant of v1 logs (which simply lack these events).
 pub const JOURNAL_SCHEMA_VERSION: u32 = 2;
 
 /// The five coordinator phases, in barrier order (ADR-0002): the derived
@@ -147,8 +150,14 @@ pub struct PublishReceipt {
     pub digest: Option<String>,
 }
 
-/// The progress of one release tag through its three landing steps. Every field
-/// is monotonic (`false → true`), so re-applying a tag event is a no-op.
+/// The progress of one release tag through its landing steps. Every field is an
+/// independent, monotonic (`false → true`) fact, so re-applying a tag event is a
+/// no-op. These are orthogonal recorded facts (each set by its own journal event),
+/// not the states of a single machine, so a flat set of flags — not a two-variant
+/// enum per `clippy::struct_excessive_bools` — is the faithful shape;
+/// `github_release` and `github_release_delegated` are the two mutually-exclusive
+/// Release dispositions (created-by-engine vs delegated-to-CI).
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TagState {
     /// The annotated tag exists in the local repository.
@@ -159,6 +168,18 @@ pub struct TagState {
     pub github_release: bool,
     /// The GitHub Release URL, once created.
     pub github_release_url: Option<String>,
+    /// The GitHub Release was **delegated to CI** rather than created by the
+    /// coordinator: the plan carried a CI-delegated target (e.g. `cargo-dist`'s
+    /// `release.yml`) whose tag-triggered workflow owns Release creation and the
+    /// cross-platform binary upload. Mutually exclusive in practice with
+    /// [`Self::github_release`] — the coordinator either creates the Release or
+    /// delegates it, never both — and, like the others, monotonic (`false → true`).
+    /// Resume/verify treat a delegated Release as an intentional non-step, never a
+    /// missing one to re-attempt (`coordinator-release-vs-cargo-dist-ownership`).
+    /// `#[serde(default)]` so a pre-field manifest still deserializes (the manifest
+    /// is disposable and rebuilt from the log anyway).
+    #[serde(default)]
+    pub github_release_delegated: bool,
 }
 
 /// One completed-phase record in the [`RunState`] projection.
@@ -264,6 +285,21 @@ pub enum EventKind {
         /// The Release URL, when GitHub reports one.
         url: Option<String>,
     },
+    /// The GitHub Release for the tag was **delegated to CI** — recorded in place
+    /// of [`Self::GithubReleaseCreated`]. The plan carries a CI-delegated target
+    /// (e.g. `cargo-dist`'s tag-triggered `release.yml`) whose workflow creates and
+    /// finalizes the Release and uploads the cross-platform binaries, so the
+    /// coordinator still creates and pushes the tag (that tag is what triggers CI)
+    /// but deliberately does **not** create the Release itself — doing so would
+    /// clash with CI over ownership of the same Release (creating it first, then CI
+    /// either fails on "release already exists" or uploads into an engine-created
+    /// stub). This fact is what lets resume/verify treat the missing engine-created
+    /// Release as intentional rather than a step to re-attempt
+    /// (`coordinator-release-vs-cargo-dist-ownership`).
+    GithubReleaseDelegated {
+        /// The tag name whose Release creation was delegated to CI.
+        tag: String,
+    },
     /// The run was abandoned. Terminal; there is **no** auto-rollback (ADR-0002).
     RunAbandoned {
         /// Why the run was abandoned.
@@ -331,6 +367,7 @@ impl EventKind {
             Self::TagCreatedLocal { tag } => format!("tag_created_local:{tag}"),
             Self::TagPushedRemote { tag } => format!("tag_pushed_remote:{tag}"),
             Self::GithubReleaseCreated { tag, .. } => format!("github_release_created:{tag}"),
+            Self::GithubReleaseDelegated { tag } => format!("github_release_delegated:{tag}"),
             Self::RunAbandoned { .. } => "run_abandoned".to_string(),
         }
     }
