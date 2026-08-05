@@ -918,6 +918,80 @@ fn release_list_empty_is_a_normal_empty_list() {
     assert_eq!(v["schema_version"], 1);
     assert_eq!(v["data"]["runs"].as_array().unwrap().len(), 0);
     assert_eq!(v["data"]["in_flight_count"], 0);
+    assert_eq!(v["data"]["unreadable"].as_array().unwrap().len(), 0);
+}
+
+/// Two runs sharing a `started_ts` fall back to the `run_id` tiebreak, so the order
+/// is deterministic (not directory/hash order).
+#[test]
+fn release_list_tiebreaks_equal_start_times_by_run_id() {
+    let mk = |id: &str| {
+        format!(
+            r#"{{"schema_version":1,"seq":1,"ts":777,"idempotency_key":"run_created","kind":"run_created","run_id":"{id}","plan_id":"plan","version":"1.0.0","targets":["cargo"]}}"#
+        )
+    };
+    // Seed in reverse id order to prove the sort, not insertion order, decides.
+    let z = mk("RUNZ");
+    let a = mk("RUNA");
+    let dir = seed_journal_multi(&[("RUNZ", &[z.as_str()]), ("RUNA", &[a.as_str()])]);
+    let out = ossctl()
+        .args(["release", "list", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let ids: Vec<&str> = v["data"]["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["run_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["RUNA", "RUNZ"], "equal ts → sorted by run_id");
+}
+
+/// A run whose journal cannot be read (a too-new schema) is NOT silently dropped:
+/// it surfaces under `unreadable` with a warning, so the in-flight gate cannot read
+/// a false clear coast while a readable run is still reported.
+#[test]
+fn release_list_surfaces_unreadable_runs() {
+    let good = &[RUN_CREATED_A][..];
+    // schema_version far in the future → read_events refuses it → list marks it
+    // unreadable rather than dropping it.
+    let bad = &[
+        r#"{"schema_version":9999,"seq":1,"ts":2000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUNBAD","plan_id":"p","version":"9.9.9","targets":["cargo"]}"#,
+    ][..];
+    let dir = seed_journal_multi(&[("RUNA", good), ("RUNBAD", bad)]);
+    let out = ossctl()
+        .args(["release", "list", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "list stays exit 0: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout JSON");
+    // The readable run is still reported…
+    let ids: Vec<&str> = v["data"]["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["run_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["RUNA"]);
+    // …and the unreadable one is explicit (not dropped), with a warning.
+    assert_eq!(
+        v["data"]["unreadable"],
+        serde_json::json!(["RUNBAD"]),
+        "an unreadable run must be surfaced, not silently dropped"
+    );
+    assert!(
+        v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("RUNBAD")),
+        "unreadable run needs a warning: {}",
+        v["warnings"]
+    );
 }
 
 /// A single in-flight run is reported with its status, tag, and the `in_flight`
@@ -1084,6 +1158,31 @@ fn release_abandon_rejects_a_blank_reason() {
     assert_eq!(out.status.code(), Some(1));
     let v: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
     assert_eq!(v["error"]["code"], "invalid_reason");
+}
+
+/// A `--reason` with embedded control characters (a newline) is rejected — it is
+/// journaled durably and rendered on one line, so it must stay single-line text.
+#[test]
+fn release_abandon_rejects_a_control_character_reason() {
+    let dir = seed_journal("RUN01", &[RUN_CREATED_A.replace("RUNA", "RUN01").as_str()]);
+    let out = ossctl()
+        .args(["release", "abandon", "RUN01", "--reason"])
+        .arg("line one\nrun OTHER completed")
+        .args(["--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(v["error"]["code"], "invalid_reason");
+    // The journal must be untouched: the run is still in-flight, not abandoned.
+    let show = ossctl()
+        .args(["release", "show", "RUN01", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    let sv: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(sv["data"]["state"]["status"], "in_progress");
 }
 
 /// A terminal run cannot be abandoned: a completed run and an already-abandoned

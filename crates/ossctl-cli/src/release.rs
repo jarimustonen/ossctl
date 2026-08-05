@@ -617,8 +617,10 @@ struct RunSummary {
     started_ts: u64,
     /// Unix timestamp of the most recently applied event.
     updated_ts: u64,
-    /// The recorded abandon reason, when the run was abandoned.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The recorded abandon reason when the run was abandoned; `null` otherwise.
+    /// Always serialized (never skipped) so the run's wire shape is the same for
+    /// every status — a consumer reads one document shape, per the codebase's
+    /// Option-serializes-null convention (`RunState::abandon_reason`).
     abandon_reason: Option<String>,
 }
 
@@ -642,13 +644,24 @@ impl RunSummary {
 /// The `data` body of `release list`: the run set plus a pre-computed count of the
 /// in-flight ones, so an agent's "already-active run?" gate is a single field read
 /// rather than a client-side filter it might get wrong.
+///
+/// **Gate contract:** it is safe to seal/start a new run **only** when
+/// `in_flight_count == 0` **and** `unreadable` is empty. An unreadable run is
+/// counted as uncertainty, never as "not in flight" — a corrupt or too-new journal
+/// that happened to be an active run must not silently read as a clear coast.
 #[derive(serde::Serialize)]
 struct RunListBody {
-    /// Every run under the journal root, in deterministic order (by start time,
-    /// then run id). An empty list is a normal result, not an error.
+    /// Every readable run under the journal root, in deterministic order (by start
+    /// time, then run id). An empty list is a normal result, not an error.
     runs: Vec<RunSummary>,
     /// How many of [`Self::runs`] are still in flight (`in_progress`).
     in_flight_count: usize,
+    /// Run ids whose journal could **not** be read (corrupt, or written by a newer
+    /// ossctl). Surfaced explicitly rather than dropped: one of these could be an
+    /// active run, so the in-flight gate must treat a non-empty `unreadable` as
+    /// "cannot be certain", not as zero active runs. Each also has a `warnings`
+    /// entry with the underlying error.
+    unreadable: Vec<String>,
 }
 
 /// `ossctl release list` — enumerate every release run under the journal root with
@@ -676,6 +689,7 @@ pub fn list(args: &ListArgs, format: OutputFormat) -> Result<(), CliError> {
     })?;
 
     let mut runs = Vec::with_capacity(run_ids.len());
+    let mut unreadable = Vec::new();
     let mut warnings = Vec::new();
     for run_id in run_ids {
         match journal::read_run_state(&store, &paths, &run_id) {
@@ -683,13 +697,17 @@ pub fn list(args: &ListArgs, format: OutputFormat) -> Result<(), CliError> {
             // `list_runs` only returns ids with a non-empty journal, so an empty
             // read here is a benign race (the run was removed mid-list); skip it.
             Ok(None) => {}
-            Err(e) => warnings.push(format!(
-                "run '{run_id}' could not be read and was skipped: {e}"
-            )),
+            // A corrupt or too-new journal is NOT silently dropped: it is recorded
+            // under `unreadable` (with a warning) so the in-flight gate cannot read
+            // a clear coast when one of these might be an active run.
+            Err(e) => {
+                warnings.push(format!("run '{run_id}' could not be read: {e}"));
+                unreadable.push(run_id);
+            }
         }
     }
     // Deterministic order: by start time, then run id as a stable tiebreak for two
-    // runs sharing a timestamp.
+    // runs sharing a timestamp. `unreadable` is already sorted (list_runs sorts).
     runs.sort_by(|a, b| {
         a.started_ts
             .cmp(&b.started_ts)
@@ -697,9 +715,19 @@ pub fn list(args: &ListArgs, format: OutputFormat) -> Result<(), CliError> {
     });
 
     let in_flight_count = runs.iter().filter(|r| r.in_flight).count();
+    // The single-active-cut lock permits at most one in-flight run per repo; more
+    // than one means the invariant was violated (a lock bypass or journal
+    // corruption) — surface it rather than letting it read as a benign count.
+    if in_flight_count > 1 {
+        warnings.push(format!(
+            "{in_flight_count} runs are in flight, but the single-active-cut invariant permits at \
+             most one — the release journal may be corrupt or a lock was bypassed"
+        ));
+    }
     let body = RunListBody {
         runs,
         in_flight_count,
+        unreadable,
     };
 
     match format {
@@ -711,9 +739,9 @@ pub fn list(args: &ListArgs, format: OutputFormat) -> Result<(), CliError> {
 
 /// Render the run list as a human table (text mode).
 fn render_list_text(body: &RunListBody, warnings: &[String]) {
-    if body.runs.is_empty() {
+    if body.runs.is_empty() && body.unreadable.is_empty() {
         println!("no release runs found");
-    } else {
+    } else if !body.runs.is_empty() {
         println!(
             "{} run(s), {} in flight",
             body.runs.len(),
@@ -732,6 +760,13 @@ fn render_list_text(body: &RunListBody, warnings: &[String]) {
                 println!("     └─ abandoned: {reason}");
             }
         }
+    }
+    if !body.unreadable.is_empty() {
+        println!(
+            "unreadable ({}): {} — status unknown, may be active",
+            body.unreadable.len(),
+            body.unreadable.join(", ")
+        );
     }
     for w in warnings {
         println!("warning: {w}");
@@ -776,19 +811,12 @@ struct AbandonReport {
 /// critically — does **not** roll anything back: any target already published
 /// under this run stays published, and the output says so explicitly.
 pub fn abandon(args: &AbandonArgs, format: OutputFormat) -> Result<(), CliError> {
-    // An explicitly-blank `--reason` is a caller mistake (a journaled reason must
-    // be meaningful); an *absent* flag falls back to the generic default.
-    let reason = match args.reason.as_deref() {
-        Some(r) if r.trim().is_empty() => {
-            return Err(CliError::user(
-                "invalid_reason",
-                "the abandon reason must not be blank — omit --reason for the default, or give a \
-                 real reason",
-            ));
-        }
-        Some(r) => r.to_string(),
-        None => DEFAULT_ABANDON_REASON.to_string(),
-    };
+    // Validate/normalize the reason up front, before any I/O. An *absent* flag falls
+    // back to the generic default; a *provided* reason is trimmed and must be
+    // non-blank, control-character-free, and bounded — it is journaled durably and
+    // rendered on one line by `show`/`list`, so a newline or a megabyte of text
+    // would pollute every later read.
+    let reason = normalize_reason(args.reason.as_deref())?;
 
     let paths = resolve_journal_paths(args.repo_root.as_ref(), args.journal_dir.as_deref())?;
 
@@ -796,11 +824,13 @@ pub fn abandon(args: &AbandonArgs, format: OutputFormat) -> Result<(), CliError>
     let clock = RealClock;
 
     // Open under the single-active-cut lock: an abandonment mutates the journal, so
-    // it takes the same lock a cut/resume does and must never race one. (A run whose
-    // process died leaving a stale lock file is a `doctor` recovery concern, not
-    // abandon's — abandon refuses rather than stomping a possibly-live run.)
+    // it takes the same lock a cut/resume does and must never race one. A stale lock
+    // (a hard-killed run) is mapped to an actionable message rather than the generic
+    // "another cut is active" — see `abandon_open_error`. (Breaking a stale lock
+    // automatically is a separate, safety-sensitive capability tracked as its own
+    // issue; abandon refuses rather than stomping a possibly-live run.)
     let mut journal = Journal::open(&store, &clock, paths, &args.run_id)
-        .map_err(|e| open_run_error(&args.run_id, e))?;
+        .map_err(|e| abandon_open_error(&args.run_id, e))?;
 
     // A terminal run cannot be abandoned: recording a second terminal fact would be
     // meaningless. Distinguish the two cases so the caller gets an actionable code.
@@ -855,6 +885,11 @@ pub fn abandon(args: &AbandonArgs, format: OutputFormat) -> Result<(), CliError>
         })?;
     debug_assert_eq!(state.status, RunStatus::Abandoned);
 
+    // Everything the report needs is already captured (snapshots above + the append
+    // result). Drop the journal now to release the single-active-cut lock *before*
+    // rendering — a blocked stdout pipe must never hold the global release lock.
+    drop(journal);
+
     let report = AbandonReport {
         run_id: args.run_id.clone(),
         status: RunStatus::Abandoned.as_str(),
@@ -882,6 +917,69 @@ pub fn abandon(args: &AbandonArgs, format: OutputFormat) -> Result<(), CliError>
         OutputFormat::Text => render_abandon_text(&report, &warnings),
     }
     Ok(())
+}
+
+/// The longest `--reason` the abandon command accepts. A reason is a short
+/// operator note journaled durably, not a document; a bound keeps a mistaken
+/// megabyte-paste out of the permanent log.
+const MAX_REASON_LEN: usize = 2048;
+
+/// Validate and normalize the `--reason` value: `None` (flag absent) → the generic
+/// default; `Some` → trimmed, and rejected if blank, containing control characters,
+/// or over [`MAX_REASON_LEN`]. Pure and I/O-free so it fails fast before the journal
+/// is even located.
+fn normalize_reason(reason: Option<&str>) -> Result<String, CliError> {
+    let Some(raw) = reason else {
+        return Ok(DEFAULT_ABANDON_REASON.to_string());
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(CliError::user(
+            "invalid_reason",
+            "the abandon reason must not be blank — omit --reason for the default, or give a real \
+             reason",
+        ));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(CliError::user(
+            "invalid_reason",
+            "the abandon reason must not contain control characters (newlines, tabs, …) — it is \
+             journaled and rendered on one line",
+        )
+        .with_invalid_value(raw.to_string()));
+    }
+    if trimmed.len() > MAX_REASON_LEN {
+        return Err(CliError::user(
+            "invalid_reason",
+            format!(
+                "the abandon reason is {} bytes; keep it under {MAX_REASON_LEN}",
+                trimmed.len()
+            ),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Map a `Journal::open` failure for `abandon` to the §10 envelope. Identical to
+/// [`open_run_error`] except for the held-lock case: because a hard-killed run
+/// leaves a **stale** `O_EXCL` lock file (not an OS-owned `flock`), abandon — the
+/// tool an operator reaches for *after* a crash — must not tell them to "wait, or
+/// `release abandon`" (the very thing they are running). It names the stale-lock
+/// recovery instead.
+fn abandon_open_error(run_id: &str, e: std::io::Error) -> CliError {
+    if e.kind() == std::io::ErrorKind::WouldBlock {
+        return CliError::user(
+            "cut_in_progress",
+            format!(
+                "cannot abandon run {run_id}: the single-active-cut lock is held. If a `release \
+                 cut`/`resume` is genuinely running, let it finish. If its process was killed the \
+                 lock file is stale and must be cleared before any run in this repository can be \
+                 abandoned (the lock is `<git-common-dir>/ossctl/releases/.lock`)."
+            ),
+        )
+        .with_invalid_value(run_id.to_string());
+    }
+    open_run_error(run_id, e)
 }
 
 /// Render the abandonment outcome as human lines (text mode).

@@ -5,6 +5,9 @@ type: bug
 reporter: jari
 status: in-progress
 priority: normal
+commits:
+- hash: e0239cb
+  summary: implement release list + abandon over the journal
 ---
 
 # release list/abandon return not_implemented, but /oss-release skill directs their use
