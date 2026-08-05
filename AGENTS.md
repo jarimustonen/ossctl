@@ -61,32 +61,49 @@ app beyond what the ADRs already fix.
   as an owned Phase-3 act — no confirmation needed. Preconditions still hold: the green gate
   passes, and `cargo publish` runs `--dry-run` first. crates.io publishes are irreversible
   (yank-only), so never publish red, and report each step.
-  - **0.1.0 shipped 2026-08-04.** crates.io `ossctl` + `ossctl-core`, GitHub Release,
-    Homebrew tap `jarimustonen/homebrew-ossctl`. Repo is **public**.
-  - **0.1.1 is prepared and committed on `main`** (cross-platform: macOS + Linux musl
-    binaries + shell installer) but **not yet published** — the crates.io publish is blocked
-    on auth (a stale local token 403'd). Two paths: refresh the local token (`cargo login`)
-    for a local cut, OR adopt the CI-publish model (a `publish-crates.yml` workflow fed by a
-    `CARGO_REGISTRY_TOKEN` repo secret, mirroring `issuectl`) so the tag push publishes in CI
-    with no local-token dependency (the durable, auto-release-friendly setup).
-  - **The recipe is still HAND-DRIVEN (auto-run), not `ossctl release cut`.** The three
-    engine blockers landed (workspace publish, homebrew first-formula, cross-platform CI),
-    but the engine cut is still **not safe** for ossctl's cargo-dist+homebrew flow: the
-    `gh-releases / cargo-dist` target returns `Unsupported` in `publish()` (a partial-publish
-    trap — crates.io would publish, then the cut sticks with no rollback), and the homebrew
-    tarball sha256 only exists post-tag (engine opens a draft PR needing a hand-filled hash).
-    Until the coordinator SKIPS CI-delegated targets and does post-tag homebrew (issue
-    `release-engine-cut-cargo-dist-flow`), the recipe is: `cargo publish -p ossctl-core`
-    (`--dry-run` first) → wait for index → `cargo publish -p ossctl`; bump the internal
-    `=X.Y.Z` dep in lockstep; `git tag vX.Y.Z && git push origin main --tags` (the tag
-    triggers the cargo-dist CI that builds the cross-platform binaries + installer + GitHub
-    Release); after the release exists, bump the tap formula's `url`+`sha256`.
+  - **Shipped: 0.1.0 (2026-08-04), 0.1.1 (2026-08-05), 0.1.2 (2026-08-05).** All on
+    crates.io (`ossctl` + `ossctl-core`), GitHub Releases (cross-platform: macOS aarch64,
+    Linux musl x86_64+aarch64, Windows, `.sh`+`.ps1` installers), and the Homebrew tap
+    `jarimustonen/homebrew-ossctl`. Repo is **public**. 0.1.2 added `ossctl dist generate`
+    (the engine generates a downstream project's cross-platform release infra from its
+    contract).
+  - **The recipe is HAND-DRIVEN (not `ossctl release cut`), and NOT a clean auto-chain —
+    it has four manual/fragile steps (proven cutting 0.1.2).** The engine cut is still not
+    safe for ossctl's cargo-dist+homebrew flow (`gh-releases / cargo-dist` returns
+    `Unsupported` in `publish()` — a partial-publish trap; homebrew tarball sha256 only
+    exists post-tag) — tracked by `release-engine-cut-cargo-dist-flow`. The ACTUAL current
+    recipe:
+    1. Bump `workspace.package.version` + the internal `=X.Y.Z` dep in lockstep → finalize
+       CHANGELOG → `cargo build` (refresh lock) → `cargo publish -p ossctl-core --dry-run`
+       → commit → push `main` → `git tag vX.Y.Z && git push origin vX.Y.Z`.
+    2. The tag triggers `release.yml` (cargo-dist): builds the cross-platform matrix +
+       creates the GitHub Release. **macOS aarch64 builds on the personal `hauis`
+       self-hosted runner** — if it 400s, clear hauis's stale token
+       (`ssh hauis 'git config --global --unset-all "http.https://github.com/.extraheader"'`)
+       and `gh run rerun <release-run-id> --failed`. (Coupling tracked:
+       `release-macos-hauis-coupling`.)
+    3. **crates.io does NOT auto-publish** — a GITHUB_TOKEN-created release does not cascade
+       `release: published`, so `publish-crates.yml` never auto-fires. Publish manually:
+       `gh workflow run publish-crates.yml` (uses `CARGO_REGISTRY_TOKEN`; core→cli, dep
+       order), then verify on crates.io. (Tracked: `publish-crates-no-auto-trigger`.)
+    4. **Bump the Homebrew tap by hand** after the GitHub Release exists — the source
+       formula's `url`+`sha256` do not auto-update (it silently served 0.1.0 through the
+       whole 0.1.1 lifetime). (Tracked: `homebrew-tap-bump-manual-and-missed`.)
 - **Git: `pull --rebase` → `push` is always allowed, no confirmation** (maintainer
   decision, 2026-08-05). On this repo the agent may run the pull-rebase-push sequence
   (`git pull --rebase origin main` then `git push origin main`, and pushing tags) on its own
   whenever `main` is clean and green — publishing commits to the remote does not need a
   separate go. (This is a repo-scoped grant that overrides the global "pushing is the user's
   step" default.) Still: never force-push a shared branch, and never push a red tree.
+- **Scope boundary: ossctl the PRODUCT ≠ Jari's personal environment.** ossctl owns the
+  generic, reusable release/readiness engine (e.g. `ossctl dist generate`). It does **not**
+  own the cross-repo *standardisation* of Jari's other CLIs (issuectl/orchestratectl/glasspad)
+  or the personal self-hosted CI infra (the `hauis` runners) — those are **homebase**
+  concerns (homebase issue `cross-repo-release-standardisation`). Keep that work out of
+  ossctl's issues/TODO/handoff; only the generic capability lives here, its downstream use
+  across Jari's repos is a homebase matter. (The `hauis` override in `dist-workspace.toml`
+  is a documented personal exception for ossctl's own build, tracked for decoupling in
+  `release-macos-hauis-coupling`.)
 - **Cross-platform is a hard requirement (macOS AND Linux).** All software the `/oss-*`
   family produces — and `ossctl` itself — MUST install and run on **both macOS and Linux**
   (arm64 and x86_64). This is `/oss-*` family canon, not a nice-to-have: a release path
