@@ -34,6 +34,14 @@ impl ReleaseAdapter for PythonAdapter {
         self.adapter
     }
 
+    fn is_ci_delegated(&self) -> bool {
+        // `gh-action-pypi-publish` is the CI trusted-publisher flow — the real
+        // upload is the workflow, not this host. `twine` uploads directly and is
+        // not delegated. Consistent with `publish` returning `Unsupported` for
+        // `gh-action-pypi-publish` only.
+        matches!(self.adapter, Adapter::GhActionPypiPublish)
+    }
+
     fn dry_run(
         &self,
         _ctx: &EffectCtx<'_>,

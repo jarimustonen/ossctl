@@ -735,6 +735,10 @@ fn release_show_post_mortem_summary_from_a_journal() {
             r#"{"schema_version":1,"seq":5,"ts":1004,"idempotency_key":"phase_entered:tag","kind":"phase_entered","phase":"tag"}"#,
             r#"{"schema_version":1,"seq":6,"ts":1005,"idempotency_key":"tag_created_local:v1.2.0","kind":"tag_created_local","tag":"v1.2.0"}"#,
             r#"{"schema_version":1,"seq":7,"ts":1006,"idempotency_key":"phase_completed:tag","kind":"phase_completed","phase":"tag","outcome":"ok"}"#,
+            // The post-tag dist barrier is what completes a run (v2): a cut with no
+            // post-tag target still runs it as a no-op.
+            r#"{"schema_version":2,"seq":8,"ts":1007,"idempotency_key":"phase_entered:dist","kind":"phase_entered","phase":"dist"}"#,
+            r#"{"schema_version":2,"seq":9,"ts":1008,"idempotency_key":"phase_completed:dist","kind":"phase_completed","phase":"dist","outcome":"ok"}"#,
         ],
     );
 
@@ -751,16 +755,16 @@ fn release_show_post_mortem_summary_from_a_journal() {
     assert_eq!(v["schema_version"], 1);
     let data = &v["data"];
     // Stable public poll cursor + folded state under `data.state`.
-    assert_eq!(data["last_seq"], 7);
+    assert_eq!(data["last_seq"], 9);
     let state = &data["state"];
     assert_eq!(state["run_id"], "SHOW01");
     assert_eq!(state["plan_id"], "plan-done");
     assert_eq!(state["version"], "1.2.0");
     assert_eq!(state["status"], "completed");
     assert_eq!(state["published"]["cargo"]["version"], "1.2.0");
-    // The recent-event window is present and carries the tag-completion event.
+    // The recent-event window is present and carries the dist-completion event.
     let events = data["recent_events"].as_array().unwrap();
-    assert_eq!(events.len(), 7, "the whole (small) log fits the window");
+    assert_eq!(events.len(), 9, "the whole (small) log fits the window");
     assert_eq!(events.last().unwrap()["kind"], "phase_completed");
 
     // Read-only: show must not materialize a manifest next to the journal.
@@ -1087,6 +1091,8 @@ fn release_resume_completed_run_is_idempotent_success() {
         &[
             r#"{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUNC","plan_id":"plan-done","version":"1.0.0","targets":["rust"]}"#,
             r#"{"schema_version":1,"seq":2,"ts":1001,"idempotency_key":"phase_completed:tag","kind":"phase_completed","phase":"tag","outcome":"ok"}"#,
+            // The post-tag dist barrier is the completion signal (v2).
+            r#"{"schema_version":2,"seq":3,"ts":1002,"idempotency_key":"phase_completed:dist","kind":"phase_completed","phase":"dist","outcome":"ok"}"#,
         ],
     );
     let out = ossctl()

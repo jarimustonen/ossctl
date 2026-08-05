@@ -341,6 +341,14 @@ fn reconcile_warnings(
         // intentional skip as an interruption.
         if let Some(reason) = state.cancelled.get(target) {
             warnings.push(format!("target '{target}' was cancelled: {reason}"));
+        } else if state.delegated.contains(target) {
+            // A CI-delegated target has no engine receipt by design — its artifact
+            // is produced by the tag-triggered CI. Say so rather than misread it as
+            // an interrupted publish.
+            warnings.push(format!(
+                "target '{target}' is CI-delegated (its artifact is produced by the \
+                 tag-triggered release workflow, not the engine); it is not reconciled"
+            ));
         } else {
             warnings.push(format!(
                 "target '{target}' was declared but has no publish receipt in this run \
@@ -1193,6 +1201,9 @@ fn render_event_line(event: &JournalEvent) -> String {
         }
         EventKind::TargetCancelled { target, reason } => {
             format!("  cancelled: {target} ({reason})")
+        }
+        EventKind::TargetDelegated { target, adapter } => {
+            format!("  delegated to CI: {target} ({adapter})")
         }
         EventKind::TagCreatedLocal { tag } => format!("  tag created: {tag}"),
         EventKind::TagPushedRemote { tag } => format!("  tag pushed: {tag}"),

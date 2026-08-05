@@ -40,6 +40,14 @@ impl ReleaseAdapter for NodeAdapter {
         self.adapter
     }
 
+    fn is_ci_delegated(&self) -> bool {
+        // `release-please` publishes on merge via a CI job keyed off the GitHub
+        // release, never from this host. `npm-publish` / `changesets` are real host
+        // publishes and are not delegated. Consistent with `publish` returning
+        // `Unsupported` for `release-please` only.
+        matches!(self.adapter, Adapter::ReleasePlease)
+    }
+
     fn dry_run(
         &self,
         _ctx: &EffectCtx<'_>,

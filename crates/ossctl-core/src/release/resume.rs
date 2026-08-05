@@ -70,6 +70,10 @@ pub enum JournalState {
     /// The journal recorded a `target_cancelled` for this target — a deliberate
     /// skip. Resume must never silently un-cancel it into a publish.
     Cancelled,
+    /// The journal recorded a `target_delegated` for this target — its artifact is
+    /// produced by the tag-triggered CI, not the engine (e.g. `cargo-dist`). Resume
+    /// must not try to publish it; there is nothing for the engine to resume.
+    Delegated,
 }
 
 /// The reconciled action for one target — the resolved cell of the ADR-0003 §4
@@ -101,6 +105,11 @@ pub enum ResumeAction {
     /// would re-publish a target the operator deliberately cancelled; resume never
     /// silently un-cancels it (there is no ADR-0003 cell for cancelled × remote).
     Cancelled,
+    /// The target is **CI-delegated** — its artifact is produced by the
+    /// tag-triggered CI, not the engine, so there is nothing for a resume to
+    /// publish. **Not** a blocker: the coordinator re-journals/skips it on re-entry,
+    /// exactly as on a fresh cut.
+    Delegated,
 }
 
 impl ResumeAction {
@@ -121,6 +130,7 @@ impl ResumeAction {
             Self::Conflict => "conflict",
             Self::Unverifiable => "unverifiable",
             Self::Cancelled => "cancelled",
+            Self::Delegated => "delegated",
         }
     }
 }
@@ -251,6 +261,27 @@ pub fn reconcile_for_resume(
             continue;
         }
 
+        // A CI-delegated target is off the publish table: the tag-triggered CI owns
+        // its artifact, so there is nothing for the engine to resume. Classify it as
+        // a non-blocking Delegated skip rather than querying a registry that cannot
+        // observe it (which would misread as `Missing` → a spurious re-publish).
+        if state.delegated.contains(&target) {
+            decisions.push(TargetDecision {
+                target,
+                ecosystem: pt.ecosystem,
+                journal_state: JournalState::Delegated,
+                outcome: VerifyOutcome::Unknown,
+                action: ResumeAction::Delegated,
+                detail: Some(
+                    "this target is produced by the tag-triggered CI (delegated), not the \
+                     engine; there is nothing to resume"
+                        .to_string(),
+                ),
+                adopted_receipt: None,
+            });
+            continue;
+        }
+
         // The journal-state axis: authoritative from `state.published`.
         let (journal_state, outcome, verify_detail) = if state.published.contains_key(&target) {
             // A receipt exists; take its remote outcome from the reconcile report
@@ -306,12 +337,13 @@ fn classify(
     outcome: VerifyOutcome,
     allow_unverified: bool,
 ) -> ResumeAction {
-    use JournalState::{Cancelled, NotRecorded, Published};
+    use JournalState::{Cancelled, Delegated, NotRecorded, Published};
     use VerifyOutcome::{Conflicts, Matches, Missing, Unknown};
     match (journal_state, outcome) {
-        // Cancelled targets are decided before classify (never queried); this arm
-        // only satisfies exhaustiveness and mirrors that hard-stop disposition.
+        // Cancelled / delegated targets are decided before classify (never queried);
+        // these arms only satisfy exhaustiveness and mirror that disposition.
         (Cancelled, _) => ResumeAction::Cancelled,
+        (Delegated, _) => ResumeAction::Delegated,
         (Published, Matches) => ResumeAction::Skip,
         // A recorded publish that now conflicts, or has vanished, is a hard stop:
         // never overwrite someone else's artifact, never blind-re-publish.
@@ -416,9 +448,9 @@ fn action_detail(
     verify_detail: Option<String>,
 ) -> Option<String> {
     match action {
-        // Skip carries no note; a Cancelled decision is built with its own detail
-        // at the call site (it needs the cancellation reason), so neither reaches here.
-        ResumeAction::Skip | ResumeAction::Cancelled => None,
+        // Skip carries no note; Cancelled and Delegated decisions are built with
+        // their own detail at the call site, so none of these reach here.
+        ResumeAction::Skip | ResumeAction::Cancelled | ResumeAction::Delegated => None,
         ResumeAction::AdoptForward => Some(
             "a publish landed before its receipt was recorded; adopting it forward so it is \
              not re-published"

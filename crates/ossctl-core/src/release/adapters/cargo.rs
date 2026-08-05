@@ -91,6 +91,15 @@ impl ReleaseAdapter for CargoAdapter {
         self.adapter
     }
 
+    fn is_ci_delegated(&self) -> bool {
+        // `cargo-dist` builds distributables locally but its *upload* is the
+        // tag-triggered `release.yml` — the engine cannot (and must not) publish it
+        // from this host. `cargo-publish` is a real host publish and is not
+        // delegated. Consistent with `publish` returning `Unsupported` for
+        // `cargo-dist` only.
+        matches!(self.adapter, Adapter::CargoDist)
+    }
+
     fn dry_run(
         &self,
         ctx: &EffectCtx<'_>,

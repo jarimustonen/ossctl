@@ -167,19 +167,21 @@ pub static EMPTY_ARTIFACTS: ReleaseArtifacts = ReleaseArtifacts {
 /// `--sha256`).
 ///
 /// The `url` is the deterministic GitHub source-archive URL for the cut's tag.
-/// The `sha256` is currently always `None` (the formula bump omits `--sha256` and
-/// lets `brew` compute it from `--url`): the tag archive the `url` points at is
-/// created only in the tag-once phase, *after* publish-all (ADR-0002 §2), so it
-/// cannot be fetched-and-hashed here, and a local `git archive` is not byte-equal
-/// to GitHub's served tarball — a wrong `--sha256` is worse than none. See
-/// [`super::coordinator`]'s `source_tarball` for the full rationale and the
-/// post-tag follow-up that would populate a correct digest.
+/// The `sha256` is `None` during the **pre-tag** phases (dry-run / build preview):
+/// the tag archive the `url` points at is created only in the tag-once phase,
+/// *after* publish-all (ADR-0002 §2), so it cannot be fetched-and-hashed yet, and a
+/// local `git archive` is not byte-equal to GitHub's served tarball — a wrong
+/// `--sha256` is worse than none. The **post-tag** dist phase then fetches the
+/// pushed archive, hashes it, and threads the real `Some(sha256)` into the homebrew
+/// publish so the finalized formula carries a correct hash (no draft placeholder).
+/// See [`super::coordinator`]'s `source_tarball` / `dist_phase`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceTarball {
     /// The source tarball's public URL (the GitHub tag archive).
     pub url: String,
-    /// The tarball's sha256, once a correct value can be produced (see the type
-    /// docs). Currently always `None` — `brew` derives it from [`Self::url`].
+    /// The tarball's sha256. `None` in the pre-tag preview phases (`brew` would
+    /// derive it from [`Self::url`]); `Some(<64-hex>)`, computed from the pushed tag
+    /// archive, in the post-tag dist phase that finalizes the formula.
     pub sha256: Option<String>,
 }
 
@@ -354,6 +356,29 @@ pub trait ReleaseAdapter {
     /// back several related identities, e.g. `cargo-publish` and `cargo-dist`).
     fn adapter(&self) -> Adapter;
 
+    /// Whether this adapter's publish is **CI-delegated** — its release artifact
+    /// is produced out-of-band by the tag-triggered CI (e.g. `cargo-dist`'s
+    /// `release.yml`, a `release-please` merge job, `PyPI`'s trusted-publisher
+    /// workflow), never by the engine's [`publish`](Self::publish) step from this
+    /// host. The coordinator **skips** such a target in publish-all (journalling a
+    /// `target_delegated` fact) rather than calling `publish` and treating its
+    /// honest [`AdapterError::Unsupported`] as a phase failure — which would leave
+    /// the cut stuck after an irreversible crates.io publish.
+    ///
+    /// This is a first-class capability the coordinator branches on; it is **not**
+    /// inferred from a `publish` that returns [`AdapterError::Unsupported`]. An
+    /// adapter that returns `Unsupported` without declaring itself CI-delegated is
+    /// a genuine error and still fails the cut. The invariant every CI-delegated
+    /// adapter upholds: `is_ci_delegated()` ⇒ `publish` returns
+    /// [`AdapterError::Unsupported`].
+    ///
+    /// Defaults to `false` (the engine owns the publish); the three delegated
+    /// identities (`cargo-dist`, `release-please`, `gh-action-pypi-publish`)
+    /// override it.
+    fn is_ci_delegated(&self) -> bool {
+        false
+    }
+
     /// Re-runnable, side-effect-free preview: the exact commands a real cut
     /// would run for `target`.
     ///
@@ -478,6 +503,9 @@ impl EcosystemAdapter {
 impl ReleaseAdapter for EcosystemAdapter {
     fn adapter(&self) -> Adapter {
         self.inner().adapter()
+    }
+    fn is_ci_delegated(&self) -> bool {
+        self.inner().is_ci_delegated()
     }
     fn dry_run(
         &self,

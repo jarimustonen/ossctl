@@ -38,11 +38,18 @@ use serde::{Deserialize, Serialize};
 /// versions the *durable* on-disk journal, which must survive `ossctl` upgrades.
 /// Bump on a breaking event/state change (removing/renaming fields, changing a
 /// variant's semantics); additive optional fields do not bump it.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 1;
+///
+/// **v2** (2026-08-05): added the [`EventKind::TargetDelegated`] event class and
+/// the post-tag [`Phase::Dist`] barrier (a new event *kind* / phase value an
+/// older reader cannot interpret, so the version is bumped per the migration
+/// rule — a v1 `ossctl` refuses a v2 line rather than misreading it). A v2 run
+/// carries no v1-incompatible receipt shape; the reduce path stays
+/// backward-tolerant of v1 logs (which simply lack these events).
+pub const JOURNAL_SCHEMA_VERSION: u32 = 2;
 
-/// The four coordinator phases, in barrier order (ADR-0002): the derived
+/// The five coordinator phases, in barrier order (ADR-0002): the derived
 /// `PartialOrd`/`Ord` follows declaration order, so `DryRun < Build < Publish <
-/// Tag` — the order the projection sorts phase records in.
+/// Tag < Dist` — the order the projection sorts phase records in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
@@ -56,6 +63,14 @@ pub enum Phase {
     /// Tag-once: the coordinator (never an adapter) creates and pushes the tag
     /// and the GitHub Release.
     Tag,
+    /// Dist (post-tag finalize): distribution targets whose artifact only exists
+    /// *after* the tag is pushed are finalized here — the Homebrew formula, whose
+    /// `url` is the just-created tag archive, is fetched, hashed, and its `.rb`
+    /// written with the real `sha256`. Runs after [`Self::Tag`]; its `Ok`
+    /// completion is what flips the run to [`RunStatus::Completed`]. A cut with no
+    /// post-tag target still runs this barrier as a clean no-op so completion is
+    /// uniform (ADR-0002 §2, extended by `release-engine-cut-cargo-dist-flow`).
+    Dist,
 }
 
 impl Phase {
@@ -68,6 +83,7 @@ impl Phase {
             Self::Build => "build",
             Self::Publish => "publish",
             Self::Tag => "tag",
+            Self::Dist => "dist",
         }
     }
 }
@@ -89,7 +105,7 @@ pub enum PhaseOutcome {
 pub enum RunStatus {
     /// The run is live (created, not yet completed or abandoned).
     InProgress,
-    /// The final [`Phase::Tag`] barrier completed [`PhaseOutcome::Ok`].
+    /// The final [`Phase::Dist`] barrier completed [`PhaseOutcome::Ok`].
     Completed,
     /// A `run_abandoned` event was recorded (see [`RunState::abandon_reason`]).
     Abandoned,
@@ -216,6 +232,21 @@ pub enum EventKind {
         /// Why it was cancelled.
         reason: String,
     },
+    /// A **CI-delegated** target was skipped in the publish phase: its artifact is
+    /// produced out-of-band by the tag-triggered CI (e.g. `cargo-dist`'s
+    /// `release.yml`, a `release-please` merge job, or `PyPI`'s trusted-publisher
+    /// workflow), not by the engine's `publish` step. Distinct from
+    /// [`Self::TargetCancelled`] (a deliberate operator skip): a delegated target
+    /// is *expected* to land via CI, so resume/verify treat it as neither
+    /// engine-published nor missing/failed — the engine simply does not own it
+    /// (`release-engine-cut-cargo-dist-flow`).
+    TargetDelegated {
+        /// The target id.
+        target: String,
+        /// The adapter identity that declared itself CI-delegated (its wire
+        /// string, e.g. `"cargo-dist"`), for the operator-facing record.
+        adapter: String,
+    },
     /// The release tag was created locally.
     TagCreatedLocal {
         /// The tag name.
@@ -296,6 +327,7 @@ impl EventKind {
             Self::TargetBuilt { target } => format!("built:{target}"),
             Self::TargetPublished { target, .. } => format!("published:{target}"),
             Self::TargetCancelled { target, .. } => format!("cancelled:{target}"),
+            Self::TargetDelegated { target, .. } => format!("delegated:{target}"),
             Self::TagCreatedLocal { tag } => format!("tag_created_local:{tag}"),
             Self::TagPushedRemote { tag } => format!("tag_pushed_remote:{tag}"),
             Self::GithubReleaseCreated { tag, .. } => format!("github_release_created:{tag}"),
@@ -344,6 +376,13 @@ pub struct RunState {
     pub published: BTreeMap<String, PublishReceipt>,
     /// Cancelled targets → their reasons.
     pub cancelled: BTreeMap<String, String>,
+    /// CI-delegated targets (their ids): skipped in publish because a
+    /// tag-triggered CI job produces their artifact, not the engine. Neither
+    /// engine-published nor missing/failed (`release-engine-cut-cargo-dist-flow`).
+    /// `#[serde(default)]` so a v1 manifest that predates the field still
+    /// deserializes (the manifest is disposable and rebuilt from the log anyway).
+    #[serde(default)]
+    pub delegated: BTreeSet<String>,
     /// Release tags → their landing progress.
     pub tags: BTreeMap<String, TagState>,
     /// The reason recorded by a `run_abandoned` event, if any.
@@ -374,6 +413,7 @@ impl RunState {
             built: BTreeSet::new(),
             published: BTreeMap::new(),
             cancelled: BTreeMap::new(),
+            delegated: BTreeSet::new(),
             tags: BTreeMap::new(),
             abandon_reason: None,
             created_ts: 0,

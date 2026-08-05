@@ -189,9 +189,14 @@ pub fn apply(state: &mut RunState, event: &JournalEvent) {
             if state.current_phase == Some(*phase) {
                 state.current_phase = None;
             }
-            // The final barrier completing OK is the run's completion signal
-            // (tag-once is the last phase, ADR-0002).
-            if *phase == Phase::Tag && *outcome == PhaseOutcome::Ok {
+            // The final barrier completing OK is the run's completion signal.
+            // Dist (post-tag finalize) is the last phase — it runs after Tag for
+            // every cut (a no-op when there is no post-tag target), so its `Ok` is
+            // the single, uniform completion signal (ADR-0002 §2, extended by
+            // `release-engine-cut-cargo-dist-flow`). A v1 log that ended at Tag `Ok`
+            // (no Dist phase) reduces to InProgress and self-heals to Completed on
+            // the next resume, which re-enters `execute` and runs the Dist no-op.
+            if *phase == Phase::Dist && *outcome == PhaseOutcome::Ok {
                 state.status = RunStatus::Completed;
             }
         }
@@ -206,6 +211,9 @@ pub fn apply(state: &mut RunState, event: &JournalEvent) {
         }
         EventKind::TargetCancelled { target, reason } => {
             state.cancelled.insert(target.clone(), reason.clone());
+        }
+        EventKind::TargetDelegated { target, .. } => {
+            state.delegated.insert(target.clone());
         }
         EventKind::TagCreatedLocal { tag } => {
             state.tags.entry(tag.clone()).or_default().created_local = true;
@@ -979,23 +987,30 @@ mod tests {
     }
 
     #[test]
-    fn tag_phase_ok_completes_the_run() {
+    fn dist_phase_ok_completes_the_run_tag_ok_alone_does_not() {
         let mut state = reduce(&sample_events());
         assert_eq!(state.status, RunStatus::InProgress);
-        let seq = state.applied_seq + 1;
-        apply(
-            &mut state,
-            &JournalEvent {
-                schema_version: JOURNAL_SCHEMA_VERSION,
-                seq,
-                ts: 9000,
-                idempotency_key: "phase_completed:tag".into(),
-                kind: EventKind::PhaseCompleted {
-                    phase: Phase::Tag,
-                    outcome: PhaseOutcome::Ok,
+        let mut seq = state.applied_seq;
+        let mut push = |state: &mut RunState, phase: Phase| {
+            seq += 1;
+            apply(
+                state,
+                &JournalEvent {
+                    schema_version: JOURNAL_SCHEMA_VERSION,
+                    seq,
+                    ts: 9000 + seq,
+                    idempotency_key: format!("phase_completed:{}", phase.as_str()),
+                    kind: EventKind::PhaseCompleted {
+                        phase,
+                        outcome: PhaseOutcome::Ok,
+                    },
                 },
-            },
-        );
+            );
+        };
+        // Tag `Ok` no longer completes the run — the post-tag Dist barrier does.
+        push(&mut state, Phase::Tag);
+        assert_eq!(state.status, RunStatus::InProgress);
+        push(&mut state, Phase::Dist);
         assert_eq!(state.status, RunStatus::Completed);
     }
 

@@ -236,7 +236,7 @@ fn plan_id_golden_vector() {
     let plan = build(&rust_contract(), &rust_facts(), HEAD, "1.2.0");
     assert_eq!(
         plan.plan_id,
-        "82437ad08474c4eadeaf057697e372b526e450bac723153e321aa0af230428f8"
+        "2a6151c8bdb2740be22ef1721e05fcb4c9b84305029c0135f287dcdb5411bcf9"
     );
 }
 
@@ -402,7 +402,8 @@ fn build_emits_the_invariant_phase_sequence() {
             PlanPhase::DryRunAll,
             PlanPhase::BuildAll,
             PlanPhase::PublishAll,
-            PlanPhase::Tag
+            PlanPhase::Tag,
+            PlanPhase::Dist
         ]
     );
     assert_eq!(plan.contract_schema_version, 1);

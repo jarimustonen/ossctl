@@ -20,6 +20,10 @@ use crate::protocol::plan::{PlanPhase, PlanTarget, ReleasePlan};
 use crate::release::adapters::{EffectCtx, EMPTY_ARTIFACTS};
 use crate::release::journal::{Journal, JournalPaths};
 
+/// The canned sha256 the fake `shasum` reports for the post-tag source tarball —
+/// a fixed 64-hex digest so a homebrew finalize threads a deterministic `--sha256`.
+const CANNED_SHA256: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+
 // ── In-memory journal store (mirrors the journal module's own fake) ──────────
 
 #[derive(Default)]
@@ -150,6 +154,17 @@ impl CommandRunner for FakeCmd {
             return Ok(CommandOutput {
                 status: Some(0),
                 stdout: r#"{"packages":[{"name":"tool","version":"1.0.0","id":"tool 1.0.0","dependencies":[],"publish":null}],"workspace_members":["tool 1.0.0"]}"#.to_string(),
+                stderr: String::new(),
+            });
+        }
+        // Serve the post-tag dist phase's source-tarball hash: `shasum -a 256 <tmp>`
+        // prints `<hex>  <file>`. A fixed canned digest lets the homebrew finalize
+        // thread a real `--sha256` deterministically (the fake `curl` that "wrote"
+        // the temp file succeeds by default, and the coordinator never reads it).
+        if program == "shasum" {
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: format!("{CANNED_SHA256}  /tmp/ossctl-src-tarball.tar.gz"),
                 stderr: String::new(),
             });
         }
@@ -783,25 +798,42 @@ fn threads_source_tarball_url_into_homebrew_publish() {
     };
     execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
 
-    // The `origin` remote resolves to the deterministic GitHub tag-archive URL,
-    // threaded into the formula bump's `--url`. `--sha256` is deliberately omitted
-    // (the coordinator threads `sha256: None`, since a correct digest of GitHub's
-    // served tarball is unavailable pre-tag — see `source_tarball` docs); `brew`
-    // computes it from `--url`.
+    // The homebrew formula is finalized in the POST-TAG dist phase, now that the tag
+    // archive exists: the coordinator resolves the `origin` slug to the deterministic
+    // tag-archive URL, fetches it (`curl`), hashes it (`shasum`), and threads the
+    // REAL `--sha256` into the formula bump — no draft placeholder, no `sha256: None`.
+    let bump = format!(
+        "brew bump-formula-pr --url \
+         https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz --sha256 {CANNED_SHA256} -- tool"
+    );
     assert!(
-        cmd.calls().iter().any(|c| c
-            == "brew bump-formula-pr --url \
-                https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz -- tool"),
-        "homebrew publish did not receive the threaded tarball URL: {:?}",
+        cmd.calls().contains(&bump),
+        "homebrew publish did not receive the tarball URL + real sha256: {:?}",
         cmd.calls()
     );
-    // The source archive is never hashed locally (no `git archive`, no shell) —
-    // guards against reintroducing the wrong-bytes best-effort digest.
+    // The digest is computed from the pushed tag archive (curl + shasum), never from
+    // a local `git archive` (whose bytes diverge from GitHub's served tarball).
+    assert!(
+        cmd.calls()
+            .iter()
+            .any(|c| c.starts_with("curl -sSfL -o ") && c.ends_with(".tar.gz")),
+        "the tag archive was not fetched before hashing: {:?}",
+        cmd.calls()
+    );
+    assert!(
+        cmd.calls().iter().any(|c| c.starts_with("shasum -a 256 ")),
+        "the fetched tag archive was not hashed: {:?}",
+        cmd.calls()
+    );
     assert!(
         !cmd.calls().iter().any(|c| c.contains("git archive")),
         "a local source archive was hashed despite the wrong-bytes hazard: {:?}",
         cmd.calls()
     );
+    // The homebrew target is recorded as published (in the dist phase), and the run
+    // completed via the dist barrier.
+    assert!(journal.state().published.contains_key("binary"));
+    assert_eq!(journal.state().status, RunStatus::Completed);
 }
 
 #[test]
@@ -1029,6 +1061,22 @@ impl CommandRunner for WorkspaceCmd {
     fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
         let line = format!("{program} {}", args.join(" "));
         self.calls.borrow_mut().push(line.clone());
+        // Serve the `origin` remote so a homebrew target's cut resolves a slug.
+        if program == "git" && args == ["remote", "get-url", "origin"] {
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: "git@github.com:jarimustonen/ossctl.git".to_string(),
+                stderr: String::new(),
+            });
+        }
+        // Serve the post-tag source-tarball hash for the dist phase.
+        if program == "shasum" {
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: format!("{CANNED_SHA256}  /tmp/ossctl-src-tarball.tar.gz"),
+                stderr: String::new(),
+            });
+        }
         if program == "cargo" && args.contains(&"metadata") {
             // Two publishable members: `ossctl` depends on `ossctl-core`.
             return Ok(CommandOutput {
@@ -1335,4 +1383,237 @@ fn refuses_a_target_with_no_resolved_package() {
     // Refused before any command or tag ran.
     assert!(cmd.calls().is_empty());
     assert!(tagger.calls().is_empty());
+}
+
+// ── CI-delegated skip + post-tag homebrew (release-engine-cut-cargo-dist-flow) ─
+
+#[test]
+fn ci_delegated_target_is_skipped_journaled_not_failed() {
+    // A cargo-dist (gh-releases) target is CI-delegated: its binaries are produced
+    // by the tag-triggered release workflow, not the engine. The coordinator must
+    // journal it `target_delegated` and SKIP it in publish — never publish it (its
+    // `publish` returns Unsupported), never count it a failure. The crates.io target
+    // publishes, the tag runs, and the run completes.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::new();
+    let reg = FakeRegistry;
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = RecordingSink::default();
+
+    let plan = ReleasePlan {
+        plan_id: "p".into(),
+        contract_schema_version: 1,
+        head_sha: "d".into(),
+        version: "1.0.0".into(),
+        targets: vec![
+            plan_target(Ecosystem::Rust, Registry::CratesIo, Adapter::CargoPublish),
+            PlanTarget {
+                ecosystem: Ecosystem::Rust,
+                package: Some("tool".into()),
+                registry: Registry::GhReleases,
+                adapter: Adapter::CargoDist,
+            },
+        ],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
+    };
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "p".into(),
+        "1.0.0".into(),
+        ids.clone(),
+    )
+    .unwrap();
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+
+    let state = journal.state();
+    assert_eq!(state.status, RunStatus::Completed);
+    // The crates.io target published; the cargo-dist target did NOT.
+    assert!(state.published.contains_key(&ids[0]));
+    assert!(!state.published.contains_key(&ids[1]));
+    // …and the cargo-dist target is journalled delegated (neither published/failed).
+    assert!(state.delegated.contains(&ids[1]));
+    // Every barrier — including publish — completed Ok (delegation is not a failure).
+    for phase in [
+        Phase::DryRun,
+        Phase::Build,
+        Phase::Publish,
+        Phase::Tag,
+        Phase::Dist,
+    ] {
+        assert!(
+            state
+                .phases
+                .iter()
+                .any(|r| r.phase == phase && r.outcome == PhaseOutcome::Ok),
+            "{phase:?} did not complete Ok"
+        );
+    }
+    // No cargo-dist publish/upload command ran (its publish was never called).
+    assert!(
+        !cmd.calls().iter().any(|c| c == "dist publish"),
+        "a delegated cargo-dist target was published: {:?}",
+        cmd.calls()
+    );
+    // The delegation is a streamed event carrying the adapter identity, recorded in
+    // the publish phase (before the tag).
+    let k = &sink.kinds;
+    let delegated_idx = first_idx(
+        k,
+        |e| matches!(e, EventKind::TargetDelegated { adapter, .. } if adapter == "cargo-dist"),
+    )
+    .expect("a target_delegated event was streamed");
+    let first_tag = first_idx(k, |e| matches!(e, EventKind::TagCreatedLocal { .. })).unwrap();
+    assert!(delegated_idx < first_tag, "delegation must precede tagging");
+}
+
+// A comprehensive end-to-end acceptance across all four target classes; splitting
+// it would fragment one coherent scenario, so the line ceiling is waived here.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn ossctl_like_contract_cuts_end_to_end_across_target_classes() {
+    // The `release-engine-cut-cargo-dist-flow` acceptance: ossctl's own contract —
+    // two crates.io targets (ossctl-core → ossctl), a gh-releases cargo-dist target
+    // (CI-delegated), and a homebrew-tap target (post-tag) — cuts end to end. The
+    // crates.io crates publish in dependency order, cargo-dist is skipped/delegated,
+    // the tag runs, and homebrew is finalized POST-TAG with a real sha256.
+    let world = CratesWorld::default();
+    let store = FakeStore::default();
+    let clock = SleepAdvancingClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = WorkspaceCmd::new(world.clone());
+    let reg = WorldRegistry {
+        world: world.clone(),
+    };
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+
+    let ossctl_target = |registry, adapter| PlanTarget {
+        ecosystem: Ecosystem::Rust,
+        package: Some("ossctl".into()),
+        registry,
+        adapter,
+    };
+    let plan = ReleasePlan {
+        plan_id: "plan-ossctl".into(),
+        contract_schema_version: 1,
+        head_sha: "deadbeef".into(),
+        version: "1.2.3".into(),
+        targets: vec![
+            crates_target("ossctl-core"),
+            crates_target("ossctl"),
+            ossctl_target(Registry::GhReleases, Adapter::CargoDist),
+            ossctl_target(Registry::Homebrew, Adapter::HomebrewTap),
+        ],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: Some("jarimustonen/homebrew-ossctl".into()),
+        license: Some("MIT".into()),
+    };
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    // ids: [ossctl-core@crates.io, ossctl@crates.io, ossctl@gh-releases, ossctl@homebrew]
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "plan-ossctl".into(),
+        "1.2.3".into(),
+        ids.clone(),
+    )
+    .unwrap();
+    let mut sink = RecordingSink::default();
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+
+    let state = journal.state();
+    assert_eq!(state.status, RunStatus::Completed);
+    let calls = cmd.calls();
+    // Both crates.io crates published exactly once, dependency before dependent.
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| *c == "cargo publish -p ossctl-core")
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| *c == "cargo publish -p ossctl")
+            .count(),
+        1
+    );
+    let core = calls
+        .iter()
+        .position(|c| c == "cargo publish -p ossctl-core")
+        .unwrap();
+    let cli = calls
+        .iter()
+        .position(|c| c == "cargo publish -p ossctl")
+        .unwrap();
+    assert!(
+        core < cli,
+        "dependency published after its dependent: {calls:?}"
+    );
+    // crates.io targets published; cargo-dist delegated (skipped); homebrew finalized.
+    assert!(state.published.contains_key(&ids[0]) && state.published.contains_key(&ids[1]));
+    assert!(state.delegated.contains(&ids[2]) && !state.published.contains_key(&ids[2]));
+    assert!(
+        state.published.contains_key(&ids[3]),
+        "homebrew was not finalized in the dist phase"
+    );
+    // The homebrew bump carried the tag-archive URL AND the real post-tag sha256.
+    let bump = format!(
+        "brew bump-formula-pr --url \
+         https://github.com/jarimustonen/ossctl/archive/refs/tags/v1.2.3.tar.gz \
+         --sha256 {CANNED_SHA256} -- ossctl"
+    );
+    assert!(
+        calls.contains(&bump),
+        "homebrew was not finalized with a real sha256: {calls:?}"
+    );
+
+    // Barrier ordering at the event level: publish closes → tag → dist, and the
+    // homebrew finalize (a published event in the dist phase) follows the tag.
+    let k = &sink.kinds;
+    let pub_done = first_idx(k, |e| {
+        matches!(
+            e,
+            EventKind::PhaseCompleted {
+                phase: Phase::Publish,
+                ..
+            }
+        )
+    })
+    .unwrap();
+    let tag_local = first_idx(k, |e| matches!(e, EventKind::TagCreatedLocal { .. })).unwrap();
+    let dist_entered = first_idx(k, |e| {
+        matches!(e, EventKind::PhaseEntered { phase: Phase::Dist })
+    })
+    .unwrap();
+    assert!(
+        pub_done < tag_local && tag_local < dist_entered,
+        "phase order publish → tag → dist was violated"
+    );
 }

@@ -1833,3 +1833,64 @@ fn verify_outcome_as_str_matches_serde() {
         );
     }
 }
+
+// ── CI-delegation capability (release-engine-cut-cargo-dist-flow) ─────────────
+
+/// The CI-delegated set is exactly the three adapters whose publish is produced by
+/// the tag-triggered CI, and each of them returns `Unsupported` from `publish`.
+///
+/// This is the invariant the coordinator relies on: it skips a target **iff** the
+/// adapter declares [`is_ci_delegated`](ReleaseAdapter::is_ci_delegated), never by
+/// catching an `Unsupported`. Because every `Unsupported`-returning adapter *is*
+/// delegated (proven here), a non-delegated adapter can never return `Unsupported`
+/// for the coordinator to swallow — a genuine `Unsupported` would reach the
+/// coordinator's `Err => fail_phase` path and still fail the cut.
+#[test]
+fn ci_delegation_matches_the_unsupported_publishers() {
+    let delegated = [
+        Adapter::CargoDist,
+        Adapter::ReleasePlease,
+        Adapter::GhActionPypiPublish,
+    ];
+    let all = [
+        Adapter::CargoPublish,
+        Adapter::CargoDist,
+        Adapter::ReleasePlease,
+        Adapter::Changesets,
+        Adapter::NpmPublish,
+        Adapter::GhActionPypiPublish,
+        Adapter::Twine,
+        Adapter::Goreleaser,
+        Adapter::HomebrewTap,
+        Adapter::HomebrewCore,
+        Adapter::Manual,
+    ];
+    // 1. The capability flag is set for exactly the delegated set.
+    for id in all {
+        assert_eq!(
+            resolve(id).is_ci_delegated(),
+            delegated.contains(&id),
+            "is_ci_delegated() is wrong for {id:?}"
+        );
+    }
+    // 2. Each delegated adapter's publish is an honest `Unsupported` (returned
+    //    before any command, so no fakes are exercised).
+    let runner = FakeCmd::new();
+    let clock = FakeClock(0);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&runner, &clock, &reg, root);
+    for id in delegated {
+        let t = target(Ecosystem::Rust, Registry::GhReleases, id, "1.0.0");
+        assert!(
+            matches!(
+                resolve(id).publish(&c, &t),
+                Err(AdapterError::Unsupported {
+                    operation: "publish",
+                    ..
+                })
+            ),
+            "delegated adapter {id:?} must publish() -> Unsupported"
+        );
+    }
+}

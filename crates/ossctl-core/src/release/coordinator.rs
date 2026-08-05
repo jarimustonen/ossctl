@@ -1,9 +1,10 @@
 //! Phase-barrier coordinator: ordering, phase barriers, and tag ownership
 //! (ADR-0002 §2).
 //!
-//! Drives every configured ecosystem adapter through the four barriers
-//! **dry-run-all → build-all → publish-all → tag-once**, with tagging owned by
-//! the coordinator alone (never an adapter). This is the one stateful,
+//! Drives every configured ecosystem adapter through the five barriers
+//! **dry-run-all → build-all → publish-all → tag-once → dist (post-tag
+//! finalize)**, with tagging owned by the coordinator alone (never an adapter).
+//! This is the one stateful,
 //! partially-irreversible operation in `ossctl`; the guarantees it enforces are:
 //!
 //! - **Strict barriers.** Every target must clear a phase before *any* target
@@ -15,6 +16,22 @@
 //!   the injected [`Tagger`] port. The three tag steps
 //!   (`tag_created_local` → `tag_pushed_remote` → `github_release_created`) are
 //!   independently journalled so an interrupted tag phase resumes step-by-step.
+//! - **CI-delegated targets are skipped, not failed.** A target whose adapter
+//!   declares [`is_ci_delegated`](ReleaseAdapter::is_ci_delegated) (its artifact is
+//!   produced by the tag-triggered CI, e.g. `cargo-dist`'s `release.yml`) is
+//!   journalled `target_delegated` in publish-all and skipped — never published
+//!   from this host, never counted as a failure. This closes the partial-publish
+//!   trap where an honest [`AdapterError::Unsupported`](super::adapters::AdapterError::Unsupported)
+//!   from such an adapter, after
+//!   an irreversible crates.io publish, would wedge the run.
+//! - **Post-tag distribution finalize.** Targets whose artifact only *exists*
+//!   after the tag is pushed — the Homebrew formula, whose `url` is the just-created
+//!   tag archive — are finalized in a fifth **dist** barrier that runs after
+//!   tag-once: the coordinator resolves the pushed tag archive, computes its real
+//!   `sha256`, and hands it to the Homebrew adapter so the generated `.rb` carries a
+//!   correct hash (no draft-PR placeholder). It runs for every cut (a no-op when
+//!   there is no post-tag target) and its `Ok` completion flips the run to
+//!   [`RunStatus::Completed`](crate::protocol::journal::RunStatus::Completed).
 //! - **No auto-rollback.** On any failure the coordinator *stops and journals
 //!   precisely what landed* — it never undoes a published artifact. Recovery is
 //!   the human's, through `release verify` / `release resume` (wave-3), which read
@@ -31,12 +48,13 @@
 //! run_created
 //! phase_entered dry_run ; target_dry_run … ; phase_completed dry_run ok
 //! phase_entered build   ; target_built …   ; phase_completed build ok
-//! phase_entered publish ; target_published …(receipt each, per target) ; phase_completed publish ok
+//! phase_entered publish ; target_published …(receipt each) / target_delegated …(CI-owned) ; phase_completed publish ok
 //! phase_entered tag     ; tag_created_local ; tag_pushed_remote ; github_release_created ; phase_completed tag ok
+//! phase_entered dist    ; target_published …(homebrew, real sha256) ; phase_completed dist ok
 //! ```
 //!
 //! `run_created` is written by [`Journal::create`] before [`execute`] runs; the
-//! final `phase_completed tag ok` is what flips the run to
+//! final `phase_completed dist ok` is what flips the run to
 //! [`RunStatus::Completed`](crate::protocol::journal::RunStatus::Completed) in the
 //! reducer.
 //!
@@ -221,10 +239,25 @@ pub fn execute(
         homebrew,
     };
     // publish-all: per-target irreversible; receipts journalled per target. The
-    // publish phase is the only one that sees the build-complete artifacts.
+    // publish phase is the only one that sees the build-complete artifacts. It
+    // publishes the engine-owned targets, journals CI-delegated targets as skipped,
+    // and defers post-tag targets (homebrew) to the dist phase below.
     publish_phase(journal, sink, &ctx.with_artifacts(&artifacts), &targets)?;
     // tag-once: coordinator-only, only after every publish succeeded.
     tag_phase(journal, sink, tagger, plan)?;
+    // dist (post-tag finalize): now the tag archive exists, finalize homebrew with
+    // its real sha256. Runs for every cut (a no-op when there is no post-tag
+    // target); its Ok completion flips the run to Completed. (`repo_slug` /
+    // `homebrew` were moved into `artifacts` above; re-read them from there.)
+    dist_phase(
+        journal,
+        sink,
+        ctx,
+        &targets,
+        plan,
+        artifacts.repo_slug.as_deref(),
+        artifacts.homebrew.as_ref(),
+    )?;
 
     Ok(())
 }
@@ -333,34 +366,27 @@ fn resolve_repo_slug(ctx: &EffectCtx<'_>, targets: &[TargetPlan]) -> Option<Stri
     crate::vcs::parse_github_slug(out.stdout.trim())
 }
 
-/// Resolve the cut's published source tarball URL — the input a downstream
-/// Homebrew formula bump needs (`--url`).
+/// Resolve the cut's source tarball URL for the **pre-tag** phases (dry-run /
+/// build preview) — the input a downstream Homebrew formula bump previews (`--url`).
 ///
 /// Only produced when a homebrew target is in the cut; other cuts thread no
 /// tarball. The `url` is the deterministic GitHub tag-archive URL for the plan's
-/// tag.
+/// tag (matching [`tag_archive_url`]).
 ///
-/// # Why `sha256` is `None` (deliberate, not deferred work)
+/// # Why the pre-tag `sha256` is `None` (and where the real one is computed)
 ///
 /// A Homebrew `--sha256` must be the hash of the exact bytes `--url` serves —
-/// GitHub's on-the-fly tag archive. That archive **cannot be hashed correctly
-/// here**:
+/// GitHub's tag archive — which **does not exist during dry-run / build**: the tag
+/// is pushed in the coordinator-owned tag-once phase, *after* publish-all
+/// (ADR-0002 §2), so there is nothing to fetch yet. A local `git archive` of the
+/// same tree is **not** a substitute (its gzip framing diverges from GitHub's
+/// served tarball, so the digest would be wrong), so the pre-tag preview threads
+/// `sha256: None`.
 ///
-/// - It does not exist yet: the tag is pushed in the coordinator-owned tag-once
-///   phase, *after* publish-all (ADR-0002 §2), so there is nothing to fetch.
-/// - A local `git archive` of the same tree is **not** a substitute: its gzip
-///   framing (and `git`/libarchive version differences) make its bytes — and thus
-///   its sha256 — diverge from GitHub's served tarball, whose checksum GitHub
-///   explicitly does not guarantee to be stable. A plausible-but-wrong `--sha256`
-///   is *worse* than none: `brew` (and Homebrew CI) reject the download on
-///   mismatch, whereas omitting it lets `brew` compute the correct digest from
-///   `--url` itself.
-///
-/// So this threads `sha256: None` and the formula bump omits `--sha256`. The
-/// genuinely-correct digest needs the *pushed* archive (a post-tag distribution
-/// phase) or an ossctl-built, ossctl-uploaded source-tarball asset whose bytes it
-/// controls — both an ADR-0002 phase-model change tracked separately. See the
-/// merge report's discussion items.
+/// The **real** digest is computed by the post-tag [`dist_phase`], which fetches
+/// the pushed archive and hashes it ([`compute_source_tarball_sha256`]) before
+/// finalizing the formula — so a homebrew cut no longer opens a draft PR with a
+/// hand-filled hash (`release-engine-cut-cargo-dist-flow`).
 fn source_tarball(slug: &str, plan: &ReleasePlan, targets: &[TargetPlan]) -> Option<SourceTarball> {
     let needed = targets.iter().any(|tp| {
         matches!(
@@ -435,7 +461,9 @@ fn reversible_phase(
                     sink.extend(built.artifacts);
                 }
             }),
-            Phase::Publish | Phase::Tag => unreachable!("reversible_phase only runs dry_run/build"),
+            Phase::Publish | Phase::Tag | Phase::Dist => {
+                unreachable!("reversible_phase only runs dry_run/build")
+            }
         };
         match outcome {
             Ok(()) => {
@@ -464,11 +492,25 @@ fn reversible_phase(
     Ok(())
 }
 
-/// Run the publish-all barrier: each target's `publish` is per-target
+/// Run the publish-all barrier: each engine-owned target's `publish` is per-target
 /// irreversible, so its receipt is journalled **immediately, before the next
 /// target is attempted** (ADR-0003 §2 — never batched). The first failure records
 /// `phase_completed publish failed` and stops with **no rollback** of what already
 /// landed.
+///
+/// Two target classes are **not** published here:
+/// - **CI-delegated** targets ([`is_ci_delegated`](ReleaseAdapter::is_ci_delegated)
+///   — `cargo-dist` et al.) are journalled `target_delegated` and skipped: their
+///   artifact is produced by the tag-triggered CI, so publishing from this host is
+///   impossible, and treating the adapter's honest
+///   [`AdapterError::Unsupported`](super::adapters::AdapterError::Unsupported) as a
+///   failure would wedge the run after an irreversible crates.io publish. The
+///   coordinator branches on the declared capability, **never** by catching
+///   `Unsupported` (a genuine `Unsupported` from a non-delegated adapter still
+///   fails the cut).
+/// - **Post-tag** targets ([`needs_post_tag`] — homebrew) are deferred to the
+///   [`dist_phase`], which runs after tag-once so the tag archive its formula
+///   points at actually exists (a correct `sha256` cannot be computed before then).
 fn publish_phase(
     journal: &mut Journal<'_>,
     sink: &mut dyn ProgressSink,
@@ -483,6 +525,29 @@ fn publish_phase(
     for tp in targets {
         // An already-published target (from a prior attempt) is never re-published.
         if journal.state().published.contains_key(&tp.id) {
+            continue;
+        }
+        // Post-tag targets (homebrew) are finalized in the dist phase, not here —
+        // their tarball only exists after the tag is pushed.
+        if needs_post_tag(tp) {
+            continue;
+        }
+        // A CI-delegated target already journalled `target_delegated` (a prior
+        // attempt) is not re-journalled.
+        if journal.state().delegated.contains(&tp.id) {
+            continue;
+        }
+        // CI-delegated target: the tag-triggered CI produces its artifact, not the
+        // engine. Journal the delegation and skip — do NOT publish, do NOT fail.
+        if tp.adapter.is_ci_delegated() {
+            record(
+                journal,
+                sink,
+                EventKind::TargetDelegated {
+                    target: tp.id.clone(),
+                    adapter: tp.input.target.adapter.as_str().to_string(),
+                },
+            )?;
             continue;
         }
         match tp.adapter.publish(ctx, &tp.input) {
@@ -585,6 +650,190 @@ fn tag_phase(
     Ok(())
 }
 
+/// Whether a target is finalized in the **post-tag** dist phase rather than
+/// publish-all: a homebrew formula, whose `url` is the tag archive that only exists
+/// after tag-once, so a correct `sha256` cannot be computed until then.
+fn needs_post_tag(tp: &TargetPlan) -> bool {
+    matches!(
+        tp.input.target.adapter,
+        Adapter::HomebrewTap | Adapter::HomebrewCore
+    )
+}
+
+/// Run the dist (post-tag finalize) barrier: finalize every post-tag target now
+/// that the tag archive exists. For homebrew this resolves the pushed tag archive,
+/// computes its **real** `sha256`, and hands it to the homebrew adapter so the
+/// generated `.rb` (or `bump-formula-pr`) carries a correct hash — not the pre-tag
+/// `sha256: None` draft-PR placeholder the publish phase could only produce.
+///
+/// Runs for every cut: one with no post-tag target enters and completes the barrier
+/// as a clean no-op, so `dist ok` is the single, uniform completion signal. The
+/// homebrew publish is per-target irreversible (it opens a PR), so its receipt is
+/// journalled immediately and an already-published target (resume) is skipped. A
+/// failure records `phase_completed dist failed` and stops — the tag already
+/// landed, so this leaves an accurate, resumable record with no rollback.
+fn dist_phase(
+    journal: &mut Journal<'_>,
+    sink: &mut dyn ProgressSink,
+    ctx: &EffectCtx<'_>,
+    targets: &[TargetPlan],
+    plan: &ReleasePlan,
+    repo_slug: Option<&str>,
+    homebrew: Option<&HomebrewFormula>,
+) -> Result<(), CutError> {
+    let phase = Phase::Dist;
+    if phase_completed_ok(journal.state(), phase) {
+        return Ok(());
+    }
+    record(journal, sink, EventKind::PhaseEntered { phase })?;
+
+    let post_tag: Vec<&TargetPlan> = targets.iter().filter(|tp| needs_post_tag(tp)).collect();
+    if !post_tag.is_empty() {
+        // Resolve the pushed tag archive and hash its exact bytes. Only possible
+        // with a GitHub slug; without one the tarball is unresolvable and the
+        // homebrew publish fails honestly below (its `source_tarball` is `None`).
+        let source_tarball = match repo_slug {
+            Some(slug) => {
+                let url = tag_archive_url(slug, &plan.version);
+                match compute_source_tarball_sha256(ctx, &url) {
+                    Ok(sha256) => Some(SourceTarball {
+                        url,
+                        sha256: Some(sha256),
+                    }),
+                    Err(message) => return fail_phase(journal, sink, phase, None, message),
+                }
+            }
+            None => None,
+        };
+        let artifacts = ReleaseArtifacts {
+            assets: Vec::new(),
+            source_tarball,
+            repo_slug: repo_slug.map(str::to_string),
+            homebrew: homebrew.cloned(),
+        };
+        let dist_ctx = ctx.with_artifacts(&artifacts);
+        for tp in post_tag {
+            // An already-finalized target (from a prior attempt) is never re-run.
+            if journal.state().published.contains_key(&tp.id) {
+                continue;
+            }
+            match tp.adapter.publish(&dist_ctx, &tp.input) {
+                Ok(receipt) => {
+                    record(
+                        journal,
+                        sink,
+                        EventKind::TargetPublished {
+                            target: tp.id.clone(),
+                            receipt: to_journal_receipt(&receipt),
+                        },
+                    )?;
+                }
+                Err(e) => {
+                    return fail_phase(journal, sink, phase, Some(tp.id.clone()), e.to_string())
+                }
+            }
+        }
+    }
+
+    record(
+        journal,
+        sink,
+        EventKind::PhaseCompleted {
+            phase,
+            outcome: PhaseOutcome::Ok,
+        },
+    )?;
+    Ok(())
+}
+
+/// The deterministic GitHub source-archive URL for `version`'s tag — the `url` a
+/// downstream Homebrew formula points at, and the bytes whose `sha256` the dist
+/// phase computes once the tag is pushed. Matches the pre-tag preview
+/// [`source_tarball`] so the previewed and finalized `url` agree byte-for-byte.
+fn tag_archive_url(slug: &str, version: &str) -> String {
+    format!("https://github.com/{slug}/archive/refs/tags/v{version}.tar.gz")
+}
+
+/// Compute the `sha256` of the pushed tag archive at `url` by downloading and
+/// hashing it through the injected [`CommandRunner`](crate::ports::CommandRunner)
+/// — the coordinator never touches the network or filesystem directly.
+///
+/// Two commands, both through the runner: `curl` streams the archive to a private,
+/// unpredictable temp file, then `shasum -a 256` hashes it (its digest lands on
+/// stdout, so a test fake supplies it deterministically and the coordinator never
+/// reads the file itself). The temp file is best-effort removed (again through the
+/// runner). This hashes the EXACT bytes the formula's `url` serves — GitHub's tag
+/// archive for the just-pushed tag — matching the working manual recipe; a local
+/// `git archive` is deliberately NOT used (its gzip framing diverges from GitHub's
+/// served tarball, so its digest would be wrong and `brew` would reject the
+/// download).
+///
+/// Returns the lowercase 64-hex digest, or an operator-facing error string when the
+/// download/hash could not be performed or produced no usable digest.
+fn compute_source_tarball_sha256(ctx: &EffectCtx<'_>, url: &str) -> Result<String, String> {
+    let tmp = source_tarball_tmp_path();
+    let tmp_str = tmp.to_string_lossy().to_string();
+
+    // 1. Download the tag archive to the temp file (`-f` fails on an HTTP error,
+    //    `-L` follows GitHub's redirect to codeload).
+    let dl = ctx
+        .runner
+        .run("curl", &["-sSfL", "-o", &tmp_str, url], ctx.repo_root)
+        .map_err(|e| format!("cannot run `curl` to fetch the source tarball `{url}`: {e}"))?;
+    if dl.status != Some(0) {
+        return Err(format!(
+            "`curl` could not fetch the source tarball `{url}` (exit {}): {}",
+            dl.status
+                .map_or_else(|| "signal".to_string(), |c| c.to_string()),
+            dl.stderr.trim()
+        ));
+    }
+
+    // 2. Hash it. `shasum -a 256 <file>` prints `<hex>  <file>` on stdout.
+    let out = ctx
+        .runner
+        .run("shasum", &["-a", "256", &tmp_str], ctx.repo_root)
+        .map_err(|e| format!("cannot run `shasum` to hash the source tarball: {e}"))?;
+    // Best-effort cleanup, routed through the runner so the coordinator performs no
+    // direct filesystem effect. Its outcome is irrelevant to the digest.
+    let _ = ctx.runner.run("rm", &["-f", &tmp_str], ctx.repo_root);
+    if out.status != Some(0) {
+        return Err(format!(
+            "`shasum` could not hash the source tarball (exit {}): {}",
+            out.status
+                .map_or_else(|| "signal".to_string(), |c| c.to_string()),
+            out.stderr.trim()
+        ));
+    }
+    let digest = out
+        .stdout
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!(
+            "could not parse a sha256 from `shasum` output: {:?}",
+            out.stdout.trim()
+        ));
+    }
+    Ok(digest)
+}
+
+/// A fresh, unpredictable temp path for the downloaded source tarball — unique per
+/// attempt (pid + a nanosecond stamp) so concurrent cuts/tests never collide and a
+/// retry never trips over a prior attempt's file. Computing the path is not a
+/// filesystem effect; `curl` (through the runner) is what creates the file.
+fn source_tarball_tmp_path() -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    std::env::temp_dir().join(format!(
+        "ossctl-src-tarball-{}-{nanos}.tar.gz",
+        std::process::id()
+    ))
+}
+
 /// Journal `phase_completed { phase, failed }` and return the [`CutError`] — the
 /// single "stop and journal, never roll back" exit every phase failure funnels
 /// through. If even the failure-record cannot be written, that journal error wins
@@ -648,7 +897,7 @@ fn target_cleared(state: &RunState, phase: Phase, target: &str) -> bool {
     match phase {
         Phase::DryRun => state.dry_run.contains(target),
         Phase::Build => state.built.contains(target),
-        Phase::Publish => state.published.contains_key(target),
+        Phase::Publish | Phase::Dist => state.published.contains_key(target),
         Phase::Tag => false,
     }
 }

@@ -61,9 +61,11 @@ pub struct ReleasePlan {
     /// resolved from detected repo facts where possible.
     pub targets: Vec<PlanTarget>,
     /// The invariant coordinator phase sequence a cut drives (ADR-0002 §2):
-    /// dry-run-all → build-all → publish-all → tag. Constant for every plan and
-    /// therefore *not* part of the content address (an invariant cannot drift);
-    /// carried here so the sealed artifact is self-describing for the approver.
+    /// dry-run-all → build-all → publish-all → tag → dist (the post-tag
+    /// distribution finalize, e.g. the Homebrew formula whose tarball only exists
+    /// after the tag). Constant for every plan and therefore *not* part of the
+    /// content address (an invariant cannot drift); carried here so the sealed
+    /// artifact is self-describing for the approver.
     pub phases: Vec<PlanPhase>,
     /// The Homebrew tap repo (`owner/repo`) the cut's generated formula is
     /// pushed to, or `null` when the contract configured none. Copied verbatim
@@ -113,6 +115,10 @@ pub enum PlanPhase {
     PublishAll,
     /// Create + push the one shared git tag and GitHub Release (coordinator-only).
     Tag,
+    /// Post-tag distribution finalize: targets whose artifact only exists after the
+    /// tag (the Homebrew formula, whose `url` is the just-created tag archive) are
+    /// finalized with the real, post-tag-computed `sha256`.
+    Dist,
 }
 
 impl PlanPhase {
@@ -125,14 +131,20 @@ impl PlanPhase {
             Self::BuildAll => "build-all",
             Self::PublishAll => "publish-all",
             Self::Tag => "tag",
+            Self::Dist => "dist",
         }
     }
 
-    /// The invariant phase order a cut drives, dry-run-all → tag.
-    pub const SEQUENCE: [PlanPhase; 4] =
-        [Self::DryRunAll, Self::BuildAll, Self::PublishAll, Self::Tag];
+    /// The invariant phase order a cut drives, dry-run-all → dist.
+    pub const SEQUENCE: [PlanPhase; 5] = [
+        Self::DryRunAll,
+        Self::BuildAll,
+        Self::PublishAll,
+        Self::Tag,
+        Self::Dist,
+    ];
 
-    /// The invariant phase order a cut drives, dry-run-all → tag (borrowed view
+    /// The invariant phase order a cut drives, dry-run-all → dist (borrowed view
     /// of [`Self::SEQUENCE`]; no allocation).
     #[must_use]
     pub fn sequence() -> &'static [PlanPhase] {

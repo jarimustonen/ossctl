@@ -2,7 +2,7 @@
 created: 2026-08-05
 updated: 2026-08-05
 type: feature
-status: open
+status: in-progress
 priority: high
 epic: ossctl-phase4-build
 blocked_by: ['@release-cut-multi-target-ecosystem']
