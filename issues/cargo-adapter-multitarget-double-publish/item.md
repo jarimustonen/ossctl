@@ -2,12 +2,15 @@
 created: 2026-08-05
 updated: 2026-08-05
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 epic: ossctl-phase4-build
 commits:
 - hash: 6cff876
   summary: cargo adapter one-target-one-publish + ADR-0004
+- hash: a113aec
+  summary: apply /llm-review fixes (fail-closed wait_for_index, actionable errors) + file 3 spin-offs
+closed: 2026-08-05
 ---
 
 # cargo adapter: closure-per-target double-publish race with multiple crates.io targets
