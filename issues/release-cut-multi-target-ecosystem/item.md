@@ -5,6 +5,9 @@ type: bug
 reporter: jari
 status: in-progress
 priority: normal
+commits:
+- hash: f40ab86
+  summary: support >1 target per ecosystem; per-target journal ids; dep-ordered cut
 ---
 
 # release cut rejects >1 target per ecosystem, but contract validate + /oss-init accept/emit them
