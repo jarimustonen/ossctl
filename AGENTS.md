@@ -50,6 +50,10 @@ app beyond what the ADRs already fix.
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace`
   - `cargo build --workspace` (release build not required per-unit)
+  - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` — **CI runs this and it
+    is easy to miss locally**: broken intra-doc links (`[`Foo`]` to a moved/renamed/private
+    item, redundant explicit link targets) fail the `docs` job even when tests pass. Run it
+    before landing any unit that touches doc comments (`//!` / `///`).
 - **Releases MAY be cut automatically whenever there is something to release** (maintainer
   decision, 2026-08-05). Publishing `ossctl` itself (crates.io / GitHub Release / Homebrew)
   no longer requires an explicit per-release go: when `main` carries unreleased user-facing
