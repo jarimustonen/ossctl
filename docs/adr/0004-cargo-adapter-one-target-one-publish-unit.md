@@ -65,7 +65,7 @@ Because each target now publishes exactly one crate, each writes exactly one jou
 
 ### 6. Consequent target model: each publishable crate is its own declared target
 
-The workspace publish model becomes **"each publishable crate is its own declared target"**, which is already what `/oss-init` emits. A multi-crate workspace that wants every crate on crates.io declares every crate as a target. A target whose package depends on a workspace crate that is *not* itself a declared target will **time out** waiting for that crate to appear on the index — the honest signal that it must be declared, rather than a silent whole-workspace publish.
+The workspace publish model becomes **"each publishable crate is its own declared target"**, which is already what `/oss-init` emits. A multi-crate workspace that wants every crate on crates.io declares every crate as a target. A target whose package depends on a workspace crate that is *not* itself a declared target — and whose required version is not already on the index — will **time out** waiting for that crate to appear, the signal that it must be declared, rather than a silent whole-workspace publish. (If that dependency version is already published, the wait clears and the publish proceeds; a plan-time coverage check that catches an under-declared workspace up front, instead of at wait time, is a follow-up — see the Consequences.)
 
 ---
 
@@ -81,7 +81,12 @@ The workspace publish model becomes **"each publishable crate is its own declare
 **Costs / risks accepted**
 
 - **Breaking change to the single-target-multi-crate-workspace model.** A contract that declared one `rust` target and expected the adapter to publish the whole workspace closure no longer does. Accepted: `/oss-init` already emits one target per publishable crate, and the alternative (two authorities across the index-lag boundary) is the very bug being fixed. The failure mode for a mis-declared workspace is a clear index-wait timeout, not a silent partial publish.
-- **A dependency published by a target the coordinator has not yet cut will time out** rather than being pulled in implicitly. Accepted as the honest signal that the crate must be declared as its own target (and ordered by the coordinator).
+- **A dependency published by a target the coordinator has not yet cut will time out** (unless its required version is already on the index) rather than being pulled in implicitly. Accepted as the signal that the crate must be declared as its own target (and ordered by the coordinator). A plan-time **coverage preflight** — rejecting an under-declared workspace up front with an actionable error instead of at wait time — is a follow-up (`cargo-target-coverage-preflight`), not owned by the single-target adapter.
+
+**Follow-ups surfaced by the `/llm-review` of this change (filed separately, out of scope here):**
+
+- **Receipt provenance / resume identity** (`cargo-publish-receipt-provenance-resume-safety`): the pre-publish probe treats version *presence* as this run's successful publish and synthesizes a digest-less receipt; a publish accepted remotely but lost before its receipt journaled could still be re-attempted during index lag, and the plan version is not cross-checked against the manifest version. These are pre-existing `SKELETON` gaps (checksum capture + journalled publish-attempt) this ADR does not close.
+- **Registry pinning** (`cargo-publish-pin-crates-io-registry`): `cargo publish` / `cargo package` are not pinned to `--registry crates-io`, so ambient registry config could redirect a publish while the receipt records crates.io.
 
 **Rejected alternatives**
 

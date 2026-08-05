@@ -22,7 +22,8 @@ struct FakeCmd {
     fail: Option<(String, i32, String)>,
     spawn_err: bool,
     /// Canned stdout served for `cargo metadata` (the workspace graph). `None`
-    /// means empty output — the adapter then degrades to a single-crate publish.
+    /// means empty output, which the adapter treats as a hard error (a real
+    /// `cargo metadata` never emits empty stdout).
     metadata: Option<String>,
     /// Fail (non-zero exit) any call whose rendered form contains this substring —
     /// for the homebrew formula-existence probe, where a `404` must read as
@@ -180,6 +181,30 @@ impl RegistryQuery for DelayedRegistry {
         }
         self.visible_after.set(remaining - 1);
         Ok(vec![])
+    }
+}
+
+/// A registry that errors for one specific package and reports the rest as
+/// definitively absent — for the dep index-wait outage path, where the target's
+/// own idempotency probe must succeed (`Ok(absent)`) while every poll for a
+/// dependency fails.
+struct ErrForRegistry {
+    err_package: String,
+}
+impl ErrForRegistry {
+    fn new(err_package: &str) -> Self {
+        Self {
+            err_package: err_package.to_string(),
+        }
+    }
+}
+impl RegistryQuery for ErrForRegistry {
+    fn published_versions(&self, _ecosystem: &str, package: &str) -> io::Result<Vec<String>> {
+        if package == self.err_package {
+            Err(io::Error::from(io::ErrorKind::TimedOut))
+        } else {
+            Ok(Vec::new())
+        }
     }
 }
 
@@ -909,6 +934,43 @@ fn publish_fails_closed_when_the_registry_is_unreachable() {
     assert!(
         cmd.calls().is_empty(),
         "a fail-closed publish ran a command: {:?}",
+        cmd.calls()
+    );
+}
+
+#[test]
+fn dep_index_wait_reports_registry_unavailable_not_a_false_index_timeout() {
+    // The dep index-wait can never reach the registry to confirm `lib` is visible
+    // (every poll errors). On timeout it must surface RegistryUnavailable — an
+    // honest outage — NOT a misleading IndexTimeout ("did not appear ... after
+    // publishing"). `bin`'s own probe still answers (Ok absent), so the wait is
+    // reached; `bin` must not publish.
+    let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "1.0.0"));
+    let clock = AdvancingClock::new();
+    let reg = ErrForRegistry::new("lib");
+    let root = Path::new("/repo");
+    let c = ctx_advancing(&cmd, &clock, &reg, root);
+
+    let t = target_named(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "bin",
+        "1.0.0",
+    );
+    let err = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap_err();
+    match err {
+        AdapterError::RegistryUnavailable {
+            package, version, ..
+        } => {
+            assert_eq!(package, "lib");
+            assert_eq!(version, "1.0.0");
+        }
+        other => panic!("expected RegistryUnavailable, got {other:?}"),
+    }
+    assert!(
+        !cmd.calls().iter().any(|call| call.contains("publish")),
+        "the dependent published despite an unreachable registry: {:?}",
         cmd.calls()
     );
 }

@@ -277,17 +277,19 @@ pub enum AdapterError {
         /// How long the wait lasted before giving up, in seconds.
         waited_secs: u64,
     },
-    /// The registry could not be reached to determine whether a crate is already
-    /// published, so the pre-publish idempotency probe cannot *prove* the publish
-    /// has not already landed. The publish fails **closed** rather than risk a
-    /// duplicate upload of a crate that in fact landed (crates.io publishes are
-    /// irreversible). Mirrors the reconcile layer's outage ⇒
-    /// [`VerifyOutcome::Unknown`] discipline: an unknown remote state is never
-    /// read as "safe to (re)publish" (see [`cargo`]).
+    /// The registry could not be reached to determine a crate's published state,
+    /// so the publish path cannot make a safe decision and fails **closed** rather
+    /// than guess. Raised in two places (see [`cargo`]): the pre-publish
+    /// idempotency probe (cannot *prove* the crate has not already landed, so a
+    /// duplicate irreversible upload is refused), and the dependency index-wait
+    /// (every poll for a workspace dependency failed, so its visibility is unknown
+    /// — surfaced honestly instead of a misleading [`Self::IndexTimeout`]). Mirrors
+    /// the reconcile layer's outage ⇒ [`VerifyOutcome::Unknown`] discipline: an
+    /// unknown remote state is never read as "safe to (re)publish".
     RegistryUnavailable {
-        /// The package whose already-published state could not be determined.
+        /// The package whose registry state could not be determined.
         package: String,
-        /// The version that was about to be published.
+        /// The version being probed or waited for.
         version: String,
         /// The underlying registry lookup error, rendered as text.
         source: String,
@@ -320,9 +322,10 @@ impl std::fmt::Display for AdapterError {
                 waited_secs,
             } => write!(
                 f,
-                "`{package}@{version}` did not appear on the registry index within \
-                 {waited_secs}s after publishing; a dependent crate cannot be published \
-                 until it is visible"
+                "`{package}@{version}` was not visible on the registry index within \
+                 {waited_secs}s; a crate that depends on it cannot be published until it is. \
+                 If `{package}` is a workspace crate, ensure it is declared as its own release \
+                 target and that its publish succeeded"
             ),
             Self::RegistryUnavailable {
                 package,
@@ -330,9 +333,9 @@ impl std::fmt::Display for AdapterError {
                 source,
             } => write!(
                 f,
-                "cannot determine whether `{package}@{version}` is already published \
-                 (registry unreachable: {source}); refusing to publish rather than risk a \
-                 duplicate upload of a crate that may already have landed"
+                "cannot reach the registry to determine the published state of \
+                 `{package}@{version}` (registry unreachable: {source}); failing closed rather \
+                 than risk an unsafe publish decision"
             ),
         }
     }

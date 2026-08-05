@@ -5,6 +5,9 @@ type: bug
 status: in-progress
 priority: normal
 epic: ossctl-phase4-build
+commits:
+- hash: 6cff876
+  summary: cargo adapter one-target-one-publish + ADR-0004
 ---
 
 # cargo adapter: closure-per-target double-publish race with multiple crates.io targets

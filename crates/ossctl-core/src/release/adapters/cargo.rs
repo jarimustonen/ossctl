@@ -34,8 +34,11 @@
 //! declared target** (which is what `/oss-init` emits). A multi-crate workspace
 //! that wants every crate on crates.io declares every crate as a target; a target
 //! whose package depends on a workspace crate that is *not* itself a declared
-//! target will time out waiting for that crate to appear — the honest signal that
-//! it must be declared.
+//! target — and whose required version is not already on the index — times out
+//! waiting for that crate, the signal that it must be declared. (If that
+//! dependency's version happens to already be published, the wait clears and the
+//! publish proceeds; the coverage check that would catch an under-declared plan up
+//! front is tracked separately, not owned by the adapter.)
 
 use std::collections::BTreeMap;
 use std::collections::HashSet;
@@ -367,25 +370,43 @@ fn is_published(ctx: &EffectCtx<'_>, package: &str, version: &str) -> Result<boo
 /// Between polls it waits [`INDEX_POLL_INTERVAL`] through the injected
 /// [`Clock::sleep`](crate::ports::Clock::sleep) — real time in production, a
 /// virtual advance under test — so the loop is bounded, never busy, and
-/// deterministic in tests. A lookup error (a transient registry outage) is
-/// treated as "not yet visible" and retried, not a hard failure; only exhausting
-/// the timeout yields [`AdapterError::IndexTimeout`].
+/// deterministic in tests. A transient lookup error is retried (waiting is
+/// reversible), but the outcome on timeout is **honest**: if the most recent poll
+/// *observed* the version absent, that is [`AdapterError::IndexTimeout`]; if the
+/// registry could not be reached at all (the last poll errored), that is
+/// [`AdapterError::RegistryUnavailable`] carrying the underlying error — a
+/// sustained outage is never masked as "did not index".
 fn wait_for_index(ctx: &EffectCtx<'_>, package: &str, version: &str) -> Result<(), AdapterError> {
     let start = ctx.clock.now_unix();
+    // The last poll's registry error, if it errored; cleared on any successful
+    // observation. Assigned on every path of the match below before it is read at
+    // the timeout check, so it needs no initializer. Drives the classification.
+    let mut last_err: Option<String>;
     loop {
-        if let Ok(versions) = ctx
+        match ctx
             .registry
             .published_versions(Ecosystem::Rust.as_str(), package)
         {
-            if versions.iter().any(|v| v == version) {
-                return Ok(());
+            Ok(versions) => {
+                if versions.iter().any(|v| v == version) {
+                    return Ok(());
+                }
+                last_err = None;
             }
+            Err(e) => last_err = Some(e.to_string()),
         }
         if ctx.clock.now_unix().saturating_sub(start) >= INDEX_WAIT_TIMEOUT_SECS {
-            return Err(AdapterError::IndexTimeout {
-                package: package.to_string(),
-                version: version.to_string(),
-                waited_secs: INDEX_WAIT_TIMEOUT_SECS,
+            return Err(match last_err {
+                Some(source) => AdapterError::RegistryUnavailable {
+                    package: package.to_string(),
+                    version: version.to_string(),
+                    source,
+                },
+                None => AdapterError::IndexTimeout {
+                    package: package.to_string(),
+                    version: version.to_string(),
+                    waited_secs: INDEX_WAIT_TIMEOUT_SECS,
+                },
             });
         }
         ctx.clock.sleep(INDEX_POLL_INTERVAL);
