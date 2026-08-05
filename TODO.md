@@ -96,9 +96,10 @@ homebase-adjacent. So do NOT harden LANE C now — that polishes a manual path w
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: release-cut-multi-target-ecosystem   (LANE A lock — engine-driven 0.2.0 critical path; see "Track B critical path" note below)
+GLOBAL HEAD-OF-LINE: cargo-adapter-multitarget-double-publish   (LANE A — NEEDS A MAINTAINER DECISION on the target model; on the critical path to the 0.2.0 engine cut)
 LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly) — Track B: make `ossctl release cut` cut ossctl ITSELF (0.2.0 dogfooding proof)
-  ▶ release-cut-multi-target-ecosystem   (bug — >1 target/ecosystem rejected; LOCK: engine can't model ossctl's own 2-crate contract until this resolves)
+  [DONE stint #12] release-cut-multi-target-ecosystem   (fixed — >1 target/ecosystem now cut in dep order)
+  ▶ cargo-adapter-multitarget-double-publish  (bug — cargo adapter double-publishes ossctl-core across 2 crates.io targets during index lag → partial-publish trap. Surfaced by the multitarget /llm-review (all 4 reviewers). NEEDS A DECISION: 3 target-model options, one breaks single-target-multi-crate. Must land before ossctl's own engine cut)
     release-engine-cut-cargo-dist-flow   after release-cut-multi-target-ecosystem (needs multi-target modeling) — skip CI-delegated targets + post-tag homebrew; makes `ossctl release cut` real. SUBSUMES LANE C's homebrew-tap-bump (post-tag homebrew phase) + makes publish-crates-no-auto-trigger moot for ossctl (engine publishes crates directly)
     release-list-abandon-not-implemented (bug — `release list`/`abandon` unimplemented; recovery/resume safety BEFORE trusting the engine with a real cut)
     << then: cut 0.2.0 THROUGH the engine — the dogfooding proof that retires the 4-step manual recipe >>
