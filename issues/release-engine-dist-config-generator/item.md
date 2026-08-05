@@ -4,6 +4,9 @@ updated: 2026-08-05
 type: feature
 status: in-progress
 priority: normal
+commits:
+- hash: at(dist)
+  summary: generate dist-workspace.toml + release.yml from distribution
 ---
 
 # Release engine generates dist-workspace.toml / release.yml from distribution.platforms

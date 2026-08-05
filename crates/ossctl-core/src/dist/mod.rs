@@ -95,17 +95,27 @@ pub fn generate(dist: &Distribution) -> GeneratedDistConfig {
 
     // installers: map through, excluding homebrew (owned by the tap adapter,
     // post-tag) and ensuring shell (the Unix curl-installer covering Mac+Linux).
+    // The match is EXHAUSTIVE (no `_ =>` catch-all) on purpose: adding an
+    // `Installer` variant must force a conscious decision here about whether
+    // cargo-dist understands it, not silently pass an unknown name through.
     let mut installers: Vec<String> = Vec::new();
     let mut excluded_homebrew = false;
     for installer in &dist.installers {
-        match installer {
-            Installer::Homebrew => excluded_homebrew = true,
-            other => {
-                let s = other.as_str().to_string();
-                if !installers.contains(&s) {
-                    installers.push(s);
-                }
+        let name = match installer {
+            Installer::Homebrew => {
+                excluded_homebrew = true;
+                continue;
             }
+            Installer::Shell => Installer::Shell.as_str(),
+            Installer::Powershell => Installer::Powershell.as_str(),
+            Installer::Msi => Installer::Msi.as_str(),
+            Installer::Npm => Installer::Npm.as_str(),
+        };
+        // The normalizer already de-duplicates `installers`; this guard is only
+        // belt-and-suspenders so a hand-built `Distribution` cannot emit a
+        // duplicate installer line.
+        if !installers.iter().any(|s| s == name) {
+            installers.push(name.to_string());
         }
     }
     if excluded_homebrew {
@@ -139,8 +149,9 @@ pub fn generate(dist: &Distribution) -> GeneratedDistConfig {
 
 /// Render the `dist-workspace.toml` text for a resolved `targets` + `installers`
 /// set. Values are simple, closed-vocabulary tokens (target triples and installer
-/// names — `[a-z0-9-]`), so they need no TOML string escaping; they are quoted
-/// literally.
+/// names — `[a-z0-9-]`), so in practice they need no escaping; every interpolated
+/// string nonetheless goes through [`toml_basic_string`] so a future variant or a
+/// hand-built `Distribution` can never emit syntactically-broken TOML.
 fn render_toml(targets: &[String], installers: &[String]) -> String {
     let mut out = String::new();
     // Header: mark the file generated and name the round-trip so a human does not
@@ -160,7 +171,7 @@ fn render_toml(targets: &[String], installers: &[String]) -> String {
     let _ = writeln!(out, "installers = {}", inline_string_array(installers));
     out.push_str("targets = [\n");
     for target in targets {
-        let _ = writeln!(out, "    \"{target}\",");
+        let _ = writeln!(out, "    {},", toml_basic_string(target));
     }
     out.push_str("]\n");
     out.push_str("hosting = \"github\"\n");
@@ -171,8 +182,33 @@ fn render_toml(targets: &[String], installers: &[String]) -> String {
 
 /// Render a slice of tokens as an inline TOML string array (`["a", "b"]`).
 fn inline_string_array(items: &[String]) -> String {
-    let quoted: Vec<String> = items.iter().map(|s| format!("\"{s}\"")).collect();
+    let quoted: Vec<String> = items.iter().map(|s| toml_basic_string(s)).collect();
     format!("[{}]", quoted.join(", "))
+}
+
+/// Quote `value` as a TOML basic string, escaping the characters TOML requires
+/// (`"`, `\`, control chars). For the closed-vocabulary tokens this module emits
+/// this is a no-op beyond the surrounding quotes, but it makes the renderer robust
+/// against a value that ever carries a special character rather than silently
+/// producing invalid TOML.
+fn toml_basic_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]

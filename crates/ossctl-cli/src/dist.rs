@@ -19,6 +19,7 @@
 //! whereas this is one-time, idempotent scaffolding that must exist **before** a
 //! tag is pushed. It is not part of the phase-barrier cut.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
@@ -144,34 +145,17 @@ pub fn generate(
 
     let generated = ossctl_core::dist::generate(distribution);
 
-    // Write the config first (the workflow generation reads it). Refuse to clobber
-    // a hand-tuned config unless --force.
+    // Write the config first (the workflow generation reads it), then produce the
+    // workflow via the tool (never hand-authored YAML).
     let config_path = root.join(DIST_CONFIG_FILENAME);
-    if config_path.exists() && !args.force {
-        return Err(CliError::user(
-            "dist_config_exists",
-            format!(
-                "{DIST_CONFIG_FILENAME} already exists at {} — pass --force to overwrite it \
-                 (a hand-tuned config is not clobbered by default)",
-                config_path.display()
-            ),
-        )
-        .with_invalid_value(config_path.display().to_string()));
-    }
-    std::fs::write(&config_path, &generated.toml).map_err(|e| {
-        CliError::system(
-            "io_error",
-            format!("cannot write {}: {e}", config_path.display()),
-        )
-    })?;
+    write_config(&config_path, &generated.toml, args.force)?;
 
-    // Then produce the workflow via the tool (never hand-authored YAML), unless
-    // the caller opted out.
     let mut warnings = generated.warnings.clone();
     let workflow = if args.no_workflow {
         warnings.push(format!(
-            "skipped `dist generate` (--no-workflow); {DIST_CONFIG_FILENAME} was written but \
-             {RELEASE_WORKFLOW_PATH} was NOT regenerated — run `dist generate` to produce it"
+            "skipped the workflow step (--no-workflow); {DIST_CONFIG_FILENAME} was written but \
+             {RELEASE_WORKFLOW_PATH} was NOT regenerated — re-run `ossctl dist generate` (without \
+             --no-workflow) to produce it"
         ));
         None
     } else {
@@ -193,14 +177,67 @@ pub fn generate(
     Ok(())
 }
 
+/// Write `contents` to `path`, protecting an existing hand-tuned or generated
+/// config and never leaving a torn file behind.
+///
+/// - **Absent** → created atomically (`create_new`, which also closes the
+///   TOCTOU window a separate `exists()` check would open).
+/// - **Present and byte-identical** → a no-op: a re-run after a partial failure
+///   (config written, `dist generate` then failed) is idempotent and does NOT
+///   require `--force`. This is the natural retry story for scaffolding.
+/// - **Present and different** → refused without `--force`; with `--force`,
+///   replaced via a same-directory temp file + atomic `rename`, so a crash or
+///   disk-full mid-write can never truncate the previous config.
+fn write_config(path: &Path, contents: &str, force: bool) -> Result<(), CliError> {
+    let io_err = |e: std::io::Error| {
+        CliError::system("io_error", format!("cannot write {}: {e}", path.display()))
+    };
+    match std::fs::read(path) {
+        Ok(existing) if existing == contents.as_bytes() => Ok(()), // already current
+        Ok(_) if !force => Err(CliError::user(
+            "dist_config_exists",
+            format!(
+                "{DIST_CONFIG_FILENAME} already exists at {} with different content — pass --force \
+                 to overwrite it (a hand-tuned config is not clobbered by default)",
+                path.display()
+            ),
+        )
+        .with_invalid_value(path.display().to_string())),
+        Ok(_) => atomic_replace(path, contents).map_err(io_err),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Exclusive create: fails if the file appears between the read above
+            // and here, so a concurrent writer is never silently clobbered.
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(io_err)?;
+            f.write_all(contents.as_bytes()).map_err(io_err)
+        }
+        Err(e) => Err(io_err(e)),
+    }
+}
+
+/// Replace `path`'s contents atomically: write a sibling temp file, then rename
+/// it over the target (an atomic swap on the same filesystem).
+fn atomic_replace(path: &Path, contents: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("toml.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
 /// Invoke `dist generate` in `root` to (re)produce the tag-triggered workflow
-/// from the just-written `dist-workspace.toml`.
+/// from the just-written `dist-workspace.toml`, then confirm the workflow landed.
 ///
 /// The config is already on disk, so both failure modes name it: a missing
 /// cargo-dist tool is a system error with an install pointer; a non-zero `dist`
-/// exit surfaces its stderr. Either way the caller can re-run just the workflow
-/// step once the tool is available (`dist generate`) — the config need not be
-/// regenerated.
+/// exit surfaces its stderr. A zero exit that produced no workflow is also an
+/// error rather than a falsely-successful report — the command's contract is that
+/// the workflow exists when it returns `Ok`.
 fn run_dist_generate(runner: &dyn CommandRunner, root: &Path) -> Result<(), CliError> {
     let output = runner.run("dist", &["generate"], root).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -209,9 +246,10 @@ fn run_dist_generate(runner: &dyn CommandRunner, root: &Path) -> Result<(), CliE
                 format!(
                     "wrote {DIST_CONFIG_FILENAME}, but the `dist` (cargo-dist) tool is not \
                      installed, so {RELEASE_WORKFLOW_PATH} was not generated. Install it \
-                     (`cargo install cargo-dist` or the curl installer from \
-                     https://opensource.axo.dev/cargo-dist/) and re-run `dist generate`, or pass \
-                     --no-workflow to skip this step"
+                     (`cargo install cargo-dist --version {pinned} --locked`, or the curl \
+                     installer from https://opensource.axo.dev/cargo-dist/) and re-run \
+                     `ossctl dist generate`, or pass --no-workflow to skip this step",
+                    pinned = ossctl_core::dist::PINNED_CARGO_DIST_VERSION,
                 ),
             )
         } else {
@@ -222,10 +260,11 @@ fn run_dist_generate(runner: &dyn CommandRunner, root: &Path) -> Result<(), CliE
         }
     })?;
     if output.status != Some(0) {
-        let detail = if output.stderr.trim().is_empty() {
-            output.stdout.trim().to_string()
-        } else {
-            output.stderr.trim().to_string()
+        let detail = match (output.stderr.trim(), output.stdout.trim()) {
+            ("", "") => "cargo-dist produced no diagnostic output".to_string(),
+            ("", out) => out.to_string(),
+            (err, "") => err.to_string(),
+            (err, out) => format!("{err}\n{out}"),
         };
         return Err(CliError::system(
             "dist_generate_failed",
@@ -235,6 +274,21 @@ fn run_dist_generate(runner: &dyn CommandRunner, root: &Path) -> Result<(), CliE
                 output
                     .status
                     .map_or_else(|| "signal".to_string(), |c| c.to_string()),
+            ),
+        ));
+    }
+    // A zero exit is not proof the workflow was produced — a different cargo-dist
+    // build or config interpretation could exit clean without writing it. Confirm
+    // the file exists so the success report is truthful.
+    let workflow_path = root.join(RELEASE_WORKFLOW_PATH);
+    if !workflow_path.is_file() {
+        return Err(CliError::system(
+            "dist_workflow_missing",
+            format!(
+                "`dist generate` exited 0 but did not produce {} — the installed cargo-dist may \
+                 differ from the pinned {} in {DIST_CONFIG_FILENAME}",
+                workflow_path.display(),
+                ossctl_core::dist::PINNED_CARGO_DIST_VERSION,
             ),
         ));
     }

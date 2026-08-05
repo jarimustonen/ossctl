@@ -17,8 +17,10 @@ struct RecordingRunner {
 }
 
 enum Behavior {
-    /// `dist generate` exits 0.
+    /// `dist generate` exits 0 and produces the workflow file (like the real tool).
     Ok,
+    /// `dist generate` exits 0 but writes NO workflow (a stale/mismatched tool).
+    OkNoWorkflow,
     /// The `dist` tool is not installed.
     NotFound,
     /// `dist generate` runs but exits non-zero.
@@ -39,17 +41,27 @@ impl CommandRunner for RecordingRunner {
         &self,
         program: &str,
         args: &[&str],
-        _cwd: &std::path::Path,
+        cwd: &std::path::Path,
     ) -> io::Result<CommandOutput> {
         self.calls
             .borrow_mut()
             .push(format!("{program} {}", args.join(" ")));
-        match self.behavior {
-            Behavior::Ok => Ok(CommandOutput {
+        let ok = || {
+            Ok(CommandOutput {
                 status: Some(0),
                 stdout: String::new(),
                 stderr: String::new(),
-            }),
+            })
+        };
+        match self.behavior {
+            Behavior::Ok => {
+                // Emulate the real tool writing the workflow file.
+                let wf = cwd.join(".github/workflows/release.yml");
+                std::fs::create_dir_all(wf.parent().unwrap()).unwrap();
+                std::fs::write(&wf, "# generated\n").unwrap();
+                ok()
+            }
+            Behavior::OkNoWorkflow => ok(),
             Behavior::NotFound => Err(io::Error::new(io::ErrorKind::NotFound, "dist not found")),
             Behavior::NonZero => Ok(CommandOutput {
                 status: Some(1),
@@ -252,6 +264,41 @@ fn nonzero_dist_exit_is_reported() {
         "surfaces stderr: {}",
         err.message
     );
+}
+
+#[test]
+fn rerun_with_identical_config_is_idempotent_without_force() {
+    let dir = tempfile::tempdir().unwrap();
+    write_contract(
+        dir.path(),
+        Some("distribution:\n  adapter: cargo-dist\n  installers: [shell]\n"),
+    );
+    // First run writes the config but skips the workflow (as if the tool was absent).
+    let r1 = RecordingRunner::new(Behavior::NotFound);
+    generate(&args(dir.path(), false, true), OutputFormat::Text, &r1).expect("config written");
+
+    // Second run, tool now available, NO --force: the on-disk config is byte-identical,
+    // so it must NOT refuse with dist_config_exists — it proceeds to the workflow.
+    let r2 = RecordingRunner::new(Behavior::Ok);
+    generate(&args(dir.path(), false, false), OutputFormat::Text, &r2)
+        .expect("idempotent re-run must not require --force");
+    assert_eq!(r2.calls.borrow().len(), 1, "workflow step ran on re-run");
+    assert!(dir.path().join(".github/workflows/release.yml").exists());
+}
+
+#[test]
+fn zero_exit_without_a_workflow_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    write_contract(
+        dir.path(),
+        Some("distribution:\n  adapter: cargo-dist\n  installers: [shell]\n"),
+    );
+    // The tool exits 0 but produces no workflow (a stale/mismatched cargo-dist).
+    let runner = RecordingRunner::new(Behavior::OkNoWorkflow);
+
+    let err = generate(&args(dir.path(), false, false), OutputFormat::Text, &runner).unwrap_err();
+    assert_eq!(err.code, "dist_workflow_missing");
+    assert!(matches!(err.kind, crate::error::ExitKind::System));
 }
 
 #[test]

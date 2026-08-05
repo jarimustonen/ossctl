@@ -174,6 +174,24 @@ fn windows_target_carries_powershell_through() {
 }
 
 #[test]
+fn special_characters_in_a_target_are_escaped() {
+    // Defensive: the normalizer never emits such a triple, but a hand-built
+    // Distribution must still not produce syntactically-broken TOML.
+    let g = generate(&dist(vec![Installer::Shell], vec!["evil\"-\\-linux"]));
+    assert!(
+        g.toml.contains("\"evil\\\"-\\\\-linux\""),
+        "quote and backslash escaped: {}",
+        g.toml
+    );
+    // The rendered value never contains a raw unescaped quote mid-token.
+    assert!(
+        !g.toml.contains("evil\"-\\-linux"),
+        "raw value must not leak: {}",
+        g.toml
+    );
+}
+
+#[test]
 fn output_is_deterministic() {
     let d = dist(
         vec![Installer::Shell, Installer::Powershell],
