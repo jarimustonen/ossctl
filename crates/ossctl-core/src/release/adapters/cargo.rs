@@ -87,6 +87,28 @@ impl CargoAdapter {
         ));
         Self { adapter }
     }
+
+    /// The cargo `--registry` alias to pin this target's `cargo publish`/`package`
+    /// invocations to, derived from the target's declared registry.
+    ///
+    /// crates.io is the only rust registry ossctl supports today, so any other
+    /// declared registry is a misconfiguration that must fail **fast, before any
+    /// external action** — never a silent publish to an unexpected destination.
+    /// Returns [`CRATES_IO_ALIAS`] for [`Registry::CratesIo`], else
+    /// [`AdapterError::UnsupportedRegistry`] tagged with **this** adapter's identity
+    /// (`self.adapter`, not a hard-coded value, so a `cargo-dist` caller could never
+    /// misreport itself). Threading the flag value through here (rather than
+    /// hard-coding it at each call site) keeps the destination tied to the contract's
+    /// `registry` field and the rejection in one place.
+    fn crates_io_registry(&self, t: &AdapterTarget) -> Result<&'static str, AdapterError> {
+        match t.target.registry {
+            Registry::CratesIo => Ok(CRATES_IO_ALIAS),
+            registry => Err(AdapterError::UnsupportedRegistry {
+                adapter: self.adapter,
+                registry,
+            }),
+        }
+    }
 }
 
 impl ReleaseAdapter for CargoAdapter {
@@ -131,7 +153,7 @@ impl ReleaseAdapter for CargoAdapter {
         // Reject a non-crates.io target before planning anything — the dry-run
         // preview must show the exact registry-pinned command a real cut runs, and a
         // misconfigured registry is a fail-fast error, not a plannable command.
-        let registry = crates_io_registry(t)?;
+        let registry = self.crates_io_registry(t)?;
         // One plan target = one publish unit: exactly one `cargo publish … --dry-run`
         // for this target's own package, pinned to crates.io, with a note listing the
         // publishable workspace dependencies a real cut waits to be index-visible
@@ -186,7 +208,7 @@ impl ReleaseAdapter for CargoAdapter {
             // Pin `cargo package` to crates.io too (rejecting a non-crates.io
             // target up front) so the build phase can never verify-package
             // against a different registry than the publish phase will target.
-            let registry = crates_io_registry(t)?;
+            let registry = self.crates_io_registry(t)?;
             (
                 vec![PlannedCommand::new(
                     "cargo",
@@ -223,7 +245,7 @@ impl ReleaseAdapter for CargoAdapter {
         // Reject a non-crates.io target BEFORE the idempotency probe or any publish —
         // the whole publish path (probe, index-wait, receipt URL) assumes crates.io,
         // so a mismatched registry must fail closed here, never reach `cargo publish`.
-        let registry = crates_io_registry(t)?;
+        let registry = self.crates_io_registry(t)?;
         // PER-TARGET IRREVERSIBLE — drives the real `cargo publish` through the
         // injected runner (the port is the safety seam under test). ADR-0004: one
         // plan target = one publish unit, so this publishes ONLY `t.package`; the
@@ -266,26 +288,6 @@ impl ReleaseAdapter for CargoAdapter {
 
     fn timeout(&self) -> Duration {
         Duration::from_secs(600)
-    }
-}
-
-/// The cargo `--registry` alias to pin this target's `cargo publish`/`package`
-/// invocations to, derived from the target's declared registry.
-///
-/// crates.io is the only rust registry ossctl supports today, so any other
-/// declared registry is a misconfiguration that must fail **fast, before any
-/// external action** — never a silent publish to an unexpected destination.
-/// Returns [`CRATES_IO_ALIAS`] for [`Registry::CratesIo`], else
-/// [`AdapterError::UnsupportedRegistry`]. Threading the flag value through here
-/// (rather than hard-coding it at each call site) keeps the destination tied to
-/// the contract's `registry` field and the rejection in one place.
-fn crates_io_registry(t: &AdapterTarget) -> Result<&'static str, AdapterError> {
-    match t.target.registry {
-        Registry::CratesIo => Ok(CRATES_IO_ALIAS),
-        registry => Err(AdapterError::UnsupportedRegistry {
-            adapter: Adapter::CargoPublish,
-            registry,
-        }),
     }
 }
 

@@ -678,7 +678,9 @@ fn re_execution_resumes_without_re_publishing_landed_targets() {
 
     // The already-landed rust publish was NOT re-run…
     assert!(
-        !cmd.calls().iter().any(|c| c == "cargo publish --registry crates-io -p tool"),
+        !cmd.calls()
+            .iter()
+            .any(|c| c == "cargo publish --registry crates-io -p tool"),
         "resume re-published an already-landed target: {:?}",
         cmd.calls()
     );

@@ -5,6 +5,9 @@ type: bug
 status: in-progress
 priority: normal
 epic: ossctl-phase4-build
+commits:
+- hash: c605eaa
+  summary: pin cargo adapter to crates.io, reject other registries
 ---
 
 ## Description
