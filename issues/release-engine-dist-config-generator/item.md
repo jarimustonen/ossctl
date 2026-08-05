@@ -2,11 +2,14 @@
 created: 2026-08-04
 updated: 2026-08-05
 type: feature
-status: in-progress
+status: fixed
 priority: normal
 commits:
 - hash: at(dist)
   summary: generate dist-workspace.toml + release.yml from distribution
+- hash: 30ac489
+  summary: 'fix(dist): apply review findings (atomic/idempotent write, exhaustive match, TOML escaping)'
+closed: 2026-08-05
 ---
 
 # Release engine generates dist-workspace.toml / release.yml from distribution.platforms
