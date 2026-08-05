@@ -2,13 +2,16 @@
 created: 2026-08-05
 updated: 2026-08-05
 type: task
-status: in-progress
+status: done
 priority: normal
 epic: ossctl-phase4-build
 related: ['@release-engine-cut-cargo-dist-flow']
 commits:
 - hash: bc3e102
   summary: delegate GitHub Release to CI when plan has a CI-delegated target; ADR-0002 addendum + tests
+- hash: 57a068e
+  summary: narrow to ci_owns_github_release; v3 bump; contradiction guard; delegated_to; review fixes
+closed: 2026-08-05
 ---
 
 # coordinator GitHub Release vs cargo-dist release.yml ownership
