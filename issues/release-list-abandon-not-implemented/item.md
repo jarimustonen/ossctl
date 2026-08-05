@@ -3,11 +3,14 @@ created: 2026-08-04
 updated: 2026-08-05
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 commits:
 - hash: e0239cb
   summary: implement release list + abandon over the journal
+- hash: 8e47d13
+  summary: apply llm-review fixes (unreadable gate, lock-held msg, lock-drop, reason sanitize)
+closed: 2026-08-05
 ---
 
 # release list/abandon return not_implemented, but /oss-release skill directs their use
