@@ -8,20 +8,37 @@
 //! crates.io through [`RegistryQuery`](crate::ports::RegistryQuery) via the
 //! adapter's default path.
 //!
-//! ## Multi-crate workspace publish (dep-order + index-wait)
+//! ## One plan target = one publish unit (ADR-0004)
 //!
-//! A single `cargo publish` cannot publish a workspace whose crates depend on
-//! one another: crates.io rejects a crate whose sibling dependency is not yet
-//! published (`no matching package named … found`). So the `cargo-publish` path
-//! discovers the workspace's publishable members and their intra-workspace
-//! dependency edges (read-only `cargo metadata`), publishes them in **topological
-//! order** (a crate only after every workspace dependency it needs), and — after
-//! each member that still has dependents to publish — **waits for crates.io to
-//! index** the just-published version before publishing the next one (polling the
-//! injected [`RegistryQuery`](crate::ports::RegistryQuery), bounded by a timeout).
-//! A single-crate workspace degrades to exactly one `cargo publish` with no wait.
+//! Each plan target publishes **exactly its own package** — one target ⇒ one
+//! `cargo publish -p <package>`. The [coordinator](super::super::coordinator) owns
+//! all cross-target ordering: it cuts same-ecosystem targets in dependency order
+//! (a dependency's target before its dependents'), so the adapter never re-orders
+//! or re-publishes another target's crate. This removes the earlier
+//! closure-per-target model, where two authorities (coordinator + adapter) each
+//! computed overlapping publish orderings and the crates.io publish→index lag
+//! between them could trigger a *duplicate* `cargo publish` of a shared dependency
+//! → a partial-publish trap.
+//!
+//! A workspace whose crates depend on one another still cannot publish in one
+//! shot: crates.io rejects a crate whose sibling dependency is not yet indexed
+//! (`no matching package named … found`). So before publishing its own package,
+//! the adapter discovers that package's publishable intra-workspace dependencies
+//! (read-only `cargo metadata`) and **waits for each to be crates.io-index-visible**
+//! (polling the injected [`RegistryQuery`](crate::ports::RegistryQuery), bounded by
+//! a timeout) — the dependency's own target, cut earlier, already published it, so
+//! this only closes the index-lag window. A crate with no publishable workspace
+//! dependencies publishes immediately with no wait.
+//!
+//! The consequence is a target model where **each publishable crate is its own
+//! declared target** (which is what `/oss-init` emits). A multi-crate workspace
+//! that wants every crate on crates.io declares every crate as a target; a target
+//! whose package depends on a workspace crate that is *not* itself a declared
+//! target will time out waiting for that crate to appear — the honest signal that
+//! it must be declared.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -86,34 +103,29 @@ impl ReleaseAdapter for CargoAdapter {
                 notes: vec![],
             });
         }
-        // Report the *whole* workspace publish plan: one `cargo publish … --dry-run`
-        // per member in dependency order, with a note for each index-wait that a
-        // real cut would perform between dependent publishes. `cargo metadata` is
-        // read-only, so running it here keeps dry-run side-effect-free.
-        let order = publish_order(ctx, t)?;
-        let mut planned_commands = Vec::with_capacity(order.len());
+        // One plan target = one publish unit: exactly one `cargo publish … --dry-run`
+        // for this target's own package, with a note listing the publishable
+        // workspace dependencies a real cut waits to be index-visible first.
+        // `cargo metadata` is read-only, so running it here keeps dry-run
+        // side-effect-free (and validates that the target package is a publishable
+        // member before a real cut would try to publish it).
+        let deps = target_workspace_deps(ctx, t)?;
+        let planned_commands = vec![PlannedCommand::new(
+            "cargo",
+            &["publish", "-p", &t.package, "--dry-run"],
+        )];
         let mut notes = Vec::new();
-        if order.len() > 1 {
-            let chain = order
+        if !deps.is_empty() {
+            let chain = deps
                 .iter()
-                .map(|m| m.name.as_str())
+                .map(|m| format!("{}@{}", m.name, m.version))
                 .collect::<Vec<_>>()
-                .join(" → ");
-            notes.push(format!("workspace publish order: {chain}"));
-        }
-        for (i, m) in order.iter().enumerate() {
-            planned_commands.push(PlannedCommand::new(
-                "cargo",
-                &["publish", "-p", &m.name, "--dry-run"],
+                .join(", ");
+            notes.push(format!(
+                "waits for these workspace dependencies to be crates.io-index-visible \
+                 before publishing `{}`: {chain}",
+                t.package
             ));
-            // Only note a wait where a later member actually depends on this one —
-            // independent members incur no index-wait.
-            if has_later_dependent(&order, i) {
-                notes.push(format!(
-                    "then wait for crates.io to index `{}@{}` before publishing dependents",
-                    m.name, m.version
-                ));
-            }
         }
         Ok(DryRunReport {
             adapter: self.adapter,
@@ -165,44 +177,39 @@ impl ReleaseAdapter for CargoAdapter {
             });
         }
         // PER-TARGET IRREVERSIBLE — drives the real `cargo publish` through the
-        // injected runner (the port is the safety seam under test). Publish each
-        // publishable member in dependency order, waiting for crates.io to index a
-        // member before the next member that depends on it publishes. No
+        // injected runner (the port is the safety seam under test). ADR-0004: one
+        // plan target = one publish unit, so this publishes ONLY `t.package`; the
+        // coordinator cut every dependency's target before this one. No
         // `--no-verify`: a resume that enters publish without re-running build must
         // still let cargo verify the package before it lands.
         //
-        // IDEMPOTENT re-entry. The coordinator records ONE receipt per ecosystem
-        // target, so a cut that publishes some members then fails leaves no journal
-        // record of the members that landed; on resume the coordinator re-enters
-        // this method from the top. To avoid `cargo publish` hard-failing on an
-        // already-uploaded version (which would wedge every resume), each member is
-        // probed against the registry first and skipped if already published at its
-        // version. A single `publish()` is thus safe to re-run.
-        let order = publish_order(ctx, t)?;
-        for (i, m) in order.iter().enumerate() {
-            if !is_published(ctx, &m.name, &m.version) {
-                run_all(
-                    ctx,
-                    &[PlannedCommand::new("cargo", &["publish", "-p", &m.name])],
-                )?;
-            }
-            // Wait for index visibility only when a later member in this cut
-            // depends on this one — an independent member blocks nothing, so it
-            // incurs no wait. An already-visible member returns immediately.
-            if has_later_dependent(&order, i) {
-                wait_for_index(ctx, &m.name, &m.version)?;
-            }
+        // IDEMPOTENT re-entry with TRI-STATE probing. On resume the coordinator
+        // re-enters this method from the top, so probe the registry first and skip
+        // an already-landed publish (a second `cargo publish` of an uploaded version
+        // hard-fails and would wedge every resume). Crucially, a probe that cannot
+        // reach the registry is NOT read as "not published" — that would permit a
+        // duplicate upload of a crate that in fact landed. It fails the publish
+        // closed ([`AdapterError::RegistryUnavailable`]), mirroring the reconcile
+        // layer's outage ⇒ `Unknown` ⇒ never-`Missing` discipline.
+        if is_published(ctx, &t.package, &t.version)? {
+            return Ok(make_receipt(ctx, t, None, Some(remote_url(t))));
         }
+        // crates.io rejects a crate whose sibling dependency is not yet indexed, so
+        // wait for this package's own publishable workspace dependencies to be
+        // index-visible before publishing it. Each dependency's target was cut
+        // earlier by the coordinator; this only closes the publish→index lag window.
+        for dep in &target_workspace_deps(ctx, t)? {
+            wait_for_index(ctx, &dep.name, &dep.version)?;
+        }
+        run_all(
+            ctx,
+            &[PlannedCommand::new("cargo", &["publish", "-p", &t.package])],
+        )?;
         // SKELETON: a production publish parses the crates.io checksum from the
-        // `cargo publish` output for `digest`; the canonical URL is well-known.
-        // The receipt names the target's primary package (published last, so all
-        // members have landed by the time it is stamped); the journal records one
-        // receipt per ecosystem target.
-        let remote_url = Some(format!(
-            "https://crates.io/crates/{}/{}",
-            t.package, t.version
-        ));
-        Ok(make_receipt(ctx, t, None, remote_url))
+        // `cargo publish` output for `digest`; the canonical URL is well-known. One
+        // target publishes exactly one crate, so the journal records exactly one
+        // receipt for this crate — `resume`/`verify` track it precisely.
+        Ok(make_receipt(ctx, t, None, Some(remote_url(t))))
     }
 
     fn timeout(&self) -> Duration {
@@ -210,34 +217,49 @@ impl ReleaseAdapter for CargoAdapter {
     }
 }
 
-/// Determine the workspace crates this cut publishes, in topological publish
-/// order (a crate only after every workspace dependency it needs).
+/// The canonical crates.io URL for a target's own package at its version — the
+/// receipt's `remote_url`.
+fn remote_url(t: &AdapterTarget) -> String {
+    format!("https://crates.io/crates/{}/{}", t.package, t.version)
+}
+
+/// The publishable intra-workspace dependencies of the target's own package — the
+/// crates that must be crates.io-index-visible before `t.package` can publish
+/// (ADR-0004). Each has its own plan target, cut earlier by the coordinator.
 ///
 /// Runs read-only `cargo metadata`, keeps only members publishable to crates.io
 /// (dropping `publish = false` and members restricted to another registry), and
-/// restricts the set to the transitive workspace-dependency **closure rooted at
-/// the target package** — so a plan approving one package publishes exactly that
-/// package plus the workspace crates it depends on, never an unrelated publishable
-/// crate. Errors if the target package is not itself a publishable member. A
-/// single-crate workspace resolves to exactly that one crate.
-fn publish_order(ctx: &EffectCtx<'_>, t: &AdapterTarget) -> Result<Vec<Member>, AdapterError> {
+/// returns the direct workspace dependencies of `t.package` among them. Errors if
+/// `t.package` is not itself a publishable member (the plan approved a package this
+/// workspace cannot publish to crates.io). A crate with no publishable workspace
+/// dependencies resolves to an empty list — it publishes with no wait.
+fn target_workspace_deps(
+    ctx: &EffectCtx<'_>,
+    t: &AdapterTarget,
+) -> Result<Vec<Member>, AdapterError> {
     let meta = load_metadata(ctx)?;
     let members = publishable_members(&meta);
-    if !members.iter().any(|m| m.name == t.package) {
+    let by_name: BTreeMap<&str, &Member> = members.iter().map(|m| (m.name.as_str(), m)).collect();
+    let Some(target) = by_name.get(t.package.as_str()) else {
         let available: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
         return Err(AdapterError::Command {
             command: "cargo metadata".to_string(),
             code: None,
             stderr: format!(
                 "target package `{}` is not a crates.io-publishable member of this workspace \
-                 (publishable members: {available:?}); check the contract `package` and each \
-                 crate's `publish` setting",
+                 (publishable members: {available:?}); declare each publishable crate as its own \
+                 target and check the contract `package` and each crate's `publish` setting",
                 t.package
             ),
         });
-    }
-    let closure = dep_closure(members, &t.package);
-    topo_sort(closure)
+    };
+    // `publishable_members` already restricted each member's `deps` to *other kept
+    // members*, so every dep name here resolves to a publishable member.
+    Ok(target
+        .deps
+        .iter()
+        .filter_map(|d| by_name.get(d.as_str()).map(|m| (*m).clone()))
+        .collect())
 }
 
 /// Run `cargo metadata` and parse the workspace graph. Errors on a command
@@ -314,89 +336,29 @@ fn publishable_to_crates_io(publish: Option<&[String]>) -> bool {
     }
 }
 
-/// The transitive workspace-dependency closure rooted at `root`: `root` plus
-/// every member reachable through the (already publishable-filtered) dependency
-/// edges. `root` is assumed present in `members` (the caller validates it).
-fn dep_closure(members: Vec<Member>, root: &str) -> Vec<Member> {
-    let by_name: BTreeMap<&str, &Member> = members.iter().map(|m| (m.name.as_str(), m)).collect();
-    let mut reached: HashSet<String> = HashSet::new();
-    let mut stack: Vec<String> = vec![root.to_string()];
-    while let Some(name) = stack.pop() {
-        if !reached.insert(name.clone()) {
-            continue;
-        }
-        if let Some(m) = by_name.get(name.as_str()) {
-            for d in &m.deps {
-                if !reached.contains(d) {
-                    stack.push(d.clone());
-                }
-            }
-        }
-    }
-    members
-        .into_iter()
-        .filter(|m| reached.contains(&m.name))
-        .collect()
-}
-
-/// Topologically order members so each appears only after all its workspace
-/// dependencies (a name-keyed [`BTreeMap`] drives the ready-scan, so the order is
-/// deterministic — ties broken alphabetically). Errors on a dependency cycle
-/// among the members (which would make a correct publish order impossible).
-fn topo_sort(members: Vec<Member>) -> Result<Vec<Member>, AdapterError> {
-    let mut graph: BTreeMap<String, Member> = BTreeMap::new();
-    for m in members {
-        graph.insert(m.name.clone(), m);
-    }
-    let mut ordered: Vec<Member> = Vec::with_capacity(graph.len());
-    let mut published: HashSet<String> = HashSet::new();
-    let mut remaining: Vec<String> = graph.keys().cloned().collect();
-    while !remaining.is_empty() {
-        // The first (alphabetically) member whose workspace deps are all published.
-        let ready = remaining
-            .iter()
-            .find(|n| graph[*n].deps.iter().all(|d| published.contains(d)))
-            .cloned();
-        match ready {
-            Some(n) => {
-                published.insert(n.clone());
-                remaining.retain(|x| x != &n);
-                // Move the member out of the graph into the ordered result.
-                ordered.push(graph.remove(&n).expect("ready name is a graph key"));
-            }
-            None => {
-                return Err(AdapterError::Command {
-                    command: "cargo metadata".to_string(),
-                    code: None,
-                    stderr: format!(
-                        "workspace publish order has a dependency cycle among: {remaining:?}"
-                    ),
-                });
-            }
-        }
-    }
-    Ok(ordered)
-}
-
-/// Whether any member *after* index `i` in the publish order depends on the member
-/// at `i` — i.e. whether the member at `i` must be index-visible before a later
-/// member publishes. Independent members (nothing downstream) need no wait.
-fn has_later_dependent(order: &[Member], i: usize) -> bool {
-    let name = &order[i].name;
-    order[i + 1..]
-        .iter()
-        .any(|later| later.deps.iter().any(|d| d == name))
-}
-
 /// Whether `package@version` is already visible on crates.io — the idempotency
-/// probe run before each `cargo publish` so a resumed cut skips members that
-/// already landed instead of hard-failing on a duplicate upload. A registry
-/// lookup error is treated as "not known to be published" (proceed to publish and
-/// let cargo be the authority), never a false "already there".
-fn is_published(ctx: &EffectCtx<'_>, package: &str, version: &str) -> bool {
-    ctx.registry
+/// probe run before `cargo publish` so a resumed cut skips a crate that already
+/// landed instead of hard-failing on a duplicate upload.
+///
+/// **Tri-state, fail-closed.** `Ok(true)` ⇒ already published (skip); `Ok(false)`
+/// ⇒ the registry answered and the version is definitively absent (safe to
+/// publish); `Err(RegistryUnavailable)` ⇒ the registry could not be reached, so
+/// the probe cannot prove the crate has *not* landed. A registry error is **never**
+/// read as "not published" (which would permit a duplicate, irreversible upload);
+/// the caller fails closed, mirroring the reconcile layer's outage ⇒ `Unknown`
+/// discipline.
+fn is_published(ctx: &EffectCtx<'_>, package: &str, version: &str) -> Result<bool, AdapterError> {
+    match ctx
+        .registry
         .published_versions(Ecosystem::Rust.as_str(), package)
-        .is_ok_and(|versions| versions.iter().any(|v| v == version))
+    {
+        Ok(versions) => Ok(versions.iter().any(|v| v == version)),
+        Err(e) => Err(AdapterError::RegistryUnavailable {
+            package: package.to_string(),
+            version: version.to_string(),
+            source: e.to_string(),
+        }),
+    }
 }
 
 /// Poll the crates.io index (through the injected [`RegistryQuery`]) until
@@ -431,7 +393,8 @@ fn wait_for_index(ctx: &EffectCtx<'_>, package: &str, version: &str) -> Result<(
 }
 
 /// A publishable workspace member with its version and its intra-workspace
-/// (non-dev) dependency names — the input to [`topo_sort`].
+/// (non-dev) dependency names.
+#[derive(Clone)]
 struct Member {
     name: String,
     version: String,

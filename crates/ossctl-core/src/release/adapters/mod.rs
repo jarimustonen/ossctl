@@ -277,6 +277,21 @@ pub enum AdapterError {
         /// How long the wait lasted before giving up, in seconds.
         waited_secs: u64,
     },
+    /// The registry could not be reached to determine whether a crate is already
+    /// published, so the pre-publish idempotency probe cannot *prove* the publish
+    /// has not already landed. The publish fails **closed** rather than risk a
+    /// duplicate upload of a crate that in fact landed (crates.io publishes are
+    /// irreversible). Mirrors the reconcile layer's outage ⇒
+    /// [`VerifyOutcome::Unknown`] discipline: an unknown remote state is never
+    /// read as "safe to (re)publish" (see [`cargo`]).
+    RegistryUnavailable {
+        /// The package whose already-published state could not be determined.
+        package: String,
+        /// The version that was about to be published.
+        version: String,
+        /// The underlying registry lookup error, rendered as text.
+        source: String,
+    },
 }
 
 impl std::fmt::Display for AdapterError {
@@ -308,6 +323,16 @@ impl std::fmt::Display for AdapterError {
                 "`{package}@{version}` did not appear on the registry index within \
                  {waited_secs}s after publishing; a dependent crate cannot be published \
                  until it is visible"
+            ),
+            Self::RegistryUnavailable {
+                package,
+                version,
+                source,
+            } => write!(
+                f,
+                "cannot determine whether `{package}@{version}` is already published \
+                 (registry unreachable: {source}); refusing to publish rather than risk a \
+                 duplicate upload of a crate that may already have landed"
             ),
         }
     }

@@ -1142,8 +1142,9 @@ fn two_crates_io_targets_in_one_ecosystem_cut_in_dependency_order() {
     assert_eq!(state.published.len(), 2);
 
     // Dependency order at the process level: `ossctl-core` publishes before
-    // `ossctl`, and exactly once (the dependent's closure sees it already indexed
-    // and skips it rather than re-publishing).
+    // `ossctl`, and exactly once (ADR-0004: each target publishes only its own
+    // crate — `ossctl`'s target waits for `ossctl-core` to index, never re-publishes
+    // it).
     let calls = cmd.calls();
     let core_pub = calls
         .iter()
@@ -1164,6 +1165,132 @@ fn two_crates_io_targets_in_one_ecosystem_cut_in_dependency_order() {
             .count(),
         1,
         "the dependency crate was published more than once: {calls:?}"
+    );
+}
+
+/// A registry over the shared [`CratesWorld`] that reports a *published* crate as
+/// index-visible only after `lag` polls — the crates.io publish→index lag window
+/// in which the old closure-per-target model re-ran `cargo publish` for a shared
+/// dependency (the double-publish bug this test guards against).
+struct LaggingWorldRegistry {
+    world: CratesWorld,
+    lag: u32,
+    polls: RefCell<HashMap<String, u32>>,
+}
+impl RegistryQuery for LaggingWorldRegistry {
+    fn published_versions(&self, _ecosystem: &str, package: &str) -> io::Result<Vec<String>> {
+        if !self.world.published.borrow().contains(package) {
+            return Ok(Vec::new());
+        }
+        let mut polls = self.polls.borrow_mut();
+        let seen = polls.entry(package.to_string()).or_insert(0);
+        if *seen >= self.lag {
+            Ok(vec!["1.2.3".to_string()])
+        } else {
+            *seen += 1;
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// A clock whose `sleep` advances virtual time (never a real thread sleep) so the
+/// index-wait loop terminates instantly under test; `now_unix` still advances so
+/// the bounded-wait timeout math is exercised.
+struct SleepAdvancingClock(Cell<u64>);
+impl Clock for SleepAdvancingClock {
+    fn now_unix(&self) -> u64 {
+        let t = self.0.get();
+        self.0.set(t + 1);
+        t
+    }
+    fn sleep(&self, dur: std::time::Duration) {
+        self.0.set(self.0.get() + dur.as_secs().max(1));
+    }
+}
+
+#[test]
+fn two_targets_do_not_double_publish_a_shared_dependency_under_index_lag() {
+    // The core `cargo-adapter-multitarget-double-publish` regression AT THE
+    // COORDINATOR LEVEL: two crates.io targets `ossctl-core` then `ossctl` cut in
+    // dependency order, where `ossctl-core` stays index-lagged for several polls
+    // after it publishes. The old model re-ran `cargo publish -p ossctl-core` from
+    // `ossctl`'s closure during that lag (a partial-publish trap); ADR-0004's
+    // one-target-one-publish model must publish each crate EXACTLY ONCE.
+    let world = CratesWorld::default();
+    let store = FakeStore::default();
+    let clock = SleepAdvancingClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = WorkspaceCmd::new(world.clone());
+    let reg = LaggingWorldRegistry {
+        world: world.clone(),
+        lag: 3,
+        polls: RefCell::new(HashMap::new()),
+    };
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+
+    let plan = ReleasePlan {
+        plan_id: "plan-lag".into(),
+        contract_schema_version: 1,
+        head_sha: "deadbeef".into(),
+        version: "1.2.3".into(),
+        targets: vec![crates_target("ossctl-core"), crates_target("ossctl")],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
+    };
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "plan-lag".into(),
+        "1.2.3".into(),
+        ids,
+    )
+    .unwrap();
+    let mut sink = NullSink;
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+
+    assert_eq!(journal.state().status, RunStatus::Completed);
+    let calls = cmd.calls();
+    // The dependency was published exactly once despite the index lag before the
+    // dependent's target ran — never a second `cargo publish -p ossctl-core`.
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| *c == "cargo publish -p ossctl-core")
+            .count(),
+        1,
+        "the shared dependency was published more than once under lag: {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| *c == "cargo publish -p ossctl")
+            .count(),
+        1
+    );
+    // Dependency before dependent.
+    let core = calls
+        .iter()
+        .position(|c| c == "cargo publish -p ossctl-core")
+        .unwrap();
+    let cli = calls
+        .iter()
+        .position(|c| c == "cargo publish -p ossctl")
+        .unwrap();
+    assert!(
+        core < cli,
+        "dependency published after its dependent: {calls:?}"
     );
 }
 
