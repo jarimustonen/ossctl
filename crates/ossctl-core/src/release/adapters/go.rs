@@ -3,7 +3,7 @@
 //! Go modules are consumed straight from a pushed git tag (there is no upload to
 //! a mutable registry), so a "publish" here is `GoReleaser` building and attaching
 //! artifacts to the GitHub Release; module availability is fronted by the
-//! immutable module proxy. `verify` uses the default [`RegistryQuery`] path
+//! immutable module proxy. `verify` uses the default [`RegistryQuery`](crate::ports::RegistryQuery) path
 //! against `proxy.golang.org`.
 
 use std::time::Duration;

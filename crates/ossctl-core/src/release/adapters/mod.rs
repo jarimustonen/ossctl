@@ -14,9 +14,9 @@
 //! ## Injected effects, per-target isolation
 //!
 //! Every method takes an [`EffectCtx`] (the ADR-0001 ports:
-//! [`CommandRunner`](crate::ports::CommandRunner),
-//! [`Clock`](crate::ports::Clock),
-//! [`RegistryQuery`](crate::ports::RegistryQuery)) so an adapter is unit-testable
+//! [`CommandRunner`],
+//! [`Clock`],
+//! [`RegistryQuery`]) so an adapter is unit-testable
 //! against a recording fake and **never** touches the real network or process
 //! table. Each adapter receives only its own [`AdapterTarget`] slice — never the
 //! whole `OSS-RELEASE.md` payload — so no adapter can couple to another
@@ -71,7 +71,7 @@ pub struct EffectCtx<'a> {
     pub repo_root: &'a std::path::Path,
     /// The concrete release artifacts threaded from build-all into publish-all
     /// (ADR-0002 §2) — the asset upload set and the source tarball a distribution
-    /// adapter repackages. [`ReleaseArtifacts::EMPTY`] during the re-runnable
+    /// adapter repackages. [`EMPTY_ARTIFACTS`] during the re-runnable
     /// dry-run / build phases (the artifacts are not yet known) and for every
     /// non-publish caller; the coordinator swaps in the computed value for the
     /// publish phase (via [`EffectCtx::with_artifacts`]) so a `publish` body can
@@ -95,8 +95,8 @@ impl<'a> EffectCtx<'a> {
 ///
 /// The two distribution adapters that repackage *already-produced* outputs need
 /// inputs no single ecosystem build yields on its own:
-/// [`binary`](self::binary) uploads the asset paths gathered from **every**
-/// target's [`build`](ReleaseAdapter::build), and [`homebrew`](self::homebrew)'s
+/// [`binary`] uploads the asset paths gathered from **every**
+/// target's [`build`](ReleaseAdapter::build), and [`homebrew`]'s
 /// formula bump needs the published source tarball's URL + sha256. The
 /// coordinator computes this once, after build-all, and exposes it through
 /// [`EffectCtx::artifacts`]. The REAL registry adapters (cargo / python / go)
@@ -114,12 +114,12 @@ pub struct ReleaseArtifacts {
     pub source_tarball: Option<SourceTarball>,
     /// The resolved `owner/repo` GitHub slug of the cut's `origin` remote, when
     /// the coordinator could parse one and the cut carries a GitHub-backed
-    /// distribution target ([`binary`](self::binary) or [`homebrew`](self::homebrew)).
-    /// The [`binary`](self::binary) adapter records the GitHub-Release page URL for
+    /// distribution target ([`binary`] or [`homebrew`]).
+    /// The [`binary`] adapter records the GitHub-Release page URL for
     /// this slug as its receipt's [`PublishReceipt::remote_url`](crate::protocol::release::PublishReceipt::remote_url).
     /// `None` for a cut with no such target or no resolvable GitHub remote.
     pub repo_slug: Option<String>,
-    /// The Homebrew formula inputs the [`homebrew`](self::homebrew) adapter's
+    /// The Homebrew formula inputs the [`homebrew`] adapter's
     /// first-formula bootstrap needs beyond the [`Self::source_tarball`] URL +
     /// sha256 — the destination tap and the SPDX license the generated `.rb`
     /// records. `None` for a cut with no homebrew target (and always `None` for
@@ -131,7 +131,7 @@ pub struct ReleaseArtifacts {
 /// The Homebrew-formula inputs a first-formula *create* needs that the source
 /// tarball alone does not carry — the destination tap and the formula's license.
 ///
-/// The [`homebrew`](self::homebrew) adapter chooses its **create** vs **bump**
+/// The [`homebrew`] adapter chooses its **create** vs **bump**
 /// path from whether the target formula already exists in [`Self::tap`]; a
 /// `None` tap (a `homebrew-core` target, or a `homebrew-tap` the contract left
 /// unconfigured) has no bootstrap destination, so the adapter falls back to the
@@ -245,7 +245,7 @@ pub enum AdapterError {
     },
     /// A local filesystem write an adapter performs *between* commands failed —
     /// distinct from [`Self::Io`] (a process that could not be spawned). The
-    /// [`homebrew`](super::homebrew) first-formula create writes the generated
+    /// [`homebrew`] first-formula create writes the generated
     /// `.rb` into the tap checkout between the clone and the commit; a failure
     /// there is this.
     Filesystem {
@@ -268,7 +268,7 @@ pub enum AdapterError {
     /// safely. Distinct from [`Self::Command`]: the publish itself *succeeded* —
     /// only the between-publishes index-wait timed out (the multi-crate cargo
     /// workspace path, where a dependent crate must not publish until its
-    /// workspace dependency is index-visible; see [`cargo`](super::cargo)).
+    /// workspace dependency is index-visible; see [`cargo`]).
     IndexTimeout {
         /// The published package still absent from the index.
         package: String,

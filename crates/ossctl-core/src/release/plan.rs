@@ -13,7 +13,7 @@
 //! whose struct-field and `BTreeMap` ordering is deterministic) covering
 //! **exactly**, in this fixed order:
 //!
-//! 1. a domain separator + [`SEAL_VERSION`] — so a `plan_id` can never collide
+//! 1. a domain separator + `SEAL_VERSION` — so a `plan_id` can never collide
 //!    with any other ossctl digest and the canonicalization format can be
 //!    evolved by a deliberate `SEAL_VERSION` bump instead of silently;
 //! 2. the contract-document `schema_version` (ADR-0002 lists it explicitly);

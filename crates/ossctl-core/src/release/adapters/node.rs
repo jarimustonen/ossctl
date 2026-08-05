@@ -6,7 +6,7 @@
 //! never from this host, so its `publish` honestly returns
 //! [`AdapterError::Unsupported`] rather than fabricating an npm receipt (matching
 //! `cargo-dist` and `gh-action-pypi-publish`). `verify` reconciles against npm via
-//! the default [`RegistryQuery`] path.
+//! the default [`RegistryQuery`](crate::ports::RegistryQuery) path.
 
 use std::time::Duration;
 

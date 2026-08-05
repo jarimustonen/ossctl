@@ -3,7 +3,7 @@
 //! Publishes wheels/sdists to `PyPI`. `twine` uploads directly from this host;
 //! `gh-action-pypi-publish` is the CI trusted-publisher flow, so its publish
 //! body is a clearly-marked skeleton (the real upload happens in the workflow).
-//! `verify` reconciles against `PyPI` via the default [`RegistryQuery`] path.
+//! `verify` reconciles against `PyPI` via the default [`RegistryQuery`](crate::ports::RegistryQuery) path.
 
 use std::time::Duration;
 

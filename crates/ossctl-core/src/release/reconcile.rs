@@ -26,7 +26,7 @@
 //!   `RealRegistryQuery` wires `node` first, degrading the rest to `Unknown`.
 //! - `binary` (GitHub Releases, and homebrew taps — which the contract models
 //!   under the `binary` ecosystem) routes to an adapter that is **not** observable
-//!   through [`RegistryQuery`], so it honestly reports [`VerifyOutcome::Unknown`].
+//!   through [`RegistryQuery`](crate::ports::RegistryQuery), so it honestly reports [`VerifyOutcome::Unknown`].
 //! - a registry outage, an unresolvable/absent package name, or an ecosystem this
 //!   binary does not recognize all resolve to [`VerifyOutcome::Unknown`] — the
 //!   audit's tri-state discipline: a lookup that could not be performed is
