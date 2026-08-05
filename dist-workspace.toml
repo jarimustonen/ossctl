@@ -28,11 +28,14 @@ installers = ["shell", "powershell"]
 # systems.
 targets = [
     "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
     "aarch64-unknown-linux-musl",
     "x86_64-unknown-linux-musl",
     "x86_64-pc-windows-msvc",
 ]
+# NOTE: no `x86_64-apple-darwin`. The macOS build runs on the self-hosted `hauis`
+# runner (below), which uses Homebrew Rust (no rustup) and so cannot cross-compile
+# the Intel-mac target — same constraint, same choice as orchestratectl. Apple
+# silicon is covered natively; Intel-mac users install via `cargo install ossctl`.
 # Where to host releases.
 hosting = "github"
 # Generate GitHub build-provenance attestations for the release artifacts
@@ -61,4 +64,3 @@ pr-run-mode = "skip"
 # would swallow every key after it.
 [dist.github-custom-runners]
 aarch64-apple-darwin = "self-hosted"
-x86_64-apple-darwin = "self-hosted"
