@@ -7,6 +7,7 @@
 mod audit;
 mod cli;
 mod contract;
+mod dist;
 mod doctor;
 mod error;
 mod facts;

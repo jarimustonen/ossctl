@@ -1272,3 +1272,137 @@ fn release_cut_rejects_a_git_ref_unsafe_version() {
         assert_eq!(v["error"]["code"], "invalid_version", "version {bad:?}");
     }
 }
+
+// ── dist generate ────────────────────────────────────────────────────────────
+
+/// A minimal approved contract with a cargo-dist distribution block (platforms
+/// omitted → the cross-platform default), written into `dir`.
+fn write_dist_contract(dir: &std::path::Path, installers: &str) {
+    let doc = format!(
+        "---\n\
+         schema_version: 1\n\
+         status: approved\n\
+         maturity: mvp\n\
+         ecosystems: [rust]\n\
+         versioning: semver\n\
+         changelog: {{mode: fragment, source: issuectl-trailers}}\n\
+         conventional_commits: false\n\
+         release: {{model: gated, layout: single}}\n\
+         contribution_provenance: none\n\
+         provenance_level: keyless\n\
+         dependency_bot: dependabot\n\
+         health_badges: [ci]\n\
+         license: MIT\n\
+         docs_site: none\n\
+         distribution:\n\
+         \x20 adapter: cargo-dist\n\
+         \x20 installers: [{installers}]\n\
+         ---\n\n# Test\n"
+    );
+    std::fs::write(dir.join("OSS-RELEASE.md"), doc).unwrap();
+}
+
+/// `dist generate --no-workflow --json` writes the reference-shape config and
+/// reports the resolved targets/installers inside the canonical envelope.
+#[test]
+fn dist_generate_writes_config_and_reports_json() {
+    let dir = tempfile::tempdir().unwrap();
+    write_dist_contract(dir.path(), "shell, powershell");
+
+    let out = ossctl()
+        .args(["dist", "generate", "--no-workflow", "--json", "--repo-root"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "exit 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    assert_eq!(v["schema_version"], 1);
+    let data = &v["data"];
+    assert_eq!(data["dist_config"], "dist-workspace.toml");
+    assert_eq!(
+        data["workflow"],
+        serde_json::Value::Null,
+        "--no-workflow → null"
+    );
+    assert_eq!(data["cargo_dist_version"], "0.28.2");
+    assert_eq!(
+        data["installers"],
+        serde_json::json!(["shell", "powershell"])
+    );
+    // The cross-platform default covers macOS AND Linux (never macOS-only).
+    let targets = data["targets"].as_array().unwrap();
+    assert!(
+        targets
+            .iter()
+            .any(|t| t.as_str().unwrap().contains("linux")),
+        "Linux target: {data}"
+    );
+    assert!(
+        targets
+            .iter()
+            .any(|t| t.as_str().unwrap().contains("darwin")),
+        "macOS target: {data}"
+    );
+
+    // The config landed on disk with the pinned reference shape.
+    let toml = std::fs::read_to_string(dir.path().join("dist-workspace.toml")).unwrap();
+    assert!(toml.contains("pr-run-mode = \"skip\""), "{toml}");
+    assert!(toml.contains("github-attestations = true"), "{toml}");
+    assert!(
+        !toml.contains("github-custom-runners"),
+        "no personal runner override: {toml}"
+    );
+}
+
+/// A contract without a `distribution` block is a user error (exit 1) and writes
+/// nothing.
+#[test]
+fn dist_generate_without_distribution_is_user_error() {
+    let dir = tempfile::tempdir().unwrap();
+    // A registry-only contract (no distribution block).
+    std::fs::copy(
+        fixture("solo-rust-cli").join("OSS-RELEASE.md"),
+        dir.path().join("OSS-RELEASE.md"),
+    )
+    .unwrap();
+
+    let out = ossctl()
+        .args(["dist", "generate", "--no-workflow", "--repo-root"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "user error → exit 1");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
+    assert_eq!(v["error"]["code"], "no_distribution");
+    assert!(
+        !dir.path().join("dist-workspace.toml").exists(),
+        "nothing written"
+    );
+}
+
+/// An existing config is not clobbered without `--force`.
+#[test]
+fn dist_generate_refuses_to_clobber_without_force() {
+    let dir = tempfile::tempdir().unwrap();
+    write_dist_contract(dir.path(), "shell");
+    std::fs::write(dir.path().join("dist-workspace.toml"), "# mine\n").unwrap();
+
+    let out = ossctl()
+        .args(["dist", "generate", "--no-workflow", "--repo-root"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
+    assert_eq!(v["error"]["code"], "dist_config_exists");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("dist-workspace.toml")).unwrap(),
+        "# mine\n",
+        "the hand-tuned config is preserved"
+    );
+}

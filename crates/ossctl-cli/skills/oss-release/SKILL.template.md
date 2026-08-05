@@ -164,14 +164,17 @@ narrower target set:
   `release.yml` (the tag-triggered publish/build/sign workflow) is the
   release-cut's job, **not** `/oss-ci`'s (which owns `ci*.yml`).
 
-> **Status (engine gap).** The `ossctl` release engine does **not yet** generate
-> `dist-workspace.toml` / `release.yml` from `distribution` — it currently
-> consumes only `distribution.homebrew_tap` for the Homebrew adapter (see the
-> `gh-release-ci-workflow` issue). Until that lands, the mapping above is the
-> **documented default the generator (current or future) reads from the
-> contract**, and any hand-driven release-infra setup MUST follow it. This makes
-> the cross-platform (Mac + Linux) target set the binding default regardless of
-> who authors the config.
+> **Generating it.** The engine generates this infra for you: `ossctl dist
+> generate` reads the contract's `distribution` block, writes `dist-workspace.toml`
+> in the reference shape (the mapping above — cross-platform by default), and then
+> invokes `dist generate` to emit `.github/workflows/release.yml` from it (the
+> workflow is never hand-authored — cargo-dist is its sole author). It refuses to
+> clobber an existing `dist-workspace.toml` without `--force`, and supports
+> `--no-workflow` to write only the config when the `dist` tool is unavailable.
+> Only the `cargo-dist` distribution adapter is generated today; a
+> `goreleaser`/`manual` scaffolder is a follow-up. The Homebrew formula stays with
+> ossctl's own tap adapter (post-tag), so `homebrew` is deliberately kept out of
+> the generated cargo-dist installer set even when the contract lists it.
 
 **1. Gate.** First, check for an already-active run so two cuts never race — if
 one is in flight, reconcile it (`resume` / `verify` below) instead of sealing a

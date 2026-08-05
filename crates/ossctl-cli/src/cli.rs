@@ -55,6 +55,11 @@ enum Command {
         #[command(subcommand)]
         action: ReleaseAction,
     },
+    /// Generate binary-release infra (dist-workspace.toml + release workflow).
+    Dist {
+        #[command(subcommand)]
+        action: DistAction,
+    },
     /// List, install, or print the companion /oss-* AI-skills.
     Skill {
         #[command(subcommand)]
@@ -97,6 +102,19 @@ pub enum ReleaseAction {
     Abandon(crate::release::AbandonArgs),
 }
 
+/// `dist` verbs — generate a downstream project's binary-release infrastructure
+/// (the cargo-dist `dist-workspace.toml` + the tag-triggered release workflow)
+/// from the contract's `distribution` block.
+///
+/// A dedicated noun rather than a `release …` verb: `release`'s verbs are the
+/// journaled, drift-checked run states (ADR-0002 §4), whereas this is one-time
+/// scaffolding that must exist *before* a tag is pushed — not part of the cut.
+#[derive(Subcommand, Debug)]
+pub enum DistAction {
+    /// Render `dist-workspace.toml` from `distribution` and run `dist generate`.
+    Generate(crate::dist::GenerateArgs),
+}
+
 /// `skill` verbs (`AGENTS-AI-FIRST-CLI.md` §15–§16).
 #[derive(Subcommand, Debug)]
 pub enum SkillAction {
@@ -126,6 +144,7 @@ pub fn run() -> ExitCode {
         Command::Facts(args) => crate::facts::run(&args, format),
         Command::Audit(args) => crate::audit::run(&args, format),
         Command::Release { action } => crate::release::dispatch(action, format),
+        Command::Dist { action } => crate::dist::dispatch(action, format),
         Command::Skill { action } => crate::skill::dispatch(action, format),
         // `doctor` owns its exit code directly (§18: exit 1 on any `fail`
         // *without* an error envelope), which does not map onto the shared

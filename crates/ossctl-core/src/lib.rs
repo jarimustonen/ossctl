@@ -15,6 +15,8 @@
 //! - [`facts`] — deterministic repo-fact detector (port of
 //!   `infer-repo-facts.py`), behind the repo ports.
 //! - [`audit`] — readiness scoring over the normalized contract + facts.
+//! - [`dist`] — the deterministic cargo-dist `dist-workspace.toml` generator
+//!   (renders the binary-release infra from the contract's `distribution` block).
 //! - [`release`] — the resumable per-ecosystem release-cut engine (ADR-0002):
 //!   sealed plan, phase-barrier coordinator, event-sourced journal, reconcile.
 //! - [`protocol`] — the versioned public JSON/JSONL envelopes + DTOs (§10/§12),
@@ -30,6 +32,7 @@
 
 pub mod audit;
 pub mod contract;
+pub mod dist;
 pub mod facts;
 pub mod ports;
 pub mod protocol;
