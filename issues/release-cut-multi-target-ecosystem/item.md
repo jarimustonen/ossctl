@@ -3,11 +3,14 @@ created: 2026-08-04
 updated: 2026-08-05
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 commits:
 - hash: f40ab86
   summary: support >1 target per ecosystem; per-target journal ids; dep-ordered cut
+- hash: 72426db
+  summary: apply /llm-review fixes (minimal_level 1..=MAX_LEVEL, BTreeSet, determinism-coupling docs); spin-off vaguely-highfalutin-prison
+closed: 2026-08-05
 ---
 
 # release cut rejects >1 target per ecosystem, but contract validate + /oss-init accept/emit them
