@@ -135,7 +135,8 @@ here; see the handoff's "Track A rollout". The lanes below are ossctl's own POST
 GLOBAL HEAD-OF-LINE: release-engine-dist-config-generator   (Track B toward engine-driven 0.2.0; but the cross-repo Track A rollout in the handoff comes first, per the user)
 LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly) — POST-RELEASE
   ▶ release-engine-dist-config-generator (BUILD the downstream cargo-dist config generator — makes "through ossctl" real; Track B)
-    release-cut-multi-target-ecosystem   (bug — from orchestratectl cut dogfood)
+    release-engine-cut-cargo-dist-flow   (skip CI-delegated targets + post-tag homebrew — engine-driven 0.2.0 enabler; Track B)
+    release-cut-multi-target-ecosystem   (bug — >1 target/ecosystem rejected; blocks engine cut of ossctl's own 2-crate contract)
     release-list-abandon-not-implemented (bug — `release list`/`abandon` unimplemented)
     cargo-per-member-receipts        (per-member publish receipts for multi-crate cuts)
     plan-preimage-projection          (release/plan: hash a release-relevant projection, not the whole Contract)
