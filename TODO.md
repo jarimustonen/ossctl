@@ -96,16 +96,19 @@ homebase-adjacent. So do NOT harden LANE C now — that polishes a manual path w
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: release-engine-cut-cargo-dist-flow   (LANE A — the mechanical blocker: engine must skip CI-delegated targets + do post-tag homebrew. No decision needed; automates the current manual recipe)
+GLOBAL HEAD-OF-LINE: coordinator-release-vs-cargo-dist-ownership   (LANE A — NEW cut-gating prereq: coordinator tag phase AND cargo-dist release.yml both create the GitHub Release → collision. Decide ownership before the first engine cut)
 LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly) — Track B: make `ossctl release cut` cut ossctl ITSELF (0.2.0 dogfooding proof)
   [DONE stint #12] release-cut-multi-target-ecosystem       (fixed — >1 target/ecosystem now cut in dep order)
   [DONE stint #12] cargo-adapter-multitarget-double-publish (fixed — Option 1 "one target = one publish unit"; ADR-0004; no more double-publish of ossctl-core)
+  [DONE stint #12] release-engine-cut-cargo-dist-flow       (done — coordinator skips CI-delegated targets + post-tag homebrew phase with real sha256)
   --- minimal safe path to the 0.2.0 engine cut (all gate the cut) ---
-  ▶ release-engine-cut-cargo-dist-flow   (skip CI-delegated/Unsupported targets — no partial-publish trap — + post-tag homebrew phase; makes `ossctl release cut` real. SUBSUMES LANE C's homebrew-tap-bump + makes publish-crates-no-auto-trigger moot for ossctl)
+  ▶ coordinator-release-vs-cargo-dist-ownership (task — coordinator tag phase creates the GH Release, but cargo-dist's release.yml ALSO does → 'already exists' clash / empty release. Decide: coordinator must NOT create the Release when a CI-delegated target is present (let CI own it), OR configure cargo-dist to upload into existing. Filed by cargo-dist-flow review; MUST resolve before the first engine cut)
     cargo-publish-pin-crates-io-registry (bug — pin `--registry crates-io` + reject non-crates.io target; guards vs silent wrong-registry publish. Small, cheap insurance before an IRREVERSIBLE publish. Filed by ADR-0004 review)
     release-list-abandon-not-implemented (bug — `release list`/`abandon` unimplemented; recovery net BEFORE trusting the engine with a real cut)
     << then: cut 0.2.0 THROUGH the engine — the dogfooding proof that retires the 4-step manual recipe >>
   --- production-safe hardening (deferred PAST the first cut — do not gate 0.2.0 on these) ---
+    homebrew-publish-resume-idempotency (bug — homebrew adapter not idempotent on resume → duplicate PR if a cut dies mid-homebrew (no natural dup-guard like crates.io). All 3 reviewers flagged. HIGHER-STAKES defer: only bites an interrupted cut. Filed by cargo-dist-flow review)
+    homebrew-stable-source-tarball       (improvement — GH auto-archive not byte-stable; build+upload a deterministic source tarball long-term. Issue says NOT a blocker. Filed by cargo-dist-flow review)
     cargo-publish-receipt-provenance-resume-safety (bug cluster — receipts carry no content digest → resume/reconcile can't prove provenance; needs RegistryQuery checksum + attempt-journaling + new AdapterError variants. Large; "production-safe end-to-end". Filed by ADR-0004 review)
     cargo-target-coverage-preflight      (feature — plan-time reject of under-declared plans (fail-fast vs 300s publish-time timeout). ossctl's own contract is correctly declared so it won't trigger for us. Filed by ADR-0004 review)
     cargo-per-member-receipts        (per-member publish receipts for multi-crate cuts — likely folds into receipt-provenance above)
