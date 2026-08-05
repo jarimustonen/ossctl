@@ -5,6 +5,7 @@ type: feature
 status: open
 priority: high
 epic: ossctl-phase4-build
+blocked_by: ['@release-cut-multi-target-ecosystem']
 ---
 
 # release cut can't drive the cargo-dist + homebrew flow (skip CI-delegated targets + post-tag homebrew)
