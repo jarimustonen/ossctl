@@ -57,9 +57,14 @@ app beyond what the ADRs already fix.
   as an owned Phase-3 act — no confirmation needed. Preconditions still hold: the green gate
   passes, and `cargo publish` runs `--dry-run` first. crates.io publishes are irreversible
   (yank-only), so never publish red, and report each step.
-  - **0.1.0 shipped 2026-08-04**; **0.1.1 shipped 2026-08-05** (cross-platform: macOS +
-    Linux musl binaries + shell installer). crates.io `ossctl` + `ossctl-core`, GitHub
-    Release, Homebrew tap `jarimustonen/homebrew-ossctl`. Repo is **public**.
+  - **0.1.0 shipped 2026-08-04.** crates.io `ossctl` + `ossctl-core`, GitHub Release,
+    Homebrew tap `jarimustonen/homebrew-ossctl`. Repo is **public**.
+  - **0.1.1 is prepared and committed on `main`** (cross-platform: macOS + Linux musl
+    binaries + shell installer) but **not yet published** — the crates.io publish is blocked
+    on auth (a stale local token 403'd). Two paths: refresh the local token (`cargo login`)
+    for a local cut, OR adopt the CI-publish model (a `publish-crates.yml` workflow fed by a
+    `CARGO_REGISTRY_TOKEN` repo secret, mirroring `issuectl`) so the tag push publishes in CI
+    with no local-token dependency (the durable, auto-release-friendly setup).
   - **The recipe is still HAND-DRIVEN (auto-run), not `ossctl release cut`.** The three
     engine blockers landed (workspace publish, homebrew first-formula, cross-platform CI),
     but the engine cut is still **not safe** for ossctl's cargo-dist+homebrew flow: the
@@ -72,6 +77,12 @@ app beyond what the ADRs already fix.
     `=X.Y.Z` dep in lockstep; `git tag vX.Y.Z && git push origin main --tags` (the tag
     triggers the cargo-dist CI that builds the cross-platform binaries + installer + GitHub
     Release); after the release exists, bump the tap formula's `url`+`sha256`.
+- **Git: `pull --rebase` → `push` is always allowed, no confirmation** (maintainer
+  decision, 2026-08-05). On this repo the agent may run the pull-rebase-push sequence
+  (`git pull --rebase origin main` then `git push origin main`, and pushing tags) on its own
+  whenever `main` is clean and green — publishing commits to the remote does not need a
+  separate go. (This is a repo-scoped grant that overrides the global "pushing is the user's
+  step" default.) Still: never force-push a shared branch, and never push a red tree.
 - **Cross-platform is a hard requirement (macOS AND Linux).** All software the `/oss-*`
   family produces — and `ossctl` itself — MUST install and run on **both macOS and Linux**
   (arm64 and x86_64). This is `/oss-*` family canon, not a nice-to-have: a release path
