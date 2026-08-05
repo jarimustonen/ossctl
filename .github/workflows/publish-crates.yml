@@ -1,0 +1,64 @@
+name: Publish to crates.io
+
+# Triggers when the cargo-dist release workflow (release.yml) publishes a GitHub
+# Release, so crates.io publishing happens in CI with no dependency on a local
+# token. Requires a CARGO_REGISTRY_TOKEN repo secret with publish scope
+# (set once: `gh secret set CARGO_REGISTRY_TOKEN --repo jarimustonen/ossctl`).
+#
+# ossctl is a two-crate workspace: `ossctl` depends on an exact `ossctl-core`
+# version, so the members MUST publish in dependency order — `ossctl-core` first,
+# then `ossctl` after its dependency is visible on the index. Modern `cargo
+# publish` waits for the just-published crate to appear on the index before it
+# returns, so a plain sequential publish is safe; the explicit retry loop below is
+# belt-and-suspenders against index propagation lag.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Run cargo publish --dry-run instead of publishing"
+        required: false
+        default: "false"
+
+jobs:
+  publish:
+    name: cargo publish (workspace, dep-order)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify
+        run: cargo build --release
+
+      - name: Publish (dry-run)
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry-run == 'true' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish -p ossctl-core --dry-run
+          # `ossctl` can't be dry-run-verified until ossctl-core is on the index,
+          # so a dry-run only covers the leaf crate.
+
+      - name: Publish (dep-order)
+        if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry-run != 'true') }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Publishing ossctl-core…"
+          cargo publish -p ossctl-core
+          echo "Publishing ossctl (retry until ossctl-core is index-visible)…"
+          for attempt in 1 2 3 4 5 6; do
+            if cargo publish -p ossctl; then
+              echo "ossctl published."
+              exit 0
+            fi
+            echo "attempt $attempt failed (ossctl-core may not be index-visible yet); waiting 30s…"
+            sleep 30
+          done
+          echo "ossctl failed to publish after retries" >&2
+          exit 1
