@@ -96,14 +96,19 @@ homebase-adjacent. So do NOT harden LANE C now — that polishes a manual path w
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: cargo-adapter-multitarget-double-publish   (LANE A — NEEDS A MAINTAINER DECISION on the target model; on the critical path to the 0.2.0 engine cut)
+GLOBAL HEAD-OF-LINE: release-engine-cut-cargo-dist-flow   (LANE A — the mechanical blocker: engine must skip CI-delegated targets + do post-tag homebrew. No decision needed; automates the current manual recipe)
 LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly) — Track B: make `ossctl release cut` cut ossctl ITSELF (0.2.0 dogfooding proof)
-  [DONE stint #12] release-cut-multi-target-ecosystem   (fixed — >1 target/ecosystem now cut in dep order)
-  ▶ cargo-adapter-multitarget-double-publish  (bug — cargo adapter double-publishes ossctl-core across 2 crates.io targets during index lag → partial-publish trap. Surfaced by the multitarget /llm-review (all 4 reviewers). NEEDS A DECISION: 3 target-model options, one breaks single-target-multi-crate. Must land before ossctl's own engine cut)
-    release-engine-cut-cargo-dist-flow   after release-cut-multi-target-ecosystem (needs multi-target modeling) — skip CI-delegated targets + post-tag homebrew; makes `ossctl release cut` real. SUBSUMES LANE C's homebrew-tap-bump (post-tag homebrew phase) + makes publish-crates-no-auto-trigger moot for ossctl (engine publishes crates directly)
-    release-list-abandon-not-implemented (bug — `release list`/`abandon` unimplemented; recovery/resume safety BEFORE trusting the engine with a real cut)
+  [DONE stint #12] release-cut-multi-target-ecosystem       (fixed — >1 target/ecosystem now cut in dep order)
+  [DONE stint #12] cargo-adapter-multitarget-double-publish (fixed — Option 1 "one target = one publish unit"; ADR-0004; no more double-publish of ossctl-core)
+  --- minimal safe path to the 0.2.0 engine cut (all gate the cut) ---
+  ▶ release-engine-cut-cargo-dist-flow   (skip CI-delegated/Unsupported targets — no partial-publish trap — + post-tag homebrew phase; makes `ossctl release cut` real. SUBSUMES LANE C's homebrew-tap-bump + makes publish-crates-no-auto-trigger moot for ossctl)
+    cargo-publish-pin-crates-io-registry (bug — pin `--registry crates-io` + reject non-crates.io target; guards vs silent wrong-registry publish. Small, cheap insurance before an IRREVERSIBLE publish. Filed by ADR-0004 review)
+    release-list-abandon-not-implemented (bug — `release list`/`abandon` unimplemented; recovery net BEFORE trusting the engine with a real cut)
     << then: cut 0.2.0 THROUGH the engine — the dogfooding proof that retires the 4-step manual recipe >>
-    cargo-per-member-receipts        (per-member publish receipts for multi-crate cuts)
+  --- production-safe hardening (deferred PAST the first cut — do not gate 0.2.0 on these) ---
+    cargo-publish-receipt-provenance-resume-safety (bug cluster — receipts carry no content digest → resume/reconcile can't prove provenance; needs RegistryQuery checksum + attempt-journaling + new AdapterError variants. Large; "production-safe end-to-end". Filed by ADR-0004 review)
+    cargo-target-coverage-preflight      (feature — plan-time reject of under-declared plans (fail-fast vs 300s publish-time timeout). ossctl's own contract is correctly declared so it won't trigger for us. Filed by ADR-0004 review)
+    cargo-per-member-receipts        (per-member publish receipts for multi-crate cuts — likely folds into receipt-provenance above)
     plan-preimage-projection          (release/plan: hash a release-relevant projection, not the whole Contract)
     seal-verify-drift-dx              (release/plan: ergonomic SEAL_VERSION bump + golden-vector regen)
     homebrew-adapter-fs-port          (EffectCtx filesystem-write port — homebrew create path)
