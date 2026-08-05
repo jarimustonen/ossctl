@@ -4,6 +4,7 @@ updated: 2026-08-05
 type: improvement
 status: open
 priority: normal
+epic: ossctl-phase4-build
 ---
 
 # release abandon cannot break a stale single-active-cut lock after a hard-killed run
