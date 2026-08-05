@@ -124,15 +124,21 @@ Scheduling PLAN — source of truth for lane + order; issuectl is authoritative 
 `after <slug> (needs …)` = logical blocked_by mirror. `collision: <file>` = touches a
 second lane's hot file (spawn-time exclusion).
 
-Stint #10 shipped 0.1.1 cross-platform via the CI recipe + set up hauis macOS runners on all 4
-repos. `linux-release-binaries` closed (artifacts published). The MAIN next work — the multi-repo
-Track A rollout (issuectl/orchestratectl/glasspad) — lives in OTHER repos, so it is NOT a DAG lane
-here; see the handoff's "Track A rollout". The lanes below are ossctl's own POST-RELEASE backlog;
-`release-engine-dist-config-generator` (Track B) is the priority path toward an engine-driven 0.2.0.
+Stint #10 shipped 0.1.1 cross-platform via the CI recipe. The lanes below are ossctl's own
+POST-RELEASE backlog; `release-engine-dist-config-generator` (Track B) is the priority path
+toward an engine-driven 0.2.0 and is ossctl's actual next objective.
+
+NOTE (scope correction, stint #11): the earlier "multi-repo Track A rollout" +
+hauis-runner infra are Jari's PERSONAL ENVIRONMENT concerns — they belong in the
+**homebase** repo, NOT here. ossctl the product does not own the cross-repo standardisation
+of issuectl/orchestratectl/glasspad, nor the self-hosted CI runners. Do not treat those as
+ossctl priorities. (The generic capability that MIGHT serve such a rollout —
+`release-engine-dist-config-generator` — is a legitimate ossctl feature and is LANE A head;
+its downstream USE across Jari's repos is a homebase matter.)
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: release-engine-dist-config-generator   (Track B toward engine-driven 0.2.0; but the cross-repo Track A rollout in the handoff comes first, per the user)
+GLOBAL HEAD-OF-LINE: release-engine-dist-config-generator   (Track B toward engine-driven 0.2.0 — the ossctl-native priority)
 LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly) — POST-RELEASE
   ▶ release-engine-dist-config-generator (BUILD the downstream cargo-dist config generator — makes "through ossctl" real; Track B)
     release-engine-cut-cargo-dist-flow   (skip CI-delegated targets + post-tag homebrew — engine-driven 0.2.0 enabler; Track B)
@@ -152,8 +158,9 @@ LANE B — contract schema (crates/ossctl-core/src/contract/schema.rs — SEQUEN
 ```
 <!-- execution-dag:end -->
 
-Note: the cross-repo standardisation (Track A) is the user's stated priority but is not an
-ossctl-issue lane — it is per-repo infra work tracked in the handoff. Do it before Track B.
+Note: the cross-repo standardisation ("Track A") and hauis CI runners are HOMEBASE concerns
+(Jari's personal environment), not ossctl work — see the scope-correction note above. ossctl's
+own priority is Track B (`release-engine-dist-config-generator`).
 
 ## Backlog
 
