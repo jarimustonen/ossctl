@@ -96,7 +96,7 @@ homebase-adjacent. So do NOT harden LANE C now — that polishes a manual path w
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: release-cut-build-phase-dep-ordering   (LANE A, REOPENED — TWO 0.2.0 engine cuts failed SAFELY here; --no-verify was insufficient (cargo still resolves the =-pinned dep vs the index). REAL fix is ARCHITECTURAL: interleave build+publish per dep-ordered cargo target (ADR-0002 amendment). 0.2.0 is prepped+pushed; ship path TBD by maintainer)
+GLOBAL HEAD-OF-LINE: release-cut-build-phase-dep-ordering   (LANE A, REOPENED — the LAST blocker before the engine can dogfood its own cut. 0.2.0 SHIPPED (2026-08-06) via the manual fallback (crates.io ×2 + GH Release + homebrew tap bumped to v0.2.0). Two engine cuts failed SAFELY here; --no-verify insufficient. REAL fix: interleave build+publish per dep-ordered cargo target (ADR-0002 amendment; consider /worktree-technical-decision). Fix it → then the 0.2.1 cut is the true engine dogfood)
 LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly) — Track B: make `ossctl release cut` cut ossctl ITSELF (0.2.0 dogfooding proof)
   [DONE stint #12] release-cut-multi-target-ecosystem       (fixed — >1 target/ecosystem now cut in dep order)
   [DONE stint #12] cargo-adapter-multitarget-double-publish (fixed — Option 1 "one target = one publish unit"; ADR-0004; no more double-publish of ossctl-core)

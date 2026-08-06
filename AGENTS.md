@@ -72,14 +72,25 @@ app beyond what the ADRs already fix.
   `dry-run-all` before any publish, `ossctl-core`→`ossctl` ordering + index-wait guard the
   crates.io partial-publish case, and `ossctl release resume`/`abandon` recover an interrupted
   run. Still: green gate first, dry-run/plan first, never publish red, report each phase.
-  - **Shipped: 0.1.0 (2026-08-04), 0.1.1 (2026-08-05), 0.1.2 (2026-08-05).** All on
-    crates.io (`ossctl` + `ossctl-core`), GitHub Releases (cross-platform: macOS aarch64,
+  - **Shipped: 0.1.0 (2026-08-04), 0.1.1 (2026-08-05), 0.1.2 (2026-08-05), 0.2.0 (2026-08-06).**
+    All on crates.io (`ossctl` + `ossctl-core`), GitHub Releases (cross-platform: macOS aarch64,
     Linux musl x86_64+aarch64, Windows, `.sh`+`.ps1` installers), and the Homebrew tap
-    `jarimustonen/homebrew-ossctl`. Repo is **public**. 0.1.2 added `ossctl dist generate`
-    (the engine generates a downstream project's cross-platform release infra from its
-    contract).
-  - **The ENGINE recipe (`ossctl release cut`) is now the primary path** (implemented stint
-    #12; **0.2.0 is the first engine-driven cut**). ossctl's own `OSS-RELEASE.md` declares the
+    `jarimustonen/homebrew-ossctl`. Repo is **public**. 0.1.2 added `ossctl dist generate`. 0.2.0
+    made the engine drive a multi-target cut (multi-target/ecosystem in dep order, one-target-one-
+    publish-unit/ADR-0004, CI-delegated skip, GH-Release-to-CI, post-tag homebrew, crates.io-pin)
+    + `release list`/`abandon`.
+  - **0.2.0 was cut MANUALLY, not by the engine** — the two attempted engine cuts failed SAFELY
+    at the build phase: `cargo package -p ossctl` resolves the `=`-pinned `ossctl-core` dep against
+    the crates.io index (even with `--no-verify`), so a dependent can't be packaged until its dep
+    is actually published. The `build-all → publish-all` barrier is incompatible with cargo's
+    multi-crate `=`-pinned model; the real fix is to INTERLEAVE build+publish per dep-ordered cargo
+    target (publish core → wait index → package+publish cli). Tracked (REOPENED, HIGH):
+    `release-cut-build-phase-dep-ordering` — the last blocker before the engine can dogfood its own
+    (0.2.1) cut. Until then, cut ossctl via the fallback manual recipe below.
+  - **The ENGINE recipe (`ossctl release cut`) is the INTENDED primary path** (built stint #12),
+    but is **blocked on `release-cut-build-phase-dep-ordering`** for ossctl's own multi-crate cut
+    (see above) — so 0.2.0 shipped via the manual fallback; the engine recipe becomes primary once
+    that blocker lands. ossctl's own `OSS-RELEASE.md` declares the
     four targets (ossctl-core + ossctl on crates.io; ossctl on gh-releases/cargo-dist; ossctl
     on homebrew) plus a `distribution` block with `homebrew_tap: jarimustonen/homebrew-ossctl`.
     The recipe:
