@@ -5,32 +5,29 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-08-06 (stint #12). New agent: read this, then continue with a fresh
-`/stint-start`. Main is clean, all pushed (`d61096e`)._
+_Handoff written 2026-08-06 (stint #13). New agent: read this, then continue with a fresh
+`/stint-start`. Main is clean, all pushed (`aba2798`)._
 
-_🎉 **STINT #12 SHIPPED ossctl 0.2.0** — the release engine can now (in code) drive a
-multi-target, cross-channel cut. Landed & green (7 LANE A units): multi-target-per-ecosystem
-in dep order; **one-target-one-publish-unit (ADR-0004)** — no double-publish; cargo-dist flow
-(skip CI-delegated targets + post-tag homebrew with real sha256); **Release-ownership Option 1**
-(coordinator delegates the GitHub Release to CI when a CI-delegated target is present,
-`ci_owns_github_release`); crates.io registry pinning; and `release list`/`abandon`. Contract
-now declares a `distribution` block with `homebrew_tap: jarimustonen/homebrew-ossctl`._
-_- **crates.io** — `ossctl-core 0.2.0` + `ossctl 0.2.0` (dep order)._
-_- **GitHub Release `v0.2.0`** — full cross-platform asset set (macOS aarch64, Linux musl
+_🎉 **STINT #13 SHIPPED ossctl 0.2.1** (manual fallback again) — and the engine got ONE LAYER
+DEEPER toward self-hosting. One unit this round: the release-engine INTERLEAVE fix
+(`release-cut-build-phase-dep-ordering`, commits `ce85309`+`35f9c23`) — landed green (310 tests),
+ADR-0002 amended. It WORKS: the 0.2.1 engine cut passed `dry-run-all` **and `build-all`** for all
+four targets, including `rust:ossctl:crates.io` — the exact step that killed both 0.2.0 attempts.
+That build-phase blocker is DEAD._
+_- **crates.io** — `ossctl-core 0.2.1` + `ossctl 0.2.1` (dep order)._
+_- **GitHub Release `v0.2.1`** — full cross-platform asset set (macOS aarch64, Linux musl
   x86_64+aarch64, Windows, `.sh`+`.ps1` installers, sha256 sums, source.tar.gz)._
-_- **Homebrew tap** — formula bumped `v0.1.2`→`v0.2.0` (tap commit `7eb3034`, sha256 verified)._
+_- **Homebrew tap** — formula bumped `v0.2.0`→`v0.2.1` (tap commit `7d39642`, sha256 verified)._
 
-_⚠️ **0.2.0 WAS CUT MANUALLY, NOT BY THE ENGINE.** Two engine cuts (`ossctl release cut`) failed
-SAFELY at the build phase (pre-publish, nothing shipped, runs abandoned): `cargo package -p ossctl`
-resolves the `=`-pinned `ossctl-core` dep against the crates.io INDEX even with `--no-verify`, so a
-dependent can't be packaged until its dep is actually PUBLISHED. The `build-all → publish-all`
-barrier is incompatible with cargo's multi-crate `=`-pinned model. **This is THE one remaining
-blocker before the engine can dogfood its own cut** — `release-cut-build-phase-dep-ordering`
-(LANE A, HIGH, REOPENED). Real fix: **interleave build+publish per dep-ordered cargo target**
-(publish core → wait index → package+publish cli) — an ADR-0002 amendment; **consider
-`/worktree-technical-decision`** since it changes a core invariant. Fix it → **the 0.2.1 cut is
-the true engine dogfood.** The 0.2.0 prep artifacts (version bump, finalized CHANGELOG, contract
-distribution block) are already on `main`._
+_⚠️ **0.2.1 WAS CUT MANUALLY, NOT BY THE ENGINE — a NEW, DEEPER blocker.** The 0.2.1 engine cut
+(run 01KZBDST…) got PAST build, then failed SAFELY in the PUBLISH phase (pre-upload, nothing shipped,
+run abandoned, `published_targets: []`): the registry-aware defer predicate needs a crates.io
+**RegistryQuery** to verify a crate's published state, and that is **not wired for ecosystem `rust`
+yet**, so the publish path FAILS CLOSED rather than guess. This is now **THE last blocker before the
+engine can dogfood its own cut** — `release-publish-registry-query-not-wired` (LANE A, HIGH, NEW this
+stint). It **likely overlaps** `cargo-publish-receipt-provenance-resume-safety` (which already calls
+for a "RegistryQuery checksum") — NEXT STINT should decide whether to merge them and wire the
+crates.io RegistryQuery as ONE unit. Fix it → the 0.2.2 cut is the true engine dogfood._
 
 _**Manual fallback recipe (used for 0.2.0; use until the engine cut works):** bump version + internal
 `=X.Y.Z` dep in lockstep → finalize CHANGELOG → `cargo build` → `cargo publish -p ossctl-core`
@@ -48,11 +45,13 @@ _**Operating policy (see AGENTS.md — updated this stint):** (1) releases may b
 dep-order/index-wait + `resume`/`abandon`), never a human gate; (3) `git pull --rebase` → `push`
 always allowed. Green gate incl. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`._
 
-_**Stint #12 also filed (all triaged into the DAG below):** the review cascade produced deferred
-hardening (homebrew resume-idempotency/stable-tarball, cargo receipt-provenance, target-coverage,
-journal-identity, stale-lock-break, resume-publish-phase, release-verify-delegated-release) plus
-worker-filed family/schema gaps (`oss-dist-channel-generator`, `publish-crates-release-trigger`,
-`publish-target-none`). None gate the interleave fix — that is the single next thing._
+_**Stint #13 also filed (triaged into LANE A below):** the interleave worker's `/llm-review`
+produced three cargo-adapter follow-ups — `cargo-metadata-recomputed-per-phase`,
+`cargo-build-disposition-journal`, `cargo-interleave-real-cargo-integration-test` — all deferred
+hardening, none gate the RegistryQuery fix. (Stint #12's filings remain in the DAG: homebrew
+resume-idempotency/stable-tarball, cargo receipt-provenance, target-coverage, journal-identity,
+stale-lock-break, resume-publish-phase, release-verify-delegated-release; family/schema gaps
+`oss-dist-channel-generator`, `publish-crates-release-trigger`, `publish-target-none`.)_
 
 _--- older history in git: stints #1–7 built the `/oss-*` deterministic core, #8 finished the
 adapters, #9 shipped 0.1.0, #10 shipped 0.1.1 cross-platform, #11 shipped 0.1.2 (`dist generate`).
@@ -61,7 +60,7 @@ concerns (homebase issue `cross-repo-release-standardisation`), NOT ossctl work.
 
 **Read first (the spec):** `docs/adr/000{1,2,3,4}-*.md` (CLI taxonomy, release engine, config+journal, one-target-one-publish-unit).
 
-## Execution DAG (2026-08-06, stint #12 handoff)
+## Execution DAG (2026-08-06, stint #13 handoff)
 
 Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
 (never copied here). Merge at Phase 0/handoff (drop landed, add active, keep existing order).
@@ -73,37 +72,45 @@ The cross-repo standardisation ("Track A") and hauis CI runners are HOMEBASE con
 personal environment), NOT ossctl work — moved to homebase issue `cross-repo-release-standardisation`.
 Do not re-add them here.
 
-**Track B critical path (decided stint #12) — "best shape = ossctl cuts ITSELF through the engine".**
-The endgame that puts ossctl in best shape is dogfooding: `ossctl release cut` drives ossctl's own
-0.2.0 end-to-end, retiring the 4-step manual recipe. Shortest path is a STRICT LANE A sequence (all
-same release-engine hot files — NOT parallelisable): (1) `release-cut-multi-target-ecosystem` [the
-lock — 2 crates.io targets], (2) `release-engine-cut-cargo-dist-flow` [cut logic: local publish +
-delegate cross-platform build to tag-triggered CI + post-tag homebrew], (3) `release-list-abandon`
-[recovery safety], then (4) cut 0.2.0 through the engine as the proof. LANE A SUBSUMES most of LANE C:
-homebrew-tap-bump → the cargo-dist-flow post-tag phase; publish-crates-no-auto-trigger → moot (engine
-publishes crates directly). Only `release-macos-hauis-coupling` survives (CI-delegated build) and it's
-homebase-adjacent. So do NOT harden LANE C now — that polishes a manual path we intend to retire.
+**Track B critical path — "best shape = ossctl cuts ITSELF through the engine".** The endgame is
+dogfooding: `ossctl release cut` drives ossctl's own cut end-to-end, retiring the 4-step manual
+recipe. STATUS after stint #13: the engine now clears `dry-run-all` + `build-all` for all four
+targets (the interleave fix killed the build-phase blocker); it stops at the PUBLISH phase because
+the crates.io **RegistryQuery is not wired for `rust`**, so the registry-aware defer/idempotency
+decision fails closed. **The whole remaining path is ONE unit:**
+`release-publish-registry-query-not-wired` (wire the crates.io RegistryQuery — likely merge with
+`cargo-publish-receipt-provenance-resume-safety`). Fix it → 0.2.2 is the dogfood proof. LANE A still
+SUBSUMES most of LANE C (homebrew-tap-bump → cargo-dist-flow post-tag phase; publish-crates-* → moot,
+engine publishes directly); only `release-macos-hauis-coupling` survives (CI-delegated build,
+homebase-adjacent — it 400'd again this stint on the stale hauis token, cleared+rerun). So do NOT
+harden LANE C now — it polishes a manual path we intend to retire.
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: release-cut-build-phase-dep-ordering   (LANE A, REOPENED — the LAST blocker before the engine can dogfood its own cut. 0.2.0 SHIPPED (2026-08-06) via the manual fallback (crates.io ×2 + GH Release + homebrew tap bumped to v0.2.0). Two engine cuts failed SAFELY here; --no-verify insufficient. REAL fix: interleave build+publish per dep-ordered cargo target (ADR-0002 amendment; consider /worktree-technical-decision). Fix it → then the 0.2.1 cut is the true engine dogfood)
-LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly) — Track B: make `ossctl release cut` cut ossctl ITSELF (0.2.0 dogfooding proof)
+GLOBAL HEAD-OF-LINE: release-publish-registry-query-not-wired   (LANE A, HIGH, NEW stint #13 — THE last blocker before the engine can dogfood its own cut. 0.2.1 SHIPPED (2026-08-06) via manual fallback (crates.io ×2 + GH Release + homebrew tap → v0.2.1). The engine now clears dry-run+build for all 4 targets (interleave fix landed); it fails CLOSED at the PUBLISH phase because no crates.io RegistryQuery is wired for `rust`. REAL fix: wire the crates.io RegistryQuery so the publish path can verify published state — likely MERGE with cargo-publish-receipt-provenance-resume-safety. Fix it → 0.2.2 is the true dogfood.)
+LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly) — Track B: make `ossctl release cut` cut ossctl ITSELF (dogfooding proof)
   [DONE stint #12] release-cut-multi-target-ecosystem       (fixed — >1 target/ecosystem now cut in dep order)
   [DONE stint #12] cargo-adapter-multitarget-double-publish (fixed — Option 1 "one target = one publish unit"; ADR-0004; no more double-publish of ossctl-core)
   [DONE stint #12] release-engine-cut-cargo-dist-flow       (done — coordinator skips CI-delegated targets + post-tag homebrew phase with real sha256)
   [DONE stint #12] coordinator-release-vs-cargo-dist-ownership (done — Option 1: coordinator delegates GH Release to CI when a CI-delegated target is present; ci_owns_github_release flag, seal v3)
   [DONE stint #12] cargo-publish-pin-crates-io-registry     (fixed — pinned cargo adapter to crates.io, rejects other registries)
   [DONE stint #12] release-list-abandon-not-implemented     (fixed — `release list` + `abandon` implemented over the journal; in-flight gate + recovery net)
-  --- TWO 0.2.0 engine cuts ATTEMPTED, both failed SAFELY (pre-publish); engine needs an ARCHITECTURAL fix ---
-  ▶ release-cut-build-phase-dep-ordering (bug, HIGH, REOPENED — `cargo package -p ossctl` resolves `ossctl-core="=0.2.0"` vs the crates.io INDEX even with `--no-verify`, so the dependent can't be packaged until the dep is actually PUBLISHED. Strict build-all→publish-all barrier is incompatible with cargo's multi-crate `=`-pinned model. REAL fix: interleave build+publish per dep-ordered cargo target (publish core → wait index → package+publish cli) — ADR-0002 amendment; consider /worktree-technical-decision. Kept: the dry-run-mirror change (fails at dry-run now, safer). See issue note.)
-    << then RE-CUT 0.2.0 THROUGH the engine (0.2.0 prep bump+changelog+contract already committed & pushed on main) >> — the dogfooding proof that retires the 4-step manual recipe.
-     · PROCEDURE (1) update ossctl's OSS-RELEASE.md contract to declare the full target set
-     · — 2 crates.io (ossctl-core + ossctl) + gh-releases/cargo-dist + homebrew — if not already;
-     · (2) `ossctl release cut --dry-run` / seal-plan stage to validate the plan WITHOUT publishing;
-     · (3) real engine cut; (4) manual post-cut `gh release view v0.2.0` check that CI created the
-     · Release + assets (Option 1 delegates it), until release-verify-delegated-github-release
-     · automates it. crates.io is irreversible — dry-run first, never cut red. >>
-  --- production-safe hardening (deferred PAST the first cut — do not gate 0.2.0 on these) ---
+  [DONE stint #13] release-cut-build-phase-dep-ordering     (fixed — INTERLEAVE build+publish for =-pinned cargo dependents: adapter defers a dependent's packaging into its dep-ordered `cargo publish` (registry-aware, fail-closed); outer barrier + coordinator-only tag + post-tag homebrew preserved; ADR-0002 amended; interleave+resume tests. The 0.2.1 engine cut proved it PASSES build-all.)
+  --- engine now clears dry-run+build for all 4 targets; STOPS at publish (RegistryQuery gap) ---
+  ▶ release-publish-registry-query-not-wired (bug, HIGH, NEW stint #13 — publish phase fails CLOSED on the first crates.io target: "no registry query wired for ecosystem 'rust' yet" — the registry-aware defer/idempotency predicate can't verify a crate@version's published state. SAFE: fails before any upload (0.2.1 cut abandoned, published_targets:[]). Fix: wire a crates.io RegistryQuery (index/API: exists? checksum?). LIKELY MERGE with cargo-publish-receipt-provenance-resume-safety below (which already needs a "RegistryQuery checksum"). Preserve fail-closed on genuine unreachable.)
+    << then CUT 0.2.2 THROUGH the engine >> — the dogfood proof that retires the 4-step manual recipe.
+     · PROCEDURE (contract already declares all 4 targets + distribution block):
+     · (1) bump 0.2.1→0.2.2 + internal =-pin in lockstep, finalize CHANGELOG, `cargo build`, commit+push;
+     · (2) `ossctl release plan --version 0.2.2` (seal + inspect, side-effect-free);
+     · (3) `ossctl release cut --plan <id> --version 0.2.2` (autonomous per policy);
+     · (4) post-cut `gh release view v0.2.2` (Option 1 delegates the Release to CI; hauis may 400 →
+     ·     clear token + `gh run rerun <id> --failed`), until release-verify-delegated-github-release
+     ·     automates it. crates.io is irreversible — plan/dry-run first, never cut red. >>
+  --- stint #13 review follow-ups (cargo adapter; deferred, do not gate the RegistryQuery fix) ---
+    cargo-metadata-recomputed-per-phase  (improvement — cargo metadata recomputed per phase; cache it. Filed by interleave /llm-review)
+    cargo-build-disposition-journal      (improvement — journal the per-target build disposition (defer vs package). Filed by interleave /llm-review)
+    cargo-interleave-real-cargo-integration-test (task — add a real-cargo integration test exercising the interleave end-to-end. Filed by interleave /llm-review)
+  --- production-safe hardening (deferred PAST the dogfood cut — do not gate it on these) ---
     resume-publish-phase-never-reached  (bug — `release resume` demands --allow-unverified even when publish phase was never entered; safe to pass it meanwhile. Filed by list-abandon review)
     release-abandon-break-stale-lock    (improvement — `abandon` can't auto-break a stale single-active-cut lock after a hard-kill; shipped stopgap names the lock-file path for manual clearing. All 4 reviewers flagged. Filed by list-abandon review)
     journal-open-identity-structural-hardening (improvement — validate journal identity/structure on read; needs a corrupt journal, low real-world likelihood. Filed by list-abandon review)
