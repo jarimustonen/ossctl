@@ -30,6 +30,36 @@
 //! this only closes the index-lag window. A crate with no publishable workspace
 //! dependencies publishes immediately with no wait.
 //!
+//! ## Deferred packaging for a `=`-pinned dependent (cargo-interleave, ADR-0002)
+//!
+//! A dependent crate that pins its workspace dependency by exact version
+//! (`dep = "=X.Y.Z"`, the shape `/oss-init` emits) **cannot be `cargo package`d
+//! before that dependency is published** — not even with `--no-verify`. `cargo
+//! package` resolves the `=`-pinned dependency against the crates.io *index* while
+//! preparing the upload (a published `.crate` cannot reference a `path` dep), and
+//! that version only lands later, in publish-all. `--no-verify` skips the isolated
+//! verify *compile*, but not this index resolution. So a strict `build-all` that
+//! packaged every crate up front could never package such a dependent
+//! (`release-cut-build-phase-dep-ordering`).
+//!
+//! The fix scopes the ADR-0002 phase barrier narrowly for cargo. `dry_run` /
+//! `build` branch on whether the target has publishable intra-workspace
+//! dependencies:
+//!
+//! - **No workspace deps** (a leaf, or a dependency cut first): fully packaged
+//!   pre-publish — `cargo check` (compile safety net) then `cargo package
+//!   --no-verify` (produces the `.crate`, validating the manifest). Its `.crate`
+//!   is the build artifact, exactly as before.
+//! - **Has workspace deps** (a `=`-pinned dependent): its **packaging is deferred**
+//!   to `cargo publish` in publish-all, which packages and publishes as one unit
+//!   *after* the dependency is published and index-visible (`build` runs only the
+//!   index-independent `cargo check`, which resolves the sibling via its `path`).
+//!   This is the "build interleaves with publish" exception the coordinator relies
+//!   on: the dependent's package step is intrinsic to its dep-ordered publish, not a
+//!   premature global-build step. The pre-publish compile safety net (`cargo check`
+//!   over every target) still runs as a global build-all barrier, so a genuine
+//!   compile error fails before **any** irreversible publish.
+//!
 //! The consequence is a target model where **each publishable crate is its own
 //! declared target** (which is what `/oss-init` emits). A multi-crate workspace
 //! that wants every crate on crates.io declares every crate as a target; a target
@@ -155,43 +185,33 @@ impl ReleaseAdapter for CargoAdapter {
         // a misconfigured registry is a fail-fast error, not a plannable command.
         let registry = self.crates_io_registry(t)?;
         // FAITHFUL PREFLIGHT: actually run the SAME index-independent build gate the
-        // build phase runs — `cargo check -p <pkg>` (local workspace compile) then
-        // `cargo package --no-verify` (tarball) — so a plan that cannot compile or
-        // package fails HERE at dry-run-all, before any external effect, rather than
+        // build phase runs, so a plan that cannot compile (or, for a leaf, cannot
+        // package) fails HERE at dry-run-all, before any external effect, rather than
         // passing dry-run and failing mid-cut in build-all. (The old dry-run only
         // *described* a `cargo publish --dry-run` without running it, so a build-phase
-        // failure slipped past the preflight.) Neither command resolves the
-        // not-yet-published `=X.Y.Z` workspace dep against the crates.io index (the
-        // check uses the sibling `path`; `--no-verify` skips the index-resolving verify
-        // compile), so the preflight validates what *can* be validated pre-publish and
-        // never false-fails on the unpublished dep. See `build` for the full rationale
-        // of each step; the real end-to-end verify happens in publish-all's
-        // `cargo publish`, after the dep is index-visible.
+        // failure slipped past the preflight.)
         //
-        // Both commands are local + self-overwriting (the package writes
+        // `target_workspace_deps` runs read-only `cargo metadata` first, validating
+        // the target is a publishable member and listing the workspace dependencies a
+        // real cut waits to be index-visible before publishing. Whether the target has
+        // any such dependency also decides the gate ([`cargo_build_gate`]): a leaf is
+        // packaged now (`cargo package --no-verify`); a `=`-pinned dependent's
+        // packaging is deferred to `cargo publish` (it cannot be packaged until its
+        // dependency is on the index), so the preflight is the `cargo check` compile
+        // gate alone. Neither command resolves the not-yet-published `=X.Y.Z`
+        // workspace dep against the index (the check uses the sibling `path`), so the
+        // preflight validates what *can* be validated pre-publish and never
+        // false-fails on the unpublished dep. The real end-to-end verify happens in
+        // publish-all's `cargo publish`, after the dep is index-visible.
+        //
+        // Every command is local + self-overwriting (a leaf's package writes
         // `target/package/`, the same artifact build-all produces; `check` only warms
         // `target/`), so dry-run stays re-runnable and free of any *external* side
         // effect (ADR-0002). One plan target = one publish unit: exactly this target's
         // own package.
-        //
-        // `target_workspace_deps` runs read-only `cargo metadata` first, validating
-        // the target is a publishable member and listing the workspace dependencies a
-        // real cut waits to be index-visible before publishing.
         let deps = target_workspace_deps(ctx, t)?;
-        let planned_commands = vec![
-            PlannedCommand::new("cargo", &["check", "-p", &t.package]),
-            PlannedCommand::new(
-                "cargo",
-                &[
-                    "package",
-                    "--registry",
-                    registry,
-                    "-p",
-                    &t.package,
-                    "--no-verify",
-                ],
-            ),
-        ];
+        let (planned_commands, _artifacts) =
+            cargo_build_gate(registry, &t.package, &t.version, !deps.is_empty());
         run_all(ctx, &planned_commands)?;
         let mut notes = vec![format!(
             "publishes with `cargo publish --registry {registry} -p {}` in publish-all",
@@ -203,6 +223,12 @@ impl ReleaseAdapter for CargoAdapter {
                 .map(|m| format!("{}@{}", m.name, m.version))
                 .collect::<Vec<_>>()
                 .join(", ");
+            notes.push(format!(
+                "packaging of `{}` is deferred to that publish: a `=`-pinned dependent \
+                 cannot be `cargo package`d until its workspace dependency is on the \
+                 crates.io index",
+                t.package
+            ));
             notes.push(format!(
                 "waits for these workspace dependencies to be crates.io-index-visible \
                  before publishing `{}`: {chain}",
@@ -223,62 +249,39 @@ impl ReleaseAdapter for CargoAdapter {
     ) -> Result<BuildArtifacts, AdapterError> {
         // `dist build` emits per-platform tarballs/installers, not a `.crate`;
         // name the artifact set to match what each identity actually produces.
-        let (cmds, artifacts) = if matches!(self.adapter, Adapter::CargoDist) {
+        let (cmds, artifacts, notes) = if matches!(self.adapter, Adapter::CargoDist) {
             (
                 vec![PlannedCommand::new("dist", &["build"])],
                 vec!["dist/".to_string()],
+                vec![],
             )
         } else {
-            // Pin `cargo package` to crates.io too (rejecting a non-crates.io
-            // target up front) so the build phase can never verify-package
-            // against a different registry than the publish phase will target.
+            // Pin `cargo package` to crates.io too (rejecting a non-crates.io target
+            // up front) so the build phase can never verify-package against a
+            // different registry than the publish phase will target. Reject BEFORE the
+            // read-only `cargo metadata` probe so a misconfigured registry runs no
+            // command at all.
             let registry = self.crates_io_registry(t)?;
-            (
-                // A two-step, INDEX-INDEPENDENT build gate (see
-                // `release-cut-build-phase-dep-ordering`):
-                //
-                // 1. `cargo check -p <pkg>` compiles the crate through the WORKSPACE.
-                //    There the `path = "…"` on an intra-workspace dep shadows its
-                //    `version = "=X.Y.Z"` requirement, so the compile resolves the
-                //    dependency against the sibling *on disk* — never the crates.io
-                //    index. This is the PRE-PUBLISH SAFETY NET: it fails build-all on a
-                //    genuine compile error (type/trait/API mismatch, missing item)
-                //    HERE, before any irreversible publish. Without it, the only
-                //    remaining compile check is `cargo publish`'s own verify build in
-                //    publish-all — which runs AFTER the dependency crate is already
-                //    published, so a compile error there would TEAR the release (the
-                //    dependency live on crates.io, the dependent unpublishable). That
-                //    is exactly the partial-publish trap ADR-0004 exists to prevent.
-                //
-                // 2. `cargo package --no-verify` produces the `.crate` tarball WITHOUT
-                //    the isolated verify compile — and it is that verify build (not
-                //    packaging itself) which resolves the `=X.Y.Z` dep against the
-                //    *index* and fails during build-all, because the dep is only
-                //    *published* later, in publish-all (the barrier is
-                //    build-ALL → publish-ALL). The tarball is still produced. The full
-                //    end-to-end verify against the real registry still happens in
-                //    publish-all's `cargo publish`, by which point the dependency has
-                //    been published AND index-waited (dep-ordered publish +
-                //    `wait_for_index`, ADR-0004), so it resolves.
-                //
-                // Both commands are local + per-target, so no build-time cross-target
-                // ordering leaks into the adapter (ADR-0002/0004 preserved).
-                vec![
-                    PlannedCommand::new("cargo", &["check", "-p", &t.package]),
-                    PlannedCommand::new(
-                        "cargo",
-                        &[
-                            "package",
-                            "--registry",
-                            registry,
-                            "-p",
-                            &t.package,
-                            "--no-verify",
-                        ],
-                    ),
-                ],
-                vec![format!("{}-{}.crate", t.package, t.version)],
-            )
+            // Read the workspace graph to decide the gate: a `=`-pinned DEPENDENT (a
+            // target with publishable intra-workspace deps) cannot be packaged until
+            // its dependency is on the index, so its packaging is DEFERRED to
+            // `cargo publish` and build runs only the index-independent `cargo check`;
+            // a leaf is packaged now. See [`cargo_build_gate`] and
+            // `release-cut-build-phase-dep-ordering`.
+            let has_workspace_deps = !target_workspace_deps(ctx, t)?.is_empty();
+            let (cmds, artifacts) =
+                cargo_build_gate(registry, &t.package, &t.version, has_workspace_deps);
+            let notes = if has_workspace_deps {
+                vec![format!(
+                    "packaging of `{}` deferred to `cargo publish` in publish-all (a \
+                     `=`-pinned dependent cannot be packaged until its workspace \
+                     dependency is on the crates.io index)",
+                    t.package
+                )]
+            } else {
+                vec![]
+            };
+            (cmds, artifacts, notes)
         };
         run_all(ctx, &cmds)?;
         // SKELETON: a production build parses the exact packaged `.crate` /
@@ -287,7 +290,7 @@ impl ReleaseAdapter for CargoAdapter {
         Ok(BuildArtifacts {
             adapter: self.adapter,
             artifacts,
-            notes: vec![],
+            notes,
         })
     }
 
@@ -352,6 +355,62 @@ impl ReleaseAdapter for CargoAdapter {
     fn timeout(&self) -> Duration {
         Duration::from_secs(600)
     }
+}
+
+/// The index-independent build/preflight gate for a `cargo-publish` target — the
+/// commands `dry_run` and `build` both run — plus the build artifacts it produces.
+///
+/// The gate is a pure function of whether the target has publishable
+/// intra-workspace dependencies (`has_workspace_deps`), so `dry_run` and `build`
+/// stay in lockstep (a faithful preflight) and the deferred-packaging decision
+/// lives in one place:
+///
+/// - **`false`** (a leaf, or a dependency cut first — nothing pins an unpublished
+///   sibling): `cargo check -p <pkg>` (compile safety net) then `cargo package
+///   --registry <r> -p <pkg> --no-verify`. The package validates the manifest and
+///   produces the `.crate`, which is the single build artifact. Every command is
+///   local and self-overwriting, so the phase stays re-runnable and free of any
+///   external side effect. `--no-verify` skips only the isolated verify *compile*
+///   (redundant with the `cargo check` above and re-run for real by `cargo publish`
+///   in publish-all); the leaf has no `=`-pinned workspace dep, so packaging never
+///   touches the index.
+/// - **`true`** (a `=`-pinned dependent): `cargo check -p <pkg>` **alone**. Its
+///   `path`-resolved compile is the pre-publish safety net that fails a genuine
+///   compile error (type/trait/API mismatch, missing item) before any irreversible
+///   publish — the partial-publish trap ADR-0004 exists to prevent. Packaging is
+///   **deferred** to `cargo publish` in publish-all, which packages+publishes as one
+///   unit *after* the dependency is published and index-visible: `cargo package`
+///   (even `--no-verify`) resolves the `=X.Y.Z` dep against the crates.io *index*
+///   when preparing the upload, so it cannot run until that dependency is published
+///   (`release-cut-build-phase-dep-ordering`). No `.crate` is produced here, so the
+///   artifact set is empty.
+///
+/// Either way the commands are local + per-target, so no build-time cross-target
+/// ordering leaks into the adapter (ADR-0002/0004 preserved); the coordinator alone
+/// orders the publishes.
+fn cargo_build_gate(
+    registry: &str,
+    package: &str,
+    version: &str,
+    has_workspace_deps: bool,
+) -> (Vec<PlannedCommand>, Vec<String>) {
+    let mut cmds = vec![PlannedCommand::new("cargo", &["check", "-p", package])];
+    if has_workspace_deps {
+        // Deferred packaging: only the index-independent compile gate runs now.
+        return (cmds, Vec::new());
+    }
+    cmds.push(PlannedCommand::new(
+        "cargo",
+        &[
+            "package",
+            "--registry",
+            registry,
+            "-p",
+            package,
+            "--no-verify",
+        ],
+    ));
+    (cmds, vec![format!("{package}-{version}.crate")])
 }
 
 /// The canonical crates.io URL for a target's own package at its version — the

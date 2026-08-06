@@ -11,6 +11,24 @@
 //!   enters the next. A publish can never precede an all-targets build; a tag can
 //!   never precede an all-targets publish. A failure in phase *K* blocks entry to
 //!   *K+1* and records a `phase_completed { phase, outcome: failed }` fact.
+//! - **One scoped exception — cargo-ecosystem interleave (ADR-0002 amendment,
+//!   2026-08-06).** For a multi-crate cargo workspace whose dependent crate pins its
+//!   workspace dependency by exact version (`dep = "=X.Y.Z"`, the shape `/oss-init`
+//!   emits), the dependent **cannot be packaged in build-all** — `cargo package`
+//!   resolves the `=`-pinned dependency against the crates.io index while preparing
+//!   the upload, and that version is only published later, in publish-all
+//!   (`release-cut-build-phase-dep-ordering`). So the cargo adapter **defers the
+//!   dependent's packaging into its `cargo publish`**, which packages+publishes as
+//!   one unit in the dep-ordered publish phase, *after* the dependency is published
+//!   and index-visible. The coordinator does not special-case this: publish-all
+//!   already walks same-ecosystem targets in dependency order and the adapter's
+//!   `publish` already index-waits on the target's own deps, so `publish core → wait
+//!   index → package+publish cli` falls out of the existing dep-ordered publish phase.
+//!   The **outer barrier still holds**: dry-run-all runs first (every target, an
+//!   index-independent `cargo check` for cargo), the pre-publish compile safety net
+//!   is a global build-all barrier before **any** publish, tagging is still
+//!   coordinator-only and once-after-all-publishes, and the post-tag homebrew phase
+//!   is unchanged. Only the dependent's *packaging* interleaves with publish.
 //! - **Coordinator-only tagging.** The shared git tag is created and pushed here,
 //!   exactly once, only after every publish has succeeded, through the injected
 //!   [`Tagger`] port. The three tag steps

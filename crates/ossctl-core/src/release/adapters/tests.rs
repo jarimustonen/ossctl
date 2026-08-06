@@ -555,15 +555,15 @@ fn publish_runs_the_registry_command_and_returns_a_receipt() {
 }
 
 #[test]
-fn cargo_build_runs_the_index_independent_gate() {
-    // The build phase runs a two-step INDEX-INDEPENDENT gate: a local `cargo check`
-    // (the pre-publish compile safety net — catches real compile errors before any
-    // publish, resolving the sibling via its `path` not the index) then a
-    // `cargo package` carrying `--registry crates-io` (same registry the publish phase
-    // targets, never ambient config) AND `--no-verify` (skips the isolated verify
-    // compile that would resolve `=`-pinned workspace deps against the index — that
-    // dep isn't published until publish-all; see `release-cut-build-phase-dep-ordering`).
-    let cmd = FakeCmd::new();
+fn cargo_build_packages_a_leaf_crate() {
+    // A LEAF crate (no publishable workspace deps) is fully packaged in build-all: a
+    // local `cargo check` (the pre-publish compile safety net — catches real compile
+    // errors before any publish, resolving via the sibling `path` not the index) then
+    // a `cargo package` carrying `--registry crates-io` (same registry the publish
+    // phase targets, never ambient config) AND `--no-verify` (skips the isolated
+    // verify compile, redundant with the check above and re-run by `cargo publish`).
+    // A read-only `cargo metadata` runs first to classify the target as a leaf.
+    let cmd = FakeCmd::new().with_metadata(&metadata_single("tool", "1.2.3"));
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
     let root = Path::new("/repo");
@@ -578,11 +578,12 @@ fn cargo_build_runs_the_index_independent_gate() {
     let b = resolve(Adapter::CargoPublish).build(&c, &t).unwrap();
 
     assert_eq!(b.adapter, Adapter::CargoPublish);
-    // The `.crate` artifact is still recorded under `--no-verify`.
+    // The `.crate` artifact is recorded — a leaf packages under `--no-verify`.
     assert_eq!(b.artifacts, vec!["tool-1.2.3.crate".to_string()]);
     assert_eq!(
         cmd.calls(),
         vec![
+            "cargo metadata --no-deps --format-version 1",
             "cargo check -p tool",
             "cargo package --registry crates-io -p tool --no-verify",
         ]
@@ -593,42 +594,100 @@ fn cargo_build_runs_the_index_independent_gate() {
 }
 
 #[test]
-fn build_phase_packages_both_crates_when_a_pinned_dep_is_not_yet_published() {
+fn cargo_build_defers_packaging_for_a_pinned_dependent() {
+    // A DEPENDENT crate (`bin` pins `lib = "=X.Y.Z"`) CANNOT be `cargo package`d
+    // until `lib` is on the crates.io index (packaging resolves the pinned dep
+    // against the index even with `--no-verify`), so its packaging is DEFERRED to
+    // `cargo publish` in publish-all. build runs only the index-independent
+    // `cargo check` gate and records NO `.crate` artifact.
+    let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "0.2.0"));
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new(); // empty: `lib` not published yet
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target_named(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "bin",
+        "0.2.0",
+    );
+    let b = resolve(Adapter::CargoPublish).build(&c, &t).unwrap();
+
+    // Only the compile gate ran; no `cargo package`, and no `.crate` artifact.
+    assert!(
+        b.artifacts.is_empty(),
+        "a deferred build produced an artifact"
+    );
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "cargo metadata --no-deps --format-version 1",
+            "cargo check -p bin",
+        ]
+    );
+    // A note records that packaging is deferred (operator-facing observability).
+    assert!(
+        b.notes.iter().any(|n| n.contains("deferred")),
+        "build dropped the deferred-packaging note: {:?}",
+        b.notes
+    );
+    // The build phase still never queries the registry index.
+    assert!(reg.queries().is_empty(), "build queried the registry index");
+}
+
+#[test]
+fn build_phase_clears_both_crates_when_a_pinned_dep_is_not_yet_published() {
     // Done criterion #1 (`release-cut-build-phase-dep-ordering`): a two-crate
     // workspace where `bin` pins `lib = "=X.Y.Z"` must clear the BUILD phase even
     // though `lib` is not on the crates.io index yet — it is only *published* later,
-    // in publish-all. `--no-verify` skips the isolated verify compile that would
-    // resolve that pinned dep against the index, so both crates package with an
-    // EMPTY registry and ZERO index queries. (Publish-order/index-wait is the
-    // publish phase's job, covered by the dep-wait tests below.)
-    let cmd = FakeCmd::new();
+    // in publish-all. The leaf `lib` packages now (`cargo package --no-verify`); the
+    // dependent `bin` CANNOT be packaged pre-publish, so build runs its `cargo check`
+    // gate only and defers packaging to `cargo publish`. Both clear the phase with an
+    // EMPTY registry and ZERO index queries.
+    let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "0.2.0"));
     let clock = FakeClock(1);
     let reg = FakeRegistry::new(); // empty: `lib` is NOT published yet
     let root = Path::new("/repo");
 
-    for pkg in ["lib", "bin"] {
-        let c = ctx(&cmd, &clock, &reg, root);
-        let t = target_named(
-            Ecosystem::Rust,
-            Registry::CratesIo,
-            Adapter::CargoPublish,
-            pkg,
-            "0.2.0",
-        );
-        let b = resolve(Adapter::CargoPublish).build(&c, &t).unwrap();
-        assert_eq!(b.artifacts, vec![format!("{pkg}-0.2.0.crate")]);
-    }
+    // The leaf `lib` packages; the dependent `bin` defers packaging.
+    let c = ctx(&cmd, &clock, &reg, root);
+    let lib = target_named(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "lib",
+        "0.2.0",
+    );
+    let lib_build = resolve(Adapter::CargoPublish).build(&c, &lib).unwrap();
+    assert_eq!(lib_build.artifacts, vec!["lib-0.2.0.crate".to_string()]);
 
-    // Both crates cleared the local `cargo check` gate and packaged with
-    // `--no-verify`; the build phase never consulted the index for the
+    let c = ctx(&cmd, &clock, &reg, root);
+    let bin = target_named(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "bin",
+        "0.2.0",
+    );
+    let bin_build = resolve(Adapter::CargoPublish).build(&c, &bin).unwrap();
+    assert!(
+        bin_build.artifacts.is_empty(),
+        "the dependent packaged in build-all instead of deferring"
+    );
+
+    // The leaf cleared check + `--no-verify` package; the dependent cleared its
+    // `cargo check` gate only; the build phase never consulted the index for the
     // not-yet-published pinned dep.
     assert_eq!(
         cmd.calls(),
         vec![
+            "cargo metadata --no-deps --format-version 1",
             "cargo check -p lib",
             "cargo package --registry crates-io -p lib --no-verify",
+            "cargo metadata --no-deps --format-version 1",
             "cargo check -p bin",
-            "cargo package --registry crates-io -p bin --no-verify",
         ]
     );
     assert!(
@@ -641,8 +700,10 @@ fn build_phase_packages_both_crates_when_a_pinned_dep_is_not_yet_published() {
 fn dry_run_preflights_a_dependent_without_the_pinned_dep_on_the_index() {
     // Done criterion #2 (positive half): the dry-run preflight of the DEPENDENT
     // crate must NOT false-fail just because its `=`-pinned workspace dep is not on
-    // the index yet. `--no-verify` keeps the preflight from resolving that dep, so an
-    // empty registry still passes — dry-run validates what it *can* pre-publish.
+    // the index yet. Because that dependent cannot be `cargo package`d pre-publish,
+    // the preflight is the index-independent `cargo check` compile gate ALONE (no
+    // package), so an empty registry still passes — dry-run validates what it *can*
+    // pre-publish and defers packaging to the real `cargo publish`.
     let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "0.2.0"));
     let clock = FakeClock(1);
     let reg = FakeRegistry::new(); // empty: `lib` not published yet
@@ -658,21 +719,26 @@ fn dry_run_preflights_a_dependent_without_the_pinned_dep_on_the_index() {
     );
     let report = resolve(Adapter::CargoPublish).dry_run(&c, &t).unwrap();
 
-    // The preflight ran the read-only graph query then the index-independent gate
-    // (local check + `--no-verify` package), and never queried the index.
+    // The preflight ran the read-only graph query then the compile gate only (no
+    // `cargo package` for the dependent), and never queried the index.
     assert_eq!(
         cmd.calls(),
         vec![
             "cargo metadata --no-deps --format-version 1",
             "cargo check -p bin",
-            "cargo package --registry crates-io -p bin --no-verify",
         ]
     );
     assert!(
         reg.queries().is_empty(),
         "dry-run false-queried the index for the unpublished pinned dep"
     );
-    // The note surfaces the dependency the real cut will wait on.
+    // The notes surface both that packaging is deferred and the dependency the real
+    // cut will wait on.
+    assert!(
+        report.notes.iter().any(|n| n.contains("deferred")),
+        "dry-run dropped the deferred-packaging note: {:?}",
+        report.notes
+    );
     assert!(
         report.notes.iter().any(|n| n.contains("lib@0.2.0")),
         "dry-run dropped the workspace-dep wait note: {:?}",
@@ -713,8 +779,9 @@ fn build_phase_fails_on_a_genuine_compile_error_before_any_publish() {
     // fail later in publish-all's `cargo publish`, AFTER the dependency crate is
     // already irreversibly published (the partial-publish trap). The index-independent
     // `cargo check` gate catches it in build-all, before any publish.
-    let cmd =
-        FakeCmd::new().fail_calls_containing("cargo check", 101, "error[E0308]: mismatched types");
+    let cmd = FakeCmd::new()
+        .with_metadata(&metadata_single("tool", "1.2.3"))
+        .fail_calls_containing("cargo check", 101, "error[E0308]: mismatched types");
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
     let root = Path::new("/repo");
@@ -731,21 +798,31 @@ fn build_phase_fails_on_a_genuine_compile_error_before_any_publish() {
         AdapterError::Command { code, .. } => assert_eq!(code, Some(101)),
         other => panic!("expected a Command error from the failing compile, got {other:?}"),
     }
-    // It failed on the compile gate — packaging was never reached.
-    assert_eq!(cmd.calls(), vec!["cargo check -p tool"]);
+    // It failed on the compile gate — packaging was never reached (metadata classifies
+    // the target first, then the `cargo check` gate fails).
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "cargo metadata --no-deps --format-version 1",
+            "cargo check -p tool",
+        ]
+    );
 }
 
 #[test]
 fn build_phase_propagates_a_real_package_failure() {
-    // Done criterion #3 (packaging half): a packaging failure (e.g. a crate that
-    // compiles but cannot package — a missing included file, a bad manifest) must
-    // still fail the BUILD phase; `--no-verify` must not turn `build` into a no-op
-    // that swallows a failing `cargo package`.
-    let cmd = FakeCmd::new().fail_calls_containing(
-        "cargo package",
-        101,
-        "error: invalid inclusion of reserved file name",
-    );
+    // Done criterion #3 (packaging half): for a LEAF crate that IS packaged in
+    // build-all, a packaging failure (e.g. a crate that compiles but cannot package —
+    // a missing included file, a bad manifest) must still fail the BUILD phase;
+    // `--no-verify` must not turn `build` into a no-op that swallows a failing
+    // `cargo package`.
+    let cmd = FakeCmd::new()
+        .with_metadata(&metadata_single("tool", "1.2.3"))
+        .fail_calls_containing(
+            "cargo package",
+            101,
+            "error: invalid inclusion of reserved file name",
+        );
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
     let root = Path::new("/repo");
@@ -762,10 +839,12 @@ fn build_phase_propagates_a_real_package_failure() {
         AdapterError::Command { code, .. } => assert_eq!(code, Some(101)),
         other => panic!("expected a Command error from the failing package, got {other:?}"),
     }
-    // The compile gate passed; packaging is where it failed.
+    // The compile gate passed; packaging is where it failed (a leaf packages, so the
+    // failure is caught in build-all, before any publish).
     assert_eq!(
         cmd.calls(),
         vec![
+            "cargo metadata --no-deps --format-version 1",
             "cargo check -p tool",
             "cargo package --registry crates-io -p tool --no-verify",
         ]
@@ -1293,20 +1372,15 @@ fn target_dry_run_reports_its_own_publish_and_the_dep_wait() {
     );
     let report = resolve(Adapter::CargoPublish).dry_run(&c, &t).unwrap();
 
-    // The preflight gate for the target's own crate: local check + `--no-verify`
-    // package (exactly what build-all runs), never another target's crate.
+    // The preflight gate for the target's own crate: a `=`-pinned DEPENDENT defers
+    // packaging, so the gate is the `cargo check` compile safety net alone (exactly
+    // what build-all runs for it), never another target's crate and never a package.
     let rendered: Vec<String> = report
         .planned_commands
         .iter()
         .map(crate::protocol::release::PlannedCommand::rendered)
         .collect();
-    assert_eq!(
-        rendered,
-        vec![
-            "cargo check -p bin".to_string(),
-            "cargo package --registry crates-io -p bin --no-verify".to_string(),
-        ]
-    );
+    assert_eq!(rendered, vec!["cargo check -p bin".to_string()]);
     // The note names the workspace dependency the real cut waits to index first.
     assert!(
         report
@@ -1317,10 +1391,15 @@ fn target_dry_run_reports_its_own_publish_and_the_dep_wait() {
         report.notes
     );
     // dry_run is a faithful preflight, not a real publish: it runs the read-only
-    // metadata query and the `--no-verify` package, but never `cargo publish`.
+    // metadata query and the compile gate, but never `cargo publish` or `cargo package`.
     assert!(
         !cmd.calls().iter().any(|call| call.contains("publish")),
         "dry_run executed a publish: {:?}",
+        cmd.calls()
+    );
+    assert!(
+        !cmd.calls().iter().any(|call| call.contains("package")),
+        "dry_run packaged a dependent that must defer: {:?}",
         cmd.calls()
     );
 }

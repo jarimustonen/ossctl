@@ -1058,12 +1058,26 @@ struct CratesWorld {
 struct WorkspaceCmd {
     world: CratesWorld,
     calls: RefCell<Vec<String>>,
+    /// A single command line (exactly rendered `program args`) to fail with a
+    /// non-zero exit — for simulating a cut that dies partway through publish-all.
+    /// Exact-match (not substring) so failing `… -p ossctl` cannot also catch
+    /// `… -p ossctl-core`. A failed publish does **not** mark its crate published.
+    fail_line: Option<String>,
 }
 impl WorkspaceCmd {
     fn new(world: CratesWorld) -> Self {
         Self {
             world,
             calls: RefCell::new(Vec::new()),
+            fail_line: None,
+        }
+    }
+    /// A runner that fails exactly the command line `line` (used to interrupt a cut
+    /// between the dependency's publish and the dependent's).
+    fn failing_line(world: CratesWorld, line: &str) -> Self {
+        Self {
+            fail_line: Some(line.to_string()),
+            ..Self::new(world)
         }
     }
     fn calls(&self) -> Vec<String> {
@@ -1101,8 +1115,15 @@ impl CommandRunner for WorkspaceCmd {
                 stderr: String::new(),
             });
         }
-        // A real publish (`cargo publish -p X`, no `--dry-run`) lands the crate.
-        if program == "cargo" && args.first() == Some(&"publish") && !args.contains(&"--dry-run") {
+        let fails = self.fail_line.as_deref() == Some(line.as_str());
+        // A real publish (`cargo publish -p X`, no `--dry-run`) lands the crate — but
+        // only if it SUCCEEDS. A failed publish must not mark its crate published (the
+        // resume-mid-interleave case: the dependent's publish dies, its crate absent).
+        if !fails
+            && program == "cargo"
+            && args.first() == Some(&"publish")
+            && !args.contains(&"--dry-run")
+        {
             if let Some(pos) = args.iter().position(|a| *a == "-p") {
                 if let Some(pkg) = args.get(pos + 1) {
                     self.world.published.borrow_mut().insert((*pkg).to_string());
@@ -1110,9 +1131,9 @@ impl CommandRunner for WorkspaceCmd {
             }
         }
         Ok(CommandOutput {
-            status: Some(0),
+            status: Some(i32::from(fails)),
             stdout: String::new(),
-            stderr: String::new(),
+            stderr: if fails { "boom".into() } else { String::new() },
         })
     }
 }
@@ -1352,6 +1373,217 @@ fn two_targets_do_not_double_publish_a_shared_dependency_under_index_lag() {
     assert!(
         core < cli,
         "dependency published after its dependent: {calls:?}"
+    );
+}
+
+// ── cargo-interleave: dependent packaging defers into publish (ADR-0002) ─────
+
+#[test]
+fn dependent_packaging_interleaves_into_publish_not_build_all() {
+    // Done criterion (a) — the cargo-ecosystem interleave
+    // (`release-cut-build-phase-dep-ordering`, ADR-0002 amendment). Two crates.io
+    // targets: the leaf `ossctl-core`, then the dependent `ossctl` (which pins
+    // `ossctl-core = "=1.2.3"`). The dependent CANNOT be `cargo package`d in build-all
+    // — packaging resolves the `=`-pinned dep against the crates.io index, and that
+    // version is only published later. So its packaging is DEFERRED to `cargo publish`
+    // in the dep-ordered publish phase, which runs after `ossctl-core` is published
+    // and index-visible. The leaf, having no unpublished workspace dep, still packages
+    // in build-all. Both land; the run completes.
+    let world = CratesWorld::default();
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = WorkspaceCmd::new(world.clone());
+    let reg = WorldRegistry {
+        world: world.clone(),
+    };
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+
+    let plan = ReleasePlan {
+        plan_id: "plan-interleave".into(),
+        contract_schema_version: 1,
+        head_sha: "deadbeef".into(),
+        version: "1.2.3".into(),
+        targets: vec![crates_target("ossctl-core"), crates_target("ossctl")],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
+    };
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "plan-interleave".into(),
+        "1.2.3".into(),
+        ids,
+    )
+    .unwrap();
+    let mut sink = NullSink;
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+
+    assert_eq!(journal.state().status, RunStatus::Completed);
+    let calls = cmd.calls();
+
+    // The DEPENDENT is never packaged as its own build step — it cannot be, before
+    // its pinned dep is published. Its packaging happens inside `cargo publish`.
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c == "cargo package --registry crates-io -p ossctl --no-verify"),
+        "the dependent packaged in build-all instead of deferring: {calls:?}"
+    );
+    // The LEAF is packaged in build-all (it has no unpublished workspace dep).
+    assert!(
+        calls
+            .iter()
+            .any(|c| c == "cargo package --registry crates-io -p ossctl-core --no-verify"),
+        "the leaf was not packaged in build-all: {calls:?}"
+    );
+    // The interleave order: `ossctl-core` publishes, then `ossctl` publishes (its
+    // `cargo publish` is where the dependent finally packages, now that its dep is on
+    // the index).
+    let core_pub = calls
+        .iter()
+        .position(|c| c == "cargo publish --registry crates-io -p ossctl-core")
+        .expect("ossctl-core was published");
+    let cli_pub = calls
+        .iter()
+        .position(|c| c == "cargo publish --registry crates-io -p ossctl")
+        .expect("ossctl was published");
+    assert!(
+        core_pub < cli_pub,
+        "the dependent published before its dependency: {calls:?}"
+    );
+    // The dependent's compile safety net (`cargo check -p ossctl`) still ran BEFORE
+    // any publish — the pre-publish barrier over every target is preserved even though
+    // its packaging interleaves into publish.
+    let cli_check = calls
+        .iter()
+        .position(|c| c == "cargo check -p ossctl")
+        .expect("the dependent's compile gate ran");
+    assert!(
+        cli_check < core_pub,
+        "the dependent's compile gate ran after a publish: {calls:?}"
+    );
+}
+
+#[test]
+fn resume_after_core_publish_completes_the_dependent_without_republishing_core() {
+    // Done criterion (b): a cut that dies AFTER publishing the dependency
+    // `ossctl-core` but BEFORE publishing the dependent `ossctl` must resume —
+    // skipping the already-landed, irreversible `ossctl-core` and completing `ossctl`.
+    // The journal (per-target `published` set) and the crates world are shared across
+    // the two runs; the second run must never re-run `cargo publish -p ossctl-core`.
+    let world = CratesWorld::default();
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+
+    let plan = ReleasePlan {
+        plan_id: "plan-resume-interleave".into(),
+        contract_schema_version: 1,
+        head_sha: "deadbeef".into(),
+        version: "1.2.3".into(),
+        targets: vec![crates_target("ossctl-core"), crates_target("ossctl")],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
+    };
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "plan-resume-interleave".into(),
+        "1.2.3".into(),
+        ids,
+    )
+    .unwrap();
+    let mut sink = NullSink;
+
+    // First run: the dependent's publish dies. `ossctl-core` lands (published +
+    // journalled); the publish phase fails before `ossctl`.
+    let reg = WorldRegistry {
+        world: world.clone(),
+    };
+    let failing = WorkspaceCmd::failing_line(
+        world.clone(),
+        "cargo publish --registry crates-io -p ossctl",
+    );
+    let first_ctx = EffectCtx {
+        runner: &failing,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let err = execute(&mut journal, &plan, &first_ctx, &tagger, &mut sink).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CutError::PhaseFailed {
+                phase: Phase::Publish,
+                ..
+            }
+        ),
+        "expected a publish-phase failure, got {err:?}"
+    );
+    assert!(
+        journal.state().published.contains_key("rust:ossctl-core"),
+        "the dependency did not land before the interruption"
+    );
+    assert!(
+        !journal.state().published.contains_key("rust:ossctl"),
+        "the dependent must not be recorded as published after a failed publish"
+    );
+    assert!(world.published.borrow().contains("ossctl-core"));
+    assert!(!world.published.borrow().contains("ossctl"));
+
+    // Second run: a healthy runner over the SAME journal + crates world. Resume must
+    // skip `ossctl-core` (already published) and land `ossctl`.
+    let resume_cmd = WorkspaceCmd::new(world.clone());
+    let resume_ctx = EffectCtx {
+        runner: &resume_cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    execute(&mut journal, &plan, &resume_ctx, &tagger, &mut sink).unwrap();
+
+    assert_eq!(journal.state().status, RunStatus::Completed);
+    assert!(journal.state().published.contains_key("rust:ossctl"));
+    assert_eq!(journal.state().published.len(), 2);
+
+    let resume_calls = resume_cmd.calls();
+    // The already-landed dependency is NEVER re-published on resume (a second
+    // `cargo publish -p ossctl-core` would hard-fail on crates.io and is irreversible).
+    assert!(
+        !resume_calls
+            .iter()
+            .any(|c| c == "cargo publish --registry crates-io -p ossctl-core"),
+        "resume re-published the already-landed dependency: {resume_calls:?}"
+    );
+    // The dependent's publish completes on resume — now that `ossctl-core` is on the
+    // index, its deferred packaging succeeds inside `cargo publish`.
+    assert!(
+        resume_calls
+            .iter()
+            .any(|c| c == "cargo publish --registry crates-io -p ossctl"),
+        "resume did not complete the dependent's publish: {resume_calls:?}"
     );
 }
 
