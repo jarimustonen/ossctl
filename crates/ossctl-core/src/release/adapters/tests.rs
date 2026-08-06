@@ -594,12 +594,14 @@ fn cargo_build_packages_a_leaf_crate() {
 }
 
 #[test]
-fn cargo_build_defers_packaging_for_a_pinned_dependent() {
-    // A DEPENDENT crate (`bin` pins `lib = "=X.Y.Z"`) CANNOT be `cargo package`d
-    // until `lib` is on the crates.io index (packaging resolves the pinned dep
-    // against the index even with `--no-verify`), so its packaging is DEFERRED to
-    // `cargo publish` in publish-all. build runs only the index-independent
-    // `cargo check` gate and records NO `.crate` artifact.
+fn cargo_build_defers_packaging_for_a_dependent_on_an_unpublished_crate() {
+    // A DEPENDENT crate (`bin` pins `lib = "=X.Y.Z"`) whose dependency `lib` is NOT
+    // yet on the crates.io index CANNOT be `cargo package`d (packaging resolves the
+    // pinned dep against the index even with `--no-verify`), so its packaging is
+    // DEFERRED to `cargo publish` in publish-all. build runs only the
+    // index-independent `cargo check` gate and records NO `.crate` artifact. It DOES
+    // probe the registry (read-only) to classify the target, but never runs a
+    // `cargo package` that would touch the index.
     let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "0.2.0"));
     let clock = FakeClock(1);
     let reg = FakeRegistry::new(); // empty: `lib` not published yet
@@ -633,8 +635,50 @@ fn cargo_build_defers_packaging_for_a_pinned_dependent() {
         "build dropped the deferred-packaging note: {:?}",
         b.notes
     );
-    // The build phase still never queries the registry index.
-    assert!(reg.queries().is_empty(), "build queried the registry index");
+    // Classification probes the registry for the dep once; no `cargo package` runs.
+    assert_eq!(reg.queries(), vec!["rust:lib".to_string()]);
+}
+
+#[test]
+fn cargo_build_packages_a_dependent_whose_dep_is_already_published() {
+    // A DEPENDENT crate `bin` whose dependency `lib` IS ALREADY on the crates.io
+    // index (a re-cut where only `bin` changed) CAN be packaged — `cargo package`
+    // resolves the `=`-pinned dep against the index it is already on — so build does
+    // NOT defer: it packages `bin` and records the `.crate`, preserving the manifest-
+    // validation safety net. This is the registry-aware refinement: defer only when a
+    // workspace dep is not yet on the index, never merely because an edge exists.
+    let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "0.2.0"));
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new().with("rust", "lib", &["0.2.0"]); // lib already published
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target_named(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "bin",
+        "0.2.0",
+    );
+    let b = resolve(Adapter::CargoPublish).build(&c, &t).unwrap();
+
+    // The dependent packages (its dep is already indexed), producing the `.crate`.
+    assert_eq!(b.artifacts, vec!["bin-0.2.0.crate".to_string()]);
+    assert!(
+        b.notes.is_empty(),
+        "an already-packageable dependent should not carry a deferral note: {:?}",
+        b.notes
+    );
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "cargo metadata --no-deps --format-version 1",
+            "cargo check -p bin",
+            "cargo package --registry crates-io -p bin --no-verify",
+        ]
+    );
+    // It probed the registry for `lib` to make the decision.
+    assert_eq!(reg.queries(), vec!["rust:lib".to_string()]);
 }
 
 #[test]
@@ -645,7 +689,8 @@ fn build_phase_clears_both_crates_when_a_pinned_dep_is_not_yet_published() {
     // in publish-all. The leaf `lib` packages now (`cargo package --no-verify`); the
     // dependent `bin` CANNOT be packaged pre-publish, so build runs its `cargo check`
     // gate only and defers packaging to `cargo publish`. Both clear the phase with an
-    // EMPTY registry and ZERO index queries.
+    // EMPTY registry, and neither runs a `cargo package` that touches the index (the
+    // dependent's only registry contact is the read-only classification probe).
     let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "0.2.0"));
     let clock = FakeClock(1);
     let reg = FakeRegistry::new(); // empty: `lib` is NOT published yet
@@ -678,8 +723,8 @@ fn build_phase_clears_both_crates_when_a_pinned_dep_is_not_yet_published() {
     );
 
     // The leaf cleared check + `--no-verify` package; the dependent cleared its
-    // `cargo check` gate only; the build phase never consulted the index for the
-    // not-yet-published pinned dep.
+    // `cargo check` gate only; no `cargo package` for `bin` (which would resolve its
+    // pinned dep against the index).
     assert_eq!(
         cmd.calls(),
         vec![
@@ -690,10 +735,10 @@ fn build_phase_clears_both_crates_when_a_pinned_dep_is_not_yet_published() {
             "cargo check -p bin",
         ]
     );
-    assert!(
-        reg.queries().is_empty(),
-        "build phase queried the registry index for an unpublished pinned dep"
-    );
+    // The leaf (no workspace deps) never probes; the dependent probes `lib` once to
+    // classify. No `cargo package` for the dependent, so nothing resolves against the
+    // index.
+    assert_eq!(reg.queries(), vec!["rust:lib".to_string()]);
 }
 
 #[test]
@@ -720,7 +765,7 @@ fn dry_run_preflights_a_dependent_without_the_pinned_dep_on_the_index() {
     let report = resolve(Adapter::CargoPublish).dry_run(&c, &t).unwrap();
 
     // The preflight ran the read-only graph query then the compile gate only (no
-    // `cargo package` for the dependent), and never queried the index.
+    // `cargo package` for the dependent, so nothing resolves against the index).
     assert_eq!(
         cmd.calls(),
         vec![
@@ -728,10 +773,8 @@ fn dry_run_preflights_a_dependent_without_the_pinned_dep_on_the_index() {
             "cargo check -p bin",
         ]
     );
-    assert!(
-        reg.queries().is_empty(),
-        "dry-run false-queried the index for the unpublished pinned dep"
-    );
+    // It probed `lib` once (read-only) to classify the target as deferring.
+    assert_eq!(reg.queries(), vec!["rust:lib".to_string()]);
     // The notes surface both that packaging is deferred and the dependency the real
     // cut will wait on.
     assert!(

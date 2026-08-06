@@ -10,6 +10,8 @@ commits:
   summary: build-phase --no-verify + faithful dry-run preflight
 - hash: a75db05
   summary: 'add index-independent cargo check gate (review fix: prevent compile-error torn release)'
+- hash: ce85309
+  summary: interleave build+publish for =-pinned cargo dependents (adapter defers dependent packaging into cargo publish; ADR-0002 amendment; interleave+resume tests)
 ---
 
 # release cut build-phase can't package a dependent crate whose =-pinned dep isn't published yet

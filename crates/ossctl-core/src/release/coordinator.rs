@@ -12,23 +12,25 @@
 //!   never precede an all-targets publish. A failure in phase *K* blocks entry to
 //!   *K+1* and records a `phase_completed { phase, outcome: failed }` fact.
 //! - **One scoped exception — cargo-ecosystem interleave (ADR-0002 amendment,
-//!   2026-08-06).** For a multi-crate cargo workspace whose dependent crate pins its
-//!   workspace dependency by exact version (`dep = "=X.Y.Z"`, the shape `/oss-init`
-//!   emits), the dependent **cannot be packaged in build-all** — `cargo package`
-//!   resolves the `=`-pinned dependency against the crates.io index while preparing
-//!   the upload, and that version is only published later, in publish-all
-//!   (`release-cut-build-phase-dep-ordering`). So the cargo adapter **defers the
-//!   dependent's packaging into its `cargo publish`**, which packages+publishes as
-//!   one unit in the dep-ordered publish phase, *after* the dependency is published
-//!   and index-visible. The coordinator does not special-case this: publish-all
+//!   2026-08-06).** For a multi-crate cargo workspace whose dependent crate pins a
+//!   workspace dependency that is **not yet on the crates.io index** (`dep =
+//!   "=X.Y.Z"`, the shape `/oss-init` emits, cut in lockstep), the dependent **cannot
+//!   be packaged in build-all** — `cargo package` resolves the `=`-pinned dependency
+//!   against the index while preparing the upload, and that version is only published
+//!   later, in publish-all (`release-cut-build-phase-dep-ordering`). So the cargo
+//!   adapter **defers the dependent's packaging into its `cargo publish`**, which
+//!   packages+publishes as one unit in the dep-ordered publish phase, *after* the
+//!   dependency is published and index-visible. (A dependent whose workspace deps are
+//!   already on the index — a re-cut — still packages in build-all; the adapter probes
+//!   the registry to decide.) The coordinator does not special-case this: publish-all
 //!   already walks same-ecosystem targets in dependency order and the adapter's
 //!   `publish` already index-waits on the target's own deps, so `publish core → wait
 //!   index → package+publish cli` falls out of the existing dep-ordered publish phase.
-//!   The **outer barrier still holds**: dry-run-all runs first (every target, an
-//!   index-independent `cargo check` for cargo), the pre-publish compile safety net
-//!   is a global build-all barrier before **any** publish, tagging is still
-//!   coordinator-only and once-after-all-publishes, and the post-tag homebrew phase
-//!   is unchanged. Only the dependent's *packaging* interleaves with publish.
+//!   The **outer barrier still holds**: dry-run-all runs first (every target, a
+//!   `cargo check` for cargo), the pre-publish compile safety net is a global
+//!   build-all barrier before **any** publish, tagging is still coordinator-only and
+//!   once-after-all-publishes, and the post-tag homebrew phase is unchanged. Only the
+//!   dependent's *packaging* interleaves with publish.
 //! - **Coordinator-only tagging.** The shared git tag is created and pushed here,
 //!   exactly once, only after every publish has succeeded, through the injected
 //!   [`Tagger`] port. The three tag steps
@@ -324,10 +326,11 @@ pub fn validate_plan(plan: &ReleasePlan) -> Result<(), CutError> {
 /// `ossctl` on crates.io): each is keyed by a distinct per-target journal id
 /// ([`journal_target_ids`]), and the plan's (normalizer-canonical) order — which
 /// lists a dependency before its dependents — is the publish order the barriers
-/// walk. Intra-ecosystem dependency ordering *within* a single target (a
-/// workspace's crates) is the adapter's own concern (the cargo adapter topo-sorts
-/// and index-waits); the only collision left here is two byte-identical targets,
-/// which is a degenerate contract duplicate.
+/// walk. The coordinator alone owns cross-target ordering; the cargo adapter
+/// publishes exactly its own target's crate and only *index-waits* on that crate's
+/// workspace deps (ADR-0004, one target = one publish unit — no topo-sort, no
+/// closure). The only collision left here is two byte-identical targets, a
+/// degenerate contract duplicate.
 fn resolve_target_plans(plan: &ReleasePlan) -> Result<Vec<TargetPlan>, CutError> {
     let ids = journal_target_ids(&plan.targets);
     let mut out = Vec::with_capacity(plan.targets.len());
