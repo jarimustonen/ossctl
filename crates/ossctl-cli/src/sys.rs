@@ -276,15 +276,18 @@ fn crockford_u128(mut value: u128) -> String {
 ///
 /// The reconciler degrades a lookup failure to [`VerifyOutcome::Unknown`], never a
 /// false `Missing`, so an ecosystem with no wired query is honestly "cannot
-/// check" rather than "did not land". Today only `node` (queried through the
-/// clean `npm view … versions --json` surface) is wired; the remaining ecosystems
-/// return an `Err` so the reconcile reports `unknown` until their registry query
-/// lands — matching the skeleton state of the adapter layer.
+/// check" rather than "did not land". Two ecosystems are wired: `node` (queried
+/// through the clean `npm view … versions --json` surface) and `rust` (queried
+/// against the crates.io **sparse index** at `index.crates.io`). The remaining
+/// ecosystems return an `Err` so the reconcile reports `unknown` until their
+/// registry query lands — matching the skeleton state of the adapter layer.
 ///
-/// **Timeout gap (accepted).** Like [`RealCommandRunner`] and [`RealGitRepo`],
-/// there is no hard wall-clock timeout — `std` has none on `Command::output` and
-/// this crate takes no new dependency. A stalled `npm`/DNS/TLS can hang the
-/// lookup; a bounded-deadline registry client is a documented follow-up.
+/// **Timeout gap (partially closed).** Like [`RealCommandRunner`] and
+/// [`RealGitRepo`], the `npm` arm has no hard wall-clock timeout — `std` has none
+/// on `Command::output` and this crate takes no new dependency, so a stalled
+/// `npm`/DNS/TLS can hang it. The `rust` arm shells to `curl` with an explicit
+/// `--max-time`, so it is bounded; a bounded-deadline `npm` query is a documented
+/// follow-up.
 ///
 /// [`VerifyOutcome::Unknown`]: ossctl_core::protocol::release::VerifyOutcome::Unknown
 pub struct RealRegistryQuery;
@@ -341,12 +344,158 @@ impl RealRegistryQuery {
             ))),
         }
     }
+
+    /// The crates.io **sparse index** entry for `crate_name`, relative to the
+    /// index root (`index.crates.io`) — the cargo index-directory convention
+    /// (`config.json` "dl"/"api" aside): 1-char names live under `1/`, 2-char
+    /// under `2/`, 3-char under `3/<first-char>/`, and everything else under
+    /// `<first-two>/<next-two>/`. The name is lowercased; hyphens and underscores
+    /// are preserved (the index keeps them distinct). Crate names are ASCII by
+    /// [`Self::validate_crate_name`], so the byte slicing here never splits a
+    /// multi-byte char.
+    fn sparse_index_path(crate_name: &str) -> String {
+        let name = crate_name.to_ascii_lowercase();
+        match name.len() {
+            0 => name,
+            1 => format!("1/{name}"),
+            2 => format!("2/{name}"),
+            3 => format!("3/{}/{}", &name[0..1], name),
+            _ => format!("{}/{}/{}", &name[0..2], &name[2..4], name),
+        }
+    }
+
+    /// Reject a crate name that could distort the query — a leading `-` (which a
+    /// CLI would read as a flag) or any character outside the crates.io-permitted
+    /// set (`[A-Za-z0-9_-]`). Mirrors the flag-injection guard on the `npm` arm,
+    /// but stricter: the name is interpolated into a URL, so anything that could
+    /// alter the request path (`/`, `?`, `.`, whitespace, …) is refused rather
+    /// than percent-mangled into a wrong-but-successful lookup.
+    fn validate_crate_name(crate_name: &str) -> io::Result<()> {
+        if crate_name.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refusing to query crates.io for an empty crate name",
+            ));
+        }
+        if crate_name.starts_with('-')
+            || !crate_name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("refusing to query crates.io for a suspicious crate name: {crate_name:?}"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Parse a crates.io sparse-index body (JSON-lines, one release per line) into
+    /// the list of published version strings.
+    ///
+    /// **Yanked versions are included.** A yanked version still occupies its
+    /// version slot on crates.io — re-publishing that exact `crate@version` is
+    /// *rejected* — so for the defer/idempotency predicate a yanked version is
+    /// unambiguously "already published" and must count. A line missing a string
+    /// `vers`, or one that is not valid JSON, is a corrupt/unrecognised index
+    /// response and fails **closed** (`Err`), never a silent drop that could
+    /// misread as "not published".
+    fn parse_sparse_index(body: &str) -> io::Result<Vec<String>> {
+        let mut versions = Vec::new();
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let entry: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+                io::Error::other(format!(
+                    "crates.io sparse-index line was not valid JSON: {e}"
+                ))
+            })?;
+            let vers = entry
+                .get("vers")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    io::Error::other("crates.io sparse-index entry has no string `vers` field")
+                })?;
+            versions.push(vers.to_string());
+        }
+        Ok(versions)
+    }
+
+    /// Classify a completed `curl` transaction to the sparse index by its HTTP
+    /// status (appended after the body via `--write-out`, behind
+    /// [`Self::HTTP_CODE_MARKER`]) and, for a `200`, parse the body.
+    ///
+    /// - `200` ⇒ parse the body into versions.
+    /// - `404`/`410` ⇒ the crate has no published versions yet — the legitimate
+    ///   "missing" signal, `Ok(vec![])`, **not** an error.
+    /// - `000` (curl never completed a transfer) or any other status ⇒ the
+    ///   registry state is unknown, so fail **closed** with `Err` — never an empty
+    ///   `Vec`, which the reconciler would read as "not published" and could act
+    ///   on with an unsafe publish.
+    fn parse_sparse_response(stdout: &str) -> io::Result<Vec<String>> {
+        let (body, code) = stdout.rsplit_once(Self::HTTP_CODE_MARKER).ok_or_else(|| {
+            io::Error::other("curl did not report an HTTP status for the crates.io sparse index")
+        })?;
+        match code.trim() {
+            "200" => Self::parse_sparse_index(body),
+            "404" | "410" => Ok(Vec::new()),
+            other => Err(io::Error::other(format!(
+                "crates.io sparse index returned an unexpected HTTP status {other}"
+            ))),
+        }
+    }
+
+    /// Sentinel that separates the sparse-index response body from the trailing
+    /// HTTP status `curl --write-out` appends, so both arrive on one stdout
+    /// capture yet stay unambiguously splittable ([`Self::parse_sparse_response`]).
+    const HTTP_CODE_MARKER: &'static str = "\n__OSSCTL_HTTP_CODE__:";
+
+    /// Query the crates.io sparse index for the published versions of
+    /// `crate_name`.
+    ///
+    /// Shells to `curl` (no new HTTP dependency, mirroring the `npm` arm's
+    /// shell-out style) with a bounded `--max-time`, stdin `/dev/null`, and the
+    /// HTTP status appended after the body. A network-level failure (DNS,
+    /// connection refused, timeout — `curl` exits non-zero, HTTP status `000`)
+    /// fails **closed** with `Err`; a `404` is the genuine "not yet published"
+    /// signal (`Ok(vec![])`). `curl` completing an HTTP transaction (any status)
+    /// exits `0`, so status classification — not the process exit — drives the
+    /// decision (see [`Self::parse_sparse_response`]).
+    fn crates_io_versions(crate_name: &str) -> io::Result<Vec<String>> {
+        Self::validate_crate_name(crate_name)?;
+        let url = format!(
+            "https://index.crates.io/{}",
+            Self::sparse_index_path(crate_name)
+        );
+        let write_out = format!("{}%{{http_code}}", Self::HTTP_CODE_MARKER);
+        let out = Command::new("curl")
+            .args(["--silent", "--show-error", "--location", "--max-time", "30"])
+            .arg("--write-out")
+            .arg(&write_out)
+            .arg(&url)
+            .stdin(Stdio::null())
+            .output()?;
+        if !out.status.success() {
+            // Network-level failure (DNS/connect/timeout): curl exits non-zero and
+            // reports HTTP status 000. Fail CLOSED — never read as "not published".
+            return Err(io::Error::other(format!(
+                "could not reach the crates.io sparse index for {crate_name:?}: curl exited {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        Self::parse_sparse_response(&stdout)
+    }
 }
 
 impl RegistryQuery for RealRegistryQuery {
     fn published_versions(&self, ecosystem: &str, package: &str) -> io::Result<Vec<String>> {
         match ecosystem {
             "node" => Self::npm_versions(package),
+            "rust" => Self::crates_io_versions(package),
             other => Err(io::Error::other(format!(
                 "no registry query wired for ecosystem '{other}' yet"
             ))),
@@ -683,5 +832,113 @@ impl JournalStore for RealJournalStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(e) => Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The sparse-index directory-prefix convention, exactly as cargo lays it out.
+    #[test]
+    fn sparse_index_path_follows_cargo_prefix_convention() {
+        assert_eq!(RealRegistryQuery::sparse_index_path("a"), "1/a");
+        assert_eq!(RealRegistryQuery::sparse_index_path("no"), "2/no");
+        assert_eq!(RealRegistryQuery::sparse_index_path("cfg"), "3/c/cfg");
+        assert_eq!(RealRegistryQuery::sparse_index_path("serde"), "se/rd/serde");
+        // ossctl's own crates — the dogfood targets.
+        assert_eq!(
+            RealRegistryQuery::sparse_index_path("ossctl-core"),
+            "os/sc/ossctl-core"
+        );
+        // The name is lowercased; hyphens are preserved.
+        assert_eq!(
+            RealRegistryQuery::sparse_index_path("Ossctl-Core"),
+            "os/sc/ossctl-core"
+        );
+    }
+
+    #[test]
+    fn parse_sparse_index_collects_versions_including_yanked() {
+        // A trimmed-down but shape-accurate sparse-index body: three releases, the
+        // middle one yanked. All three must appear — a yanked version still holds
+        // its slot, so re-publishing it would be rejected.
+        let body = concat!(
+            r#"{"name":"tool","vers":"0.9.0","yanked":false}"#,
+            "\n",
+            r#"{"name":"tool","vers":"1.0.0","yanked":true}"#,
+            "\n",
+            r#"{"name":"tool","vers":"1.1.0","yanked":false}"#,
+            "\n",
+        );
+        let versions = RealRegistryQuery::parse_sparse_index(body).unwrap();
+        assert_eq!(versions, vec!["0.9.0", "1.0.0", "1.1.0"]);
+    }
+
+    #[test]
+    fn parse_sparse_index_blank_lines_are_skipped() {
+        let body = "\n{\"name\":\"tool\",\"vers\":\"1.0.0\",\"yanked\":false}\n\n";
+        assert_eq!(
+            RealRegistryQuery::parse_sparse_index(body).unwrap(),
+            vec!["1.0.0"]
+        );
+    }
+
+    #[test]
+    fn parse_sparse_index_rejects_malformed_line() {
+        // A line with no `vers` field must fail closed, not silently drop.
+        let body = r#"{"name":"tool","yanked":false}"#;
+        assert!(RealRegistryQuery::parse_sparse_index(body).is_err());
+        // Non-JSON garbage likewise fails closed.
+        assert!(RealRegistryQuery::parse_sparse_index("not json").is_err());
+    }
+
+    #[test]
+    fn parse_sparse_response_200_returns_versions() {
+        let stdout = format!(
+            "{}{}200",
+            r#"{"name":"tool","vers":"1.0.0","yanked":false}"#,
+            RealRegistryQuery::HTTP_CODE_MARKER
+        );
+        assert_eq!(
+            RealRegistryQuery::parse_sparse_response(&stdout).unwrap(),
+            vec!["1.0.0"]
+        );
+    }
+
+    #[test]
+    fn parse_sparse_response_404_is_empty_not_error() {
+        // 404 = crate has never been published = the legitimate "missing" signal.
+        let stdout = format!("{}404", RealRegistryQuery::HTTP_CODE_MARKER);
+        assert_eq!(
+            RealRegistryQuery::parse_sparse_response(&stdout).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn parse_sparse_response_unreachable_fails_closed() {
+        // HTTP status 000: curl never completed a transfer (DNS/connect failure).
+        // Must be Err, never an empty Vec that would read as "not published".
+        let stdout = format!("{}000", RealRegistryQuery::HTTP_CODE_MARKER);
+        assert!(RealRegistryQuery::parse_sparse_response(&stdout).is_err());
+        // A server-side 5xx is equally "unknown" and fails closed.
+        let stdout = format!("{}503", RealRegistryQuery::HTTP_CODE_MARKER);
+        assert!(RealRegistryQuery::parse_sparse_response(&stdout).is_err());
+        // A response with no status marker at all (curl produced no write-out)
+        // cannot be classified and must fail closed rather than guess.
+        assert!(RealRegistryQuery::parse_sparse_response("some body, no marker").is_err());
+    }
+
+    #[test]
+    fn validate_crate_name_rejects_suspicious_input() {
+        assert!(RealRegistryQuery::validate_crate_name("ossctl-core").is_ok());
+        assert!(RealRegistryQuery::validate_crate_name("serde_json").is_ok());
+        // Empty, flag-like, path-traversing, or otherwise out-of-charset names.
+        assert!(RealRegistryQuery::validate_crate_name("").is_err());
+        assert!(RealRegistryQuery::validate_crate_name("-oops").is_err());
+        assert!(RealRegistryQuery::validate_crate_name("a/b").is_err());
+        assert!(RealRegistryQuery::validate_crate_name("a b").is_err());
+        assert!(RealRegistryQuery::validate_crate_name("a.b").is_err());
     }
 }
