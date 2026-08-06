@@ -2,7 +2,7 @@
 created: 2026-08-06
 updated: 2026-08-06
 type: bug
-status: in-progress
+status: fixed
 priority: high
 epic: ossctl-phase4-build
 commits:
@@ -12,6 +12,9 @@ commits:
   summary: 'add index-independent cargo check gate (review fix: prevent compile-error torn release)'
 - hash: ce85309
   summary: interleave build+publish for =-pinned cargo dependents (adapter defers dependent packaging into cargo publish; ADR-0002 amendment; interleave+resume tests)
+- hash: 35f9c23
+  summary: registry-aware defer predicate (defer only for not-yet-published deps; fail-closed) + /llm-review fixes; follow-ups filed
+closed: 2026-08-06
 ---
 
 # release cut build-phase can't package a dependent crate whose =-pinned dep isn't published yet
