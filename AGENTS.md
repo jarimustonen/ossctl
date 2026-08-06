@@ -61,34 +61,53 @@ app beyond what the ADRs already fix.
   as an owned Phase-3 act — no confirmation needed. Preconditions still hold: the green gate
   passes, and `cargo publish` runs `--dry-run` first. crates.io publishes are irreversible
   (yank-only), so never publish red, and report each step.
+- **The ENGINE-DRIVEN cut (`ossctl release cut`) is fully autonomous — NO go/no-go checkpoint,
+  ever** (maintainer decision, 2026-08-06). Running the release *through the engine* — the full
+  multi-target flow (crates.io ×2 + cargo-dist binaries + the Homebrew tap) — requires **no
+  permission and no pause before the irreversible publish**, not for the first-ever engine cut,
+  not for the homebrew leg (the homebrew leg is the most important target — it must be cut, not
+  dropped). Do **not** stop to ask "shall I cut?" — just run the recipe end to end and report
+  as you go. The safety is structural, not a human gate: `ossctl release plan` seals a
+  content-addressed plan (a side-effect-free preview the agent inspects), the coordinator runs
+  `dry-run-all` before any publish, `ossctl-core`→`ossctl` ordering + index-wait guard the
+  crates.io partial-publish case, and `ossctl release resume`/`abandon` recover an interrupted
+  run. Still: green gate first, dry-run/plan first, never publish red, report each phase.
   - **Shipped: 0.1.0 (2026-08-04), 0.1.1 (2026-08-05), 0.1.2 (2026-08-05).** All on
     crates.io (`ossctl` + `ossctl-core`), GitHub Releases (cross-platform: macOS aarch64,
     Linux musl x86_64+aarch64, Windows, `.sh`+`.ps1` installers), and the Homebrew tap
     `jarimustonen/homebrew-ossctl`. Repo is **public**. 0.1.2 added `ossctl dist generate`
     (the engine generates a downstream project's cross-platform release infra from its
     contract).
-  - **The recipe is HAND-DRIVEN (not `ossctl release cut`), and NOT a clean auto-chain —
-    it has four manual/fragile steps (proven cutting 0.1.2).** The engine cut is still not
-    safe for ossctl's cargo-dist+homebrew flow (`gh-releases / cargo-dist` returns
-    `Unsupported` in `publish()` — a partial-publish trap; homebrew tarball sha256 only
-    exists post-tag) — tracked by `release-engine-cut-cargo-dist-flow`. The ACTUAL current
-    recipe:
+  - **The ENGINE recipe (`ossctl release cut`) is now the primary path** (implemented stint
+    #12; **0.2.0 is the first engine-driven cut**). ossctl's own `OSS-RELEASE.md` declares the
+    four targets (ossctl-core + ossctl on crates.io; ossctl on gh-releases/cargo-dist; ossctl
+    on homebrew) plus a `distribution` block with `homebrew_tap: jarimustonen/homebrew-ossctl`.
+    The recipe:
     1. Bump `workspace.package.version` + the internal `=X.Y.Z` dep in lockstep → finalize
-       CHANGELOG → `cargo build` (refresh lock) → `cargo publish -p ossctl-core --dry-run`
-       → commit → push `main` → `git tag vX.Y.Z && git push origin vX.Y.Z`.
-    2. The tag triggers `release.yml` (cargo-dist): builds the cross-platform matrix +
-       creates the GitHub Release. **macOS aarch64 builds on the personal `hauis`
+       CHANGELOG → `cargo build` (refresh lock) → `cargo publish -p ossctl-core --dry-run` →
+       commit → push `main`.
+    2. `ossctl release plan --version X.Y.Z` (seal + inspect; side-effect-free) → then
+       `ossctl release cut --plan <id> --version X.Y.Z`. The engine runs
+       `dry-run-all → build-all → publish-all (crates.io, dep-ordered, index-waited) → tag →
+       dist (homebrew: real sha256 pushed to the tap)`. It **skips** the CI-delegated
+       cargo-dist target and **delegates the GitHub Release to CI** (Option 1,
+       `ci_owns_github_release`) — so the engine does crates.io + tag + homebrew; cargo-dist
+       CI does the binaries + the GitHub Release. No manual `gh workflow run publish-crates.yml`
+       and no manual homebrew bump anymore — the engine owns both.
+    3. The pushed tag triggers `release.yml` (cargo-dist): builds the cross-platform matrix +
+       creates/finalizes the GitHub Release. **macOS aarch64 builds on the personal `hauis`
        self-hosted runner** — if it 400s, clear hauis's stale token
        (`ssh hauis 'git config --global --unset-all "http.https://github.com/.extraheader"'`)
        and `gh run rerun <release-run-id> --failed`. (Coupling tracked:
        `release-macos-hauis-coupling`.)
-    3. **crates.io does NOT auto-publish** — a GITHUB_TOKEN-created release does not cascade
-       `release: published`, so `publish-crates.yml` never auto-fires. Publish manually:
-       `gh workflow run publish-crates.yml` (uses `CARGO_REGISTRY_TOKEN`; core→cli, dep
-       order), then verify on crates.io. (Tracked: `publish-crates-no-auto-trigger`.)
-    4. **Bump the Homebrew tap by hand** after the GitHub Release exists — the source
-       formula's `url`+`sha256` do not auto-update (it silently served 0.1.0 through the
-       whole 0.1.1 lifetime). (Tracked: `homebrew-tap-bump-manual-and-missed`.)
+    4. Post-cut, verify the delegated Release exists: `gh release view vX.Y.Z` (until
+       `release-verify-delegated-github-release` automates it into `ossctl release verify`).
+  - **Fallback (manual recipe), if an engine cut fails partway:** the old hand-driven path
+    still works — `gh workflow run publish-crates.yml` for crates, a hand `brew bump-formula-pr`
+    for the tap — and `ossctl release resume <run>` / `abandon <run>` recover an interrupted
+    engine run. The three pre-engine defects (`publish-crates-no-auto-trigger`,
+    `homebrew-tap-bump-manual-and-missed`, `release-macos-hauis-coupling`) are now mostly
+    subsumed by the engine cut; hauis coupling is the surviving CI-side item.
 - **Git: `pull --rebase` → `push` is always allowed, no confirmation** (maintainer
   decision, 2026-08-05). On this repo the agent may run the pull-rebase-push sequence
   (`git pull --rebase origin main` then `git push origin main`, and pushing tags) on its own
