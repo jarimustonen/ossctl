@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 <!-- oss-changelog:unreleased-end -->
 
+## [0.2.2] - 2026-08-06
+
+### Added
+- **crates.io `RegistryQuery` for ecosystem `rust`** — the release engine's publish/reconcile
+  path can now determine a crate@version's already-published state by querying the crates.io
+  **sparse index** (`index.crates.io`, via `curl` with a bounded `--max-time`; no new HTTP
+  dependency). Previously only `node` (npm) was wired, so a `rust` cut's publish phase failed
+  **closed** with *"no registry query wired for ecosystem 'rust' yet"* — the last blocker
+  before the engine could cut ossctl itself. The query is defensively fail-closed: a genuine
+  registry-unreachable (network error, unexpected HTTP status, malformed index line) returns an
+  error rather than a false "not published"; a `404`/`410` is the legitimate "not yet published"
+  signal (empty result); yanked versions count as published (their version slot is occupied).
+  This completes the engine's registry-aware defer/idempotency predicate for crates.io — the
+  cut of ossctl itself now runs end-to-end through its own engine (dogfood).
+
 ## [0.2.1] - 2026-08-06
 
 ### Fixed
