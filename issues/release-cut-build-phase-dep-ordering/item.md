@@ -2,12 +2,15 @@
 created: 2026-08-06
 updated: 2026-08-06
 type: bug
-status: in-progress
+status: fixed
 priority: high
 epic: ossctl-phase4-build
 commits:
 - hash: bfb05d3
   summary: build-phase --no-verify + faithful dry-run preflight
+- hash: a75db05
+  summary: 'add index-independent cargo check gate (review fix: prevent compile-error torn release)'
+closed: 2026-08-06
 ---
 
 # release cut build-phase can't package a dependent crate whose =-pinned dep isn't published yet
