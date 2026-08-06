@@ -24,3 +24,25 @@ Surfaced by the 4-model `/llm-review` of ADR-0004 (`cargo-adapter-multitarget-do
 Requires extending the `RegistryQuery` port (per-version checksum) and adding journal publish-attempt events + new `AdapterError` variants. Larger than the ADR-0004 fix; deliberately deferred. `release-engine-cut-cargo-dist-flow` and this together gate "cargo cut is production-safe end-to-end".
 
 Refs-Issue: cargo-adapter-multitarget-double-publish
+
+## Update 2026-08-06 — `RegistryQuery` version-existence arm is now wired (partial progress on #4)
+
+`release-publish-registry-query-not-wired` (commits 8fc1e85/483ce0b) landed the
+crates.io `RegistryQuery` for ecosystem `rust`: `published_versions` now returns the
+real version list from the sparse index, so the **version-existence** half of point
+#4's prerequisite chain exists (proven end-to-end against live crates.io —
+`ossctl-core@0.2.0` → `matches`, `@99.0.0` → `missing`). Still open here:
+
+- **Point #4 (checksum):** the port still returns only version *strings*, not the
+  per-version `cksum`. `classify_receipt`'s `Conflicts` branch remains undetectable
+  until a checksum-returning capability is added. (The sparse-index body the new arm
+  already fetches *carries* `cksum` per line — a checksum arm can read it from the
+  same response, no extra request.)
+- **Point #2 (stale-negative after an ambiguous publish):** the new arm reads the
+  sparse index, which lags a just-accepted upload. The `/llm-review` of the wiring
+  re-raised exactly this: a resume probing during the publish→index window can see
+  the version absent (`Ok(false)`) and retry an irreversible upload. The
+  publish-*attempt* journaling fact proposed in #2 is still the fix; the wiring did
+  not address it (out of scope).
+
+Refs-Issue: release-publish-registry-query-not-wired

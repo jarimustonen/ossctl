@@ -2,12 +2,13 @@
 created: 2026-08-06
 updated: 2026-08-06
 type: bug
-status: in-progress
+status: fixed
 priority: high
 epic: ossctl-phase4-build
 commits:
 - hash: 8fc1e85
   summary: wire crates.io RegistryQuery for ecosystem rust (harvested stranded draft)
+closed: 2026-08-06
 ---
 
 # release publish-phase fails closed: no crates.io RegistryQuery wired for rust
