@@ -2,7 +2,7 @@
 created: 2026-08-06
 updated: 2026-08-06
 type: bug
-status: fixed
+status: open
 priority: high
 epic: ossctl-phase4-build
 commits:
@@ -10,7 +10,6 @@ commits:
   summary: build-phase --no-verify + faithful dry-run preflight
 - hash: a75db05
   summary: 'add index-independent cargo check gate (review fix: prevent compile-error torn release)'
-closed: 2026-08-06
 ---
 
 # release cut build-phase can't package a dependent crate whose =-pinned dep isn't published yet
@@ -68,3 +67,29 @@ its own dep is published. Options:
 Prefer (1) + (3): `--no-verify` in build, and a dry-run that mirrors the real build so the barrier
 never enters publish-all on a plan that would fail to build. Preserve ADR-0002 phase-barrier
 invariants and ADR-0004 (one target = one publish unit).
+
+## Reopen Notes — 2026-08-06
+
+_Add rationale for reopening here._
+
+## Comments
+
+### 2026-08-06T08:48:06Z · @claude
+
+REOPENED after the 0.2.0 re-cut (run 01KZB40Y…) failed identically at dry-run.
+
+The `--no-verify` fix (bfb05d3) is INSUFFICIENT. `cargo package --registry crates-io -p ossctl --no-verify`
+STILL fails: `--no-verify` only skips the verify *compile* build — cargo still resolves the package's
+deps against the crates.io index when "preparing the local package for uploading", because a published
+`.crate` cannot reference a path dep. So `ossctl` (which pins `ossctl-core = "=0.2.0"`) fundamentally
+CANNOT be packaged until `ossctl-core 0.2.0` is actually published to crates.io.
+
+The worker's OTHER change (making dry-run mirror the build) IS good and should stay — it now fails at
+dry-run (before build/publish), which is even safer.
+
+REAL FIX (architectural — likely an ADR-0002 amendment): the strict `build-all → publish-all` phase
+barrier is incompatible with cargo's multi-crate `=`-pinned publish model. For same-ecosystem
+dep-ordered cargo targets the coordinator must INTERLEAVE: publish `ossctl-core` (real publish) →
+wait for index → THEN package+publish `ossctl`. The dependent's package step must happen AFTER its
+dep is published, not up-front in a global build phase. This is what the manual recipe does and what
+cargo requires. Needs design (phase-barrier vs cargo reality) + review; consider /worktree-technical-decision.
