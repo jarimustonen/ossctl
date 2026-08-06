@@ -132,10 +132,13 @@ LANE B — contract schema (crates/ossctl-core/src/contract/schema.rs — SEQUEN
     distribution-extra-fields            (extra_fields forward-compat on nested distribution structs)
     distribution-installer-platform-crosscheck (validate installer/platform coherence)
     distribution-platforms-adapter-neutral     (platforms field adapter-neutrality)
-LANE C — release CI/pipeline infra (.github/workflows/**, dist-workspace.toml — SEQUENCE strictly) — MOSTLY SUBSUMED BY LANE A (see note), keep only as insurance for the manual recipe until the engine cut lands
-    publish-crates-no-auto-trigger       (bug — moot for ossctl once LANE A cargo-dist-flow lands: engine publishes crates directly, doesn't rely on release:published cascade)
+LANE C — release CI/pipeline infra (.github/workflows/**, dist-workspace.toml — SEQUENCE strictly) — MOSTLY SUBSUMED BY LANE A (see note), keep only as insurance for the manual/fallback recipe + other repos
+    publish-crates-no-auto-trigger       (bug — moot for ossctl's engine cut (engine publishes crates directly); DUP-cluster with publish-crates-release-trigger below)
+    publish-crates-release-trigger       (bug — same root as above with a VERIFIED fix: trigger publish-crates.yml on the version-tag push, not release:published (GITHUB_TOKEN emits no release event). Proven in glasspad. Fold with publish-crates-no-auto-trigger. Filed via 0f7c637)
     homebrew-tap-bump-manual-and-missed  (bug — SUBSUMED by LANE A cargo-dist-flow's post-tag homebrew phase)
     release-macos-hauis-coupling         (improvement — the ONE LANE C survivor: cross-platform build is CI-delegated so engine can't own it. Personal hauis infra → arguably a HOMEBASE concern; do last / defer)
+UNLANED — /oss-* family completeness (skill/template work; no release-engine hot file; run anytime):
+    oss-dist-channel-generator           (feature — no /oss-* member generates the distribution channel (dist-workspace.toml + release.yml + tap scaffold + secrets) from a contract's gh-releases/homebrew targets; `ossctl dist generate` does the config half but no skill wraps it + scaffolds the tap. Surfaced on glasspad 0.2.1. Filed via 0f7c637)
 ```
 <!-- execution-dag:end -->
 
