@@ -96,7 +96,7 @@ homebase-adjacent. So do NOT harden LANE C now — that polishes a manual path w
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: << CUT 0.2.0 THROUGH THE ENGINE >>   (minimal safe path COMPLETE — all 6 code prereqs landed & green. Awaiting maintainer go on the first engine-driven cut; dry-run/plan-validate first)
+GLOBAL HEAD-OF-LINE: release-cut-build-phase-dep-ordering   (LANE A — the first 0.2.0 engine cut FAILED SAFELY here (run 01KZB29W…, nothing published); build-all packages `ossctl` before `ossctl-core=0.2.0` is on the index. Fix, then re-cut 0.2.0)
 LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly) — Track B: make `ossctl release cut` cut ossctl ITSELF (0.2.0 dogfooding proof)
   [DONE stint #12] release-cut-multi-target-ecosystem       (fixed — >1 target/ecosystem now cut in dep order)
   [DONE stint #12] cargo-adapter-multitarget-double-publish (fixed — Option 1 "one target = one publish unit"; ADR-0004; no more double-publish of ossctl-core)
@@ -104,8 +104,9 @@ LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly)
   [DONE stint #12] coordinator-release-vs-cargo-dist-ownership (done — Option 1: coordinator delegates GH Release to CI when a CI-delegated target is present; ci_owns_github_release flag, seal v3)
   [DONE stint #12] cargo-publish-pin-crates-io-registry     (fixed — pinned cargo adapter to crates.io, rejects other registries)
   [DONE stint #12] release-list-abandon-not-implemented     (fixed — `release list` + `abandon` implemented over the journal; in-flight gate + recovery net)
-  --- minimal safe path to the 0.2.0 engine cut: COMPLETE (all 6 above landed & green) ---
-  ▶ << CUT 0.2.0 THROUGH the engine — the dogfooding proof that retires the 4-step manual recipe.
+  --- the first engine cut (0.2.0) was ATTEMPTED and failed SAFELY (pre-publish) → one more blocker ---
+  ▶ release-cut-build-phase-dep-ordering (bug, HIGH — build-all runs `cargo package -p ossctl` whose verify build needs `ossctl-core=0.2.0` on the index before it's published → build-phase fail before any publish. Dry-run didn't catch it (no verify build). Fix: `--no-verify` in build + make dry-run mirror the real build. THEN re-cut 0.2.0)
+    << then RE-CUT 0.2.0 THROUGH the engine — the dogfooding proof that retires the 4-step manual recipe.
      · PROCEDURE (1) update ossctl's OSS-RELEASE.md contract to declare the full target set
      · — 2 crates.io (ossctl-core + ossctl) + gh-releases/cargo-dist + homebrew — if not already;
      · (2) `ossctl release cut --dry-run` / seal-plan stage to validate the plan WITHOUT publishing;
