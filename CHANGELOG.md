@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 <!-- oss-changelog:unreleased-end -->
 
+## [0.2.0] - 2026-08-06
+
+The release engine can now cut a multi-target, cross-channel release end to end — including
+ossctl's own (two crates.io crates + cargo-dist binaries + a Homebrew tap).
+
+### Added
+- **`ossctl release list` and `ossctl release abandon`** — inspect release runs (active and
+  past) and terminally mark an interrupted run un-resumable, over the event-sourced journal.
+  These back the "is a cut already in flight?" gate and interrupted-run recovery.
+
+### Changed
+- **`ossctl release cut` now drives a multi-target, cross-channel release end to end.** A
+  contract with several publish targets across crates.io, cargo-dist binaries, and a Homebrew
+  tap cuts in one run:
+  - **Multiple targets in one ecosystem** are published in dependency order (e.g. `ossctl-core`
+    before `ossctl`) instead of being rejected.
+  - **One plan target = one publish unit** (ADR-0004): the cargo adapter publishes exactly its
+    own crate and waits for that crate's workspace dependencies to be index-visible first, so a
+    multi-crate cut never double-publishes a shared dependency during the crates.io index lag.
+  - **CI-delegated targets are skipped, not failed** — a cargo-dist / gh-releases target whose
+    binaries are built by the tag-triggered CI workflow no longer traps the publish phase.
+  - **The GitHub Release is left to CI** when a CI-delegated target is present, so the engine and
+    cargo-dist's workflow don't both try to create it.
+  - **Post-tag Homebrew phase** fetches the tag archive, computes its real `sha256`, and finalizes
+    the formula — no hand-filled hash.
+
+### Fixed
+- Cargo publishes are **pinned to crates.io** (`--registry crates-io`) and reject any other
+  registry, preventing a silently misconfigured host from publishing to the wrong destination
+  while ossctl records a crates.io receipt.
+
 ## [0.1.2] - 2026-08-05
 
 ### Added
