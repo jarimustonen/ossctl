@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 <!-- oss-changelog:unreleased-end -->
 
+## [0.2.1] - 2026-08-06
+
+### Fixed
+- **Multi-crate cuts with `=`-pinned internal deps now cut through the engine.** For a workspace
+  whose dependent crate pins its workspace dep by exact version (`ossctl` → `ossctl-core = "=X.Y.Z"`),
+  `ossctl release cut` no longer fails in the build phase trying to package the dependent before its
+  dep exists on the crates.io index. The cargo adapter now **defers packaging a dependent whose
+  `=`-pinned dep is not yet published** into that target's dep-ordered `cargo publish` — so the dep
+  is published and index-visible first, then the dependent packages and publishes against it. The
+  decision is registry-aware and fail-closed (deferral applies only to a not-yet-published internal
+  dep). The outer phase barrier, coordinator-only tagging, and post-tag Homebrew phase are preserved
+  (ADR-0002 amendment; ADR-0004 one-target-one-publish-unit intact). This is the fix that lets ossctl
+  cut *itself* through its own engine.
+
 ## [0.2.0] - 2026-08-06
 
 The release engine can now cut a multi-target, cross-channel release end to end — including
