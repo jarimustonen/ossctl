@@ -5,6 +5,9 @@ type: bug
 status: in-progress
 priority: high
 epic: ossctl-phase4-build
+commits:
+- hash: bfb05d3
+  summary: build-phase --no-verify + faithful dry-run preflight
 ---
 
 # release cut build-phase can't package a dependent crate whose =-pinned dep isn't published yet

@@ -425,7 +425,7 @@ fn every_adapter_has_a_nonzero_timeout() {
 // ── dry_run produces real, side-effect-free command plans ────────────────────
 
 #[test]
-fn dry_run_runs_the_no_verify_package_preflight() {
+fn dry_run_runs_the_index_independent_build_gate_as_preflight() {
     let cmd = FakeCmd::new().with_metadata(&metadata_single("tool", "1.2.3"));
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
@@ -441,21 +441,45 @@ fn dry_run_runs_the_no_verify_package_preflight() {
     let report = resolve(Adapter::CargoPublish).dry_run(&c, &t).unwrap();
 
     assert_eq!(report.adapter, Adapter::CargoPublish);
-    assert_eq!(report.planned_commands.len(), 1);
+    // The preview lists the same index-independent gate build-all runs: a local
+    // `cargo check` then a `--no-verify` package.
+    let rendered: Vec<String> = report
+        .planned_commands
+        .iter()
+        .map(crate::protocol::release::PlannedCommand::rendered)
+        .collect();
     assert_eq!(
-        report.planned_commands[0].rendered(),
-        "cargo package --registry crates-io -p tool --no-verify"
+        rendered,
+        vec![
+            "cargo check -p tool".to_string(),
+            "cargo package --registry crates-io -p tool --no-verify".to_string(),
+        ]
     );
-    // dry_run is a FAITHFUL PREFLIGHT: it reads the workspace graph (read-only)
-    // and then actually runs the same `--no-verify` package the build phase runs,
-    // so a plan that cannot package fails here — not mid-cut. No `cargo publish`
-    // and no `--verify` compile, so it never touches the registry index.
+    // dry_run is a FAITHFUL PREFLIGHT: it reads the workspace graph (read-only) and
+    // then actually runs that same gate, so a plan that cannot compile or package
+    // fails here — not mid-cut. No `cargo publish` and no `--verify` compile, so it
+    // never touches the registry index.
     assert_eq!(
         cmd.calls(),
         vec![
             "cargo metadata --no-deps --format-version 1",
-            "cargo package --registry crates-io -p tool --no-verify"
+            "cargo check -p tool",
+            "cargo package --registry crates-io -p tool --no-verify",
         ]
+    );
+    assert!(
+        !cmd.calls().iter().any(|call| call.contains("publish")),
+        "dry-run executed a publish: {:?}",
+        cmd.calls()
+    );
+    // The publish command a real cut runs is still surfaced as a note.
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("cargo publish --registry crates-io -p tool")),
+        "dry-run dropped the publish note: {:?}",
+        report.notes
     );
 }
 
@@ -531,13 +555,14 @@ fn publish_runs_the_registry_command_and_returns_a_receipt() {
 }
 
 #[test]
-fn cargo_build_packages_no_verify_pinned_to_crates_io() {
-    // `cargo package` must carry `--registry crates-io` (so the build phase packages
-    // against the same registry the publish phase targets, never one resolved from
-    // ambient config) AND `--no-verify` (so the build phase does not run the isolated
-    // verify compile that resolves `=`-pinned workspace deps against the index —
-    // that dep isn't published until publish-all; see
-    // `release-cut-build-phase-dep-ordering`).
+fn cargo_build_runs_the_index_independent_gate() {
+    // The build phase runs a two-step INDEX-INDEPENDENT gate: a local `cargo check`
+    // (the pre-publish compile safety net — catches real compile errors before any
+    // publish, resolving the sibling via its `path` not the index) then a
+    // `cargo package` carrying `--registry crates-io` (same registry the publish phase
+    // targets, never ambient config) AND `--no-verify` (skips the isolated verify
+    // compile that would resolve `=`-pinned workspace deps against the index — that
+    // dep isn't published until publish-all; see `release-cut-build-phase-dep-ordering`).
     let cmd = FakeCmd::new();
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
@@ -557,10 +582,13 @@ fn cargo_build_packages_no_verify_pinned_to_crates_io() {
     assert_eq!(b.artifacts, vec!["tool-1.2.3.crate".to_string()]);
     assert_eq!(
         cmd.calls(),
-        vec!["cargo package --registry crates-io -p tool --no-verify"]
+        vec![
+            "cargo check -p tool",
+            "cargo package --registry crates-io -p tool --no-verify",
+        ]
     );
-    // The build phase must never query the registry index — that is exactly the
-    // resolution `--no-verify` skips.
+    // The build phase must never query the registry index — the check resolves via
+    // the local path and `--no-verify` skips the index-resolving verify.
     assert!(reg.queries().is_empty(), "build queried the registry index");
 }
 
@@ -591,12 +619,15 @@ fn build_phase_packages_both_crates_when_a_pinned_dep_is_not_yet_published() {
         assert_eq!(b.artifacts, vec![format!("{pkg}-0.2.0.crate")]);
     }
 
-    // Both crates packaged with `--no-verify`; the build phase never consulted the
-    // index for the not-yet-published pinned dep.
+    // Both crates cleared the local `cargo check` gate and packaged with
+    // `--no-verify`; the build phase never consulted the index for the
+    // not-yet-published pinned dep.
     assert_eq!(
         cmd.calls(),
         vec![
+            "cargo check -p lib",
             "cargo package --registry crates-io -p lib --no-verify",
+            "cargo check -p bin",
             "cargo package --registry crates-io -p bin --no-verify",
         ]
     );
@@ -627,12 +658,13 @@ fn dry_run_preflights_a_dependent_without_the_pinned_dep_on_the_index() {
     );
     let report = resolve(Adapter::CargoPublish).dry_run(&c, &t).unwrap();
 
-    // The preflight ran the read-only graph query then the `--no-verify` package,
-    // and never queried the index.
+    // The preflight ran the read-only graph query then the index-independent gate
+    // (local check + `--no-verify` package), and never queried the index.
     assert_eq!(
         cmd.calls(),
         vec![
             "cargo metadata --no-deps --format-version 1",
+            "cargo check -p bin",
             "cargo package --registry crates-io -p bin --no-verify",
         ]
     );
@@ -675,14 +707,44 @@ fn dry_run_fails_when_the_package_preflight_fails() {
 }
 
 #[test]
+fn build_phase_fails_on_a_genuine_compile_error_before_any_publish() {
+    // Done criterion #3 (the important half): a crate that genuinely does not COMPILE
+    // must fail the BUILD phase — not slip through `--no-verify` packaging and only
+    // fail later in publish-all's `cargo publish`, AFTER the dependency crate is
+    // already irreversibly published (the partial-publish trap). The index-independent
+    // `cargo check` gate catches it in build-all, before any publish.
+    let cmd =
+        FakeCmd::new().fail_calls_containing("cargo check", 101, "error[E0308]: mismatched types");
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.2.3",
+    );
+    let err = resolve(Adapter::CargoPublish).build(&c, &t).unwrap_err();
+    match err {
+        AdapterError::Command { code, .. } => assert_eq!(code, Some(101)),
+        other => panic!("expected a Command error from the failing compile, got {other:?}"),
+    }
+    // It failed on the compile gate — packaging was never reached.
+    assert_eq!(cmd.calls(), vec!["cargo check -p tool"]);
+}
+
+#[test]
 fn build_phase_propagates_a_real_package_failure() {
-    // Done criterion #3: a real build error (a crate that genuinely doesn't package)
-    // must still fail the BUILD phase — `--no-verify` must not turn `build` into a
-    // no-op that swallows a failing `cargo package`.
+    // Done criterion #3 (packaging half): a packaging failure (e.g. a crate that
+    // compiles but cannot package — a missing included file, a bad manifest) must
+    // still fail the BUILD phase; `--no-verify` must not turn `build` into a no-op
+    // that swallows a failing `cargo package`.
     let cmd = FakeCmd::new().fail_calls_containing(
         "cargo package",
         101,
-        "error[E0432]: unresolved import",
+        "error: invalid inclusion of reserved file name",
     );
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
@@ -700,6 +762,14 @@ fn build_phase_propagates_a_real_package_failure() {
         AdapterError::Command { code, .. } => assert_eq!(code, Some(101)),
         other => panic!("expected a Command error from the failing package, got {other:?}"),
     }
+    // The compile gate passed; packaging is where it failed.
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "cargo check -p tool",
+            "cargo package --registry crates-io -p tool --no-verify",
+        ]
+    );
 }
 
 #[test]
@@ -1223,7 +1293,8 @@ fn target_dry_run_reports_its_own_publish_and_the_dep_wait() {
     );
     let report = resolve(Adapter::CargoPublish).dry_run(&c, &t).unwrap();
 
-    // Exactly one preflight command — the target's own `--no-verify` package.
+    // The preflight gate for the target's own crate: local check + `--no-verify`
+    // package (exactly what build-all runs), never another target's crate.
     let rendered: Vec<String> = report
         .planned_commands
         .iter()
@@ -1231,7 +1302,10 @@ fn target_dry_run_reports_its_own_publish_and_the_dep_wait() {
         .collect();
     assert_eq!(
         rendered,
-        vec!["cargo package --registry crates-io -p bin --no-verify"]
+        vec![
+            "cargo check -p bin".to_string(),
+            "cargo package --registry crates-io -p bin --no-verify".to_string(),
+        ]
     );
     // The note names the workspace dependency the real cut waits to index first.
     assert!(

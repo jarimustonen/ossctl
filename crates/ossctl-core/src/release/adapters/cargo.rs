@@ -154,41 +154,49 @@ impl ReleaseAdapter for CargoAdapter {
         // preflight must exercise the exact registry-pinned build a real cut runs, and
         // a misconfigured registry is a fail-fast error, not a plannable command.
         let registry = self.crates_io_registry(t)?;
-        // FAITHFUL PREFLIGHT: actually run the same `cargo package --no-verify` the
-        // build phase runs, so a plan that cannot even package fails HERE at
-        // dry-run-all — before any external effect — rather than passing dry-run and
-        // failing mid-cut in build-all. (The old dry-run only *described* a
-        // `cargo publish --dry-run` without running it, so a build-phase package
-        // failure slipped past the preflight.) `--no-verify` is essential: it keeps
-        // this preflight from resolving a not-yet-published `=X.Y.Z` workspace dep
-        // against the crates.io index — the very failure this whole change fixes — so
-        // dry-run validates what *can* be validated pre-publish (manifest, packaging)
-        // and never false-fails on the unpublished dep. The real compile/verify
-        // happens in publish-all's `cargo publish`, after the dep is index-visible.
+        // FAITHFUL PREFLIGHT: actually run the SAME index-independent build gate the
+        // build phase runs — `cargo check -p <pkg>` (local workspace compile) then
+        // `cargo package --no-verify` (tarball) — so a plan that cannot compile or
+        // package fails HERE at dry-run-all, before any external effect, rather than
+        // passing dry-run and failing mid-cut in build-all. (The old dry-run only
+        // *described* a `cargo publish --dry-run` without running it, so a build-phase
+        // failure slipped past the preflight.) Neither command resolves the
+        // not-yet-published `=X.Y.Z` workspace dep against the crates.io index (the
+        // check uses the sibling `path`; `--no-verify` skips the index-resolving verify
+        // compile), so the preflight validates what *can* be validated pre-publish and
+        // never false-fails on the unpublished dep. See `build` for the full rationale
+        // of each step; the real end-to-end verify happens in publish-all's
+        // `cargo publish`, after the dep is index-visible.
         //
-        // `cargo package` is local + self-overwriting (it writes `target/package/`,
-        // the same artifact build-all produces), so this keeps dry-run
-        // re-runnable and free of any *external* side effect (ADR-0002). One plan
-        // target = one publish unit: exactly this target's own package.
+        // Both commands are local + self-overwriting (the package writes
+        // `target/package/`, the same artifact build-all produces; `check` only warms
+        // `target/`), so dry-run stays re-runnable and free of any *external* side
+        // effect (ADR-0002). One plan target = one publish unit: exactly this target's
+        // own package.
         //
         // `target_workspace_deps` runs read-only `cargo metadata` first, validating
         // the target is a publishable member and listing the workspace dependencies a
         // real cut waits to be index-visible before publishing.
         let deps = target_workspace_deps(ctx, t)?;
-        let package_cmd = PlannedCommand::new(
-            "cargo",
-            &[
-                "package",
-                "--registry",
-                registry,
-                "-p",
-                &t.package,
-                "--no-verify",
-            ],
-        );
-        run_all(ctx, std::slice::from_ref(&package_cmd))?;
-        let planned_commands = vec![package_cmd];
-        let mut notes = Vec::new();
+        let planned_commands = vec![
+            PlannedCommand::new("cargo", &["check", "-p", &t.package]),
+            PlannedCommand::new(
+                "cargo",
+                &[
+                    "package",
+                    "--registry",
+                    registry,
+                    "-p",
+                    &t.package,
+                    "--no-verify",
+                ],
+            ),
+        ];
+        run_all(ctx, &planned_commands)?;
+        let mut notes = vec![format!(
+            "publishes with `cargo publish --registry {registry} -p {}` in publish-all",
+            t.package
+        )];
         if !deps.is_empty() {
             let chain = deps
                 .iter()
@@ -226,31 +234,49 @@ impl ReleaseAdapter for CargoAdapter {
             // against a different registry than the publish phase will target.
             let registry = self.crates_io_registry(t)?;
             (
-                // `--no-verify`: package the `.crate` tarball WITHOUT the isolated
-                // verify compile. That verify build resolves the crate's deps
-                // against the crates.io *index*, so for a dependent crate whose
-                // intra-workspace dep is pinned `=X.Y.Z` (what `/oss-init` emits),
-                // it fails — the dep is only *published* later in publish-all, not
-                // yet on the index during build-all (the phase barrier is
-                // build-ALL → publish-ALL; see `release-cut-build-phase-dep-ordering`).
-                // The tarball is still produced under `--no-verify`. The real
-                // compile/verify is deferred to publish-all: `cargo publish` runs
-                // its own verify build, and by then the dependency has been
-                // published AND index-waited (dep-ordered publish + `wait_for_index`,
-                // ADR-0004), so it resolves. This keeps build-all
-                // index-independent — no build-time cross-target ordering leaks into
-                // the adapter (ADR-0002/0004 preserved).
-                vec![PlannedCommand::new(
-                    "cargo",
-                    &[
-                        "package",
-                        "--registry",
-                        registry,
-                        "-p",
-                        &t.package,
-                        "--no-verify",
-                    ],
-                )],
+                // A two-step, INDEX-INDEPENDENT build gate (see
+                // `release-cut-build-phase-dep-ordering`):
+                //
+                // 1. `cargo check -p <pkg>` compiles the crate through the WORKSPACE.
+                //    There the `path = "…"` on an intra-workspace dep shadows its
+                //    `version = "=X.Y.Z"` requirement, so the compile resolves the
+                //    dependency against the sibling *on disk* — never the crates.io
+                //    index. This is the PRE-PUBLISH SAFETY NET: it fails build-all on a
+                //    genuine compile error (type/trait/API mismatch, missing item)
+                //    HERE, before any irreversible publish. Without it, the only
+                //    remaining compile check is `cargo publish`'s own verify build in
+                //    publish-all — which runs AFTER the dependency crate is already
+                //    published, so a compile error there would TEAR the release (the
+                //    dependency live on crates.io, the dependent unpublishable). That
+                //    is exactly the partial-publish trap ADR-0004 exists to prevent.
+                //
+                // 2. `cargo package --no-verify` produces the `.crate` tarball WITHOUT
+                //    the isolated verify compile — and it is that verify build (not
+                //    packaging itself) which resolves the `=X.Y.Z` dep against the
+                //    *index* and fails during build-all, because the dep is only
+                //    *published* later, in publish-all (the barrier is
+                //    build-ALL → publish-ALL). The tarball is still produced. The full
+                //    end-to-end verify against the real registry still happens in
+                //    publish-all's `cargo publish`, by which point the dependency has
+                //    been published AND index-waited (dep-ordered publish +
+                //    `wait_for_index`, ADR-0004), so it resolves.
+                //
+                // Both commands are local + per-target, so no build-time cross-target
+                // ordering leaks into the adapter (ADR-0002/0004 preserved).
+                vec![
+                    PlannedCommand::new("cargo", &["check", "-p", &t.package]),
+                    PlannedCommand::new(
+                        "cargo",
+                        &[
+                            "package",
+                            "--registry",
+                            registry,
+                            "-p",
+                            &t.package,
+                            "--no-verify",
+                        ],
+                    ),
+                ],
                 vec![format!("{}-{}.crate", t.package, t.version)],
             )
         };
