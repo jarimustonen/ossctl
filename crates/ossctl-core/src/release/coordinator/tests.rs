@@ -534,7 +534,7 @@ fn publish_failure_stops_journals_and_does_not_roll_back() {
 }
 
 #[test]
-fn a_failed_build_never_publishes_or_tags() {
+fn a_failed_package_preflight_stops_at_dry_run_before_publish_or_tag() {
     let store = FakeStore::default();
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
@@ -558,8 +558,11 @@ fn a_failed_build_never_publishes_or_tags() {
         homebrew_tap: None,
         license: None,
     };
-    // `dry_run` shells out to nothing, so fail the build step (`cargo package`)
-    // and assert publish never runs and no tag is created.
+    // The cargo build/package step is now `cargo package --no-verify`, and the
+    // dry-run phase runs that SAME preflight (a faithful preflight — see
+    // `release-cut-build-phase-dep-ordering`), so a package failure surfaces at
+    // dry-run-all, before any external effect. Fail `cargo package` and assert the
+    // cut stops at the dry-run barrier — publish never runs and no tag is created.
     let cmd = FakeCmd::failing_on("package");
     let ctx = EffectCtx {
         runner: &cmd,
@@ -572,13 +575,13 @@ fn a_failed_build_never_publishes_or_tags() {
     assert!(matches!(
         err,
         CutError::PhaseFailed {
-            phase: Phase::Build,
+            phase: Phase::DryRun,
             ..
         }
     ));
     assert!(
         !cmd.calls().iter().any(|c| c.contains("publish")),
-        "published after a failed build"
+        "published after a failed package preflight"
     );
     assert!(journal.state().published.is_empty());
     assert!(journal.state().tags.is_empty());

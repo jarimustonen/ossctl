@@ -209,15 +209,19 @@ impl RegistryQuery for ErrForRegistry {
 }
 
 /// Programmable registry: maps `(ecosystem, package)` to a version list, or errors.
+/// Records every lookup so a test can assert an index-independent phase (the build
+/// phase) never queried it.
 struct FakeRegistry {
     versions: HashMap<(String, String), Vec<String>>,
     err: bool,
+    queries: RefCell<Vec<String>>,
 }
 impl FakeRegistry {
     fn new() -> Self {
         Self {
             versions: HashMap::new(),
             err: false,
+            queries: RefCell::new(Vec::new()),
         }
     }
     fn with(mut self, ecosystem: &str, package: &str, versions: &[&str]) -> Self {
@@ -233,9 +237,16 @@ impl FakeRegistry {
             ..Self::new()
         }
     }
+    /// Every `(ecosystem, package)` lookup made, in call order.
+    fn queries(&self) -> Vec<String> {
+        self.queries.borrow().clone()
+    }
 }
 impl RegistryQuery for FakeRegistry {
     fn published_versions(&self, ecosystem: &str, package: &str) -> io::Result<Vec<String>> {
+        self.queries
+            .borrow_mut()
+            .push(format!("{ecosystem}:{package}"));
         if self.err {
             return Err(io::Error::from(io::ErrorKind::TimedOut));
         }
@@ -414,7 +425,7 @@ fn every_adapter_has_a_nonzero_timeout() {
 // ── dry_run produces real, side-effect-free command plans ────────────────────
 
 #[test]
-fn dry_run_plans_commands_without_running_them() {
+fn dry_run_runs_the_no_verify_package_preflight() {
     let cmd = FakeCmd::new().with_metadata(&metadata_single("tool", "1.2.3"));
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
@@ -433,13 +444,18 @@ fn dry_run_plans_commands_without_running_them() {
     assert_eq!(report.planned_commands.len(), 1);
     assert_eq!(
         report.planned_commands[0].rendered(),
-        "cargo publish --registry crates-io -p tool --dry-run"
+        "cargo package --registry crates-io -p tool --no-verify"
     );
-    // dry_run reads the workspace graph (read-only) but must not execute any
-    // publish — the only command it runs is the `cargo metadata` query.
+    // dry_run is a FAITHFUL PREFLIGHT: it reads the workspace graph (read-only)
+    // and then actually runs the same `--no-verify` package the build phase runs,
+    // so a plan that cannot package fails here — not mid-cut. No `cargo publish`
+    // and no `--verify` compile, so it never touches the registry index.
     assert_eq!(
         cmd.calls(),
-        vec!["cargo metadata --no-deps --format-version 1"]
+        vec![
+            "cargo metadata --no-deps --format-version 1",
+            "cargo package --registry crates-io -p tool --no-verify"
+        ]
     );
 }
 
@@ -515,10 +531,13 @@ fn publish_runs_the_registry_command_and_returns_a_receipt() {
 }
 
 #[test]
-fn cargo_build_pins_the_package_command_to_crates_io() {
-    // `cargo package` must carry `--registry crates-io` too, so the build phase
-    // verify-packages against the same registry the publish phase targets — never a
-    // registry resolved from ambient config.
+fn cargo_build_packages_no_verify_pinned_to_crates_io() {
+    // `cargo package` must carry `--registry crates-io` (so the build phase packages
+    // against the same registry the publish phase targets, never one resolved from
+    // ambient config) AND `--no-verify` (so the build phase does not run the isolated
+    // verify compile that resolves `=`-pinned workspace deps against the index —
+    // that dep isn't published until publish-all; see
+    // `release-cut-build-phase-dep-ordering`).
     let cmd = FakeCmd::new();
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
@@ -534,10 +553,153 @@ fn cargo_build_pins_the_package_command_to_crates_io() {
     let b = resolve(Adapter::CargoPublish).build(&c, &t).unwrap();
 
     assert_eq!(b.adapter, Adapter::CargoPublish);
+    // The `.crate` artifact is still recorded under `--no-verify`.
+    assert_eq!(b.artifacts, vec!["tool-1.2.3.crate".to_string()]);
     assert_eq!(
         cmd.calls(),
-        vec!["cargo package --registry crates-io -p tool"]
+        vec!["cargo package --registry crates-io -p tool --no-verify"]
     );
+    // The build phase must never query the registry index — that is exactly the
+    // resolution `--no-verify` skips.
+    assert!(reg.queries().is_empty(), "build queried the registry index");
+}
+
+#[test]
+fn build_phase_packages_both_crates_when_a_pinned_dep_is_not_yet_published() {
+    // Done criterion #1 (`release-cut-build-phase-dep-ordering`): a two-crate
+    // workspace where `bin` pins `lib = "=X.Y.Z"` must clear the BUILD phase even
+    // though `lib` is not on the crates.io index yet — it is only *published* later,
+    // in publish-all. `--no-verify` skips the isolated verify compile that would
+    // resolve that pinned dep against the index, so both crates package with an
+    // EMPTY registry and ZERO index queries. (Publish-order/index-wait is the
+    // publish phase's job, covered by the dep-wait tests below.)
+    let cmd = FakeCmd::new();
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new(); // empty: `lib` is NOT published yet
+    let root = Path::new("/repo");
+
+    for pkg in ["lib", "bin"] {
+        let c = ctx(&cmd, &clock, &reg, root);
+        let t = target_named(
+            Ecosystem::Rust,
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+            pkg,
+            "0.2.0",
+        );
+        let b = resolve(Adapter::CargoPublish).build(&c, &t).unwrap();
+        assert_eq!(b.artifacts, vec![format!("{pkg}-0.2.0.crate")]);
+    }
+
+    // Both crates packaged with `--no-verify`; the build phase never consulted the
+    // index for the not-yet-published pinned dep.
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "cargo package --registry crates-io -p lib --no-verify",
+            "cargo package --registry crates-io -p bin --no-verify",
+        ]
+    );
+    assert!(
+        reg.queries().is_empty(),
+        "build phase queried the registry index for an unpublished pinned dep"
+    );
+}
+
+#[test]
+fn dry_run_preflights_a_dependent_without_the_pinned_dep_on_the_index() {
+    // Done criterion #2 (positive half): the dry-run preflight of the DEPENDENT
+    // crate must NOT false-fail just because its `=`-pinned workspace dep is not on
+    // the index yet. `--no-verify` keeps the preflight from resolving that dep, so an
+    // empty registry still passes — dry-run validates what it *can* pre-publish.
+    let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "0.2.0"));
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new(); // empty: `lib` not published yet
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target_named(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "bin",
+        "0.2.0",
+    );
+    let report = resolve(Adapter::CargoPublish).dry_run(&c, &t).unwrap();
+
+    // The preflight ran the read-only graph query then the `--no-verify` package,
+    // and never queried the index.
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "cargo metadata --no-deps --format-version 1",
+            "cargo package --registry crates-io -p bin --no-verify",
+        ]
+    );
+    assert!(
+        reg.queries().is_empty(),
+        "dry-run false-queried the index for the unpublished pinned dep"
+    );
+    // The note surfaces the dependency the real cut will wait on.
+    assert!(
+        report.notes.iter().any(|n| n.contains("lib@0.2.0")),
+        "dry-run dropped the workspace-dep wait note: {:?}",
+        report.notes
+    );
+}
+
+#[test]
+fn dry_run_fails_when_the_package_preflight_fails() {
+    // Done criterion #2 (negative half): a genuinely-unbuildable plan must fail at
+    // DRY-RUN-ALL — before any external effect — not mid-cut. The `cargo package`
+    // preflight failing propagates as a dry-run error.
+    let cmd = FakeCmd::new()
+        .with_metadata(&metadata_single("tool", "1.2.3"))
+        .fail_calls_containing("cargo package", 101, "error: could not compile `tool`");
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.2.3",
+    );
+    let err = resolve(Adapter::CargoPublish).dry_run(&c, &t).unwrap_err();
+    match err {
+        AdapterError::Command { code, .. } => assert_eq!(code, Some(101)),
+        other => panic!("expected a Command error from the package preflight, got {other:?}"),
+    }
+}
+
+#[test]
+fn build_phase_propagates_a_real_package_failure() {
+    // Done criterion #3: a real build error (a crate that genuinely doesn't package)
+    // must still fail the BUILD phase — `--no-verify` must not turn `build` into a
+    // no-op that swallows a failing `cargo package`.
+    let cmd = FakeCmd::new().fail_calls_containing(
+        "cargo package",
+        101,
+        "error[E0432]: unresolved import",
+    );
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.2.3",
+    );
+    let err = resolve(Adapter::CargoPublish).build(&c, &t).unwrap_err();
+    match err {
+        AdapterError::Command { code, .. } => assert_eq!(code, Some(101)),
+        other => panic!("expected a Command error from the failing package, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1061,7 +1223,7 @@ fn target_dry_run_reports_its_own_publish_and_the_dep_wait() {
     );
     let report = resolve(Adapter::CargoPublish).dry_run(&c, &t).unwrap();
 
-    // Exactly one dry-run publish — the target's own crate.
+    // Exactly one preflight command — the target's own `--no-verify` package.
     let rendered: Vec<String> = report
         .planned_commands
         .iter()
@@ -1069,7 +1231,7 @@ fn target_dry_run_reports_its_own_publish_and_the_dep_wait() {
         .collect();
     assert_eq!(
         rendered,
-        vec!["cargo publish --registry crates-io -p bin --dry-run"]
+        vec!["cargo package --registry crates-io -p bin --no-verify"]
     );
     // The note names the workspace dependency the real cut waits to index first.
     assert!(
@@ -1080,7 +1242,8 @@ fn target_dry_run_reports_its_own_publish_and_the_dep_wait() {
         "notes missing the dep index-wait: {:?}",
         report.notes
     );
-    // dry_run runs only the read-only metadata query — no publish.
+    // dry_run is a faithful preflight, not a real publish: it runs the read-only
+    // metadata query and the `--no-verify` package, but never `cargo publish`.
     assert!(
         !cmd.calls().iter().any(|call| call.contains("publish")),
         "dry_run executed a publish: {:?}",
