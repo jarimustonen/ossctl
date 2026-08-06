@@ -4,6 +4,7 @@ updated: 2026-08-06
 type: feature
 status: open
 priority: normal
+epic: ossctl-phase4-build
 ---
 
 # Contract can't express 'publish target none' for a registry ecosystem

@@ -5,73 +5,63 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-08-05 (stint #11). New agent: read this, then continue with a fresh
-`/stint-start`. Main is clean, all pushed._
+_Handoff written 2026-08-06 (stint #12). New agent: read this, then continue with a fresh
+`/stint-start`. Main is clean, all pushed (`d61096e`)._
 
-_🎉 **STINT #11 SHIPPED ossctl 0.1.2** — `ossctl dist generate`: the release engine now
-GENERATES a downstream project's cross-platform release infra (`dist-workspace.toml` +
-`release.yml` via `dist generate`) from the contract's `distribution` block. This is the
-Track B piece that makes "release through ossctl" real (built against the current single
-`Option<Distribution>` model; no schema change). Fully published:_
-_- **crates.io** — `ossctl-core 0.1.2` + `ossctl 0.1.2` (dep order)._
-_- **GitHub Release `v0.1.2`** — full cross-platform asset set (macOS aarch64, Linux musl
-  x86_64+aarch64, Windows, `.sh`+`.ps1` installers, sha256 sums)._
-_- **Homebrew tap** — formula bumped `v0.1.0`→`v0.1.2` (tap commit `e50fbe2`)._
+_🎉 **STINT #12 SHIPPED ossctl 0.2.0** — the release engine can now (in code) drive a
+multi-target, cross-channel cut. Landed & green (7 LANE A units): multi-target-per-ecosystem
+in dep order; **one-target-one-publish-unit (ADR-0004)** — no double-publish; cargo-dist flow
+(skip CI-delegated targets + post-tag homebrew with real sha256); **Release-ownership Option 1**
+(coordinator delegates the GitHub Release to CI when a CI-delegated target is present,
+`ci_owns_github_release`); crates.io registry pinning; and `release list`/`abandon`. Contract
+now declares a `distribution` block with `homebrew_tap: jarimustonen/homebrew-ossctl`._
+_- **crates.io** — `ossctl-core 0.2.0` + `ossctl 0.2.0` (dep order)._
+_- **GitHub Release `v0.2.0`** — full cross-platform asset set (macOS aarch64, Linux musl
+  x86_64+aarch64, Windows, `.sh`+`.ps1` installers, sha256 sums, source.tar.gz)._
+_- **Homebrew tap** — formula bumped `v0.1.2`→`v0.2.0` (tap commit `7eb3034`, sha256 verified)._
 
-_⚠️ **THE RELEASE PIPELINE IS NOT THE CLEAN AUTO-CHAIN THE OLD HANDOFF CLAIMED.** The 0.1.2
-cut surfaced three real defects (all filed as ossctl issues — LANE C below). The ACTUAL,
-CURRENT release recipe (do it this way until the issues are fixed):_
-_1. Bump `workspace.package.version` + the internal `=X.Y.Z` dep in lockstep → finalize
-   CHANGELOG → `cargo build` (refresh lock) → `cargo publish -p ossctl-core --dry-run` →
-   commit → push main → `git tag vX.Y.Z && git push origin vX.Y.Z`._
-_2. The tag triggers `release.yml` (cargo-dist) → builds the cross-platform matrix + creates
-   the GitHub Release. **macOS aarch64 builds on the personal `hauis` self-hosted runner** —
-   if it 400s, clear hauis's stale token:
-   `ssh hauis 'git config --global --unset-all "http.https://github.com/.extraheader"'`
-   then `gh run rerun <release-run-id> --failed`. (Tracked: `release-macos-hauis-coupling`.)_
-_3. **crates.io does NOT auto-publish.** A GITHUB_TOKEN-created release does not cascade
-   `release: published`, so `publish-crates.yml` never auto-fires. Publish manually:
-   `gh workflow run publish-crates.yml` (uses the `CARGO_REGISTRY_TOKEN` secret; publishes
-   core→cli in dep order). Verify on crates.io. (Tracked: `publish-crates-no-auto-trigger`.)_
-_4. **Bump the Homebrew tap by hand** after the GitHub Release exists — the source formula's
-   `url`+`sha256` do NOT auto-update (the tap silently served 0.1.0 through the whole 0.1.1
-   lifetime). `curl -sL <src-tarball>; shasum -a 256`, then PUT `Formula/ossctl.rb` in
-   `jarimustonen/homebrew-ossctl`. (Tracked: `homebrew-tap-bump-manual-and-missed`.)_
+_⚠️ **0.2.0 WAS CUT MANUALLY, NOT BY THE ENGINE.** Two engine cuts (`ossctl release cut`) failed
+SAFELY at the build phase (pre-publish, nothing shipped, runs abandoned): `cargo package -p ossctl`
+resolves the `=`-pinned `ossctl-core` dep against the crates.io INDEX even with `--no-verify`, so a
+dependent can't be packaged until its dep is actually PUBLISHED. The `build-all → publish-all`
+barrier is incompatible with cargo's multi-crate `=`-pinned model. **This is THE one remaining
+blocker before the engine can dogfood its own cut** — `release-cut-build-phase-dep-ordering`
+(LANE A, HIGH, REOPENED). Real fix: **interleave build+publish per dep-ordered cargo target**
+(publish core → wait index → package+publish cli) — an ADR-0002 amendment; **consider
+`/worktree-technical-decision`** since it changes a core invariant. Fix it → **the 0.2.1 cut is
+the true engine dogfood.** The 0.2.0 prep artifacts (version bump, finalized CHANGELOG, contract
+distribution block) are already on `main`._
 
-_**Operating policy (unchanged, both apply going forward — see AGENTS.md):** (1) releases may
-be cut AUTONOMOUSLY when main has something to release (green gate first; `cargo publish`
-dry-runs first; crates.io irreversible so never publish red); (2) `git pull --rebase` → `push`
-is always allowed autonomously on this repo. Green gate includes
-`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`._
+_**Manual fallback recipe (used for 0.2.0; use until the engine cut works):** bump version + internal
+`=X.Y.Z` dep in lockstep → finalize CHANGELOG → `cargo build` → `cargo publish -p ossctl-core`
+(real) → cargo waits for the index → `cargo publish -p ossctl` → `git tag vX.Y.Z && git push origin
+vX.Y.Z` → the tag triggers cargo-dist `release.yml` (macOS aarch64 on **hauis**; if it 400s with
+`Duplicate header: Authorization`, `ssh hauis 'git config --global --unset-all
+"http.https://github.com/.extraheader"'` then `gh run rerun <run-id> --failed`) → after the GH
+Release exists, bump the Homebrew tap by hand (`curl -sL <tag-archive>; shasum -a 256`; PUT
+`Formula/ossctl.rb` in `jarimustonen/homebrew-ossctl`). All four hauis/publish-crates/tap defects
+still tracked in LANE C, but MOSTLY SUBSUMED once the engine cut lands._
 
-_**⭐ SCOPE CLEANUP THIS STINT — the cross-repo/personal-infra work is GONE from ossctl.**
-The old handoff conflated ossctl's product backlog with Jari's personal environment. The
-"multi-repo Track A rollout" (standardising issuectl/orchestratectl/glasspad) and the whole
-hauis self-hosted-runner setup are **homebase concerns**, now tracked in homebase issue
-[`cross-repo-release-standardisation`] (homebase commit `9c6069f`, not yet pushed). ossctl
-no longer references any of it. ossctl the product only owns the GENERIC capability
-(`ossctl dist generate`, shipped) — its downstream USE across Jari's repos is homebase's job._
+_**Operating policy (see AGENTS.md — updated this stint):** (1) releases may be cut AUTONOMOUSLY;
+(2) **the engine-driven `ossctl release cut` is fully autonomous — NO go/no-go checkpoint, ever**
+(incl. first cut + homebrew leg); safety is structural (`release plan` seal + `dry-run-all` +
+dep-order/index-wait + `resume`/`abandon`), never a human gate; (3) `git pull --rebase` → `push`
+always allowed. Green gate incl. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`._
 
-_**ossctl's own next objective is Track B toward an engine-driven 0.2.0** (LANE A): the engine
-CAN now generate config; the remaining gap is making `ossctl release cut` actually drive the
-cut safely (`release-engine-cut-cargo-dist-flow` — skip CI-delegated targets + post-tag
-homebrew) + the two engine bugs. A strong parallel candidate is LANE C — hardening the
-fragile release pipeline itself (the 3 defects above), which would also make future cuts
-one-command instead of the 4-step manual recipe._
+_**Stint #12 also filed (all triaged into the DAG below):** the review cascade produced deferred
+hardening (homebrew resume-idempotency/stable-tarball, cargo receipt-provenance, target-coverage,
+journal-identity, stale-lock-break, resume-publish-phase, release-verify-delegated-release) plus
+worker-filed family/schema gaps (`oss-dist-channel-generator`, `publish-crates-release-trigger`,
+`publish-target-none`). None gate the interleave fix — that is the single next thing._
 
-_**Stint #11 issue work:** `release-engine-dist-config-generator` landed, closed `fixed`
-(4-model /llm-review applied; green gate passed). Filed: `publish-crates-no-auto-trigger`,
-`release-macos-hauis-coupling`, `homebrew-tap-bump-manual-and-missed` (LANE C)._
+_--- older history in git: stints #1–7 built the `/oss-*` deterministic core, #8 finished the
+adapters, #9 shipped 0.1.0, #10 shipped 0.1.1 cross-platform, #11 shipped 0.1.2 (`dist generate`).
+Epic `ossctl-phase4-build` stays OPEN. Cross-repo standardisation + hauis infra remain HOMEBASE
+concerns (homebase issue `cross-repo-release-standardisation`), NOT ossctl work. ---_
 
-_--- older history in git: stints #1–7 built the `/oss-*` deterministic core
-(contract/facts/audit/skill/release-engine + 9 bundled skills), #8 finished the adapters,
-#9 shipped 0.1.0 by hand, #10 shipped 0.1.1 cross-platform + set up the hauis runners (now a
-homebase concern). Epic `ossctl-phase4-build` stays OPEN (tails: `migrate-oss-init` deferred
-until the homebase `/oss-init` copy is removed; non-Rust adapter build-side skeletons). ---_
+**Read first (the spec):** `docs/adr/000{1,2,3,4}-*.md` (CLI taxonomy, release engine, config+journal, one-target-one-publish-unit).
 
-**Read first (the spec):** `docs/adr/000{1,2,3}-*.md` (CLI taxonomy, release engine, config+journal).
-
-## Execution DAG (2026-08-05, stint #12)
+## Execution DAG (2026-08-06, stint #12 handoff)
 
 Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
 (never copied here). Merge at Phase 0/handoff (drop landed, add active, keep existing order).
@@ -128,7 +118,8 @@ LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly)
     homebrew-adapter-fs-port          (EffectCtx filesystem-write port — homebrew create path)
     homebrew-create-resume-journaling (journal homebrew create sub-steps / reconcile remote)
     homebrew-formula-non-rust         (generate non-Rust Homebrew formulas)
-LANE B — contract schema (crates/ossctl-core/src/contract/schema.rs — SEQUENCE strictly) — POST-RELEASE hardening
+LANE B — contract schema (crates/ossctl-core/src/contract/schema.rs + normalize.rs — SEQUENCE strictly) — POST-RELEASE hardening
+    publish-target-none                  (feature — contract can't express "version-tracked + changelogged but NEVER published"; normalizer force-expands a registry target, registry enum has no non-publishing value. Surfaced on another project. Filed via 63c7c7c)
     distribution-monorepo-vec            (Vec<Distribution> + per-package association)
     distribution-extra-fields            (extra_fields forward-compat on nested distribution structs)
     distribution-installer-platform-crosscheck (validate installer/platform coherence)
