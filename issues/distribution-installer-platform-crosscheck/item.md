@@ -9,6 +9,8 @@ related: ['@distribution-cross-platform-targets']
 commits:
 - hash: 0e0d3c6
   summary: 'feat(contract): warn on installer/platform OS mismatch'
+- hash: ef3b837
+  summary: 'review(contract): positional triple OS match + error-gate the crosscheck'
 ---
 
 # distribution: cross-validate installers against platforms (msi to windows, homebrew to darwin)
