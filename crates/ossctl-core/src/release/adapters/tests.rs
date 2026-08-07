@@ -1814,9 +1814,86 @@ fn read_created_formula(name: &str, version: &str) -> (std::path::PathBuf, Strin
 }
 
 #[test]
-fn homebrew_tap_bumps_when_the_formula_already_exists() {
-    // The tap already serves `Formula/tool.rb` (gh api probe exits 0) → the bump
-    // path runs, carrying the threaded url/sha256 — preceded only by the probe.
+fn homebrew_tap_direct_writes_when_the_formula_already_exists() {
+    // The tap already serves `Formula/tool.rb` (gh api probe exits 0) → the
+    // tap-write path runs: clone → overwrite the formula → (dirty) commit → push
+    // directly to the tap's default branch. NO `brew bump-formula-pr`, no PR.
+    let cmd = FakeCmd::new()
+        // The overwrite makes the checkout dirty, so the commit/push run.
+        .stdout_calls_containing("status --porcelain", " M Formula/tool.rb\n");
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = homebrew_artifacts(
+        "o/homebrew-r",
+        "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz",
+        Some("deadbeef"),
+        Some("MIT"),
+    );
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target(
+        Ecosystem::Binary,
+        Registry::Homebrew,
+        Adapter::HomebrewTap,
+        "1.0.0",
+    );
+    let r = resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap();
+
+    let calls = cmd.calls();
+    assert_eq!(
+        calls[0],
+        "gh api --silent repos/o/homebrew-r/contents/Formula/tool.rb"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.starts_with("gh repo clone o/homebrew-r ")),
+        "expected a tap clone: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c.contains("status --porcelain")),
+        "expected a dirty-check: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c.contains("add Formula/tool.rb")),
+        "expected the updated formula to be staged: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c.contains("commit -m tool 1.0.0")),
+        "expected a commit: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c.ends_with("push origin HEAD")),
+        "expected a direct push to the default branch: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.contains("bump-formula-pr")),
+        "the tap-write path must not call bump-formula-pr: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.contains("pr create")),
+        "the tap-write path must not open a PR: {calls:?}"
+    );
+    // The receipt records the verified digest the formula pins.
+    assert_eq!(r.digest.as_deref(), Some("deadbeef"));
+
+    // The overwritten formula on disk carries the threaded url + verified sha256.
+    let (workdir, formula) = read_created_formula("tool", "1.0.0");
+    assert!(
+        formula.contains("url \"https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz\""),
+        "{formula}"
+    );
+    assert!(formula.contains("sha256 \"deadbeef\""), "{formula}");
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn homebrew_tap_direct_write_is_a_noop_when_the_formula_is_unchanged() {
+    // A resume/re-run at the target version: the overwrite produces byte-identical
+    // content, so `git status --porcelain` is clean → the path is a no-op success
+    // (clone + dirty-check only, no empty commit, no redundant push). The default
+    // FakeCmd serves an empty (clean) `git status`.
     let cmd = FakeCmd::new();
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
@@ -1835,15 +1912,64 @@ fn homebrew_tap_bumps_when_the_formula_already_exists() {
         Adapter::HomebrewTap,
         "1.0.0",
     );
-    resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap();
+    let r = resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap();
 
-    assert_eq!(
-        cmd.calls(),
-        vec![
-            "gh api --silent repos/o/homebrew-r/contents/Formula/tool.rb",
-            "brew bump-formula-pr --url \
-             https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz --sha256 deadbeef -- tool",
-        ]
+    let calls = cmd.calls();
+    assert!(
+        calls.iter().any(|c| c.contains("status --porcelain")),
+        "expected a dirty-check: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.contains("commit")),
+        "an unchanged formula must not create an empty commit: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.ends_with("push origin HEAD")),
+        "an unchanged formula must not push: {calls:?}"
+    );
+    // Still a success receipt recording the verified digest.
+    assert_eq!(r.digest.as_deref(), Some("deadbeef"));
+
+    let (workdir, _) = read_created_formula("tool", "1.0.0");
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn homebrew_tap_direct_write_fails_closed_without_a_verified_sha256() {
+    // Fail-closed: the tap-write path pushes to the default branch (what
+    // `brew install` resolves), so it REFUSES to write a formula without a verified
+    // sha256 — no TODO placeholder, no broken install. The formula exists (probe
+    // exits 0) so the path is TapWrite; sha256 is threaded as None.
+    let cmd = FakeCmd::new().stdout_calls_containing("status --porcelain", " M Formula/tool.rb\n");
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = homebrew_artifacts(
+        "o/homebrew-r",
+        "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz",
+        None,
+        Some("MIT"),
+    );
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target(
+        Ecosystem::Binary,
+        Registry::Homebrew,
+        Adapter::HomebrewTap,
+        "1.0.0",
+    );
+    let err = resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap_err();
+    assert!(
+        matches!(&err, AdapterError::Command { stderr, .. } if stderr.contains("verified sha256")),
+        "expected a fail-closed error naming the missing verified sha256: {err:?}"
+    );
+    // It must not have committed or pushed a formula.
+    let calls = cmd.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.contains("commit") || c.ends_with("push origin HEAD")),
+        "must not commit/push without a verified sha256: {calls:?}"
     );
 }
 
@@ -2060,12 +2186,65 @@ fn homebrew_dry_run_reports_the_chosen_path() {
         create.planned_commands
     );
 
-    // Formula present ⇒ dry-run previews the bump path.
-    let bump_cmd = FakeCmd::new();
-    let bc = ctx_with(&bump_cmd, &clock, &reg, root, &artifacts);
-    let bump = resolve(Adapter::HomebrewTap).dry_run(&bc, &t).unwrap();
+    // Formula present ⇒ dry-run previews the tap-write path (clone → add → commit →
+    // push directly to the tap's default branch — no bump-formula-pr, no PR).
+    let write_cmd = FakeCmd::new();
+    let wc = ctx_with(&write_cmd, &clock, &reg, root, &artifacts);
+    let write = resolve(Adapter::HomebrewTap).dry_run(&wc, &t).unwrap();
     assert!(
-        bump.notes.iter().any(|n| n.contains("bump path")),
+        write.notes.iter().any(|n| n.contains("tap-write path")),
+        "{:?}",
+        write.notes
+    );
+    let rendered: Vec<String> = write
+        .planned_commands
+        .iter()
+        .map(crate::protocol::release::PlannedCommand::rendered)
+        .collect();
+    assert!(
+        rendered
+            .iter()
+            .any(|c| c.starts_with("gh repo clone o/homebrew-r ")),
+        "{rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|c| c.ends_with("push origin HEAD")),
+        "{rendered:?}"
+    );
+    assert!(
+        !rendered
+            .iter()
+            .any(|c| c.contains("bump-formula-pr") || c.contains("pr create")),
+        "{rendered:?}"
+    );
+}
+
+#[test]
+fn homebrew_dry_run_previews_bump_pr_without_a_configured_tap() {
+    // No configured tap (homebrew: None) ⇒ the bump-PR fallback for homebrew-core.
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = ReleaseArtifacts {
+        assets: vec![],
+        source_tarball: Some(SourceTarball {
+            url: "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz".to_string(),
+            sha256: Some("deadbeef".to_string()),
+        }),
+        repo_slug: Some("o/r".to_string()),
+        homebrew: None,
+    };
+    let cmd = FakeCmd::new();
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+    let t = target(
+        Ecosystem::Binary,
+        Registry::Homebrew,
+        Adapter::HomebrewCore,
+        "1.0.0",
+    );
+    let bump = resolve(Adapter::HomebrewCore).dry_run(&c, &t).unwrap();
+    assert!(
+        bump.notes.iter().any(|n| n.contains("bump-PR path")),
         "{:?}",
         bump.notes
     );
@@ -2073,6 +2252,8 @@ fn homebrew_dry_run_reports_the_chosen_path() {
     assert!(bump.planned_commands[0]
         .rendered()
         .starts_with("brew bump-formula-pr"));
+    // No configured tap ⇒ no probe was needed.
+    assert!(cmd.calls().is_empty(), "{:?}", cmd.calls());
 }
 
 #[test]

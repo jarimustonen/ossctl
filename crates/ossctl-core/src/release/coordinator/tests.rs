@@ -1104,6 +1104,15 @@ impl CommandRunner for WorkspaceCmd {
                 stderr: String::new(),
             });
         }
+        // The homebrew tap-write path overwrites the formula then checks whether the
+        // checkout is dirty; report a change so it commits + pushes to the tap.
+        if program == "git" && args.contains(&"status") && args.contains(&"--porcelain") {
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: " M Formula/ossctl.rb\n".to_string(),
+                stderr: String::new(),
+            });
+        }
         if program == "cargo" && args.contains(&"metadata") {
             // Two publishable members: `ossctl` depends on `ossctl-core`.
             return Ok(CommandOutput {
@@ -1828,16 +1837,49 @@ fn ossctl_like_contract_cuts_end_to_end_across_target_classes() {
         state.published.contains_key(&ids[3]),
         "homebrew was not finalized in the dist phase"
     );
-    // The homebrew bump carried the tag-archive URL AND the real post-tag sha256.
-    let bump = format!(
-        "brew bump-formula-pr --url \
-         https://github.com/jarimustonen/ossctl/archive/refs/tags/v1.2.3.tar.gz \
-         --sha256 {CANNED_SHA256} -- ossctl"
+    // The homebrew leg is self-sufficient: no `brew bump-formula-pr` (and thus no
+    // `brew audit`), it renders the formula and pushes it straight to the tap's
+    // default branch. The push is what makes `brew install` resolve the new version.
+    assert!(
+        !calls.iter().any(|c| c.contains("bump-formula-pr")),
+        "homebrew must not shell to bump-formula-pr for a configured tap: {calls:?}"
     );
     assert!(
-        calls.contains(&bump),
-        "homebrew was not finalized with a real sha256: {calls:?}"
+        calls
+            .iter()
+            .any(|c| c.starts_with("gh repo clone jarimustonen/homebrew-ossctl ")),
+        "homebrew leg did not clone the tap: {calls:?}"
     );
+    assert!(
+        calls.iter().any(|c| c.ends_with("push origin HEAD")),
+        "homebrew leg did not push the formula to the tap: {calls:?}"
+    );
+    // The formula it wrote to the tap checkout carries the real post-tag sha256 the
+    // dist phase computed by hashing the fetched tag archive.
+    let hb_prefix = "ossctl-homebrew-ossctl-1.2.3-";
+    let hb_dir = std::fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(hb_prefix))
+        })
+        .expect("the tap-write path made a scratch checkout");
+    let formula = std::fs::read_to_string(hb_dir.join("Formula/ossctl.rb"))
+        .expect("the tap-write path wrote the formula file");
+    assert!(
+        formula.contains(&format!("sha256 \"{CANNED_SHA256}\"")),
+        "formula lacks the real post-tag sha256: {formula}"
+    );
+    assert!(
+        formula.contains(
+            "url \"https://github.com/jarimustonen/ossctl/archive/refs/tags/v1.2.3.tar.gz\""
+        ),
+        "formula lacks the tag-archive url: {formula}"
+    );
+    let _ = std::fs::remove_dir_all(&hb_dir);
 
     // Barrier ordering at the event level: publish closes → tag → dist, and the
     // homebrew finalize (a published event in the dist phase) follows the tag.

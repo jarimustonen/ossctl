@@ -6,26 +6,43 @@
 //! [`VerifyOutcome::Unknown`] **explicitly** rather than being excused from the
 //! contract (ADR-0002 §1) — an honest "cannot check", never a false `Missing`.
 //!
-//! ## Create vs. bump (the first-formula bootstrap)
+//! ## Three formula paths: create, tap-write, bump-PR
 //!
-//! `brew bump-formula-pr` *updates* a formula that already exists — on a fresh,
-//! empty tap there is nothing to bump, so the very first release must **create**
-//! the initial `<name>.rb` instead. This adapter chooses between the two paths by
-//! asking the tap whether the formula already exists (through the injected
+//! A release either **creates** the first `<name>.rb` on an empty tap or
+//! **updates** an existing one. This adapter chooses by asking the tap whether the
+//! formula already exists (through the injected
 //! [`CommandRunner`](crate::ports::CommandRunner), so it is testable with no real
 //! network or tap):
 //!
-//! - **absent** → the *create* path: generate a source-build formula (the release
-//!   tarball's `url` + `sha256`, the license, a cargo build/install stanza), clone
-//!   the tap, commit the new file on a branch, and open a PR.
-//! - **present** → the *bump* path: `brew bump-formula-pr` carrying the release
-//!   tarball's `--url` (+ `--sha256` when a digest is available).
+//! - **configured tap, formula absent** → the *create* path: generate a
+//!   source-build formula (the release tarball's `url` + `sha256`, the license, a
+//!   cargo build/install stanza), clone the tap, commit the new file on a branch,
+//!   and open a PR.
+//! - **configured tap, formula present** → the *tap-write* path
+//!   (`FormulaPath::TapWrite`): render the updated `<name>.rb` from the verified
+//!   `url` + `sha256`, clone the tap, overwrite the file, commit, and **push
+//!   directly to the tap's default branch** — no `brew`, no `bump-formula-pr`, no
+//!   `brew audit`. This is deterministic, needs no local `brew`/ruby/gem toolchain
+//!   on the cutting machine, and mirrors the manual fallback that has always
+//!   worked. It **fails closed** without a verified `sha256` (unlike create, which
+//!   can open a draft-PR placeholder, a formula on the tap's *default branch* is
+//!   what `brew install` resolves — so an unverified digest would ship a broken
+//!   install), and it is a **clean no-op** when the tap already carries exactly
+//!   this formula (an idempotent resume/re-run at the target version).
+//! - **no configured tap** (a `homebrew-core` target, or a `homebrew-tap` with no
+//!   resolved tap) → the *bump-PR* path: `brew bump-formula-pr` carrying the
+//!   release tarball's `--url` (+ `--sha256` when a digest is available). First
+//!   submission to `homebrew-core` is a human review process where the full core
+//!   `brew audit` is appropriate, so the PR path is kept for it.
 //!
-//! The create path only applies to a `homebrew-tap` target whose destination tap
-//! the contract configured (`ctx.artifacts.homebrew.tap`). A `homebrew-core`
-//! target — or a `homebrew-tap` with no resolved tap — falls back to the plain
-//! bump path (first submission to `homebrew-core` is a human review process, not
-//! an automated create).
+//! ## Why tap-write replaced `brew bump-formula-pr` for the tap-bump case
+//!
+//! `brew bump-formula-pr` runs a full `brew audit` internally and aborts the whole
+//! bump on any finding — including cosmetic core-lint changes irrelevant to a
+//! personal tap the maintainer controls (issue `homebrew-dist-brew-audit-fails`:
+//! the first engine dogfood cut failed here with a swallowed audit message). The
+//! tap-write path removes that dependency entirely and surfaces any real git/`gh`
+//! failure verbatim through the shared `run_all` runner rather than as a black box.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -46,14 +63,19 @@ pub struct HomebrewAdapter {
     adapter: Adapter,
 }
 
-/// Which formula operation the adapter resolved for a target — the create path
-/// (a first formula on an empty tap) or the bump path (an existing formula).
+/// Which formula operation the adapter resolved for a target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FormulaPath {
-    /// Generate + PR the initial `<name>.rb` (the tap has no formula yet).
+    /// Generate + PR the initial `<name>.rb` (configured tap, no formula yet).
     Create,
-    /// `brew bump-formula-pr` an already-present formula.
-    Bump,
+    /// Render + write the updated `<name>.rb` directly to the configured tap's
+    /// default branch (configured tap, formula already present) — no `brew`, no
+    /// PR. See the module docs' *tap-write* path.
+    TapWrite,
+    /// `brew bump-formula-pr` an already-present formula — the fallback for a
+    /// target with no configured tap (`homebrew-core`, or an unconfigured
+    /// `homebrew-tap`), where a reviewed PR + full `brew audit` is the right path.
+    BumpPr,
 }
 
 impl HomebrewAdapter {
@@ -77,9 +99,11 @@ impl HomebrewAdapter {
         artifacts.and_then(|h| h.tap.as_deref())
     }
 
-    /// Decide the create-vs-bump path for `target`: a `homebrew-tap` with a
-    /// configured tap probes the tap for the formula (create when absent); every
-    /// other case is a bump.
+    /// Decide the formula path for `target`. A `homebrew-tap` with a configured
+    /// tap probes the tap for the formula: absent → [`FormulaPath::Create`],
+    /// present → [`FormulaPath::TapWrite`] (direct write to the tap). Every other
+    /// case (no configured tap: `homebrew-core`, or an unconfigured tap) is
+    /// [`FormulaPath::BumpPr`].
     ///
     /// The probe runs through the injected runner (`gh api …/contents/…`); a
     /// non-zero exit (a `404`, typically) reads as *absent* → create. A spawn
@@ -91,8 +115,14 @@ impl HomebrewAdapter {
     ) -> Result<FormulaPath, AdapterError> {
         let homebrew = ctx.artifacts.homebrew.as_ref();
         match self.tap(homebrew) {
-            Some(tap) if !Self::formula_exists(ctx, tap, &t.package)? => Ok(FormulaPath::Create),
-            _ => Ok(FormulaPath::Bump),
+            Some(tap) => {
+                if Self::formula_exists(ctx, tap, &t.package)? {
+                    Ok(FormulaPath::TapWrite)
+                } else {
+                    Ok(FormulaPath::Create)
+                }
+            }
+            None => Ok(FormulaPath::BumpPr),
         }
     }
 
@@ -319,7 +349,7 @@ impl HomebrewAdapter {
         // 2. write the generated formula into the checkout (create-new: refuses to
         //    overwrite a formula that already exists in the clone — the last-line
         //    guard against a probe/clone race or a mis-detected "absent").
-        Self::write_formula(&workdir, &t.package, &formula)?;
+        Self::write_formula(&workdir, &t.package, &formula, WriteMode::CreateNew)?;
         // 3. branch → add → commit → push → PR.
         let outputs = run_all(ctx, &commands[1..])?;
 
@@ -338,6 +368,154 @@ impl HomebrewAdapter {
         Ok(make_receipt(ctx, t, None, remote_url))
     }
 
+    /// The commit title for a tap-write formula update.
+    fn update_title(name: &str, version: &str) -> String {
+        format!("{name} {version}")
+    }
+
+    /// The ordered git/`gh` commands the *tap-write* path runs: clone → add →
+    /// commit → push **to the tap's default branch** (no branch, no PR — the
+    /// generated `.rb` is what `brew install` resolves). The rendered formula is
+    /// overwritten onto disk *between* the clone (`commands[..1]`) and the `add`
+    /// (`commands[1..]`), exactly like [`Self::create_commands`]; these are only
+    /// the process steps, shared by [`Self::dry_run`]'s preview and
+    /// [`Self::run_tap_write`].
+    ///
+    /// `git push origin HEAD` publishes the freshly-committed default branch (the
+    /// clone checks the default branch out, so `HEAD` is it) — matching the manual
+    /// fallback that pushed the formula straight to the tap.
+    fn update_commands(tap: &str, name: &str, version: &str, workdir: &str) -> Vec<PlannedCommand> {
+        let title = Self::update_title(name, version);
+        let formula_rel = format!("Formula/{name}.rb");
+        vec![
+            PlannedCommand::new("gh", &["repo", "clone", tap, workdir, "--", "--depth", "1"]),
+            PlannedCommand::new("git", &["-C", workdir, "add", &formula_rel]),
+            // Set the commit identity explicitly (via `-c`): the freshly-cloned tap
+            // inherits no `user.name`/`user.email`, so on a clean CI runner an
+            // identity-less `git commit` fails with "Author identity unknown".
+            PlannedCommand::new(
+                "git",
+                &[
+                    "-C",
+                    workdir,
+                    "-c",
+                    "user.name=ossctl",
+                    "-c",
+                    "user.email=ossctl@users.noreply.github.com",
+                    "commit",
+                    "-m",
+                    &title,
+                ],
+            ),
+            PlannedCommand::new("git", &["-C", workdir, "push", "origin", "HEAD"]),
+        ]
+    }
+
+    /// Run the *tap-write* path: render the updated formula from the **verified**
+    /// `url` + `sha256`, clone the tap, overwrite `Formula/<name>.rb`, commit, and
+    /// push to the tap's default branch.
+    ///
+    /// **Fail-closed contract.** This path pushes to the tap's default branch — the
+    /// ref `brew install <tap>/<name>` resolves — so it refuses to write a formula
+    /// without a verified `sha256` (the digest the post-tag dist phase computed by
+    /// fetching and hashing the exact tag-archive bytes). A missing tarball or a
+    /// `sha256: None` is a hard [`AdapterError::Command`], never a TODO placeholder:
+    /// unlike the create path's draft PR, there is no human review gate here, so a
+    /// guessed/absent digest would ship a broken install.
+    ///
+    /// **Idempotent.** After overwriting the file it checks whether the checkout is
+    /// dirty; a clean tree means the tap already carries exactly this formula (a
+    /// resume/re-run at the target version), so it returns a receipt without an
+    /// empty commit or a redundant push.
+    fn run_tap_write(
+        ctx: &EffectCtx<'_>,
+        t: &AdapterTarget,
+        tap: &str,
+    ) -> Result<PublishReceipt, AdapterError> {
+        let tarball =
+            ctx.artifacts
+                .source_tarball
+                .as_ref()
+                .ok_or_else(|| AdapterError::Command {
+                    command: "homebrew formula update".into(),
+                    code: None,
+                    stderr: "cannot update the Homebrew formula without a resolvable GitHub \
+                         source-tarball URL (no `origin` GitHub remote?)"
+                        .into(),
+                })?;
+        let sha256 = tarball
+            .sha256
+            .as_deref()
+            .ok_or_else(|| AdapterError::Command {
+                command: "homebrew formula update".into(),
+                code: None,
+                stderr:
+                    "refusing to push a Homebrew formula to the tap's default branch without a \
+                     verified sha256 (the tag archive was not fetched and hashed) — a formula on \
+                     the default branch is what `brew install` resolves, so an unverified digest \
+                     would ship a broken install"
+                        .into(),
+            })?;
+        let license = ctx
+            .artifacts
+            .homebrew
+            .as_ref()
+            .and_then(|h| h.license.as_deref());
+        let homepage_slug = ctx.artifacts.repo_slug.as_deref();
+        let formula = render_formula(
+            &t.package,
+            homepage_slug,
+            &tarball.url,
+            Some(sha256),
+            license,
+        );
+
+        let workdir = Self::fresh_workdir(&t.package, &t.version);
+        let workdir_str = workdir.to_string_lossy().to_string();
+        let commands = Self::update_commands(tap, &t.package, &t.version, &workdir_str);
+        // 1. clone the tap (its default branch).
+        run_all(ctx, &commands[..1])?;
+        // 2. overwrite the existing formula with the freshly-rendered one.
+        Self::write_formula(&workdir, &t.package, &formula, WriteMode::Overwrite)?;
+        // 3. idempotent no-op: if the write changed nothing, the tap is already at
+        //    this exact formula — do not create an empty commit.
+        if !Self::worktree_dirty(ctx, &workdir_str)? {
+            return Ok(make_receipt(ctx, t, Some(sha256.to_string()), None));
+        }
+        // 4. add → commit → push to the default branch.
+        run_all(ctx, &commands[1..])?;
+        Ok(make_receipt(ctx, t, Some(sha256.to_string()), None))
+    }
+
+    /// Whether the tap checkout at `workdir` has uncommitted changes, via
+    /// `git status --porcelain` through the runner. Empty output ⇒ clean (the
+    /// [`run_tap_write`](Self::run_tap_write) idempotent no-op); any line ⇒ dirty.
+    /// A non-zero exit or spawn failure is a genuine error, not "clean".
+    fn worktree_dirty(ctx: &EffectCtx<'_>, workdir: &str) -> Result<bool, AdapterError> {
+        let args = ["-C", workdir, "status", "--porcelain"];
+        let cmd = PlannedCommand::new("git", &args);
+        let out = ctx
+            .runner
+            .run("git", &args, ctx.repo_root)
+            .map_err(|e| AdapterError::Io {
+                command: cmd.rendered(),
+                source: e.to_string(),
+            })?;
+        if out.status != Some(0) {
+            let detail = if out.stderr.trim().is_empty() {
+                out.stdout
+            } else {
+                out.stderr
+            };
+            return Err(AdapterError::Command {
+                command: cmd.rendered(),
+                code: out.status,
+                stderr: detail,
+            });
+        }
+        Ok(!out.stdout.trim().is_empty())
+    }
+
     /// Write the generated formula to `<workdir>/Formula/<name>.rb`, creating the
     /// `Formula/` directory if the freshly-cloned tap does not carry it yet.
     ///
@@ -345,17 +523,23 @@ impl HomebrewAdapter {
     /// "add a formula" CLI; a new formula *is* a committed file, so `run_all`
     /// (which only *runs processes*) cannot express it. It is deliberately scoped:
     /// it writes exactly one file into a private, unpredictable [`Self::fresh_workdir`]
-    /// the create path just cloned into, and it uses **create-new** semantics
-    /// (`O_EXCL`) so it never follows a symlink onto, or truncates, an existing
-    /// file — which also fails loudly if the tap already carries the formula (a
-    /// last-line guard against a mis-detected "absent" formula). A general
-    /// filesystem port on `EffectCtx` is the cleaner long-term home (issue
-    /// `homebrew-adapter-fs-port`); until then this is mapped to a distinct
-    /// [`AdapterError::Filesystem`] so the effect is explicit, not hidden.
+    /// the calling path just cloned into. A general filesystem port on `EffectCtx`
+    /// is the cleaner long-term home (issue `homebrew-adapter-fs-port`); until then
+    /// this is mapped to a distinct [`AdapterError::Filesystem`] so the effect is
+    /// explicit, not hidden.
+    ///
+    /// [`WriteMode`] gates the open semantics:
+    /// - [`WriteMode::CreateNew`] (the create path) uses **create-new** (`O_EXCL`)
+    ///   so it never follows a symlink onto, or truncates, an existing file — which
+    ///   also fails loudly if the tap already carries the formula (a last-line guard
+    ///   against a mis-detected "absent" formula).
+    /// - [`WriteMode::Overwrite`] (the tap-write path) truncates and replaces the
+    ///   already-present formula — the bump of an existing tap formula.
     fn write_formula(
         workdir: &std::path::Path,
         name: &str,
         formula: &str,
+        mode: WriteMode,
     ) -> Result<(), AdapterError> {
         let dir = workdir.join("Formula");
         std::fs::create_dir_all(&dir).map_err(|e| AdapterError::Filesystem {
@@ -363,14 +547,20 @@ impl HomebrewAdapter {
             source: e.to_string(),
         })?;
         let path = dir.join(format!("{name}.rb"));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| AdapterError::Filesystem {
-                path: path.to_string_lossy().to_string(),
-                source: e.to_string(),
-            })?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true);
+        match mode {
+            WriteMode::CreateNew => {
+                opts.create_new(true);
+            }
+            WriteMode::Overwrite => {
+                opts.create(true).truncate(true);
+            }
+        }
+        let mut file = opts.open(&path).map_err(|e| AdapterError::Filesystem {
+            path: path.to_string_lossy().to_string(),
+            source: e.to_string(),
+        })?;
         std::io::Write::write_all(&mut file, formula.as_bytes()).map_err(|e| {
             AdapterError::Filesystem {
                 path: path.to_string_lossy().to_string(),
@@ -378,6 +568,17 @@ impl HomebrewAdapter {
             }
         })
     }
+}
+
+/// How [`HomebrewAdapter::write_formula`] opens the target `.rb`: create-new
+/// (`O_EXCL`, the first-formula create) or truncate-and-overwrite (the tap-write
+/// bump of an existing formula).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteMode {
+    /// Refuse to open an existing file (`O_EXCL`) — the create path's guard.
+    CreateNew,
+    /// Create or truncate — the tap-write path replacing an existing formula.
+    Overwrite,
 }
 
 impl ReleaseAdapter for HomebrewAdapter {
@@ -416,9 +617,28 @@ impl ReleaseAdapter for HomebrewAdapter {
                     )],
                 )
             }
-            FormulaPath::Bump => (
+            FormulaPath::TapWrite => {
+                // `tap` is Some whenever resolve_path returned TapWrite.
+                let tap = self
+                    .tap(ctx.artifacts.homebrew.as_ref())
+                    .unwrap_or_default();
+                let workdir = Self::fresh_workdir(&t.package, &t.version);
+                (
+                    Self::update_commands(tap, &t.package, &t.version, &workdir.to_string_lossy()),
+                    vec![format!(
+                        "tap-write path: `{}` already serves `{}.rb` — rendering the updated \
+                         formula and pushing it directly to the tap's default branch (no \
+                         `brew`, no PR)",
+                        tap, t.package,
+                    )],
+                )
+            }
+            FormulaPath::BumpPr => (
                 vec![self.bump_command(tarball, &t.package)],
-                vec!["bump path: the formula already exists — bumping its url/sha256".to_string()],
+                vec![
+                    "bump-PR path: no configured tap — `brew bump-formula-pr` opens a reviewed PR"
+                        .to_string(),
+                ],
             ),
         };
         match tarball {
@@ -458,7 +678,7 @@ impl ReleaseAdapter for HomebrewAdapter {
         ctx: &EffectCtx<'_>,
         t: &AdapterTarget,
     ) -> Result<PublishReceipt, AdapterError> {
-        // PER-TARGET IRREVERSIBLE (opens a formula create/bump PR).
+        // PER-TARGET IRREVERSIBLE (pushes a formula to the tap, or opens a PR).
         match self.resolve_path(ctx, t)? {
             FormulaPath::Create => {
                 let tap = self
@@ -466,7 +686,13 @@ impl ReleaseAdapter for HomebrewAdapter {
                     .expect("resolve_path returns Create only when a tap is configured");
                 Self::run_create(ctx, t, tap)
             }
-            FormulaPath::Bump => {
+            FormulaPath::TapWrite => {
+                let tap = self
+                    .tap(ctx.artifacts.homebrew.as_ref())
+                    .expect("resolve_path returns TapWrite only when a tap is configured");
+                Self::run_tap_write(ctx, t, tap)
+            }
+            FormulaPath::BumpPr => {
                 let cmd = self.bump_command(ctx.artifacts.source_tarball.as_ref(), &t.package);
                 run_all(ctx, &[cmd])?;
                 Ok(make_receipt(ctx, t, None, None))
