@@ -2,12 +2,15 @@
 created: 2026-08-04
 updated: 2026-08-07
 type: improvement
-status: in-progress
+status: done
 priority: normal
 related: ['@contract-cannot-model-cargo-dist-release']
 commits:
 - hash: 1d24911
   summary: capture unknown distribution sub-keys in extra_fields
+- hash: '2221631'
+  summary: review fixes — keep Eq, version the nested warning, add coexistence + drift-guard tests
+closed: 2026-08-07
 ---
 
 # Nested distribution block: extra_fields forward-compat capture
