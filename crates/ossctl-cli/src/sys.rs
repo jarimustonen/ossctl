@@ -367,15 +367,26 @@ impl RealRegistryQuery {
             .call()
             .map_err(|e| io::Error::other(format!("HTTP GET {url} failed: {e}")))?;
         let status = resp.status().as_u16();
+        // Cap the body read explicitly rather than leaning on `ureq`'s current
+        // default: a hostile or misconfigured endpoint must not exhaust RAM, and a
+        // future `ureq` default change must not silently lift the ceiling. Exceeding
+        // it is an `Err` (→ `unknown`), never a truncated `Ok` that could misparse.
         let body = resp
             .body_mut()
+            .with_config()
+            .limit(Self::MAX_BODY_BYTES)
             .read_to_vec()
             .map_err(|e| io::Error::other(format!("reading HTTP body from {url} failed: {e}")))?;
         Ok((status, body))
     }
 
-    /// crates.io's ceiling on a scoped/unscoped npm package name (its documented
-    /// `214` limit); a longer input is a tampered/erroneous journal value, not a
+    /// Hard ceiling on a response body read by [`Self::http_get`] (10 MiB). Both a
+    /// crates.io sparse-index entry and an npm packument sit far below this; the cap
+    /// is a RAM-exhaustion guard, not a functional limit.
+    const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
+
+    /// npm's ceiling on a scoped/unscoped package name (its documented `214`
+    /// limit); a longer input is a tampered/erroneous journal value, not a
     /// lookup — refuse it before it becomes an oversized URL.
     const MAX_NPM_NAME_LEN: usize = 214;
 
@@ -385,7 +396,10 @@ impl RealRegistryQuery {
     /// outside the npm-permitted set is refused rather than percent-mangled into a
     /// wrong-but-successful lookup. A scoped name (`@scope/name`) is allowed exactly
     /// one `/` (between a non-empty scope and a non-empty name) and a leading `@`;
-    /// an unscoped name carries neither.
+    /// an unscoped name carries neither. Each name component must also obey npm's
+    /// rule that it cannot begin with `.` or `_` — which additionally rules out the
+    /// URL dot-segments `.`/`..` that a middlebox could path-normalize away from the
+    /// literal segment we meant to request.
     fn validate_npm_package(package: &str) -> io::Result<()> {
         let invalid = |msg: String| Err(io::Error::new(io::ErrorKind::InvalidInput, msg));
         if package.is_empty() {
@@ -405,11 +419,15 @@ impl RealRegistryQuery {
         }
         let scoped = package.starts_with('@');
         let slashes = package.bytes().filter(|&b| b == b'/').count();
-        if scoped {
+        // The individual name components: `[scope, name]` for a scoped package,
+        // `[name]` otherwise. Each must be non-empty and not lead with `.`/`_`.
+        let components: Vec<&str> = if scoped {
             // `@scope/name` — exactly one '/', both halves non-empty.
             let rest = &package[1..];
             match rest.split_once('/') {
-                Some((scope, name)) if !scope.is_empty() && !name.is_empty() && slashes == 1 => {}
+                Some((scope, name)) if !scope.is_empty() && !name.is_empty() && slashes == 1 => {
+                    vec![scope, name]
+                }
                 _ => {
                     return invalid(format!(
                         "refusing to query npm for a malformed scoped package name: {package:?}"
@@ -420,6 +438,15 @@ impl RealRegistryQuery {
             return invalid(format!(
                 "refusing to query npm for an unscoped package name containing '/': {package:?}"
             ));
+        } else {
+            vec![package]
+        };
+        for component in components {
+            if component.starts_with('.') || component.starts_with('_') {
+                return invalid(format!(
+                    "refusing to query npm for a package name whose component starts with '.' or '_': {package:?}"
+                ));
+            }
         }
         // Charset: unreserved npm name bytes, plus '@' only as the leading scope
         // marker and '/' only inside a scoped name (both already positionally
@@ -439,11 +466,11 @@ impl RealRegistryQuery {
     }
 
     /// The npm-registry packument URL for `package`. A scoped name's `/` is
-    /// percent-encoded (`@scope%2fname`) so it stays a single path segment rather
-    /// than a nested path; every other byte is validated URL-safe by
-    /// [`Self::validate_npm_package`], so no further encoding is needed.
+    /// percent-encoded (`@scope%2Fname`, canonical uppercase hex) so it stays a
+    /// single path segment rather than a nested path; every other byte is validated
+    /// URL-safe by [`Self::validate_npm_package`], so no further encoding is needed.
     fn npm_registry_url(package: &str) -> String {
-        format!("https://registry.npmjs.org/{}", package.replace('/', "%2f"))
+        format!("https://registry.npmjs.org/{}", package.replace('/', "%2F"))
     }
 
     /// Parse an npm-registry packument body into its published version list — the
@@ -1212,10 +1239,11 @@ mod tests {
             RealRegistryQuery::npm_registry_url("left-pad"),
             "https://registry.npmjs.org/left-pad"
         );
-        // A scoped name's '/' is percent-encoded so it stays one path segment.
+        // A scoped name's '/' is percent-encoded (canonical uppercase) so it stays
+        // one path segment.
         assert_eq!(
             RealRegistryQuery::npm_registry_url("@scope/pkg"),
-            "https://registry.npmjs.org/@scope%2fpkg"
+            "https://registry.npmjs.org/@scope%2Fpkg"
         );
     }
 
@@ -1242,6 +1270,19 @@ mod tests {
         assert!(RealRegistryQuery::validate_npm_package("@scope").is_err()); // scope needs a name
         assert!(RealRegistryQuery::validate_npm_package("@/pkg").is_err()); // empty scope
         assert!(RealRegistryQuery::validate_npm_package("pkg@1").is_err()); // '@' only leading
+                                                                            // URL dot-segments and npm's leading-'.'/'_' rule: a component may not begin
+                                                                            // with '.' or '_' (this also rejects "." and ".." path segments).
+        assert!(RealRegistryQuery::validate_npm_package(".").is_err());
+        assert!(RealRegistryQuery::validate_npm_package("..").is_err());
+        assert!(RealRegistryQuery::validate_npm_package(".hidden").is_err());
+        assert!(RealRegistryQuery::validate_npm_package("_priv").is_err());
+        assert!(RealRegistryQuery::validate_npm_package("@scope/.").is_err());
+        assert!(RealRegistryQuery::validate_npm_package("@scope/..").is_err());
+        assert!(RealRegistryQuery::validate_npm_package("@.scope/pkg").is_err());
+        assert!(RealRegistryQuery::validate_npm_package("@_scope/pkg").is_err());
+        // A '.' or '_' *inside* a component is still fine (real packages use them).
+        assert!(RealRegistryQuery::validate_npm_package("lodash.merge").is_ok());
+        assert!(RealRegistryQuery::validate_npm_package("read_file").is_ok());
     }
 
     #[test]
@@ -1263,5 +1304,68 @@ mod tests {
         assert!(RealRegistryQuery::validate_crate_name("a/b").is_err());
         assert!(RealRegistryQuery::validate_crate_name("a b").is_err());
         assert!(RealRegistryQuery::validate_crate_name("a.b").is_err());
+    }
+
+    /// Spin up a one-shot loopback HTTP/1.1 server that answers the first request
+    /// with `response` (raw status line + headers + body) and returns its `http://`
+    /// URL. Plaintext (no TLS) exercises the `ureq` config that the fail-closed
+    /// contract rests on without a certificate.
+    fn serve_once(response: &'static [u8]) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // Drain (part of) the request so the client's write completes, then
+                // answer and drop the connection.
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response);
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    #[test]
+    fn http_get_delivers_200_status_and_body() {
+        let url = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello");
+        let (status, body) = RealRegistryQuery::http_get(&url).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, b"hello");
+    }
+
+    #[test]
+    fn http_get_delivers_404_as_ok_status_not_error() {
+        // Proves `http_status_as_error(false)`: a 404 arrives as Ok(status=404), NOT
+        // an error. The crates.io/npm "not published" signal depends on this — if a
+        // 404 became an Err, every genuine miss would misread as "unknown".
+        let url = serve_once(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+        let (status, body) = RealRegistryQuery::http_get(&url).unwrap();
+        assert_eq!(status, 404);
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn http_get_delivers_5xx_as_ok_status() {
+        // A 5xx likewise arrives as its own status (→ classifier fails closed), not
+        // as a transport error.
+        let url = serve_once(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n");
+        let (status, _) = RealRegistryQuery::http_get(&url).unwrap();
+        assert_eq!(status, 503);
+    }
+
+    #[test]
+    fn http_get_does_not_follow_redirects() {
+        // Proves `max_redirects(0)`: a 3xx is NOT followed and surfaces as its own
+        // status (Ok(301)), so `classify_*_response` reaches its fail-closed
+        // "unexpected status" arm instead of chasing a wrong-host redirect whose
+        // 404 would misread as "not published". (Verifies the doc claim empirically
+        // rather than trusting it.)
+        let url = serve_once(
+            b"HTTP/1.1 301 Moved Permanently\r\nLocation: http://127.0.0.1:1/x\r\nContent-Length: 0\r\n\r\n",
+        );
+        let (status, _) = RealRegistryQuery::http_get(&url).unwrap();
+        assert_eq!(status, 301);
     }
 }

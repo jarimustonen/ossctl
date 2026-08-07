@@ -1,10 +1,13 @@
 ---
 created: 2026-08-06
-updated: 2026-08-06
+updated: 2026-08-07
 type: improvement
-status: open
+status: in-progress
 priority: normal
 epic: ossctl-phase4-build
+commits:
+- hash: 8428e1b
+  summary: 'feat(sys): unify registry queries behind one ureq http_get seam'
 ---
 
 # Unify registry queries behind a lightweight HTTP client instead of shelling to curl/npm
