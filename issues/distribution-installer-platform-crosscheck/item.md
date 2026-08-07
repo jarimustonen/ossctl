@@ -1,8 +1,8 @@
 ---
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-08-07
 type: improvement
-status: open
+status: in-progress
 priority: normal
 epic: ossctl-phase4-build
 related: ['@distribution-cross-platform-targets']

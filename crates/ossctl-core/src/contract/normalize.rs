@@ -850,6 +850,38 @@ fn parse_distribution(
         }
     };
 
+    // Cross-check: an OS-specific installer whose target OS is absent from
+    // `platforms` is dead config — the generated installer points at a binary the
+    // release never builds ("the installer has nothing to install"). A warning,
+    // not a floor (mirrors the `homebrew_tap`-without-consumer advisory above):
+    // the contract is internally consistent, just wasteful. Only the OS-specific
+    // installers constrain the set — see [`installer_os_need`] for the full
+    // installer→OS table; npm/shell/powershell are OS-agnostic and never warn.
+    let has_windows = platforms.iter().any(|t| is_windows_triple(t));
+    let has_macos = platforms.iter().any(|t| is_macos_triple(t));
+    let has_linux = platforms.iter().any(|t| is_linux_triple(t));
+    for &installer in &installers {
+        let unmet = match installer_os_need(installer) {
+            OsNeed::Agnostic => None,
+            OsNeed::Windows => (!has_windows).then_some(
+                "distribution.installers includes 'msi' but distribution.platforms has no \
+                 Windows (*-windows-*) target — the MSI installer has nothing to install",
+            ),
+            // Homebrew serves macOS natively AND Linux via Linuxbrew, so a single
+            // Linux triple satisfies it just as a darwin triple does; the warning
+            // fires only when NEITHER is present (the issue's stated intent when
+            // the darwin-vs-linux question is ambiguous).
+            OsNeed::MacosOrLinux => (!has_macos && !has_linux).then_some(
+                "distribution.installers includes 'homebrew' but distribution.platforms has no \
+                 macOS (*-apple-darwin) or Linux (*-linux-*) target — the Homebrew formula has \
+                 nothing to install",
+            ),
+        };
+        if let Some(msg) = unmet {
+            p.warn(msg.to_string());
+        }
+    }
+
     // Forward-compat: preserve unknown distribution sub-keys (the nested analogue
     // of the top-level `extra_fields` scan), so an older reader round-trips a
     // newer contract's distribution keys rather than dropping them. Reported once,
@@ -892,6 +924,56 @@ fn default_cross_platform_targets() -> Vec<String> {
         .iter()
         .map(|&s| s.to_string())
         .collect()
+}
+
+/// The OS coverage an installer needs from `distribution.platforms` to install
+/// anything — the small installer→OS spec behind the installer↔platform
+/// cross-check warning. Kept as one table (see [`installer_os_need`]) rather than
+/// scattered conditionals so the mapping stays inspectable in one place.
+enum OsNeed {
+    /// OS-agnostic — the installer never constrains `platforms`.
+    Agnostic,
+    /// Needs at least one Windows triple.
+    Windows,
+    /// Needs at least one macOS OR Linux triple.
+    MacosOrLinux,
+}
+
+/// The OS an installer's generated artifact can actually install onto — the spec
+/// that lets the normalizer flag an installer whose target OS is absent from
+/// `platforms`. Only the OS-specific installers constrain the set:
+///
+/// | installer    | needs                | rationale                                     |
+/// |--------------|----------------------|-----------------------------------------------|
+/// | `msi`        | Windows              | an `.msi` installs only on Windows            |
+/// | `homebrew`   | macOS **or** Linux   | Homebrew serves macOS natively and Linux (Linuxbrew) |
+/// | `shell`      | — (agnostic)         | the shell script fetches whichever platform's binary the release built |
+/// | `powershell` | — (agnostic)         | Windows-oriented, but not gated here — only msi/homebrew are OS-checked |
+/// | `npm`        | — (agnostic)         | published to a registry, not an OS-specific artifact |
+fn installer_os_need(i: Installer) -> OsNeed {
+    match i {
+        Installer::Msi => OsNeed::Windows,
+        Installer::Homebrew => OsNeed::MacosOrLinux,
+        Installer::Shell | Installer::Powershell | Installer::Npm => OsNeed::Agnostic,
+    }
+}
+
+/// Whether a (well-formed) target-triple targets Windows — an `-windows-`
+/// component (e.g. `x86_64-pc-windows-msvc`), matching the `*-windows-*` glob.
+fn is_windows_triple(s: &str) -> bool {
+    s.split('-').any(|part| part == "windows")
+}
+
+/// Whether a target-triple targets macOS — an `apple-darwin` OS component
+/// (e.g. `aarch64-apple-darwin`), matching the `*-apple-darwin` glob.
+fn is_macos_triple(s: &str) -> bool {
+    s.split('-').any(|part| part == "darwin")
+}
+
+/// Whether a target-triple targets Linux — a `-linux-` component (e.g.
+/// `x86_64-unknown-linux-musl`), covering the Linuxbrew case for `homebrew`.
+fn is_linux_triple(s: &str) -> bool {
+    s.split('-').any(|part| part == "linux")
 }
 
 /// Whether `s` is a *structurally* plausible target-triple — 2–4 `-`-separated
@@ -1551,6 +1633,144 @@ mod tests {
                     && w.contains("future_signing")
             }),
             "expected a scoped forward-compat warning: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    // ── installer ↔ platform cross-check (warning, not a floor) ──────────────
+
+    /// `installers: [msi]` with no Windows triple in `platforms` warns — the MSI
+    /// installer points at a binary the release never builds. Still valid (warning,
+    /// not error): the contract is internally consistent, just wasteful.
+    #[test]
+    fn msi_installer_without_windows_platform_warns() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [msi]\n  \
+                    platforms: [x86_64-apple-darwin, x86_64-unknown-linux-musl]\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("includes 'msi'") && w.contains("no Windows")),
+            "expected an msi/Windows cross-check warning: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// `installers: [msi]` WITH a Windows triple present → no cross-check warning.
+    #[test]
+    fn msi_installer_with_windows_platform_no_warning() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [msi]\n  \
+                    platforms: [x86_64-pc-windows-msvc]\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            !n.problems.warnings.iter().any(|w| w.contains("'msi'")),
+            "unexpected msi cross-check warning: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// `installers: [homebrew]` with NEITHER a macOS nor a Linux triple warns —
+    /// the generated formula has nothing to install. (A Windows-only platform set
+    /// is the only way to strand a `homebrew` installer, since Homebrew serves
+    /// both macOS and Linux.)
+    #[test]
+    fn homebrew_installer_without_darwin_or_linux_warns() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [homebrew]\n  \
+                    homebrew_tap: jarimustonen/homebrew-issuectl\n  \
+                    platforms: [x86_64-pc-windows-msvc]\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("includes 'homebrew'") && w.contains("nothing to install")),
+            "expected a homebrew/(macOS|Linux) cross-check warning: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// `installers: [homebrew]` is satisfied by a LINUX triple alone (Linuxbrew) —
+    /// no darwin triple required. The chosen interpretation: homebrew needs macOS
+    /// OR Linux, so a Linux-only platform set is coherent, not a warning.
+    #[test]
+    fn homebrew_installer_with_linux_only_no_warning() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [homebrew]\n  \
+                    homebrew_tap: jarimustonen/homebrew-issuectl\n  \
+                    platforms: [x86_64-unknown-linux-musl]\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            !n.problems.warnings.iter().any(|w| w.contains("'homebrew'")),
+            "unexpected homebrew cross-check warning for a Linux-only set: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// npm and shell installers are OS-agnostic: even a platform set that would
+    /// strand an msi (no Windows) never warns for them.
+    #[test]
+    fn npm_and_shell_installers_never_cross_check_warn() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust, node]\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [shell, npm]\n  \
+                    platforms: [x86_64-apple-darwin]\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            !n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("nothing to install")),
+            "OS-agnostic installers must not cross-check warn: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// A coherent installer/platform set (msi + Windows, homebrew + darwin) emits
+    /// no cross-check warning.
+    #[test]
+    fn coherent_installer_platform_set_no_warning() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [homebrew, msi]\n  \
+                    homebrew_tap: jarimustonen/homebrew-issuectl\n  \
+                    platforms: [aarch64-apple-darwin, x86_64-pc-windows-msvc]\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            !n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("nothing to install")),
+            "coherent set must not warn: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// ossctl's own contract shape — installers `[shell, powershell]` with a
+    /// platform set spanning Windows + macOS + Linux — produces no cross-check
+    /// warning (both installers are agnostic here, and every OS is covered anyway).
+    #[test]
+    fn ossctl_own_contract_shape_no_cross_check_warning() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [shell, powershell]\n  \
+                    platforms: [aarch64-apple-darwin, x86_64-apple-darwin, \
+                    x86_64-unknown-linux-musl, aarch64-unknown-linux-musl, \
+                    x86_64-pc-windows-msvc]\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            !n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("nothing to install")),
+            "ossctl's own shape must not cross-check warn: {:?}",
             n.problems.warnings
         );
     }
