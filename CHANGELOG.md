@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 <!-- oss-changelog:unreleased-end -->
 
+## [0.2.3] - 2026-08-07
+
+### Fixed
+- **The engine's Homebrew release leg is now self-sufficient — no local `brew` toolchain required.**
+  For a configured tap with an existing formula, the `dist` phase renders `Formula/<name>.rb` from the
+  verified sha256 and pushes it **directly to the tap** (git/API write), instead of shelling to
+  `brew bump-formula-pr` (which ran `brew audit` internally and could abort a cut on an unrelated
+  audit/lint error, as it did on the 0.2.2 cut). The write verifies the sha against the fetched
+  archive, guards formula existence/symlinks, and is idempotent (a byte-identical formula is a no-op).
+  `brew bump-formula-pr` is retained only for the homebrew-core path. This makes an engine cut's
+  Homebrew leg deterministic and hands-off.
+- **False-positive `homebrew_tap` contract warning removed.** The normalizer no longer warns
+  "homebrew_tap is set but no homebrew installer" when the contract declares a `homebrew`-registry
+  **target** — that target IS the tap consumer, so the tap is updated. The warning now fires only when
+  a tap has neither a homebrew installer nor a homebrew target (the genuinely-orphaned case).
+
+### Added
+- **Forward-compat capture on the nested `distribution` block.** The `Distribution` struct and its
+  sub-structs now preserve unknown sub-keys in `extra_fields` (mirroring the top-level `Contract`), so
+  an older ossctl reading a newer contract round-trips distribution keys instead of dropping them.
+- **Installer↔platform coherence warning.** The normalizer now warns when `distribution.installers`
+  targets an OS absent from `distribution.platforms` (e.g. `msi` without a Windows triple, `homebrew`
+  without a macOS or Linux triple), catching dead installer config; `npm`/`shell`/`powershell` are
+  OS-agnostic and ungated.
+
 ## [0.2.2] - 2026-08-06
 
 ### Added
