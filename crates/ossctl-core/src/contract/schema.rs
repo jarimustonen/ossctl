@@ -292,7 +292,10 @@ pub struct Target {
 ///
 /// `Option` on [`Contract`]: `null` for a registry-only repo (the common case),
 /// so this addition leaves every existing contract's shape unchanged.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// Drops `Eq` (unlike its sibling [`Target`]) for the same reason [`Contract`]
+/// does: [`Self::extra_fields`] holds `serde_json::Value`s, which are not `Eq`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Distribution {
     /// The binary-distribution engine that owns the tag-triggered release
     /// workflow.
@@ -321,6 +324,12 @@ pub struct Distribution {
     /// well-formed, never that the set covers any particular OS or that the toolchain
     /// will build it.
     pub platforms: Vec<String>,
+    /// Preserved unknown keys inside the `distribution` block under a known
+    /// `schema_version` (forward-compat), so an older reader round-trips a newer
+    /// contract's distribution sub-keys rather than dropping them. Mirrors
+    /// [`Contract::extra_fields`] at the nested level; empty for a contract with
+    /// no unknown distribution keys.
+    pub extra_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The changelog block of the contract (SCHEMA.md §1). `fragment_dir` is always

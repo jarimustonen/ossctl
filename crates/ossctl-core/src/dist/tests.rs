@@ -11,6 +11,7 @@ fn dist(installers: Vec<Installer>, platforms: Vec<&str>) -> Distribution {
         installers,
         homebrew_tap: None,
         platforms: platforms.into_iter().map(str::to_string).collect(),
+        extra_fields: serde_json::Map::new(),
     }
 }
 

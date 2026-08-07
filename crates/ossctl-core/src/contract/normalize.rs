@@ -640,6 +640,17 @@ fn validate_targets(
     out
 }
 
+/// Known `distribution`-block keys; anything else is preserved under
+/// [`Distribution::extra_fields`] (forward-compat), the nested analogue of
+/// [`KNOWN_KEYS`].
+const KNOWN_DISTRIBUTION_KEYS: &[&str] = &[
+    "adapter",
+    "gh_releases",
+    "installers",
+    "homebrew_tap",
+    "platforms",
+];
+
 /// Canonical installer order — used to de-duplicate and stably order the
 /// `distribution.installers` list (mirrors [`ECOSYSTEM_ORDER`]'s role).
 const INSTALLER_ORDER: [Installer; 5] = [
@@ -833,12 +844,36 @@ fn parse_distribution(
         }
     };
 
+    // Forward-compat: preserve unknown distribution sub-keys (the nested analogue
+    // of the top-level `extra_fields` scan), so an older reader round-trips a
+    // newer contract's distribution keys rather than dropping them. Reported once,
+    // scoped to the block, mirroring the top-level unknown-field warning.
+    let mut extra_fields = serde_json::Map::new();
+    for (k, v) in m {
+        if let Value::String(key) = k {
+            if !KNOWN_DISTRIBUTION_KEYS.contains(&key.as_str()) {
+                extra_fields.insert(key.clone(), yaml_to_json(v));
+            }
+        }
+    }
+    if !extra_fields.is_empty() {
+        let keys = extra_fields
+            .keys()
+            .map(|k| format!("'{k}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        p.warn(format!(
+            "unknown distribution field(s) preserved (forward-compat): [{keys}]"
+        ));
+    }
+
     Some(Distribution {
         adapter,
         gh_releases,
         installers,
         homebrew_tap,
         platforms,
+        extra_fields,
     })
 }
 
@@ -1467,6 +1502,63 @@ mod tests {
         assert_eq!(d["gh_releases"], true);
         assert_eq!(d["installers"], serde_json::json!(["shell", "homebrew"]));
         assert_eq!(d["homebrew_tap"], "jarimustonen/homebrew-issuectl");
+    }
+
+    /// Forward-compat: an unknown key inside the `distribution` block is preserved
+    /// under `distribution.extra_fields` (not dropped) and survives a
+    /// parse→serialize round-trip, mirroring the top-level `extra_fields` capture.
+    /// A warning reports it once; the known distribution keys are unaffected.
+    #[test]
+    fn distribution_unknown_subkey_preserved_and_warned() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  gh_releases: true\n  \
+                    future_signing: {enabled: true, kms_key: alias/oss}\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        let d = n
+            .contract
+            .clone()
+            .distribution
+            .expect("distribution present");
+        // The unknown sub-key is captured, with its nested value intact.
+        assert_eq!(
+            d.extra_fields
+                .get("future_signing")
+                .and_then(|v| v.get("kms_key"))
+                .and_then(|v| v.as_str()),
+            Some("alias/oss")
+        );
+        // Known keys are untouched by the capture.
+        assert_eq!(d.adapter, DistributionAdapter::CargoDist);
+        assert!(d.gh_releases);
+        // It round-trips through the serialized JSON downstream members read.
+        let json = serde_json::to_value(&n.contract).unwrap();
+        assert_eq!(
+            json["distribution"]["extra_fields"]["future_signing"]["enabled"],
+            serde_json::json!(true)
+        );
+        // Reported once, scoped to the block, naming the key.
+        assert!(
+            n.problems.warnings.iter().any(|w| {
+                w.contains("unknown distribution field(s) preserved")
+                    && w.contains("future_signing")
+            }),
+            "expected a scoped forward-compat warning: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// A distribution block with only known keys carries an empty `extra_fields`
+    /// map — the additive field is shape-neutral for existing contracts.
+    #[test]
+    fn distribution_known_keys_only_has_empty_extra_fields() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n---\n";
+        let d = norm(text)
+            .contract
+            .distribution
+            .expect("distribution present");
+        assert!(d.extra_fields.is_empty());
     }
 
     /// Installers de-dup into canonical order regardless of source order.

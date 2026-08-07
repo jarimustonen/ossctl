@@ -218,6 +218,7 @@ fn dist_with(platforms: &[&str]) -> Distribution {
         installers: vec![],
         homebrew_tap: None,
         platforms: platforms.iter().map(|s| (*s).to_string()).collect(),
+        extra_fields: serde_json::Map::new(),
     }
 }
 
