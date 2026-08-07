@@ -41,6 +41,20 @@ const ECOSYSTEM_ORDER: [Ecosystem; 5] = [
 
 /// Known top-level frontmatter keys; anything else is preserved under
 /// [`Contract::extra_fields`] (forward-compat).
+///
+/// **Invariant:** this list MUST stay in sync with the [`Contract`] struct
+/// fields — every parsed field has its source key here. A field added to
+/// [`Contract`] without its key here would be captured as an "unknown" field on
+/// input; the `all_known_keys_*` tests guard against that drift.
+///
+/// The two trailing entries — `extra_fields` and `warnings` — are the canonical
+/// *output* metadata keys, reserved here so canonical JSON (which carries them)
+/// re-fed to the normalizer as YAML does NOT re-capture them into a nested
+/// `extra_fields.extra_fields` on each pass. They are handled asymmetrically:
+/// `extra_fields`'s mapping contents are merged back into the captured map (see
+/// [`capture_unknown_fields`]) so the block round-trips losslessly; `warnings` is
+/// derived diagnostic output, regenerated every pass, so any input value under it
+/// is intentionally ignored (not preserved — it is not user contract data).
 const KNOWN_KEYS: &[&str] = &[
     "schema_version",
     "status",
@@ -58,6 +72,9 @@ const KNOWN_KEYS: &[&str] = &[
     "health_badges",
     "license",
     "docs_site",
+    // Reserved canonical-output metadata keys (not parsed) — see doc above.
+    "extra_fields",
+    "warnings",
 ];
 
 /// Collected fatal errors and non-fatal warnings from a normalization pass.
@@ -464,27 +481,8 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
     }
 
     // ── Forward-compat: preserve unknown fields, report once ─────────────────
-    let mut extra_fields = serde_json::Map::new();
-    for (k, v) in map {
-        if let Value::String(key) = k {
-            if !KNOWN_KEYS.contains(&key.as_str()) {
-                extra_fields.insert(key.clone(), yaml_to_json(v));
-            }
-        }
-    }
-    if !extra_fields.is_empty() {
-        // serde_json::Map is ordered (BTreeMap) → keys already sorted. Rendered
-        // as a single-quoted list to match the Python normalizer's message.
-        let keys = extra_fields
-            .keys()
-            .map(|k| format!("'{k}'"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        p.warn(format!(
-            "unknown field(s) preserved under schema_version {schema_version} (forward-compat): \
-             [{keys}]"
-        ));
-    }
+    let extra_fields =
+        capture_unknown_fields(map, KNOWN_KEYS, CaptureScope::TopLevel, schema_version, p);
 
     let warnings = p.warnings.clone();
     Contract {
@@ -648,12 +646,21 @@ fn validate_targets(
 /// Known `distribution`-block keys; anything else is preserved under
 /// [`Distribution::extra_fields`] (forward-compat), the nested analogue of
 /// [`KNOWN_KEYS`].
+///
+/// **Invariant:** this list MUST stay in sync with the [`Distribution`] struct
+/// fields (see the [`KNOWN_KEYS`] note). The trailing `extra_fields` entry is the
+/// reserved canonical-output metadata key — its contents are merged back rather
+/// than nested (see [`capture_unknown_fields`]). A [`Distribution`] carries no
+/// `warnings` (those live only at the top level), so only `extra_fields` needs
+/// reserving here.
 const KNOWN_DISTRIBUTION_KEYS: &[&str] = &[
     "adapter",
     "gh_releases",
     "installers",
     "homebrew_tap",
     "platforms",
+    // Reserved canonical-output metadata key (not parsed) — see doc above.
+    "extra_fields",
 ];
 
 /// Canonical installer order — used to de-duplicate and stably order the
@@ -894,26 +901,15 @@ fn parse_distribution(
     // Forward-compat: preserve unknown distribution sub-keys (the nested analogue
     // of the top-level `extra_fields` scan), so an older reader round-trips a
     // newer contract's distribution keys rather than dropping them. Reported once,
-    // scoped to the block, mirroring the top-level unknown-field warning.
-    let mut extra_fields = serde_json::Map::new();
-    for (k, v) in m {
-        if let Value::String(key) = k {
-            if !KNOWN_DISTRIBUTION_KEYS.contains(&key.as_str()) {
-                extra_fields.insert(key.clone(), yaml_to_json(v));
-            }
-        }
-    }
-    if !extra_fields.is_empty() {
-        let keys = extra_fields
-            .keys()
-            .map(|k| format!("'{k}'"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        p.warn(format!(
-            "unknown distribution field(s) preserved under schema_version {schema_version} \
-             (forward-compat): [{keys}]"
-        ));
-    }
+    // scoped to the block via the `Distribution` scope, mirroring the top-level
+    // unknown-field warning — the shared helper keeps the two from drifting.
+    let extra_fields = capture_unknown_fields(
+        m,
+        KNOWN_DISTRIBUTION_KEYS,
+        CaptureScope::Distribution,
+        schema_version,
+        p,
+    );
 
     Some(Distribution {
         adapter,
@@ -1197,6 +1193,148 @@ fn path_inside_repo(rel: &str) -> bool {
         }
     }
     true
+}
+
+/// Which mapping the [`capture_unknown_fields`] scan is running over — scopes the
+/// forward-compat warning text and error messages. An enum (rather than a bare
+/// string prefix) so a new call site cannot silently pass a mis-spaced label and
+/// produce `unknown distributionfield(s)`.
+#[derive(Clone, Copy)]
+enum CaptureScope {
+    /// The top-level frontmatter mapping ([`KNOWN_KEYS`]).
+    TopLevel,
+    /// The nested `distribution` block ([`KNOWN_DISTRIBUTION_KEYS`]).
+    Distribution,
+}
+
+impl CaptureScope {
+    /// The infix woven into the warning/error text — `""` for the top level,
+    /// `"distribution "` for the block — so a message reads `unknown field(s) …`
+    /// vs `unknown distribution field(s) …`.
+    fn label(self) -> &'static str {
+        match self {
+            Self::TopLevel => "",
+            Self::Distribution => "distribution ",
+        }
+    }
+}
+
+/// Scan a YAML mapping for keys outside `known` and preserve them under a
+/// forward-compat `extra_fields` map, warning once when any were captured. The
+/// single implementation behind BOTH the top-level ([`KNOWN_KEYS`]) and nested
+/// `distribution` ([`KNOWN_DISTRIBUTION_KEYS`]) scans, so the two cannot drift
+/// (the nested warning once silently omitted `schema_version`).
+///
+/// The guarantee is that an unknown **string** key is never dropped, never
+/// double-captured, and round-trips predictably:
+/// - A string key not in `known` is captured verbatim.
+/// - A known string key is skipped (parsed as its field, not double-captured).
+/// - The reserved canonical-output key `extra_fields` (in `known`) is not
+///   re-captured into a nested `extra_fields.extra_fields`; instead its mapping
+///   contents are **merged back** into the returned map (see
+///   [`merge_reserved_extra_fields`]) so a hand-authored — or, defensively, a
+///   re-fed canonical — `extra_fields` block round-trips losslessly rather than
+///   being silently dropped. A key present both in that block and as a sibling
+///   unknown field is an ambiguity error, not a silent overwrite.
+///
+/// Non-string keys (`42:`, `true:`, a list/map key — legal YAML) are a **structural
+/// error**, not silently coerced: they can never be a forward-compatible schema
+/// field (canonical JSON object keys are strings), and coercing them through the
+/// display formatter would collapse distinct keys onto the same string (`42` and
+/// `"42"`; every list key onto `<list>`) and silently drop a value — the opposite
+/// of the never-drop intent. Rejecting keeps the invariant vacuously (an invalid
+/// contract's output is never consumed) and matches the normalizer's
+/// error-collection style.
+fn capture_unknown_fields(
+    m: &Mapping,
+    known: &[&str],
+    scope: CaptureScope,
+    schema_version: u32,
+    p: &mut Problems,
+) -> serde_json::Map<String, serde_json::Value> {
+    let label = scope.label();
+    let mut extra_fields = serde_json::Map::new();
+    // Merge an explicit `extra_fields` block first (reserved metadata key), so a
+    // sibling unknown key colliding with it is detected below rather than
+    // silently overwriting it.
+    if let Some(v) = m.get("extra_fields") {
+        merge_reserved_extra_fields(v, scope, &mut extra_fields, p);
+    }
+    for (k, v) in m {
+        match k {
+            Value::String(key) => {
+                if known.contains(&key.as_str()) {
+                    continue;
+                }
+                if extra_fields.contains_key(key) {
+                    p.err(format!(
+                        "{label}field '{key}' appears both as an unknown top-level key and inside \
+                         the reserved '{label}extra_fields' block — refusing to drop either value; \
+                         remove one"
+                    ));
+                } else {
+                    extra_fields.insert(key.clone(), yaml_to_json(v));
+                }
+            }
+            other => p.err(format!(
+                "{label}field key {} must be a string — a non-string key is not a \
+                 forward-compatible schema shape and cannot be preserved losslessly (distinct \
+                 non-string keys collapse onto the same JSON key)",
+                yaml_display(other)
+            )),
+        }
+    }
+    if !extra_fields.is_empty() {
+        // serde_json::Map is ordered (BTreeMap, no `preserve_order`) → keys already
+        // sorted. Rendered as a single-quoted list to match the Python normalizer.
+        let keys = extra_fields
+            .keys()
+            .map(|k| format!("'{k}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        p.warn(format!(
+            "unknown {label}field(s) preserved under schema_version {schema_version} \
+             (forward-compat): [{keys}]"
+        ));
+    }
+    extra_fields
+}
+
+/// Merge the contents of a reserved `extra_fields` block (a hand-authored, or
+/// defensively a re-fed canonical, mapping under the reserved `extra_fields` key)
+/// into `out`, upholding the never-drop invariant for that block rather than
+/// silently discarding it now that the key is reserved in `known`. A non-mapping
+/// value, or a non-string key inside it, is a structural error (same rationale as
+/// the sibling scan in [`capture_unknown_fields`]). Sibling-key collisions are
+/// detected back in the caller, after this has seeded `out`.
+fn merge_reserved_extra_fields(
+    v: &Value,
+    scope: CaptureScope,
+    out: &mut serde_json::Map<String, serde_json::Value>,
+    p: &mut Problems,
+) {
+    let label = scope.label();
+    match v {
+        Value::Null => {}
+        Value::Mapping(inner) => {
+            for (k, val) in inner {
+                match k {
+                    Value::String(key) => {
+                        out.insert(key.clone(), yaml_to_json(val));
+                    }
+                    other => p.err(format!(
+                        "reserved '{label}extra_fields' block has a non-string key {} — its keys \
+                         must be strings",
+                        yaml_display(other)
+                    )),
+                }
+            }
+        }
+        other => p.err(format!(
+            "reserved '{label}extra_fields' must be a mapping when present, got {}",
+            yaml_display(other)
+        )),
+    }
 }
 
 /// Convert an arbitrary YAML value to JSON, for `extra_fields` preservation.
@@ -1995,6 +2133,174 @@ mod tests {
             .filter(|w| w.contains("forward-compat") && w.contains("schema_version 1"))
             .collect();
         assert_eq!(fc.len(), 2, "expected two versioned warnings: {fc:?}");
+    }
+
+    // ── extra_fields capture hardening ───────────────────────────────────────
+
+    /// A non-string top-level mapping key (`42:`, legal YAML) is a STRUCTURAL
+    /// error, not silently coerced/dropped: distinct non-string keys collapse onto
+    /// the same JSON key (`42` and `"42"`; every list key onto `<list>`), so
+    /// preserving them losslessly is impossible — the normalizer rejects instead,
+    /// keeping the never-drop invariant vacuously.
+    #[test]
+    fn non_string_top_level_key_rejected() {
+        let n = norm("---\nstatus: approved\nmaturity: mvp\n42: answer\n---\n");
+        assert_error_contains(&n, "must be a string");
+        assert!(
+            n.problems.errors.iter().any(|e| e.contains("42")),
+            "error should name the offending key: {:?}",
+            n.problems.errors
+        );
+    }
+
+    /// The nested `distribution` scan rejects the same way, with the block scope in
+    /// the message.
+    #[test]
+    fn non_string_distribution_key_rejected() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  true: enabled\n---\n";
+        let n = norm(text);
+        assert_error_contains(&n, "must be a string");
+        assert!(
+            n.problems
+                .errors
+                .iter()
+                .any(|e| e.contains("distribution field key")),
+            "error should be scoped to the distribution block: {:?}",
+            n.problems.errors
+        );
+    }
+
+    /// A known key placed normally is parsed as its field and NOT double-captured
+    /// into `extra_fields` — the dedupe guarantee (a key is never both a known
+    /// field and an extra field).
+    #[test]
+    fn known_key_not_double_captured() {
+        let n = norm("---\nstatus: approved\nmaturity: production\necosystems: [rust]\n---\n");
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(!n.contract.extra_fields.contains_key("ecosystems"));
+        assert!(!n.contract.extra_fields.contains_key("status"));
+        assert!(n.contract.extra_fields.is_empty());
+    }
+
+    /// The reserved `extra_fields` metadata key is not re-captured into a nested
+    /// `extra_fields.extra_fields`; its mapping contents are MERGED back, so a
+    /// hand-authored (or defensively re-fed canonical) block round-trips losslessly
+    /// rather than being silently dropped. The derived `warnings` key is ignored
+    /// (regenerated), not preserved — it is not user contract data.
+    #[test]
+    fn reserved_extra_fields_block_merged_warnings_ignored() {
+        let text = "---\nstatus: approved\nmaturity: mvp\n\
+                    extra_fields:\n  foo: 1\nwarnings:\n  - a prior note\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        // `foo` is preserved (merged), not nested and not dropped.
+        assert_eq!(
+            n.contract.extra_fields.get("foo"),
+            Some(&serde_json::json!(1))
+        );
+        assert!(!n.contract.extra_fields.contains_key("extra_fields"));
+        // The stale input `warnings` list is not resurrected into the output.
+        assert!(
+            !n.contract
+                .warnings
+                .iter()
+                .any(|w| w.contains("a prior note")),
+            "input warnings must be regenerated, not preserved: {:?}",
+            n.contract.warnings
+        );
+    }
+
+    /// The nested analogue: `distribution.extra_fields` is merged back, not nested
+    /// and not dropped.
+    #[test]
+    fn distribution_reserved_extra_fields_block_merged() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  extra_fields:\n    foo: 1\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        let d = n.contract.distribution.expect("distribution present");
+        assert_eq!(d.extra_fields.get("foo"), Some(&serde_json::json!(1)));
+        assert!(!d.extra_fields.contains_key("extra_fields"));
+    }
+
+    /// Idempotence: normalizing, serializing the canonical `extra_fields` map, and
+    /// re-feeding it as an `extra_fields` block yields the identical map — the
+    /// round-trip the reserve+merge design guarantees (no nesting, no loss).
+    #[test]
+    fn extra_fields_round_trip_is_idempotent() {
+        let first = norm("---\nstatus: approved\nmaturity: mvp\nroadmap_url: https://x/y\n---\n");
+        assert!(first.is_valid(), "errors: {:?}", first.problems.errors);
+        assert_eq!(first.contract.extra_fields.len(), 1);
+        // Feed the captured extra_fields back under the reserved key.
+        let inner = serde_yaml::to_string(&first.contract.extra_fields).unwrap();
+        let indented = inner
+            .lines()
+            .map(|l| format!("  {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text =
+            format!("---\nstatus: approved\nmaturity: mvp\nextra_fields:\n{indented}\n---\n");
+        let second = norm(&text);
+        assert!(second.is_valid(), "errors: {:?}", second.problems.errors);
+        assert_eq!(second.contract.extra_fields, first.contract.extra_fields);
+    }
+
+    /// A key present BOTH inside the reserved `extra_fields` block AND as a sibling
+    /// unknown top-level key is an ambiguity error — never a silent overwrite of
+    /// either value (dedupe: a key resolves to exactly one source).
+    #[test]
+    fn extra_fields_block_sibling_collision_is_error() {
+        let text = "---\nstatus: approved\nmaturity: mvp\n\
+                    extra_fields:\n  dup: 1\ndup: 2\n---\n";
+        let n = norm(text);
+        assert_error_contains(&n, "appears both");
+    }
+
+    /// A reserved `extra_fields` value that is not a mapping is a structural error
+    /// (it can only carry preserved key/value pairs).
+    #[test]
+    fn reserved_extra_fields_non_mapping_is_error() {
+        let n = norm("---\nstatus: approved\nmaturity: mvp\nextra_fields: nonsense\n---\n");
+        assert_error_contains(&n, "must be a mapping");
+    }
+
+    /// A contract setting EVERY parsed top-level known key carries an empty
+    /// `extra_fields` and emits no forward-compat warning — the top-level analogue
+    /// of `distribution_all_known_keys_has_empty_extra_fields`, guarding
+    /// [`KNOWN_KEYS`] against drifting out of sync with the [`Contract`] struct (a
+    /// new field whose key is missing here would be wrongly captured as unknown).
+    #[test]
+    fn top_level_all_known_keys_has_empty_extra_fields() {
+        let text = "---\nschema_version: 1\nstatus: approved\nmaturity: production\n\
+                    ecosystems: [rust]\n\
+                    targets:\n  - {ecosystem: rust, package: x, registry: crates.io, adapter: cargo-publish}\n\
+                    distribution:\n  adapter: cargo-dist\n\
+                    versioning: semver\n\
+                    changelog:\n  mode: curated\n  source: manual\n\
+                    conventional_commits: false\n\
+                    release:\n  model: gated\n  layout: single\n\
+                    contribution_provenance: none\n\
+                    provenance_level: none\n\
+                    dependency_bot: dependabot\n\
+                    health_badges: [ci, registry, license]\n\
+                    license: MIT\n\
+                    docs_site: none\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.contract.extra_fields.is_empty(),
+            "unexpected extra_fields (KNOWN_KEYS drift?): {:?}",
+            n.contract.extra_fields
+        );
+        assert!(
+            !n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("forward-compat")),
+            "no forward-compat warning for an all-known-keys contract: {:?}",
+            n.problems.warnings
+        );
     }
 
     /// Installers de-dup into canonical order regardless of source order.
