@@ -14,7 +14,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ossctl_core::ports::{
     Clock, CommandOutput, CommandRunner, Fs, GitRepo, IdGen, JournalLock, JournalStore,
@@ -276,73 +276,251 @@ fn crockford_u128(mut value: u128) -> String {
 ///
 /// The reconciler degrades a lookup failure to [`VerifyOutcome::Unknown`], never a
 /// false `Missing`, so an ecosystem with no wired query is honestly "cannot
-/// check" rather than "did not land". Two ecosystems are wired: `node` (queried
-/// through the clean `npm view … versions --json` surface) and `rust` (queried
-/// against the crates.io **sparse index** at `index.crates.io`). The remaining
+/// check" rather than "did not land". Two ecosystems are wired, both over one
+/// native HTTP seam ([`Self::http_get`]) — no `curl`/`npm` subprocess: `rust`
+/// queries the crates.io **sparse index** at `index.crates.io`; `node` queries
+/// the **npm registry** packument at `registry.npmjs.org`. The remaining
 /// ecosystems return an `Err` so the reconcile reports `unknown` until their
 /// registry query lands — matching the skeleton state of the adapter layer.
 ///
-/// **Timeout gap (partially closed).** Like [`RealCommandRunner`] and
-/// [`RealGitRepo`], the `npm` arm has no hard wall-clock timeout — `std` has none
-/// on `Command::output` and this crate takes no new dependency, so a stalled
-/// `npm`/DNS/TLS can hang it. The `rust` arm shells to `curl` with an explicit
-/// `--max-time`, so it is bounded; a bounded-deadline `npm` query is a documented
-/// follow-up.
+/// **Timeout: bounded on both arms.** Every probe runs through [`Self::http_get`],
+/// which sets one `ureq` wall-clock `timeout_global` covering
+/// DNS→connect→TLS→transfer — closing the old `npm`-shell-out no-timeout gap and
+/// replacing the `rust` arm's `curl --max-time`. Unlike the subprocess ports
+/// ([`RealCommandRunner`], [`RealGitRepo`]), there is no stalled-process risk at
+/// all here: the transport is in-process.
+///
+/// **`node` caveat (accepted).** Querying `registry.npmjs.org` directly targets
+/// the canonical **public** registry — it does *not* honour a `.npmrc`-configured
+/// private registry/mirror the old `npm view` would have consulted. For ossctl's
+/// public-OSS publish-verification model (remote-is-ground-truth, ADR-0003) the
+/// public registry is the correct source of truth. The full packument is fetched
+/// (the abbreviated form needs a request header the single-URL seam does not
+/// carry), so a pathologically large packument that exceeds [`Self::http_get`]'s
+/// body cap degrades to `unknown` (fail-closed, never a false `missing`).
 ///
 /// [`VerifyOutcome::Unknown`]: ossctl_core::protocol::release::VerifyOutcome::Unknown
 pub struct RealRegistryQuery;
 
+/// Deserializes a JSON object into just its **keys**, discarding every value —
+/// used to read an npm packument's `versions` map without materializing the
+/// per-version metadata (which can be large). See
+/// [`RealRegistryQuery::parse_npm_versions`].
+struct VersionKeys(Vec<String>);
+
+impl<'de> serde::Deserialize<'de> for VersionKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct KeysVisitor;
+        impl<'de> serde::de::Visitor<'de> for KeysVisitor {
+            type Value = Vec<String>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object mapping version strings to metadata")
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let mut keys = Vec::new();
+                // `IgnoredAny` streams past each value without allocating it.
+                while let Some((key, _)) = map.next_entry::<String, serde::de::IgnoredAny>()? {
+                    keys.push(key);
+                }
+                Ok(keys)
+            }
+        }
+        deserializer.deserialize_map(KeysVisitor).map(VersionKeys)
+    }
+}
+
 impl RealRegistryQuery {
-    /// `npm view --json <package> versions` → the published version list.
+    /// The one bounded, blocking HTTP `GET` seam every registry-state probe runs
+    /// through — returns the raw `(status, body)` so each ecosystem arm classifies
+    /// the status itself (see the fail-closed contract on [`RealRegistryQuery`]).
     ///
-    /// Hardened against non-interactive hangs the same way the other real ports
-    /// are (stdin `/dev/null`, update notifier disabled). A missing `npm`, a
-    /// non-zero exit, or unparsable output all surface as `Err`, which the
-    /// reconciler reads as `unknown` (never a false `missing`).
-    fn npm_versions(package: &str) -> io::Result<Vec<String>> {
-        // A package name is a positional; one that begins with '-' would be read
-        // by npm as a flag (flag injection from a tampered/erroneous journal).
-        // A real npm package name never starts with '-', so reject it outright
-        // rather than let it alter where/how the query runs.
-        if package.starts_with('-') {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "refusing to query npm for a package name that looks like a flag: {package:?}"
-                ),
+    /// A `ureq` agent is built per call (these probes are infrequent — once per
+    /// target per reconcile — and a short-lived agent keeps no idle connections).
+    /// Three settings encode the contract shared by both arms:
+    ///
+    /// - `timeout_global` — one wall-clock deadline over DNS→connect→TLS→transfer,
+    ///   so **both** arms are bounded (the old `npm` shell-out had none).
+    /// - `http_status_as_error(false)` — a `4xx`/`5xx` comes back as an
+    ///   `Ok(Response)` carrying its status, not folded into an error variant, so
+    ///   the caller can tell a `404` ("not published") from a `503` ("unknown").
+    /// - `max_redirects(0)` — a redirect is never chased. The sparse index and the
+    ///   npm registry answer `200`/`404` directly, so a `3xx` is anomalous and must
+    ///   surface as its own status (→ fail closed), never be followed to a
+    ///   wrong-host `404` that would misread as "not published".
+    ///
+    /// A transport-level failure (DNS, connect refused, TLS, timeout, or a body
+    /// read past `ureq`'s built-in size cap) is an `Err` — the reconciler reads it
+    /// as `unknown`, never a false `missing`.
+    fn http_get(url: &str) -> io::Result<(u16, Vec<u8>)> {
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(30)))
+            .user_agent(concat!("ossctl/", env!("CARGO_PKG_VERSION")))
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .build()
+            .new_agent();
+        let mut resp = agent
+            .get(url)
+            .call()
+            .map_err(|e| io::Error::other(format!("HTTP GET {url} failed: {e}")))?;
+        let status = resp.status().as_u16();
+        let body = resp
+            .body_mut()
+            .read_to_vec()
+            .map_err(|e| io::Error::other(format!("reading HTTP body from {url} failed: {e}")))?;
+        Ok((status, body))
+    }
+
+    /// crates.io's ceiling on a scoped/unscoped npm package name (its documented
+    /// `214` limit); a longer input is a tampered/erroneous journal value, not a
+    /// lookup — refuse it before it becomes an oversized URL.
+    const MAX_NPM_NAME_LEN: usize = 214;
+
+    /// Reject an npm package name that could distort the query, mirroring the
+    /// crates.io guard ([`Self::validate_crate_name`]): the name is interpolated
+    /// into a request URL, so a leading `-` (flag injection) or any character
+    /// outside the npm-permitted set is refused rather than percent-mangled into a
+    /// wrong-but-successful lookup. A scoped name (`@scope/name`) is allowed exactly
+    /// one `/` (between a non-empty scope and a non-empty name) and a leading `@`;
+    /// an unscoped name carries neither.
+    fn validate_npm_package(package: &str) -> io::Result<()> {
+        let invalid = |msg: String| Err(io::Error::new(io::ErrorKind::InvalidInput, msg));
+        if package.is_empty() {
+            return invalid("refusing to query npm for an empty package name".to_string());
+        }
+        if package.len() > Self::MAX_NPM_NAME_LEN {
+            return invalid(format!(
+                "refusing to query npm for an over-long package name ({} > {} bytes)",
+                package.len(),
+                Self::MAX_NPM_NAME_LEN
             ));
         }
-        let out = Command::new("npm")
-            .args(["view", "--json", package, "versions"])
-            .stdin(Stdio::null())
-            .env("NO_UPDATE_NOTIFIER", "1")
-            .env("NPM_CONFIG_FUND", "false")
-            .output()?;
-        if !out.status.success() {
+        if package.starts_with('-') {
+            return invalid(format!(
+                "refusing to query npm for a package name that looks like a flag: {package:?}"
+            ));
+        }
+        let scoped = package.starts_with('@');
+        let slashes = package.bytes().filter(|&b| b == b'/').count();
+        if scoped {
+            // `@scope/name` — exactly one '/', both halves non-empty.
+            let rest = &package[1..];
+            match rest.split_once('/') {
+                Some((scope, name)) if !scope.is_empty() && !name.is_empty() && slashes == 1 => {}
+                _ => {
+                    return invalid(format!(
+                        "refusing to query npm for a malformed scoped package name: {package:?}"
+                    ));
+                }
+            }
+        } else if slashes != 0 {
+            return invalid(format!(
+                "refusing to query npm for an unscoped package name containing '/': {package:?}"
+            ));
+        }
+        // Charset: unreserved npm name bytes, plus '@' only as the leading scope
+        // marker and '/' only inside a scoped name (both already positionally
+        // constrained above).
+        for (i, &b) in package.as_bytes().iter().enumerate() {
+            let ok = b.is_ascii_alphanumeric()
+                || matches!(b, b'-' | b'_' | b'.')
+                || (b == b'@' && i == 0)
+                || (b == b'/' && scoped);
+            if !ok {
+                return invalid(format!(
+                    "refusing to query npm for a suspicious package name: {package:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The npm-registry packument URL for `package`. A scoped name's `/` is
+    /// percent-encoded (`@scope%2fname`) so it stays a single path segment rather
+    /// than a nested path; every other byte is validated URL-safe by
+    /// [`Self::validate_npm_package`], so no further encoding is needed.
+    fn npm_registry_url(package: &str) -> String {
+        format!("https://registry.npmjs.org/{}", package.replace('/', "%2f"))
+    }
+
+    /// Parse an npm-registry packument body into its published version list — the
+    /// keys of the top-level `versions` object — cross-checking the packument's
+    /// `name` against `expected_name` (a cache-poisoned or misrouted body for the
+    /// *wrong* package fails closed, never yields versions for the wrong name).
+    ///
+    /// Only the version *keys* are read — [`VersionKeys`] collects them and skips
+    /// the per-version metadata rather than materializing it. A body that is not
+    /// the expected `{"name":…,"versions":{…}}` shape fails to deserialize and so
+    /// fails closed. Version-key *order* is not preserved and does not matter: the
+    /// defer/idempotency predicate only tests membership.
+    fn parse_npm_versions(body: &[u8], expected_name: &str) -> io::Result<Vec<String>> {
+        /// The subset of an npm packument this query reads.
+        #[derive(serde::Deserialize)]
+        struct Packument {
+            name: String,
+            versions: VersionKeys,
+        }
+
+        let pack: Packument = serde_json::from_slice(body).map_err(|e| {
+            io::Error::other(format!("npm registry body was not a valid packument: {e}"))
+        })?;
+        if !pack.name.eq_ignore_ascii_case(expected_name) {
             return Err(io::Error::other(format!(
-                "npm view {package} versions exited {:?}",
-                out.status.code()
+                "npm registry body was for package {:?}, not the requested {expected_name:?}",
+                pack.name
             )));
         }
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        // `npm view` returns a JSON array for many versions, or a bare JSON string
-        // for a single one; accept either, but reject any other shape (an object,
-        // null, or a mixed array) rather than silently dropping entries — a
-        // partial parse that yielded an empty list would misread as `missing`.
-        match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
-            Ok(serde_json::Value::Array(items)) => items
-                .into_iter()
-                .map(|v| {
-                    v.as_str()
-                        .map(str::to_string)
-                        .ok_or_else(|| io::Error::other("npm returned a non-string version entry"))
-                })
-                .collect(),
-            Ok(serde_json::Value::String(v)) => Ok(vec![v]),
-            _ => Err(io::Error::other(format!(
-                "could not parse `npm view --json {package} versions` output"
+        Ok(pack.versions.0)
+    }
+
+    /// Classify a completed npm-registry transaction by HTTP status, and for a
+    /// `200` parse the packument for `expected_name`.
+    ///
+    /// - `200` ⇒ parse the version keys; a `200` that yields *zero* versions is
+    ///   anomalous (a live package always carries at least one), so it fails
+    ///   **closed** with `Err` rather than the "not published" `Ok(vec![])` a
+    ///   truncated or proxy-intercepted body would otherwise mint.
+    /// - `404` ⇒ the package has never been published — the one authoritative
+    ///   "missing" signal, `Ok(vec![])`, **not** an error.
+    /// - any other status ⇒ the registry state is unknown; fail **closed** with
+    ///   `Err`, never an empty `Vec` the reconciler would read as "not published".
+    fn classify_npm_response(
+        status: u16,
+        body: &[u8],
+        expected_name: &str,
+    ) -> io::Result<Vec<String>> {
+        match status {
+            200 => {
+                let versions = Self::parse_npm_versions(body, expected_name)?;
+                if versions.is_empty() {
+                    return Err(io::Error::other(
+                        "npm registry returned HTTP 200 with no versions; \
+                         treating as unknown rather than 'not published'",
+                    ));
+                }
+                Ok(versions)
+            }
+            404 => Ok(Vec::new()),
+            other => Err(io::Error::other(format!(
+                "npm registry returned an unexpected HTTP status {other}"
             ))),
         }
+    }
+
+    /// Query the npm registry for the published versions of `package`.
+    ///
+    /// Validates the name, then runs the single HTTP seam ([`Self::http_get`]) and
+    /// classifies the result ([`Self::classify_npm_response`]) — the fail-closed
+    /// contract on [`RealRegistryQuery`] holds: a transport failure is `Err`
+    /// (`unknown`), a `404` is the genuine "not yet published" `Ok(vec![])`.
+    fn npm_versions(package: &str) -> io::Result<Vec<String>> {
+        Self::validate_npm_package(package)?;
+        let url = Self::npm_registry_url(package);
+        let (status, body) = Self::http_get(&url)?;
+        Self::classify_npm_response(status, &body, package)
     }
 
     /// The crates.io **sparse index** entry for `crate_name`, relative to the
@@ -421,7 +599,7 @@ impl RealRegistryQuery {
     /// missing the string `name`/`vers` fields, or one whose `name` is not
     /// `expected_name` (a cache-poisoned or misrouted body for the *wrong* crate)
     /// is an `Err`, never a silent drop that could misread as "not published". An
-    /// empty result is *not* decided here — [`Self::parse_sparse_response`] rejects
+    /// empty result is *not* decided here — [`Self::classify_sparse_response`] rejects
     /// a `200` that parsed to zero versions, since a live crate's index is never
     /// empty.
     fn parse_sparse_index(body: &str, expected_name: &str) -> io::Result<Vec<String>> {
@@ -457,10 +635,8 @@ impl RealRegistryQuery {
         Ok(versions)
     }
 
-    /// Classify a completed `curl` transaction to the sparse index by its HTTP
-    /// status (appended after the body via `--write-out`, behind
-    /// [`Self::HTTP_CODE_MARKER`]) and, for a `200`, parse the body for
-    /// `expected_name`.
+    /// Classify a completed crates.io sparse-index transaction by its typed HTTP
+    /// status, and for a `200` parse the body for `expected_name`.
     ///
     /// - `200` ⇒ parse the body into versions; a `200` that yields *zero* versions
     ///   is anomalous (a live crate's sparse index always carries at least one
@@ -469,17 +645,24 @@ impl RealRegistryQuery {
     ///   truncated transfer or a proxy-intercepted empty body would otherwise mint.
     /// - `404` ⇒ the crate has no published versions yet — the one authoritative
     ///   "missing" signal, `Ok(vec![])`, **not** an error.
-    /// - `410` (Gone), `000` (curl never completed a transfer), or any other
-    ///   status ⇒ the registry state is unknown, so fail **closed** with `Err` —
-    ///   never an empty `Vec`, which the reconciler would read as "not published"
-    ///   and could act on with an unsafe publish. (`410` in particular does *not*
-    ///   prove a crate was never published.)
-    fn parse_sparse_response(stdout: &str, expected_name: &str) -> io::Result<Vec<String>> {
-        let (body, code) = stdout.rsplit_once(Self::HTTP_CODE_MARKER).ok_or_else(|| {
-            io::Error::other("curl did not report an HTTP status for the crates.io sparse index")
-        })?;
-        match code.trim() {
-            "200" => {
+    /// - `410` (Gone), a `3xx` (an unfollowed redirect from the flat-file index),
+    ///   or any other status ⇒ the registry state is unknown, so fail **closed**
+    ///   with `Err` — never an empty `Vec`, which the reconciler would read as "not
+    ///   published" and could act on with an unsafe publish. (`410` in particular
+    ///   does *not* prove a crate was never published.) A transport failure never
+    ///   reaches here — it is already an `Err` from [`Self::http_get`].
+    fn classify_sparse_response(
+        status: u16,
+        body: &[u8],
+        expected_name: &str,
+    ) -> io::Result<Vec<String>> {
+        match status {
+            200 => {
+                let body = std::str::from_utf8(body).map_err(|e| {
+                    io::Error::other(format!(
+                        "crates.io sparse index returned a non-UTF-8 body: {e}"
+                    ))
+                })?;
                 let versions = Self::parse_sparse_index(body, expected_name)?;
                 if versions.is_empty() {
                     return Err(io::Error::other(
@@ -489,76 +672,28 @@ impl RealRegistryQuery {
                 }
                 Ok(versions)
             }
-            "404" => Ok(Vec::new()),
+            404 => Ok(Vec::new()),
             other => Err(io::Error::other(format!(
                 "crates.io sparse index returned an unexpected HTTP status {other}"
             ))),
         }
     }
 
-    /// Sentinel that separates the sparse-index response body from the trailing
-    /// HTTP status `curl --write-out` appends, so both arrive on one stdout
-    /// capture yet stay unambiguously splittable ([`Self::parse_sparse_response`]).
-    const HTTP_CODE_MARKER: &'static str = "\n__OSSCTL_HTTP_CODE__:";
-
     /// Query the crates.io sparse index for the published versions of
     /// `crate_name`.
     ///
-    /// Shells to `curl` (no new HTTP dependency, mirroring the `npm` arm's
-    /// shell-out style) with a bounded `--max-time`, stdin `/dev/null`, and the
-    /// HTTP status appended after the body. A network-level failure (DNS,
-    /// connection refused, timeout — `curl` exits non-zero, HTTP status `000`)
-    /// fails **closed** with `Err`; a `404` is the genuine "not yet published"
-    /// signal (`Ok(vec![])`). `curl` completing an HTTP transaction (any status)
-    /// exits `0`, so status classification — not the process exit — drives the
-    /// decision (see [`Self::parse_sparse_response`]).
-    ///
-    /// Hardening on the invocation: `--disable` ignores an ambient `~/.curlrc`
-    /// that could otherwise alter the output shape and break the status-marker
-    /// split; redirects are deliberately **not** followed (no `--location`) — the
-    /// sparse index is a flat file host that answers `200`/`404` directly, so a
-    /// `3xx` is anomalous and must fail closed rather than chase a cross-host
-    /// redirect to a `404` that would misread as "not published". `curl` being
-    /// absent surfaces as a named `Err` (still fail-closed), not a silent miss.
+    /// Validates the name, then runs the single HTTP seam ([`Self::http_get`]) and
+    /// classifies the result ([`Self::classify_sparse_response`]). A network-level
+    /// failure (DNS, connection refused, timeout) is already an `Err` from the seam
+    /// (fail **closed**); a `404` is the genuine "not yet published" `Ok(vec![])`.
     fn crates_io_versions(crate_name: &str) -> io::Result<Vec<String>> {
         Self::validate_crate_name(crate_name)?;
         let url = format!(
             "https://index.crates.io/{}",
             Self::sparse_index_path(crate_name)
         );
-        let write_out = format!("{}%{{http_code}}", Self::HTTP_CODE_MARKER);
-        let out = Command::new("curl")
-            .args([
-                "--disable",
-                "--silent",
-                "--show-error",
-                "--max-time",
-                "30",
-                "--user-agent",
-                concat!("ossctl/", env!("CARGO_PKG_VERSION")),
-            ])
-            .arg("--write-out")
-            .arg(&write_out)
-            .arg(&url)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| {
-                io::Error::other(format!(
-                    "could not run `curl` to query the crates.io sparse index \
-                     (is curl installed?): {e}"
-                ))
-            })?;
-        if !out.status.success() {
-            // Network-level failure (DNS/connect/timeout): curl exits non-zero and
-            // reports HTTP status 000. Fail CLOSED — never read as "not published".
-            return Err(io::Error::other(format!(
-                "could not reach the crates.io sparse index for {crate_name:?}: curl exited {:?}: {}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        Self::parse_sparse_response(&stdout, crate_name)
+        let (status, body) = Self::http_get(&url)?;
+        Self::classify_sparse_response(status, &body, crate_name)
     }
 }
 
@@ -983,60 +1118,130 @@ mod tests {
     }
 
     #[test]
-    fn parse_sparse_response_200_returns_versions() {
-        let stdout = format!(
-            "{}{}200",
-            r#"{"name":"tool","vers":"1.0.0","yanked":false}"#,
-            RealRegistryQuery::HTTP_CODE_MARKER
-        );
+    fn classify_sparse_response_200_returns_versions() {
+        let body = br#"{"name":"tool","vers":"1.0.0","yanked":false}"#;
         assert_eq!(
-            RealRegistryQuery::parse_sparse_response(&stdout, "tool").unwrap(),
+            RealRegistryQuery::classify_sparse_response(200, body, "tool").unwrap(),
             vec!["1.0.0"]
         );
     }
 
     #[test]
-    fn parse_sparse_response_404_is_empty_not_error() {
+    fn classify_sparse_response_404_is_empty_not_error() {
         // 404 = crate has never been published = the legitimate "missing" signal.
-        let stdout = format!("{}404", RealRegistryQuery::HTTP_CODE_MARKER);
+        // The body is irrelevant on a 404 (crates.io serves a short error page).
         assert_eq!(
-            RealRegistryQuery::parse_sparse_response(&stdout, "tool").unwrap(),
+            RealRegistryQuery::classify_sparse_response(404, b"not found", "tool").unwrap(),
             Vec::<String>::new()
         );
     }
 
     #[test]
-    fn parse_sparse_response_empty_200_fails_closed() {
+    fn classify_sparse_response_empty_200_fails_closed() {
         // A 200 with no release records is anomalous (a live crate's index is never
         // empty) — a truncated transfer or a proxy-intercepted empty body. It must
         // fail closed, NOT return the "not published" Ok(vec![]).
-        let stdout = format!("{}200", RealRegistryQuery::HTTP_CODE_MARKER);
-        assert!(RealRegistryQuery::parse_sparse_response(&stdout, "tool").is_err());
+        assert!(RealRegistryQuery::classify_sparse_response(200, b"", "tool").is_err());
         // Whitespace-only body is likewise empty-after-parse and fails closed.
-        let stdout = format!("   \n  {}200", RealRegistryQuery::HTTP_CODE_MARKER);
-        assert!(RealRegistryQuery::parse_sparse_response(&stdout, "tool").is_err());
+        assert!(RealRegistryQuery::classify_sparse_response(200, b"   \n  ", "tool").is_err());
     }
 
     #[test]
-    fn parse_sparse_response_unreachable_fails_closed() {
-        // HTTP status 000: curl never completed a transfer (DNS/connect failure).
-        // Must be Err, never an empty Vec that would read as "not published".
-        let stdout = format!("{}000", RealRegistryQuery::HTTP_CODE_MARKER);
-        assert!(RealRegistryQuery::parse_sparse_response(&stdout, "tool").is_err());
-        // A server-side 5xx is equally "unknown" and fails closed.
-        let stdout = format!("{}503", RealRegistryQuery::HTTP_CODE_MARKER);
-        assert!(RealRegistryQuery::parse_sparse_response(&stdout, "tool").is_err());
-        // 410 Gone does NOT prove a crate was never published — it is unknown, not
+    fn classify_sparse_response_non_utf8_200_fails_closed() {
+        // A 200 whose body is not UTF-8 cannot be parsed and must fail closed
+        // rather than be misread as "not published".
+        assert!(RealRegistryQuery::classify_sparse_response(200, &[0xff, 0xfe], "tool").is_err());
+    }
+
+    #[test]
+    fn classify_sparse_response_unexpected_status_fails_closed() {
+        // A server-side 5xx is "unknown" and fails closed, never an empty Vec that
+        // would read as "not published".
+        assert!(RealRegistryQuery::classify_sparse_response(503, b"", "tool").is_err());
+        // 410 Gone does NOT prove a crate was never published — unknown, not
         // "missing", so it fails closed rather than returning Ok(vec![]).
-        let stdout = format!("{}410", RealRegistryQuery::HTTP_CODE_MARKER);
-        assert!(RealRegistryQuery::parse_sparse_response(&stdout, "tool").is_err());
-        // An unfollowed redirect (no --location) is anomalous for a flat-file index
-        // and must not be chased; classified as unexpected → fail closed.
-        let stdout = format!("{}301", RealRegistryQuery::HTTP_CODE_MARKER);
-        assert!(RealRegistryQuery::parse_sparse_response(&stdout, "tool").is_err());
-        // A response with no status marker at all (curl produced no write-out)
-        // cannot be classified and must fail closed rather than guess.
-        assert!(RealRegistryQuery::parse_sparse_response("some body, no marker", "tool").is_err());
+        assert!(RealRegistryQuery::classify_sparse_response(410, b"", "tool").is_err());
+        // An unfollowed redirect (max_redirects(0)) surfaces as its own 3xx status
+        // and is anomalous for a flat-file index → fail closed.
+        assert!(RealRegistryQuery::classify_sparse_response(301, b"", "tool").is_err());
+    }
+
+    #[test]
+    fn classify_npm_response_200_returns_versions() {
+        let body = br#"{"name":"tool","versions":{"1.0.0":{},"1.1.0":{}}}"#;
+        let mut versions = RealRegistryQuery::classify_npm_response(200, body, "tool").unwrap();
+        versions.sort();
+        assert_eq!(versions, vec!["1.0.0", "1.1.0"]);
+    }
+
+    #[test]
+    fn classify_npm_response_404_is_empty_not_error() {
+        // 404 = package has never been published = the legitimate "missing" signal.
+        let body = br#"{"error":"Not found"}"#;
+        assert_eq!(
+            RealRegistryQuery::classify_npm_response(404, body, "tool").unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn classify_npm_response_empty_and_unexpected_fail_closed() {
+        // A 200 with an empty versions object is anomalous (a live package always
+        // has ≥1 version) → fail closed, not "not published".
+        let body = br#"{"name":"tool","versions":{}}"#;
+        assert!(RealRegistryQuery::classify_npm_response(200, body, "tool").is_err());
+        // A wrong-package body (cache-poisoned/misrouted) fails closed.
+        let body = br#"{"name":"other","versions":{"1.0.0":{}}}"#;
+        assert!(RealRegistryQuery::classify_npm_response(200, body, "tool").is_err());
+        // A malformed packument fails closed.
+        assert!(RealRegistryQuery::classify_npm_response(200, b"not json", "tool").is_err());
+        // A 5xx is "unknown" → fail closed.
+        assert!(RealRegistryQuery::classify_npm_response(503, b"", "tool").is_err());
+        // The requested-name comparison is case-insensitive (npm answers the
+        // canonical case) — this must NOT be an error.
+        let body = br#"{"name":"Tool","versions":{"1.0.0":{}}}"#;
+        assert_eq!(
+            RealRegistryQuery::classify_npm_response(200, body, "tool").unwrap(),
+            vec!["1.0.0"]
+        );
+    }
+
+    #[test]
+    fn npm_registry_url_encodes_scoped_slash() {
+        assert_eq!(
+            RealRegistryQuery::npm_registry_url("left-pad"),
+            "https://registry.npmjs.org/left-pad"
+        );
+        // A scoped name's '/' is percent-encoded so it stays one path segment.
+        assert_eq!(
+            RealRegistryQuery::npm_registry_url("@scope/pkg"),
+            "https://registry.npmjs.org/@scope%2fpkg"
+        );
+    }
+
+    #[test]
+    fn validate_npm_package_rejects_suspicious_input() {
+        assert!(RealRegistryQuery::validate_npm_package("left-pad").is_ok());
+        assert!(RealRegistryQuery::validate_npm_package("lodash.merge").is_ok());
+        assert!(RealRegistryQuery::validate_npm_package("@babel/core").is_ok());
+        // A name at the length ceiling is fine; one byte over is refused.
+        assert!(RealRegistryQuery::validate_npm_package(
+            &"a".repeat(RealRegistryQuery::MAX_NPM_NAME_LEN)
+        )
+        .is_ok());
+        assert!(RealRegistryQuery::validate_npm_package(
+            &"a".repeat(RealRegistryQuery::MAX_NPM_NAME_LEN + 1)
+        )
+        .is_err());
+        // Empty, flag-like, path-injecting, malformed-scope, or out-of-charset.
+        assert!(RealRegistryQuery::validate_npm_package("").is_err());
+        assert!(RealRegistryQuery::validate_npm_package("-oops").is_err());
+        assert!(RealRegistryQuery::validate_npm_package("a b").is_err());
+        assert!(RealRegistryQuery::validate_npm_package("a/b").is_err()); // '/' only when scoped
+        assert!(RealRegistryQuery::validate_npm_package("@scope/a/b").is_err()); // one '/' max
+        assert!(RealRegistryQuery::validate_npm_package("@scope").is_err()); // scope needs a name
+        assert!(RealRegistryQuery::validate_npm_package("@/pkg").is_err()); // empty scope
+        assert!(RealRegistryQuery::validate_npm_package("pkg@1").is_err()); // '@' only leading
     }
 
     #[test]

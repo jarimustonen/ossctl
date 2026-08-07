@@ -20,6 +20,12 @@ semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+# Minimal blocking HTTP client for the release-path registry-state probes
+# (crates.io sparse index + npm registry). rustls + bundled webpki-roots — no
+# OpenSSL/OS-TLS, so it links cleanly into the static musl cross-platform
+# binaries — and no async runtime (no tokio). cli-only; ossctl-core stays
+# dependency-free. See `RealRegistryQuery` in crates/ossctl-cli/src/sys.rs.
+ureq = "3"
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
