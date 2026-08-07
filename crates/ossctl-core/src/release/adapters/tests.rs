@@ -32,6 +32,13 @@ struct FakeCmd {
     /// Serve this stdout for any call whose rendered form contains the key — e.g.
     /// the PR URL `gh pr create` prints.
     stdout_containing: Option<(String, String)>,
+    /// On a `gh repo clone <tap> <workdir> …`, create `<workdir>/<rel>` with this
+    /// content — a faithful fake of a real clone that checks the tap's files out, so
+    /// the tap-write path can read the tap's *current* formula from disk.
+    clone_seed: Option<(String, String)>,
+    /// On a clone, create `<workdir>/<rel>` as a **symlink** (to a throwaway target)
+    /// — for exercising the tap-write path's refusal to overwrite a non-regular file.
+    clone_symlink: Option<String>,
 }
 
 impl FakeCmd {
@@ -43,7 +50,19 @@ impl FakeCmd {
             metadata: None,
             fail_containing: None,
             stdout_containing: None,
+            clone_seed: None,
+            clone_symlink: None,
         }
+    }
+    /// Seed a faked `gh repo clone` so the checkout carries `<rel>` with `content`.
+    fn seed_clone(mut self, rel: &str, content: &str) -> Self {
+        self.clone_seed = Some((rel.to_string(), content.to_string()));
+        self
+    }
+    /// Seed a faked `gh repo clone` so `<rel>` in the checkout is a symlink.
+    fn seed_clone_symlink(mut self, rel: &str) -> Self {
+        self.clone_symlink = Some(rel.to_string());
+        self
     }
     /// Fail every call whose rendered form contains `needle` with `code`/`stderr`.
     fn fail_calls_containing(mut self, needle: &str, code: i32, stderr: &str) -> Self {
@@ -84,6 +103,36 @@ impl CommandRunner for FakeCmd {
         self.calls.borrow_mut().push(rendered.clone());
         if self.spawn_err {
             return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+        // A faked `gh repo clone <tap> <workdir> -- --depth 1` checks the tap out:
+        // materialize the seeded files under the real workdir so the tap-write path
+        // can read the tap's current formula (and hit its symlink guard) from disk.
+        if program == "gh" && args.first() == Some(&"repo") && args.get(1) == Some(&"clone") {
+            if let Some(workdir) = args.get(3) {
+                let base = Path::new(workdir);
+                if let Some((rel, content)) = &self.clone_seed {
+                    let path = base.join(rel);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).unwrap();
+                    }
+                    std::fs::write(&path, content).unwrap();
+                }
+                if let Some(rel) = &self.clone_symlink {
+                    let path = base.join(rel);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).unwrap();
+                    }
+                    let target = base.join("__symlink_target");
+                    std::fs::write(&target, "target\n").unwrap();
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(&target, &path).unwrap();
+                }
+            }
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            });
         }
         if let Some((needle, code, stderr)) = &self.fail_containing {
             if rendered.contains(needle) {
@@ -1813,29 +1862,37 @@ fn read_created_formula(name: &str, version: &str) -> (std::path::PathBuf, Strin
     (dir, formula)
 }
 
+/// The exact formula bytes `render_formula` produces for a tap-write target —
+/// mirrors what the adapter renders, so a test can seed a fake tap clone with the
+/// current (matching or differing) formula.
+fn rendered_formula(name: &str, url: &str, sha256: &str, license: Option<&str>) -> String {
+    super::homebrew::render_formula(name, Some("o/r"), url, Some(sha256), license)
+}
+
 #[test]
 fn homebrew_tap_direct_writes_when_the_formula_already_exists() {
     // The tap already serves `Formula/tool.rb` (gh api probe exits 0) → the
-    // tap-write path runs: clone → overwrite the formula → (dirty) commit → push
-    // directly to the tap's default branch. NO `brew bump-formula-pr`, no PR.
+    // tap-write path runs: clone → (tap carries an OLDER formula) overwrite → commit
+    // → push directly to the default branch. NO `brew bump-formula-pr`, no PR.
+    let url = "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz";
+    let sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
     let cmd = FakeCmd::new()
-        // The overwrite makes the checkout dirty, so the commit/push run.
-        .stdout_calls_containing("status --porcelain", " M Formula/tool.rb\n");
+        // The fake clone checks out an older formula so the rendered one differs.
+        .seed_clone(
+            "Formula/hbwrite.rb",
+            "class Hbwrite < Formula\n  # old\nend\n",
+        );
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
     let root = Path::new("/repo");
-    let artifacts = homebrew_artifacts(
-        "o/homebrew-r",
-        "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz",
-        Some("deadbeef"),
-        Some("MIT"),
-    );
+    let artifacts = homebrew_artifacts("o/homebrew-r", url, Some(sha), Some("MIT"));
     let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
 
-    let t = target(
+    let t = target_named(
         Ecosystem::Binary,
         Registry::Homebrew,
         Adapter::HomebrewTap,
+        "hbwrite",
         "1.0.0",
     );
     let r = resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap();
@@ -1843,7 +1900,7 @@ fn homebrew_tap_direct_writes_when_the_formula_already_exists() {
     let calls = cmd.calls();
     assert_eq!(
         calls[0],
-        "gh api --silent repos/o/homebrew-r/contents/Formula/tool.rb"
+        "gh api --silent repos/o/homebrew-r/contents/Formula/hbwrite.rb"
     );
     assert!(
         calls
@@ -1852,15 +1909,11 @@ fn homebrew_tap_direct_writes_when_the_formula_already_exists() {
         "expected a tap clone: {calls:?}"
     );
     assert!(
-        calls.iter().any(|c| c.contains("status --porcelain")),
-        "expected a dirty-check: {calls:?}"
-    );
-    assert!(
-        calls.iter().any(|c| c.contains("add Formula/tool.rb")),
+        calls.iter().any(|c| c.contains("add Formula/hbwrite.rb")),
         "expected the updated formula to be staged: {calls:?}"
     );
     assert!(
-        calls.iter().any(|c| c.contains("commit -m tool 1.0.0")),
+        calls.iter().any(|c| c.contains("commit -m hbwrite 1.0.0")),
         "expected a commit: {calls:?}"
     );
     assert!(
@@ -1875,49 +1928,53 @@ fn homebrew_tap_direct_writes_when_the_formula_already_exists() {
         !calls.iter().any(|c| c.contains("pr create")),
         "the tap-write path must not open a PR: {calls:?}"
     );
-    // The receipt records the verified digest the formula pins.
-    assert_eq!(r.digest.as_deref(), Some("deadbeef"));
+    // The receipt records the verified digest the formula pins + the tap formula URL.
+    assert_eq!(r.digest.as_deref(), Some(sha));
+    assert_eq!(
+        r.remote_url.as_deref(),
+        Some("https://github.com/o/homebrew-r/blob/HEAD/Formula/hbwrite.rb")
+    );
 
     // The overwritten formula on disk carries the threaded url + verified sha256.
-    let (workdir, formula) = read_created_formula("tool", "1.0.0");
+    let (workdir, formula) = read_created_formula("hbwrite", "1.0.0");
+    assert!(formula.contains(&format!("url \"{url}\"")), "{formula}");
     assert!(
-        formula.contains("url \"https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz\""),
+        formula.contains(
+            "sha256 \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\""
+        ),
         "{formula}"
     );
-    assert!(formula.contains("sha256 \"deadbeef\""), "{formula}");
     let _ = std::fs::remove_dir_all(&workdir);
 }
 
 #[test]
 fn homebrew_tap_direct_write_is_a_noop_when_the_formula_is_unchanged() {
-    // A resume/re-run at the target version: the overwrite produces byte-identical
-    // content, so `git status --porcelain` is clean → the path is a no-op success
-    // (clone + dirty-check only, no empty commit, no redundant push). The default
-    // FakeCmd serves an empty (clean) `git status`.
-    let cmd = FakeCmd::new();
+    // A resume/re-run at the target version: the tap already carries byte-identical
+    // rendered content, so the byte-compare short-circuits to a no-op success — no
+    // rewrite, no empty commit, no push.
+    let url = "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz";
+    let sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    let current = rendered_formula("hbnoop", url, sha, Some("MIT"));
+    let cmd = FakeCmd::new().seed_clone("Formula/hbnoop.rb", &current);
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
     let root = Path::new("/repo");
-    let artifacts = homebrew_artifacts(
-        "o/homebrew-r",
-        "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz",
-        Some("deadbeef"),
-        Some("MIT"),
-    );
+    let artifacts = homebrew_artifacts("o/homebrew-r", url, Some(sha), Some("MIT"));
     let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
 
-    let t = target(
+    let t = target_named(
         Ecosystem::Binary,
         Registry::Homebrew,
         Adapter::HomebrewTap,
+        "hbnoop",
         "1.0.0",
     );
     let r = resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap();
 
     let calls = cmd.calls();
     assert!(
-        calls.iter().any(|c| c.contains("status --porcelain")),
-        "expected a dirty-check: {calls:?}"
+        calls.iter().any(|c| c.starts_with("gh repo clone")),
+        "expected the tap clone: {calls:?}"
     );
     assert!(
         !calls.iter().any(|c| c.contains("commit")),
@@ -1927,20 +1984,23 @@ fn homebrew_tap_direct_write_is_a_noop_when_the_formula_is_unchanged() {
         !calls.iter().any(|c| c.ends_with("push origin HEAD")),
         "an unchanged formula must not push: {calls:?}"
     );
-    // Still a success receipt recording the verified digest.
-    assert_eq!(r.digest.as_deref(), Some("deadbeef"));
+    // Still a success receipt recording the verified digest + tap formula URL.
+    assert_eq!(r.digest.as_deref(), Some(sha));
+    assert_eq!(
+        r.remote_url.as_deref(),
+        Some("https://github.com/o/homebrew-r/blob/HEAD/Formula/hbnoop.rb")
+    );
 
-    let (workdir, _) = read_created_formula("tool", "1.0.0");
+    let (workdir, _) = read_created_formula("hbnoop", "1.0.0");
     let _ = std::fs::remove_dir_all(&workdir);
 }
 
 #[test]
 fn homebrew_tap_direct_write_fails_closed_without_a_verified_sha256() {
     // Fail-closed: the tap-write path pushes to the default branch (what
-    // `brew install` resolves), so it REFUSES to write a formula without a verified
-    // sha256 — no TODO placeholder, no broken install. The formula exists (probe
-    // exits 0) so the path is TapWrite; sha256 is threaded as None.
-    let cmd = FakeCmd::new().stdout_calls_containing("status --porcelain", " M Formula/tool.rb\n");
+    // `brew install` resolves), so it REFUSES without a verified sha256 — before it
+    // even clones. sha256 threaded as None.
+    let cmd = FakeCmd::new();
     let clock = FakeClock(1);
     let reg = FakeRegistry::new();
     let root = Path::new("/repo");
@@ -1963,13 +2023,166 @@ fn homebrew_tap_direct_write_fails_closed_without_a_verified_sha256() {
         matches!(&err, AdapterError::Command { stderr, .. } if stderr.contains("verified sha256")),
         "expected a fail-closed error naming the missing verified sha256: {err:?}"
     );
-    // It must not have committed or pushed a formula.
+    // It refused before cloning — no clone, commit, or push.
     let calls = cmd.calls();
+    assert!(
+        !calls.iter().any(|c| c.contains("clone")
+            || c.contains("commit")
+            || c.ends_with("push origin HEAD")),
+        "must not clone/commit/push without a verified sha256: {calls:?}"
+    );
+}
+
+#[test]
+fn homebrew_tap_direct_write_fails_closed_on_a_malformed_sha256() {
+    // A `Some(_)` digest is not proof of verification: a non-64-hex value is rejected
+    // just like an absent one, before any clone.
+    for bad in [
+        "",
+        "deadbeef",
+        "not-hex-but-64-chars-long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    ] {
+        let cmd = FakeCmd::new();
+        let clock = FakeClock(1);
+        let reg = FakeRegistry::new();
+        let root = Path::new("/repo");
+        let artifacts = homebrew_artifacts(
+            "o/homebrew-r",
+            "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz",
+            Some(bad),
+            Some("MIT"),
+        );
+        let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+        let t = target(
+            Ecosystem::Binary,
+            Registry::Homebrew,
+            Adapter::HomebrewTap,
+            "1.0.0",
+        );
+        let err = resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap_err();
+        assert!(
+            matches!(&err, AdapterError::Command { stderr, .. } if stderr.contains("verified sha256")),
+            "malformed sha {bad:?} should fail closed: {err:?}"
+        );
+        assert!(
+            !cmd.calls().iter().any(|c| c.contains("clone")),
+            "malformed sha {bad:?} must not clone: {:?}",
+            cmd.calls()
+        );
+    }
+}
+
+#[test]
+fn homebrew_tap_direct_write_fails_closed_when_the_formula_vanished_after_clone() {
+    // The `gh api` probe reported the formula present (TapWrite), but the cloned
+    // checkout does not carry it (a probe/clone race, or a maintainer revert). The
+    // path must NOT synthesize a formula straight onto the default branch — that
+    // bypasses the create-path PR review gate. Fail closed instead.
+    let cmd = FakeCmd::new(); // no seed → the clone leaves no Formula/tool.rb
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = homebrew_artifacts(
+        "o/homebrew-r",
+        "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz",
+        Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+        Some("MIT"),
+    );
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target(
+        Ecosystem::Binary,
+        Registry::Homebrew,
+        Adapter::HomebrewTap,
+        "1.0.0",
+    );
+    let err = resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap_err();
+    assert!(
+        matches!(&err, AdapterError::Command { stderr, .. } if stderr.contains("review gate")),
+        "expected a fail-closed error citing the review gate: {err:?}"
+    );
+    let calls = cmd.calls();
+    assert!(
+        calls.iter().any(|c| c.starts_with("gh repo clone")),
+        "should have cloned before discovering the missing formula: {calls:?}"
+    );
     assert!(
         !calls
             .iter()
             .any(|c| c.contains("commit") || c.ends_with("push origin HEAD")),
-        "must not commit/push without a verified sha256: {calls:?}"
+        "must not commit/push a synthesized formula: {calls:?}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn homebrew_tap_direct_write_refuses_a_symlink_formula() {
+    // A tap whose `Formula/hbsym.rb` is a symlink must not be overwritten —
+    // truncating it would follow the link and clobber a file outside the checkout.
+    let cmd = FakeCmd::new().seed_clone_symlink("Formula/hbsym.rb");
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = homebrew_artifacts(
+        "o/homebrew-r",
+        "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz",
+        Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+        Some("MIT"),
+    );
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target_named(
+        Ecosystem::Binary,
+        Registry::Homebrew,
+        Adapter::HomebrewTap,
+        "hbsym",
+        "1.0.0",
+    );
+    let err = resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap_err();
+    assert!(
+        matches!(&err, AdapterError::Filesystem { source, .. } if source.contains("regular file")),
+        "expected a fail-closed error refusing the symlink: {err:?}"
+    );
+    assert!(
+        !cmd.calls()
+            .iter()
+            .any(|c| c.contains("commit") || c.ends_with("push origin HEAD")),
+        "must not commit/push over a symlink: {:?}",
+        cmd.calls()
+    );
+
+    // Clean up the fake checkout the seeded clone created.
+    let (workdir, _) = read_created_formula("hbsym", "1.0.0");
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn homebrew_tap_direct_write_rejects_a_traversal_package_name() {
+    // A package name with a path separator / traversal must be refused before any
+    // filesystem or git effect — it would otherwise escape the `Formula/` dir.
+    let cmd = FakeCmd::new().seed_clone("Formula/x.rb", "x");
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let artifacts = homebrew_artifacts(
+        "o/homebrew-r",
+        "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz",
+        Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+        Some("MIT"),
+    );
+    let c = ctx_with(&cmd, &clock, &reg, root, &artifacts);
+
+    let t = target_named(
+        Ecosystem::Binary,
+        Registry::Homebrew,
+        Adapter::HomebrewTap,
+        "../evil",
+        "1.0.0",
+    );
+    let err = resolve(Adapter::HomebrewTap).publish(&c, &t).unwrap_err();
+    assert!(
+        matches!(&err, AdapterError::Filesystem { source, .. } if source.contains("package name")),
+        "expected a rejected package name: {err:?}"
     );
 }
 
@@ -2316,6 +2529,31 @@ fn homebrew_create_class_name_handles_a_leading_digit() {
     let (workdir, formula) = read_created_formula("3d-tool", "1.0.0");
     assert!(formula.contains("class X3dTool < Formula"), "{formula}");
     let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn homebrew_render_formula_neutralizes_ruby_interpolation() {
+    // A Ruby double-quoted literal evaluates `#{…}`; a contract-supplied value
+    // carrying `#{system('…')}` (here via the license) must NOT emit a live
+    // interpolation into the formula, or `brew` would execute it. The `#` is escaped.
+    let malicious = "MIT #{system('touch /tmp/pwned')}";
+    let formula = super::homebrew::render_formula(
+        "tool",
+        Some("o/r"),
+        "https://github.com/o/r/archive/refs/tags/v1.0.0.tar.gz",
+        Some("deadbeef"),
+        Some(malicious),
+    );
+    // The `#` is backslash-escaped, so Ruby sees a literal `#` and never interpolates:
+    // the un-escaped `MIT #{` must be gone, replaced by `MIT \#{`.
+    assert!(
+        !formula.contains("MIT #{"),
+        "unescaped Ruby interpolation leaked into the formula: {formula}"
+    );
+    assert!(
+        formula.contains("MIT \\#{system('touch /tmp/pwned')}"),
+        "expected the `#` escaped: {formula}"
+    );
 }
 
 // ── classify_receipt: the pure verify core, all four outcomes ────────────────

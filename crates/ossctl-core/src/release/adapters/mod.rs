@@ -52,13 +52,16 @@ use crate::protocol::release::{
 /// references keeps adapters testable with recording fakes and away from the real
 /// network or clock.
 ///
-/// **One scoped exception:** the [`homebrew`] first-formula create writes the
-/// generated `.rb` directly with `std::fs` (a new formula *is* a committed file;
-/// there is no "add a formula" CLI to route through [`CommandRunner`]). That write
-/// is confined to a private, unpredictable scratch checkout it just cloned, uses
-/// create-new semantics, and is the sole direct-fs effect in the layer. A general
-/// filesystem port on this context is the cleaner long-term home (tracked as issue
-/// `homebrew-adapter-fs-port`); until then the exception is deliberate and local.
+/// **One scoped exception:** the [`homebrew`] adapter writes the generated `.rb`
+/// directly with `std::fs` (a formula *is* a committed file; there is no "add a
+/// formula" CLI to route through [`CommandRunner`]) — the first-formula *create*
+/// (create-new / `O_EXCL` semantics) and the *tap-write* bump (truncating an
+/// existing regular file the path first verified via `symlink_metadata`, never
+/// following a symlink or creating). Both writes are confined to a private,
+/// unpredictable scratch checkout the path just cloned, and they are the sole
+/// direct-fs effects in the layer. A general filesystem port on this context is the
+/// cleaner long-term home (tracked as issue `homebrew-adapter-fs-port`); until then
+/// the exception is deliberate and local.
 pub struct EffectCtx<'a> {
     /// Runs external commands (package-manager / registry CLIs). The single
     /// seam an adapter shells out through.

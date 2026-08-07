@@ -276,6 +276,8 @@ impl HomebrewAdapter {
             // Set the commit identity explicitly (via `-c`): the freshly-cloned tap
             // inherits no `user.name`/`user.email`, so on a clean CI runner an
             // identity-less `git commit` fails with "Author identity unknown".
+            // Disable `commit.gpgsign` so a machine with global signing on cannot
+            // hang the automated commit waiting for a passphrase / missing GPG.
             PlannedCommand::new(
                 "git",
                 &[
@@ -285,6 +287,8 @@ impl HomebrewAdapter {
                     "user.name=ossctl",
                     "-c",
                     "user.email=ossctl@users.noreply.github.com",
+                    "-c",
+                    "commit.gpgsign=false",
                     "commit",
                     "-m",
                     &title,
@@ -309,6 +313,9 @@ impl HomebrewAdapter {
         t: &AdapterTarget,
         tap: &str,
     ) -> Result<PublishReceipt, AdapterError> {
+        // The package name reaches a filesystem path and a git pathspec; reject any
+        // traversal/separator before it can escape the checkout or the `Formula/` dir.
+        validate_package_name(&t.package)?;
         let tarball =
             ctx.artifacts
                 .source_tarball
@@ -393,6 +400,8 @@ impl HomebrewAdapter {
             // Set the commit identity explicitly (via `-c`): the freshly-cloned tap
             // inherits no `user.name`/`user.email`, so on a clean CI runner an
             // identity-less `git commit` fails with "Author identity unknown".
+            // Disable `commit.gpgsign` so a machine with global signing on cannot
+            // hang the automated commit waiting for a passphrase / missing GPG.
             PlannedCommand::new(
                 "git",
                 &[
@@ -402,6 +411,8 @@ impl HomebrewAdapter {
                     "user.name=ossctl",
                     "-c",
                     "user.email=ossctl@users.noreply.github.com",
+                    "-c",
+                    "commit.gpgsign=false",
                     "commit",
                     "-m",
                     &title,
@@ -417,21 +428,30 @@ impl HomebrewAdapter {
     ///
     /// **Fail-closed contract.** This path pushes to the tap's default branch — the
     /// ref `brew install <tap>/<name>` resolves — so it refuses to write a formula
-    /// without a verified `sha256` (the digest the post-tag dist phase computed by
-    /// fetching and hashing the exact tag-archive bytes). A missing tarball or a
-    /// `sha256: None` is a hard [`AdapterError::Command`], never a TODO placeholder:
-    /// unlike the create path's draft PR, there is no human review gate here, so a
-    /// guessed/absent digest would ship a broken install.
+    /// without a verified `sha256`: a missing tarball, an absent digest, or one that
+    /// is not exactly 64 hex chars is a hard [`AdapterError::Command`], never a TODO
+    /// placeholder. Unlike the create path's draft PR, there is no human review gate
+    /// here, so a guessed/absent/malformed digest would ship a broken install.
     ///
-    /// **Idempotent.** After overwriting the file it checks whether the checkout is
-    /// dirty; a clean tree means the tap already carries exactly this formula (a
-    /// resume/re-run at the target version), so it returns a receipt without an
-    /// empty commit or a redundant push.
+    /// **Must already exist.** `resolve_path` chose this path from a `gh api` probe
+    /// that reported the formula present; after cloning, this re-checks that the tap
+    /// actually carries `Formula/<name>.rb` as a *regular file* before overwriting.
+    /// If a probe/clone race left it absent (or it is a symlink/dir), it fails closed
+    /// rather than *synthesize* a new formula straight onto the default branch — that
+    /// would bypass the create path's PR review gate (and, for a symlink, clobber a
+    /// file outside the checkout).
+    ///
+    /// **Idempotent.** It compares the rendered formula against the tap's current
+    /// bytes; an exact match is a clean no-op success (a resume/re-run at the target
+    /// version), so it neither rewrites the file nor pushes an empty commit.
     fn run_tap_write(
         ctx: &EffectCtx<'_>,
         t: &AdapterTarget,
         tap: &str,
     ) -> Result<PublishReceipt, AdapterError> {
+        // The package name reaches a filesystem path and a git pathspec; reject any
+        // traversal/separator before it can escape the checkout or the `Formula/` dir.
+        validate_package_name(&t.package)?;
         let tarball =
             ctx.artifacts
                 .source_tarball
@@ -446,14 +466,15 @@ impl HomebrewAdapter {
         let sha256 = tarball
             .sha256
             .as_deref()
+            .filter(|s| is_sha256_hex(s))
             .ok_or_else(|| AdapterError::Command {
                 command: "homebrew formula update".into(),
                 code: None,
                 stderr:
                     "refusing to push a Homebrew formula to the tap's default branch without a \
-                     verified sha256 (the tag archive was not fetched and hashed) — a formula on \
-                     the default branch is what `brew install` resolves, so an unverified digest \
-                     would ship a broken install"
+                     verified sha256 — the digest is absent or not a 64-char hex string (the tag \
+                     archive was not fetched and hashed). A formula on the default branch is what \
+                     `brew install` resolves, so an unverified digest would ship a broken install"
                         .into(),
             })?;
         let license = ctx
@@ -475,45 +496,51 @@ impl HomebrewAdapter {
         let commands = Self::update_commands(tap, &t.package, &t.version, &workdir_str);
         // 1. clone the tap (its default branch).
         run_all(ctx, &commands[..1])?;
-        // 2. overwrite the existing formula with the freshly-rendered one.
-        Self::write_formula(&workdir, &t.package, &formula, WriteMode::Overwrite)?;
-        // 3. idempotent no-op: if the write changed nothing, the tap is already at
-        //    this exact formula — do not create an empty commit.
-        if !Self::worktree_dirty(ctx, &workdir_str)? {
-            return Ok(make_receipt(ctx, t, Some(sha256.to_string()), None));
+        // 2. the formula must already be a regular file in the clone (see the
+        //    "Must already exist" contract above) — read its current bytes.
+        let formula_path = workdir.join("Formula").join(format!("{}.rb", t.package));
+        let current = Self::read_existing_formula(&formula_path, &t.package)?;
+        // 3. idempotent no-op: the tap already carries this exact formula.
+        let remote_url = Some(format!(
+            "https://github.com/{tap}/blob/HEAD/Formula/{}.rb",
+            t.package
+        ));
+        if current == formula.as_bytes() {
+            return Ok(make_receipt(ctx, t, Some(sha256.to_string()), remote_url));
         }
-        // 4. add → commit → push to the default branch.
+        // 4. overwrite the existing formula, then add → commit → push.
+        Self::write_formula(&workdir, &t.package, &formula, WriteMode::Overwrite)?;
         run_all(ctx, &commands[1..])?;
-        Ok(make_receipt(ctx, t, Some(sha256.to_string()), None))
+        Ok(make_receipt(ctx, t, Some(sha256.to_string()), remote_url))
     }
 
-    /// Whether the tap checkout at `workdir` has uncommitted changes, via
-    /// `git status --porcelain` through the runner. Empty output ⇒ clean (the
-    /// [`run_tap_write`](Self::run_tap_write) idempotent no-op); any line ⇒ dirty.
-    /// A non-zero exit or spawn failure is a genuine error, not "clean".
-    fn worktree_dirty(ctx: &EffectCtx<'_>, workdir: &str) -> Result<bool, AdapterError> {
-        let args = ["-C", workdir, "status", "--porcelain"];
-        let cmd = PlannedCommand::new("git", &args);
-        let out = ctx
-            .runner
-            .run("git", &args, ctx.repo_root)
-            .map_err(|e| AdapterError::Io {
-                command: cmd.rendered(),
-                source: e.to_string(),
-            })?;
-        if out.status != Some(0) {
-            let detail = if out.stderr.trim().is_empty() {
-                out.stdout
-            } else {
-                out.stderr
-            };
-            return Err(AdapterError::Command {
-                command: cmd.rendered(),
-                code: out.status,
-                stderr: detail,
+    /// Read the tap's current `Formula/<name>.rb` bytes, enforcing the tap-write
+    /// invariant that it is an **already-present regular file**. A missing file (a
+    /// probe/clone race) or a non-regular node (a symlink the overwrite would follow
+    /// out of the checkout, or a directory) is a fail-closed [`AdapterError`] — never
+    /// a silent create. Uses `symlink_metadata` so a symlink is *detected*, not
+    /// traversed.
+    fn read_existing_formula(path: &std::path::Path, name: &str) -> Result<Vec<u8>, AdapterError> {
+        let meta = std::fs::symlink_metadata(path).map_err(|e| AdapterError::Command {
+            command: "homebrew formula update".into(),
+            code: None,
+            stderr: format!(
+                "the tap was probed as carrying `{name}.rb` but the cloned checkout does not \
+                 (`{}`: {e}) — refusing to synthesize a formula on the default branch without the \
+                 create-path review gate",
+                path.display()
+            ),
+        })?;
+        if !meta.file_type().is_file() {
+            return Err(AdapterError::Filesystem {
+                path: path.to_string_lossy().to_string(),
+                source: "not a regular file (symlink or directory) — refusing to overwrite".into(),
             });
         }
-        Ok(!out.stdout.trim().is_empty())
+        std::fs::read(path).map_err(|e| AdapterError::Filesystem {
+            path: path.to_string_lossy().to_string(),
+            source: e.to_string(),
+        })
     }
 
     /// Write the generated formula to `<workdir>/Formula/<name>.rb`, creating the
@@ -533,8 +560,11 @@ impl HomebrewAdapter {
     ///   so it never follows a symlink onto, or truncates, an existing file — which
     ///   also fails loudly if the tap already carries the formula (a last-line guard
     ///   against a mis-detected "absent" formula).
-    /// - [`WriteMode::Overwrite`] (the tap-write path) truncates and replaces the
-    ///   already-present formula — the bump of an existing tap formula.
+    /// - [`WriteMode::Overwrite`] (the tap-write path) truncates the already-present
+    ///   formula **without** `create` — the caller ([`Self::run_tap_write`]) has
+    ///   already verified via [`Self::read_existing_formula`] that it is an existing
+    ///   regular file, so an open failure here means it vanished under us (a race),
+    ///   which is a fail-closed error rather than a silent create.
     fn write_formula(
         workdir: &std::path::Path,
         name: &str,
@@ -554,7 +584,7 @@ impl HomebrewAdapter {
                 opts.create_new(true);
             }
             WriteMode::Overwrite => {
-                opts.create(true).truncate(true);
+                opts.truncate(true);
             }
         }
         let mut file = opts.open(&path).map_err(|e| AdapterError::Filesystem {
@@ -571,13 +601,14 @@ impl HomebrewAdapter {
 }
 
 /// How [`HomebrewAdapter::write_formula`] opens the target `.rb`: create-new
-/// (`O_EXCL`, the first-formula create) or truncate-and-overwrite (the tap-write
-/// bump of an existing formula).
+/// (`O_EXCL`, the first-formula create) or truncate-an-existing-file (the tap-write
+/// bump, whose caller has already proven the file is a present regular file).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WriteMode {
     /// Refuse to open an existing file (`O_EXCL`) — the create path's guard.
     CreateNew,
-    /// Create or truncate — the tap-write path replacing an existing formula.
+    /// Truncate an existing file; **no** `create`, so a vanished file is an error,
+    /// not a silent create — the tap-write path replacing an existing formula.
     Overwrite,
 }
 
@@ -592,7 +623,8 @@ impl ReleaseAdapter for HomebrewAdapter {
         t: &AdapterTarget,
     ) -> Result<DryRunReport, AdapterError> {
         let tarball = ctx.artifacts.source_tarball.as_ref();
-        let (planned_commands, mut notes) = match self.resolve_path(ctx, t)? {
+        let path = self.resolve_path(ctx, t)?;
+        let (planned_commands, mut notes) = match path {
             FormulaPath::Create => {
                 // `tap` is Some whenever resolve_path returned Create.
                 let tap = self
@@ -623,14 +655,25 @@ impl ReleaseAdapter for HomebrewAdapter {
                     .tap(ctx.artifacts.homebrew.as_ref())
                     .unwrap_or_default();
                 let workdir = Self::fresh_workdir(&t.package, &t.version);
+                let mut notes = vec![format!(
+                    "tap-write path: `{}` already serves `{}.rb` — rendering the updated \
+                     formula and pushing it directly to the tap's default branch (no \
+                     `brew`, no PR)",
+                    tap, t.package,
+                )];
+                // Surface the fail-closed requirement rather than let publish fail
+                // late: this path refuses to push without a verified 64-hex sha256,
+                // which the coordinator threads only in the post-tag dist phase.
+                if tarball.and_then(|tb| tb.sha256.as_deref()).is_none() {
+                    notes.push(
+                        "publish will require a verified post-tag sha256 (absent in this \
+                         pre-tag preview); the coordinator supplies it after the tag is pushed"
+                            .to_string(),
+                    );
+                }
                 (
                     Self::update_commands(tap, &t.package, &t.version, &workdir.to_string_lossy()),
-                    vec![format!(
-                        "tap-write path: `{}` already serves `{}.rb` — rendering the updated \
-                         formula and pushing it directly to the tap's default branch (no \
-                         `brew`, no PR)",
-                        tap, t.package,
-                    )],
+                    notes,
                 )
             }
             FormulaPath::BumpPr => (
@@ -643,10 +686,15 @@ impl ReleaseAdapter for HomebrewAdapter {
         };
         match tarball {
             Some(tb) => {
-                let sha = tb
-                    .sha256
-                    .as_deref()
-                    .unwrap_or("(computed by brew from --url)");
+                // The bump-PR path lets `brew` derive the digest from `--url`; the
+                // create / tap-write paths get a verified digest threaded post-tag.
+                let sha = tb.sha256.as_deref().unwrap_or({
+                    if path == FormulaPath::BumpPr {
+                        "(computed by brew from --url)"
+                    } else {
+                        "(resolved and verified by the coordinator post-tag)"
+                    }
+                });
                 notes.push(format!("url: {} ; sha256: {sha}", tb.url));
             }
             None => notes
@@ -727,7 +775,10 @@ impl ReleaseAdapter for HomebrewAdapter {
 /// hash the pushed tag archive before it exists — see the coordinator's
 /// `source_tarball` docs) emits a `TODO` placeholder the maintainer completes,
 /// mirroring the 0.1.0 hand-fill; an absent `license` omits the stanza.
-fn render_formula(
+///
+/// `pub(super)` so the adapter tests can compute the exact expected bytes when
+/// seeding a fake tap clone (the tap-write idempotency no-op is a byte-compare).
+pub(super) fn render_formula(
     name: &str,
     homepage_slug: Option<&str>,
     url: &str,
@@ -776,10 +827,45 @@ fn render_formula(
 }
 
 /// Escape a value for inclusion in a Ruby double-quoted string literal:
-/// backslashes first, then double quotes. Prevents a contract-supplied `"` or
-/// `\` from terminating the literal or injecting Ruby.
+/// backslashes first, then double quotes, then `#`. Prevents a contract-supplied
+/// `"` or `\` from terminating the literal, and — critically — escaping `#` closes
+/// Ruby's `#{…}` string **interpolation**, which would otherwise evaluate arbitrary
+/// Ruby (code execution when `brew` loads the formula) from a value like
+/// `#{system('…')}`. `\#` renders as a literal `#`, so escaping every `#` is safe.
 fn ruby_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('#', "\\#")
+}
+
+/// Whether `s` is a syntactically valid SHA-256 digest: exactly 64 ASCII hex
+/// characters. The tap-write fail-closed check rejects an absent OR malformed digest
+/// (`Some("")`, `Some("garbage")`, a wrong length) — `Some(_)` alone is not proof of
+/// a verified hash.
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Reject a package name that could escape the `Formula/` directory or the git
+/// pathspec when interpolated into `Formula/<name>.rb` / `<name>.rb` — an empty
+/// name, a path separator (`/`, `\`), a `..` traversal component, or a leading `.`.
+/// The name is otherwise trusted (it reaches `desc`/`bin` via [`ruby_escape`]); this
+/// guards only the filesystem/path uses.
+fn validate_package_name(name: &str) -> Result<(), AdapterError> {
+    let bad = name.is_empty()
+        || name.starts_with('.')
+        || name.contains('/')
+        || name.contains('\\')
+        || name.split(['/', '\\']).any(|seg| seg == "..");
+    if bad {
+        return Err(AdapterError::Filesystem {
+            path: name.to_string(),
+            source: "invalid Homebrew package name — must not be empty, start with `.`, or \
+                     contain a path separator or `..` traversal component"
+                .into(),
+        });
+    }
+    Ok(())
 }
 
 /// Homebrew's formula class name for `name`: alphanumeric runs capitalised and

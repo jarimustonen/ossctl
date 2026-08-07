@@ -1,10 +1,13 @@
 ---
 created: 2026-08-06
-updated: 2026-08-06
+updated: 2026-08-07
 type: bug
-status: open
+status: in-progress
 priority: high
 epic: ossctl-phase4-build
+commits:
+- hash: 15dfbde
+  summary: make homebrew dist leg self-sufficient (direct tap-write, drop bump-formula-pr audit dep)
 ---
 
 # engine homebrew dist leg: brew bump-formula-pr fails on brew audit

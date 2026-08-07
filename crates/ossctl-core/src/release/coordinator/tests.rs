@@ -1104,12 +1104,22 @@ impl CommandRunner for WorkspaceCmd {
                 stderr: String::new(),
             });
         }
-        // The homebrew tap-write path overwrites the formula then checks whether the
-        // checkout is dirty; report a change so it commits + pushes to the tap.
-        if program == "git" && args.contains(&"status") && args.contains(&"--porcelain") {
+        // The homebrew tap-write path reads the tap's current formula from the clone
+        // and byte-compares. Fake the clone by checking out an OLDER formula so the
+        // rendered one differs → the path overwrites, commits, and pushes.
+        if program == "gh" && args.first() == Some(&"repo") && args.get(1) == Some(&"clone") {
+            if let Some(workdir) = args.get(3) {
+                let dir = Path::new(workdir).join("Formula");
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(
+                    dir.join("ossctl.rb"),
+                    "class Ossctl < Formula\n  # old\nend\n",
+                )
+                .unwrap();
+            }
             return Ok(CommandOutput {
                 status: Some(0),
-                stdout: " M Formula/ossctl.rb\n".to_string(),
+                stdout: String::new(),
                 stderr: String::new(),
             });
         }
