@@ -2,7 +2,7 @@
 created: 2026-08-04
 updated: 2026-08-07
 type: improvement
-status: in-progress
+status: done
 priority: normal
 epic: ossctl-phase4-build
 related: ['@distribution-cross-platform-targets']
@@ -11,6 +11,7 @@ commits:
   summary: 'feat(contract): warn on installer/platform OS mismatch'
 - hash: ef3b837
   summary: 'review(contract): positional triple OS match + error-gate the crosscheck'
+closed: 2026-08-07
 ---
 
 # distribution: cross-validate installers against platforms (msi to windows, homebrew to darwin)
