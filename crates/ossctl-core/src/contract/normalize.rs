@@ -283,7 +283,11 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
 
     // distribution — the binary-distribution block (cargo-dist/goreleaser); a
     // registry-only repo omits it (→ None), leaving its contract shape unchanged.
-    let distribution = parse_distribution(map.get("distribution"), p);
+    // A `homebrew`-registry target is the OTHER consumer of `homebrew_tap` (the
+    // release engine's homebrew-tap adapter pushes the formula in its `dist`
+    // phase), so it is passed in to suppress the dead-config warning.
+    let has_homebrew_target = targets.iter().any(|t| t.registry == Registry::Homebrew);
+    let distribution = parse_distribution(map.get("distribution"), has_homebrew_target, p);
 
     // changelog (mode + source + fragment_dir).
     let changelog = match map.get("changelog") {
@@ -651,7 +655,11 @@ const INSTALLER_ORDER: [Installer; 5] = [
 /// present-but-non-mapping value is an error (with `None` on the error path — the
 /// document is never emitted while `problems.errors` is non-empty).
 #[allow(clippy::too_many_lines)]
-fn parse_distribution(value: Option<&Value>, p: &mut Problems) -> Option<Distribution> {
+fn parse_distribution(
+    value: Option<&Value>,
+    has_homebrew_target: bool,
+    p: &mut Problems,
+) -> Option<Distribution> {
     let m = match value {
         None | Some(Value::Null) => return None,
         Some(Value::Mapping(m)) => m,
@@ -754,13 +762,18 @@ fn parse_distribution(value: Option<&Value>, p: &mut Problems) -> Option<Distrib
                 .to_string(),
         );
     }
-    // Advisory: a tap with no `homebrew` installer is dead config — the formula
-    // is never generated, so the tap is never pushed to. A warning, not a floor:
-    // the contract is internally consistent, just wasteful.
-    if homebrew_tap.is_some() && !wants_homebrew {
+    // Advisory: a tap with NEITHER a `homebrew` installer NOR a `homebrew`-registry
+    // target is dead config — no formula is ever generated, so the tap is never
+    // pushed to. A warning, not a floor: the contract is internally consistent,
+    // just wasteful. The tap has TWO possible consumers: cargo-dist's `homebrew`
+    // installer, and the release engine's homebrew-tap adapter target (whose `dist`
+    // phase generates + pushes the formula). Either one means the tap IS updated —
+    // so the warning fires only when both are absent.
+    if homebrew_tap.is_some() && !wants_homebrew && !has_homebrew_target {
         p.warn(
-            "distribution.homebrew_tap is set but 'homebrew' is not in distribution.installers — \
-             no formula is generated, so the tap will never be updated"
+            "distribution.homebrew_tap is set but there is neither a 'homebrew' installer in \
+             distribution.installers nor a 'homebrew'-registry target — no formula is generated, \
+             so the tap will never be updated"
                 .to_string(),
         );
     }
@@ -1526,8 +1539,10 @@ mod tests {
         assert_error_contains(&norm(text), "not allowed on maturity 'spike'");
     }
 
-    /// A `homebrew_tap` set without a `homebrew` installer is dead config — a
-    /// warning, not a floor (the contract is still valid).
+    /// A `homebrew_tap` set with neither a `homebrew` installer nor a
+    /// `homebrew`-registry target is dead config — a warning, not a floor (the
+    /// contract is still valid). This is the genuinely-orphaned tap: no consumer
+    /// exists, so the tap is truly never updated.
     #[test]
     fn distribution_tap_without_installer_warns() {
         let text = "---\nstatus: approved\nmaturity: mvp\n\
@@ -1539,8 +1554,33 @@ mod tests {
             n.problems
                 .warnings
                 .iter()
-                .any(|w| w.contains("homebrew_tap is set but 'homebrew' is not")),
+                .any(|w| w.contains("no formula is generated, so the tap will never be updated")),
             "expected dead-tap warning: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// A `homebrew_tap` set with NO `homebrew` installer but WITH a
+    /// `homebrew`-registry target (the release engine's homebrew-tap adapter, which
+    /// pushes the formula in its `dist` phase) is NOT dead config — the tap IS
+    /// updated by the engine, so the dead-config warning must NOT fire. This is
+    /// ossctl's own (correct) contract shape.
+    #[test]
+    fn distribution_tap_with_homebrew_target_no_warning() {
+        let text = "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\n\
+                    targets:\n  \
+                    - {ecosystem: rust, package: ossctl, registry: crates.io, adapter: cargo-publish}\n  \
+                    - {ecosystem: rust, package: ossctl, registry: homebrew, adapter: homebrew-tap}\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [shell]\n  \
+                    homebrew_tap: owner/tap\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            !n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("the tap will never be updated")),
+            "homebrew-target contract must not warn about a dead tap: {:?}",
             n.problems.warnings
         );
     }
