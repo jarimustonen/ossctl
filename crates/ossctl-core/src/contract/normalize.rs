@@ -850,35 +850,44 @@ fn parse_distribution(
         }
     };
 
-    // Cross-check: an OS-specific installer whose target OS is absent from
-    // `platforms` is dead config — the generated installer points at a binary the
-    // release never builds ("the installer has nothing to install"). A warning,
-    // not a floor (mirrors the `homebrew_tap`-without-consumer advisory above):
-    // the contract is internally consistent, just wasteful. Only the OS-specific
-    // installers constrain the set — see [`installer_os_need`] for the full
-    // installer→OS table; npm/shell/powershell are OS-agnostic and never warn.
-    let has_windows = platforms.iter().any(|t| is_windows_triple(t));
-    let has_macos = platforms.iter().any(|t| is_macos_triple(t));
-    let has_linux = platforms.iter().any(|t| is_linux_triple(t));
-    for &installer in &installers {
-        let unmet = match installer_os_need(installer) {
-            OsNeed::Agnostic => None,
-            OsNeed::Windows => (!has_windows).then_some(
-                "distribution.installers includes 'msi' but distribution.platforms has no \
-                 Windows (*-windows-*) target — the MSI installer has nothing to install",
-            ),
-            // Homebrew serves macOS natively AND Linux via Linuxbrew, so a single
-            // Linux triple satisfies it just as a darwin triple does; the warning
-            // fires only when NEITHER is present (the issue's stated intent when
-            // the darwin-vs-linux question is ambiguous).
-            OsNeed::MacosOrLinux => (!has_macos && !has_linux).then_some(
-                "distribution.installers includes 'homebrew' but distribution.platforms has no \
-                 macOS (*-apple-darwin) or Linux (*-linux-*) target — the Homebrew formula has \
-                 nothing to install",
-            ),
-        };
-        if let Some(msg) = unmet {
-            p.warn(msg.to_string());
+    // Cross-check: an OS-specific installer whose target OS is absent from the
+    // resolved `platforms` set is dead config — the generated installer points at
+    // a binary the release never builds ("the installer has nothing to install").
+    // A warning, not a floor (mirrors the `homebrew_tap`-without-consumer advisory
+    // above): the contract is internally consistent, just wasteful. Only the
+    // OS-specific installers constrain the set — see [`installer_os_need`] for the
+    // full installer→OS table; npm/shell/powershell are not cross-checked.
+    //
+    // Gated on a clean parse: this is a cross-field semantic advisory, so it must
+    // read only well-formed triples. A malformed triple (rejected above) that
+    // happens to contain an OS keyword must neither satisfy nor spuriously fail
+    // the coverage check — otherwise the warning would flip as the author fixes an
+    // unrelated error. Errors already block emission, so gating here loses nothing.
+    if p.errors.is_empty() {
+        let has_windows = platforms.iter().any(|t| is_windows_triple(t));
+        let has_macos = platforms.iter().any(|t| is_macos_triple(t));
+        let has_linux = platforms.iter().any(|t| is_linux_triple(t));
+        for &installer in &installers {
+            let unmet = match installer_os_need(installer) {
+                OsNeed::Unchecked => None,
+                OsNeed::Windows => (!has_windows).then_some(
+                    "distribution.installers includes 'msi' but the resolved \
+                     distribution.platforms set has no Windows (*-windows-*) target — the MSI \
+                     installer has nothing to install",
+                ),
+                // Homebrew serves macOS natively AND Linux via Linuxbrew, so a
+                // single Linux triple satisfies it just as a darwin triple does;
+                // the warning fires only when NEITHER is present (the issue's stated
+                // intent when the darwin-vs-linux question is ambiguous).
+                OsNeed::MacosOrLinux => (!has_macos && !has_linux).then_some(
+                    "distribution.installers includes 'homebrew' but the resolved \
+                     distribution.platforms set has no macOS (*-apple-darwin) or Linux \
+                     (*-linux-*) target — the Homebrew formula has nothing to install",
+                ),
+            };
+            if let Some(msg) = unmet {
+                p.warn(msg.to_string());
+            }
         }
     }
 
@@ -931,8 +940,8 @@ fn default_cross_platform_targets() -> Vec<String> {
 /// cross-check warning. Kept as one table (see [`installer_os_need`]) rather than
 /// scattered conditionals so the mapping stays inspectable in one place.
 enum OsNeed {
-    /// OS-agnostic — the installer never constrains `platforms`.
-    Agnostic,
+    /// Not cross-checked — this installer never constrains `platforms`.
+    Unchecked,
     /// Needs at least one Windows triple.
     Windows,
     /// Needs at least one macOS OR Linux triple.
@@ -941,39 +950,54 @@ enum OsNeed {
 
 /// The OS an installer's generated artifact can actually install onto — the spec
 /// that lets the normalizer flag an installer whose target OS is absent from
-/// `platforms`. Only the OS-specific installers constrain the set:
+/// `platforms`. Only `msi` and `homebrew` are OS-gated; the rest are deliberately
+/// left `Unchecked` (a scoping choice, not a claim that they run everywhere):
 ///
-/// | installer    | needs                | rationale                                     |
-/// |--------------|----------------------|-----------------------------------------------|
-/// | `msi`        | Windows              | an `.msi` installs only on Windows            |
-/// | `homebrew`   | macOS **or** Linux   | Homebrew serves macOS natively and Linux (Linuxbrew) |
-/// | `shell`      | — (agnostic)         | the shell script fetches whichever platform's binary the release built |
-/// | `powershell` | — (agnostic)         | Windows-oriented, but not gated here — only msi/homebrew are OS-checked |
-/// | `npm`        | — (agnostic)         | published to a registry, not an OS-specific artifact |
+/// | installer    | need              | rationale                                          |
+/// |--------------|-------------------|----------------------------------------------------|
+/// | `msi`        | Windows           | an `.msi` installs only on Windows                 |
+/// | `homebrew`   | macOS **or** Linux| Homebrew serves macOS natively and Linux (Linuxbrew) |
+/// | `shell`      | — (not checked)   | a POSIX script; only msi/homebrew are gated for now |
+/// | `powershell` | — (not checked)   | Windows-oriented; only msi/homebrew are gated for now |
+/// | `npm`        | — (not checked)   | published to a registry, not tied to one OS's artifact |
 fn installer_os_need(i: Installer) -> OsNeed {
     match i {
         Installer::Msi => OsNeed::Windows,
         Installer::Homebrew => OsNeed::MacosOrLinux,
-        Installer::Shell | Installer::Powershell | Installer::Npm => OsNeed::Agnostic,
+        Installer::Shell | Installer::Powershell | Installer::Npm => OsNeed::Unchecked,
     }
 }
 
-/// Whether a (well-formed) target-triple targets Windows — an `-windows-`
-/// component (e.g. `x86_64-pc-windows-msvc`), matching the `*-windows-*` glob.
+/// The OS ("system") component of a target-triple — the 3rd `-`-separated field
+/// in the `<arch>-<vendor>-<os>[-<env>]` shape the shipped desktop triples use
+/// (`x86_64-pc-windows-msvc`, `aarch64-apple-darwin`, `x86_64-unknown-linux-musl`).
+/// `None` for a 2-component triple that names no vendor (`wasm32-wasip1`). Matching
+/// the OS *positionally* (rather than "any component equals …") is what keeps
+/// `aarch64-linux-android` out of the Linux bucket: its `linux` sits in the vendor
+/// slot and the real OS component is `android`.
+fn triple_os(s: &str) -> Option<&str> {
+    s.split('-').nth(2)
+}
+
+/// Whether a target-triple targets Windows — OS component `windows` (covering
+/// both `-windows-msvc` and `-windows-gnu`).
 fn is_windows_triple(s: &str) -> bool {
-    s.split('-').any(|part| part == "windows")
+    triple_os(s) == Some("windows")
 }
 
-/// Whether a target-triple targets macOS — an `apple-darwin` OS component
-/// (e.g. `aarch64-apple-darwin`), matching the `*-apple-darwin` glob.
+/// Whether a target-triple targets macOS — OS component `darwin` (e.g.
+/// `aarch64-apple-darwin`). Apple's non-macOS triples (`*-apple-ios`, `-tvos`, …)
+/// carry a different OS component and are correctly excluded.
 fn is_macos_triple(s: &str) -> bool {
-    s.split('-').any(|part| part == "darwin")
+    triple_os(s) == Some("darwin")
 }
 
-/// Whether a target-triple targets Linux — a `-linux-` component (e.g.
+/// Whether a target-triple targets Linux — OS component `linux` (e.g.
 /// `x86_64-unknown-linux-musl`), covering the Linuxbrew case for `homebrew`.
+/// Android (`aarch64-linux-android`) has `android` as its OS component and does
+/// not count.
 fn is_linux_triple(s: &str) -> bool {
-    s.split('-').any(|part| part == "linux")
+    triple_os(s) == Some("linux")
 }
 
 /// Whether `s` is a *structurally* plausible target-triple — 2–4 `-`-separated
@@ -1771,6 +1795,154 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("nothing to install")),
             "ossctl's own shape must not cross-check warn: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// `installers: [msi]` with `platforms` OMITTED warns: the default set
+    /// (macOS + Linux) carries no Windows triple, so the MSI installs nothing.
+    /// This is the common footgun — the author added msi but never listed a
+    /// Windows target.
+    #[test]
+    fn msi_installer_with_defaulted_platforms_warns() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [msi]\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("includes 'msi'") && w.contains("no Windows")),
+            "expected an msi/Windows warning against the defaulted platform set: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// `installers: [msi]` is satisfied by a `*-windows-gnu` triple just as by
+    /// `*-windows-msvc` — both target the Windows OS. No warning.
+    #[test]
+    fn msi_installer_with_windows_gnu_no_warning() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [msi]\n  \
+                    platforms: [x86_64-pc-windows-gnu]\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            !n.problems.warnings.iter().any(|w| w.contains("'msi'")),
+            "windows-gnu must satisfy msi: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// `installers: [homebrew]` with an ANDROID-only platform set warns: Android
+    /// triples (`aarch64-linux-android`) carry `linux` in the *vendor* slot but an
+    /// `android` OS component — Homebrew/Linuxbrew does not serve Android, so the
+    /// formula has nothing to install. Regression guard for the positional
+    /// `triple_os` OS-component match (vs a naive any-component `== "linux"`).
+    #[test]
+    fn homebrew_installer_with_android_only_warns() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [homebrew]\n  \
+                    homebrew_tap: jarimustonen/homebrew-issuectl\n  \
+                    platforms: [aarch64-linux-android]\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("includes 'homebrew'") && w.contains("nothing to install")),
+            "Android-only must strand a homebrew installer: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// `installers: [homebrew]` with an APPLE-iOS-only set warns: `*-apple-ios`
+    /// carries an `ios` OS component, not `darwin`, so it is not a macOS target and
+    /// Homebrew serves neither iOS nor (here) Linux.
+    #[test]
+    fn homebrew_installer_with_apple_ios_only_warns() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [homebrew]\n  \
+                    homebrew_tap: jarimustonen/homebrew-issuectl\n  \
+                    platforms: [aarch64-apple-ios]\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("includes 'homebrew'") && w.contains("nothing to install")),
+            "apple-ios must not satisfy homebrew's macOS need: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// `installers: [homebrew]` with a macOS-only set (no Linux) is coherent — the
+    /// isolated darwin case, distinct from the Linux-only test above.
+    #[test]
+    fn homebrew_installer_with_macos_only_no_warning() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [homebrew]\n  \
+                    homebrew_tap: jarimustonen/homebrew-issuectl\n  \
+                    platforms: [aarch64-apple-darwin]\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            !n.problems.warnings.iter().any(|w| w.contains("'homebrew'")),
+            "macOS-only must satisfy homebrew: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// Two stranded installers → two independent warnings. A wasm-only platform
+    /// set has no OS component any installer supports, so both `msi` and `homebrew`
+    /// warn (exactly once each — the installer list is de-duped and canonically
+    /// ordered).
+    #[test]
+    fn both_installers_stranded_warn_once_each() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [homebrew, msi]\n  \
+                    homebrew_tap: jarimustonen/homebrew-issuectl\n  \
+                    platforms: [wasm32-unknown-unknown]\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        let msi = n
+            .problems
+            .warnings
+            .iter()
+            .filter(|w| w.contains("includes 'msi'"))
+            .count();
+        let brew = n
+            .problems
+            .warnings
+            .iter()
+            .filter(|w| w.contains("includes 'homebrew'"))
+            .count();
+        assert_eq!((msi, brew), (1, 1), "warnings: {:?}", n.problems.warnings);
+    }
+
+    /// A malformed triple that happens to contain an OS keyword must NOT drive the
+    /// cross-check: the block has a parse error (uppercase triple), so the advisory
+    /// is gated off entirely. Otherwise the misspelled `x86_64-PC-WINDOWS-MSVC`
+    /// would silently "satisfy" msi and the warning would flip once the author
+    /// fixed the typo.
+    #[test]
+    fn malformed_platform_triple_gates_off_cross_check() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [msi]\n  \
+                    platforms: [x86_64-PC-WINDOWS-MSVC]\n---\n";
+        let n = norm(text);
+        // The uppercase triple is a hard error → the document is invalid …
+        assert!(!n.is_valid(), "expected a malformed-triple error");
+        // … and the cross-check emitted no (misleading) installer/platform warning.
+        assert!(
+            !n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("nothing to install")),
+            "cross-check must be gated off while platforms has errors: {:?}",
             n.problems.warnings
         );
     }

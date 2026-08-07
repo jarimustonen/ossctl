@@ -6,6 +6,9 @@ status: in-progress
 priority: normal
 epic: ossctl-phase4-build
 related: ['@distribution-cross-platform-targets']
+commits:
+- hash: 0e0d3c6
+  summary: 'feat(contract): warn on installer/platform OS mismatch'
 ---
 
 # distribution: cross-validate installers against platforms (msi to windows, homebrew to darwin)
