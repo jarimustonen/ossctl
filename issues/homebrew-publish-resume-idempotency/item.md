@@ -19,3 +19,21 @@ The post-tag dist phase (coordinator.rs dist_phase) publishes homebrew via the a
 Surfaced by /llm-review (openai, anthropic, deepseek all flagged it). This is the same append-then-apply crash window that exists for every publish, but homebrew lacks a natural idempotency gate and the action is now post-tag. Pre-existing in spirit (homebrew always had this), not introduced here, but raised in stakes.
 
 Fix direction: make the homebrew adapter idempotent — before bump/create, probe the tap for an existing open PR / branch / already-updated formula for this package@version and treat it as Matches (adopt-forward a synthetic receipt) rather than opening a second PR. Use a deterministic branch name (the adapter already does: ossctl-homebrew-<name>-<version>). Do NOT let --allow-unverified authorize retrying an irreversible homebrew PR when remote state cannot be observed. Relatedto homebrew-adapter-fs-port / the deferred homebrew hardening.
+
+## Update (tap-write leg, 2026-08-07)
+
+The `homebrew-dist-brew-audit-fails` fix replaced `brew bump-formula-pr` with a direct tap-write
+(clone → overwrite → `git push origin HEAD`). Two resume/concurrency concerns the `/llm-review` panel
+raised belong here (the tap-write path fails **closed** on both today — safe, but not yet recovered):
+
+- **Non-fast-forward push race**: a concurrent cut for another formula in the same tap, or a manual
+  commit landing between the shallow clone and the push, makes `git push origin HEAD` fail
+  non-fast-forward. Fails closed; no auto re-clone/rebase-retry. Fine for sequential single-formula
+  cuts; revisit if a tap ever hosts fan-out cuts.
+- **Stale-version resume downgrade**: resuming an OLD version's cut after a NEWER version already
+  updated the tap would clone the newer formula, render the older one, see a diff, and push a
+  *downgrade* as a clean fast-forward. A version/precedence guard (or compare-and-swap on the file's
+  blob SHA via the GitHub Contents API) would prevent it.
+
+Byte-compare idempotency (a re-run at the SAME version = clean no-op) IS now handled in the tap-write
+path; these two are the remaining resume-safety gaps.

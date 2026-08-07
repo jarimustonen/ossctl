@@ -8,6 +8,8 @@ epic: ossctl-phase4-build
 commits:
 - hash: 15dfbde
   summary: make homebrew dist leg self-sufficient (direct tap-write, drop bump-formula-pr audit dep)
+- hash: 607407e
+  summary: 'harden tap-write per multi-LLM review (sha 64-hex, existence+symlink guard, byte-compare idempotency, ruby # escape, pkg-name validation)'
 ---
 
 # engine homebrew dist leg: brew bump-formula-pr fails on brew audit
