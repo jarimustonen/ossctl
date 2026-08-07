@@ -287,7 +287,12 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
     // release engine's homebrew-tap adapter pushes the formula in its `dist`
     // phase), so it is passed in to suppress the dead-config warning.
     let has_homebrew_target = targets.iter().any(|t| t.registry == Registry::Homebrew);
-    let distribution = parse_distribution(map.get("distribution"), has_homebrew_target, p);
+    let distribution = parse_distribution(
+        map.get("distribution"),
+        has_homebrew_target,
+        schema_version,
+        p,
+    );
 
     // changelog (mode + source + fragment_dir).
     let changelog = match map.get("changelog") {
@@ -669,6 +674,7 @@ const INSTALLER_ORDER: [Installer; 5] = [
 fn parse_distribution(
     value: Option<&Value>,
     has_homebrew_target: bool,
+    schema_version: u32,
     p: &mut Problems,
 ) -> Option<Distribution> {
     let m = match value {
@@ -863,7 +869,8 @@ fn parse_distribution(
             .collect::<Vec<_>>()
             .join(", ");
         p.warn(format!(
-            "unknown distribution field(s) preserved (forward-compat): [{keys}]"
+            "unknown distribution field(s) preserved under schema_version {schema_version} \
+             (forward-compat): [{keys}]"
         ));
     }
 
@@ -1548,17 +1555,54 @@ mod tests {
         );
     }
 
-    /// A distribution block with only known keys carries an empty `extra_fields`
-    /// map — the additive field is shape-neutral for existing contracts.
+    /// A distribution block setting EVERY known key carries an empty
+    /// `extra_fields` map and emits no forward-compat warning — the additive field
+    /// is shape-neutral for existing contracts. Exercising all of
+    /// `KNOWN_DISTRIBUTION_KEYS` guards against the allowlist drifting out of sync
+    /// with the struct (a new known key wrongly captured as "unknown").
     #[test]
-    fn distribution_known_keys_only_has_empty_extra_fields() {
+    fn distribution_all_known_keys_has_empty_extra_fields() {
         let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
-                    distribution:\n  adapter: cargo-dist\n---\n";
-        let d = norm(text)
-            .contract
-            .distribution
-            .expect("distribution present");
+                    distribution:\n  adapter: cargo-dist\n  gh_releases: true\n  \
+                    installers: [shell, homebrew]\n  homebrew_tap: owner/tap\n  \
+                    platforms: [x86_64-unknown-linux-musl]\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        let d = n.contract.distribution.expect("distribution present");
         assert!(d.extra_fields.is_empty());
+        assert!(
+            !n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("unknown distribution field(s) preserved")),
+            "no forward-compat warning for an all-known-keys block: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// Top-level and nested `extra_fields` capture are independent: a contract
+    /// with BOTH an unknown top-level key AND an unknown distribution sub-key
+    /// populates both maps and warns once for each, with the correct
+    /// `schema_version` in each message.
+    #[test]
+    fn distribution_and_top_level_extra_fields_coexist() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    roadmap_url: https://example.com/x\n\
+                    distribution:\n  adapter: cargo-dist\n  future_x: 1\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        let c = n.contract.clone();
+        assert!(c.extra_fields.contains_key("roadmap_url"));
+        let d = c.distribution.expect("distribution present");
+        assert_eq!(d.extra_fields.get("future_x"), Some(&serde_json::json!(1)));
+        // Two independent forward-compat warnings, each naming schema_version 1.
+        let fc: Vec<&String> = n
+            .problems
+            .warnings
+            .iter()
+            .filter(|w| w.contains("forward-compat") && w.contains("schema_version 1"))
+            .collect();
+        assert_eq!(fc.len(), 2, "expected two versioned warnings: {fc:?}");
     }
 
     /// Installers de-dup into canonical order regardless of source order.

@@ -293,9 +293,11 @@ pub struct Target {
 /// `Option` on [`Contract`]: `null` for a registry-only repo (the common case),
 /// so this addition leaves every existing contract's shape unchanged.
 ///
-/// Drops `Eq` (unlike its sibling [`Target`]) for the same reason [`Contract`]
-/// does: [`Self::extra_fields`] holds `serde_json::Value`s, which are not `Eq`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// Keeps `Eq` even after gaining [`Self::extra_fields`]: `serde_json::Value`
+/// (and `serde_json::Map`) implement `Eq` — JSON numbers exclude non-finite
+/// floats — so the added field does not weaken the derive (unlike the sibling
+/// [`Contract`], which is `PartialEq`-only for unrelated historical reasons).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Distribution {
     /// The binary-distribution engine that owns the tag-triggered release
     /// workflow.

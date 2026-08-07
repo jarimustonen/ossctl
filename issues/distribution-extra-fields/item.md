@@ -1,10 +1,13 @@
 ---
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-08-07
 type: improvement
-status: open
+status: in-progress
 priority: normal
 related: ['@contract-cannot-model-cargo-dist-release']
+commits:
+- hash: 1d24911
+  summary: capture unknown distribution sub-keys in extra_fields
 ---
 
 # Nested distribution block: extra_fields forward-compat capture
