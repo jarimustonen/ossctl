@@ -2,9 +2,13 @@
 created: 2026-08-07
 updated: 2026-08-07
 type: improvement
-status: in-progress
+status: done
 priority: normal
 related: ['@distribution-extra-fields']
+commits:
+- hash: 36b0156
+  summary: harden extra_fields capture (non-string reject, reserved merge, dedupe)
+closed: 2026-08-07
 ---
 
 # extra_fields capture: shared hardening (non-string keys, reserved-key round-trip, dedupe)
