@@ -1575,12 +1575,12 @@ mod tests {
                     homebrew_tap: owner/tap\n---\n";
         let n = norm(text);
         assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        // Stronger than a negative substring match: the whole contract is clean,
+        // so it must produce NO warnings at all — this also catches any reworded
+        // dead-tap advisory that a substring check would miss.
         assert!(
-            !n.problems
-                .warnings
-                .iter()
-                .any(|w| w.contains("the tap will never be updated")),
-            "homebrew-target contract must not warn about a dead tap: {:?}",
+            n.problems.warnings.is_empty(),
+            "homebrew-target contract must not warn: {:?}",
             n.problems.warnings
         );
     }
