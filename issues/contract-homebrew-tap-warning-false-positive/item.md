@@ -2,12 +2,15 @@
 created: 2026-08-06
 updated: 2026-08-07
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 epic: ossctl-phase4-build
 commits:
 - hash: 0e0dea7
   summary: fix homebrew_tap dead-config false positive for homebrew-tap targets
+- hash: d54d028
+  summary: strengthen no-warning test + file homebrew-consistency spin-off
+closed: 2026-08-07
 ---
 
 # contract validate false-positive: homebrew_tap 'dead config' warning ignores a homebrew-tap TARGET as a consumer
