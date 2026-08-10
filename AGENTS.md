@@ -73,7 +73,7 @@ app beyond what the ADRs already fix.
   crates.io partial-publish case, and `ossctl release resume`/`abandon` recover an interrupted
   run. Still: green gate first, dry-run/plan first, never publish red, report each phase.
   - **Shipped: 0.1.0 (2026-08-04), 0.1.1 (2026-08-05), 0.1.2 (2026-08-05), 0.2.0 (2026-08-06),
-    0.2.1 (2026-08-06), 0.2.2 (2026-08-06), 0.2.3 (2026-08-07).**
+    0.2.1 (2026-08-06), 0.2.2 (2026-08-06), 0.2.3 (2026-08-07), 0.2.4 (2026-08-10).**
     All on crates.io (`ossctl` + `ossctl-core`), GitHub Releases (cross-platform: macOS aarch64,
     Linux musl x86_64+aarch64, Windows, `.sh`+`.ps1` installers), and the Homebrew tap
     `jarimustonen/homebrew-ossctl`. Repo is **public**. 0.1.2 added `ossctl dist generate`. 0.2.0
