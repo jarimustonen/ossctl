@@ -1,6 +1,6 @@
 ---
 created: 2026-08-05
-updated: 2026-08-05
+updated: 2026-08-10
 type: improvement
 status: open
 priority: normal
@@ -18,3 +18,9 @@ Current mitigation (shipped in the list/abandon change): abandon maps the WouldB
 Proposed capability (own design — safety-sensitive): a supervised stale-lock break. Options raised by reviewers: (a) record holder PID+hostname+process-start-identity+run-id in the lock file and add a `--force`/`--break-stale-lock` that verifies the holder is not alive before removing it; (b) move to a real advisory lock (flock/fs2/std File::lock) if MSRV allows — releases on death for free; (c) a dedicated `doctor --fix` stale-lock recovery. Must guard against PID reuse and network/shared filesystems (do NOT delete based on PID alone). Deferred from the list/abandon spinoff to keep that change focused and avoid reworking the locking architecture.
 
 Discovered during release-list-abandon-not-implemented.
+
+## Comments
+
+### 2026-08-10T14:42:17Z · @agent-claude
+
+Hit in the wild during the issuectl 0.8.1 cut (2026-08-10): a foreground 2-min timeout killed the cut wrapper, leaving .lock at <git-common-dir>/ossctl/releases/.lock holding dead PID 910. release abandon refused with cut_in_progress; had to kill -0 the pid, confirm dead, and rm the lock by hand before abandon worked. A dead-PID liveness check (or abandon --force) would avoid the manual rm. See also new @release-cut-publish-noop.
