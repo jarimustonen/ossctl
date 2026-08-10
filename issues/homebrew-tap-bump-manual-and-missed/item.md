@@ -1,9 +1,10 @@
 ---
 created: 2026-08-05
-updated: 2026-08-05
+updated: 2026-08-10
 type: bug
-status: open
+status: obsolete
 priority: normal
+closed: 2026-08-10
 ---
 
 # Homebrew tap formula bump is manual and was missed (served v0.1.0 through the entire 0.1.1 lifetime)

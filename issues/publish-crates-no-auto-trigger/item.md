@@ -1,9 +1,10 @@
 ---
 created: 2026-08-05
-updated: 2026-08-05
+updated: 2026-08-10
 type: bug
-status: open
+status: duplicate
 priority: normal
+closed: 2026-08-10
 ---
 
 # publish-crates.yml does not auto-trigger on release (GITHUB_TOKEN recursion guard)
