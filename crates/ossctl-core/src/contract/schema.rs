@@ -352,6 +352,13 @@ pub struct Distribution {
     /// contract's distribution sub-keys rather than dropping them. Mirrors
     /// [`Contract::extra_fields`] at the nested level; empty for a contract with
     /// no unknown distribution keys.
+    ///
+    /// An EMPTY map is OMITTED from canonical JSON (`skip_serializing_if`), so a
+    /// distribution with no unknown keys carries no `extra_fields` key at all — the
+    /// "additive = absent-by-default" migration rule holds literally, and a
+    /// populated map serializes exactly as before. Kept symmetric with
+    /// [`Contract::extra_fields`] (both omit-when-empty).
+    #[serde(skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra_fields: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -438,6 +445,13 @@ pub struct Contract {
     pub docs_site: DocsSite,
     /// Preserved unknown frontmatter keys under a known `schema_version`
     /// (forward-compat); never dropped.
+    ///
+    /// An EMPTY map is OMITTED from canonical JSON (`skip_serializing_if`), so a
+    /// contract with no unknown keys carries no `extra_fields` key at all — the
+    /// "additive = absent-by-default" migration rule holds literally, and a
+    /// populated map serializes exactly as before. Kept symmetric with
+    /// [`Distribution::extra_fields`] (both omit-when-empty).
+    #[serde(skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra_fields: serde_json::Map<String, serde_json::Value>,
     /// Non-fatal notes (aspirational draft producers, the unknown-field report).
     pub warnings: Vec<String>,

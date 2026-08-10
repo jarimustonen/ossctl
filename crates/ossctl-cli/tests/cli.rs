@@ -123,7 +123,13 @@ fn contract_show_positive_fixtures() {
         assert_eq!(data["schema_version"], 2, "{name} contract schema_version");
         assert!(data["maturity"].is_string(), "{name} maturity: {data}");
         assert!(data["targets"].is_array(), "{name} targets: {data}");
-        assert!(data["extra_fields"].is_object(), "{name} extra_fields");
+        // Option A (omit-when-empty): `extra_fields` is ABSENT when empty and an
+        // object only when a fixture carries unknown keys (e.g. `go-cli`).
+        assert!(
+            data.get("extra_fields")
+                .is_none_or(serde_json::Value::is_object),
+            "{name} extra_fields must be absent or an object"
+        );
         assert!(data["warnings"].is_array(), "{name} warnings");
         assert!(data["versioning_pattern"].is_null() || data["versioning_pattern"].is_string());
     }

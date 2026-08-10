@@ -2067,7 +2067,6 @@ mod tests {
             "health_badges",
             "license",
             "docs_site",
-            "extra_fields",
             "warnings",
         ] {
             assert!(json.get(key).is_some(), "missing §4 key {key}");
@@ -2076,6 +2075,57 @@ mod tests {
         // A registry-only contract carries an explicit empty `distributions: []` —
         // the collection is always a JSON array (v2 canonical shape).
         assert_eq!(json["distributions"], serde_json::json!([]));
+        // An EMPTY `extra_fields` is OMITTED from canonical JSON (Option A,
+        // `skip_serializing_if`): a contract with no unknown keys carries no
+        // `extra_fields` key at all. It reappears only when populated — see
+        // [`empty_extra_fields_absent_populated_present`].
+        assert!(
+            json.get("extra_fields").is_none(),
+            "empty extra_fields must be absent, got {:?}",
+            json.get("extra_fields")
+        );
+    }
+
+    /// Option A (omit-when-empty), asserted SYMMETRICALLY on both the top-level
+    /// [`Contract::extra_fields`] and the nested [`Distribution::extra_fields`]:
+    /// an empty map is ABSENT from canonical JSON, a populated map is PRESENT and
+    /// byte-for-shape unchanged from before the `skip_serializing_if`.
+    #[test]
+    fn empty_extra_fields_absent_populated_present() {
+        // Empty (both levels): a contract with a distribution but no unknown keys.
+        let empty = serde_json::to_value(
+            norm(
+                "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                 distribution:\n  adapter: cargo-dist\n---\n",
+            )
+            .contract,
+        )
+        .unwrap();
+        assert!(
+            empty.get("extra_fields").is_none(),
+            "empty top-level extra_fields must be absent"
+        );
+        assert!(
+            empty["distributions"][0].get("extra_fields").is_none(),
+            "empty nested extra_fields must be absent"
+        );
+
+        // Populated (both levels): an unknown top-level key and an unknown
+        // distribution key are preserved and PRESENT.
+        let populated = serde_json::to_value(
+            norm(
+                "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                 roadmap_url: https://example.com/roadmap\n\
+                 distribution:\n  adapter: cargo-dist\n  future_x: 1\n---\n",
+            )
+            .contract,
+        )
+        .unwrap();
+        assert_eq!(
+            populated["extra_fields"]["roadmap_url"],
+            "https://example.com/roadmap"
+        );
+        assert_eq!(populated["distributions"][0]["extra_fields"]["future_x"], 1);
     }
 
     // ── distribution (cargo-dist binary layer) ───────────────────────────────

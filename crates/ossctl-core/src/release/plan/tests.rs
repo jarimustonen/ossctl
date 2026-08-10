@@ -237,7 +237,7 @@ fn plan_id_golden_vector() {
     let plan = build(&rust_contract(), &rust_facts(), HEAD, "1.2.0");
     assert_eq!(
         plan.plan_id,
-        "400133f96f974c3bfe7a6b71d20861c291497c8cde5b23fe79ff96c94c51f855"
+        "5ee31eacdddd882dfb69bd63f7fcbeee98b00a4f7fd7a46f1dd78ff769ebf703"
     );
 }
 
@@ -265,7 +265,7 @@ fn plan_id_golden_vector_with_distribution() {
     let plan = build(&contract, &rust_facts(), HEAD, "1.2.0");
     assert_eq!(
         plan.plan_id,
-        "f165e38fac7ac4df378a54a7d2aaa0802ccc3ca166f7eebe17ec542c5b900d20"
+        "d0a9b8debb288ad7b6b9fc96226fc1113220e4f77c283c005c1335be5e2b5e9d"
     );
     // The tap threads into the plan from the sole distribution.
     assert_eq!(plan.homebrew_tap.as_deref(), Some("acme/homebrew-acme"));

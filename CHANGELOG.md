@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
+
+### Changed
+- **An empty `extra_fields` map is now omitted from canonical JSON** (not emitted as `"extra_fields": {}`),
+  applied symmetrically to both the top-level `Contract` and the nested `Distribution` via
+  `skip_serializing_if`. A populated `extra_fields` serializes exactly as before. This makes the
+  "additive = absent-by-default" migration rule hold literally. No `schema_version` bump (existing
+  populated contracts are byte-identical; consumers already tolerate an absent optional key), but the
+  release-plan `SEAL_VERSION` bumped `4` → `5` because the sealed pre-image of an empty-`extra_fields`
+  contract changed.
 <!-- oss-changelog:unreleased-end -->
 
 ## [0.2.3] - 2026-08-07
