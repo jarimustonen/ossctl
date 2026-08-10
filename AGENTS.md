@@ -110,7 +110,14 @@ app beyond what the ADRs already fix.
     1. Bump `workspace.package.version` + the internal `=X.Y.Z` dep in lockstep → finalize
        CHANGELOG → `cargo build` (refresh lock) → `cargo publish -p ossctl-core --dry-run` →
        commit → push `main`.
-    2. `ossctl release plan --version X.Y.Z` (seal + inspect; side-effect-free) → then
+    2. **Cut with a FRESHLY-BUILT binary from the current tree.** Build it as
+       `cargo build --release -p ossctl` (the bin crate is **`ossctl`**, NOT `ossctl-cli` —
+       `-p ossctl-cli` silently no-ops and leaves a STALE binary) and verify `./target/release/ossctl
+       version` prints the just-bumped version. ⚠️ Since 0.2.5 the version is read from the tree at
+       runtime, so `release plan` shows the NEW version even from a stale old binary — `plan`/`cut`
+       will then run OLD engine code silently. `ossctl version` is the only tell. (Stale-binary guard
+       tracked in `release-cut-stale-binary-guard`.) Then
+       `ossctl release plan --version X.Y.Z` (seal + inspect; side-effect-free) → then
        `ossctl release cut --plan <id> --version X.Y.Z`. The engine runs
        `dry-run-all → build-all → publish-all (crates.io, dep-ordered, index-waited) → tag →
        dist (homebrew: real sha256 pushed to the tap)`. It **skips** the CI-delegated
