@@ -2262,29 +2262,42 @@ impl RegistryQuery for SharedRegistry {
 }
 
 /// A command runner that models a real `cargo publish`: on `cargo publish … -p X`
-/// it records `X@publish_version` into the shared registry (as a real upload makes
-/// the crate index-visible), so the adapter's `is_published` / `wait_for_index`
-/// probes — reading the same registry — observe the landed version. Serves the
-/// injected workspace graph for `cargo metadata`; every other command succeeds.
-/// `publish_version = None` is the NO-OP variant: it runs the publish command but
-/// uploads nothing (the exact defect under test).
+/// it records X at **the version declared for X in the served `cargo metadata`**
+/// — i.e. the manifest version cargo would actually upload — into the shared
+/// registry, so the adapter's `is_published` / `wait_for_index` probes (reading the
+/// same registry) observe the landed version. Publishing the *metadata* version
+/// (not a value handed in out-of-band) keeps the mock faithful to the real
+/// "`cargo publish` uploads the tree manifest version" behavior: a coordinator that
+/// somehow published a different version than the manifest declares would show up as
+/// the wrong version on the registry. `noop = true` is the defect variant: it runs
+/// the publish command but uploads nothing.
 struct PublishingCmd {
     reg: SharedRegistry,
     metadata: String,
-    publish_version: Option<String>,
+    noop: bool,
     calls: RefCell<Vec<String>>,
 }
 impl PublishingCmd {
-    fn new(reg: SharedRegistry, metadata: &str, publish_version: Option<&str>) -> Self {
+    fn new(reg: SharedRegistry, metadata: &str, noop: bool) -> Self {
         Self {
             reg,
             metadata: metadata.to_string(),
-            publish_version: publish_version.map(str::to_string),
+            noop,
             calls: RefCell::new(Vec::new()),
         }
     }
     fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
+    }
+    /// The version the served metadata declares for `package` (what `cargo publish`
+    /// would upload), or `None` if the crate is not in the graph.
+    fn manifest_version(&self, package: &str) -> Option<String> {
+        let meta: serde_json::Value = serde_json::from_str(&self.metadata).ok()?;
+        meta.get("packages")?.as_array()?.iter().find_map(|p| {
+            (p.get("name")?.as_str()? == package)
+                .then(|| p.get("version")?.as_str().map(str::to_string))
+                .flatten()
+        })
     }
 }
 impl CommandRunner for PublishingCmd {
@@ -2300,16 +2313,19 @@ impl CommandRunner for PublishingCmd {
             });
         }
         if program == "cargo" && args.first() == Some(&"publish") {
-            if let Some(version) = &self.publish_version {
-                // The `-p <pkg>` that names the one crate this publish uploads.
+            if !self.noop {
+                // The `-p <pkg>` that names the one crate this publish uploads, at
+                // the version its manifest (the served metadata) declares.
                 if let Some(pos) = args.iter().position(|a| *a == "-p") {
                     if let Some(pkg) = args.get(pos + 1) {
-                        self.reg
-                            .inner
-                            .borrow_mut()
-                            .entry((*pkg).to_string())
-                            .or_default()
-                            .push(version.clone());
+                        if let Some(version) = self.manifest_version(pkg) {
+                            self.reg
+                                .inner
+                                .borrow_mut()
+                                .entry((*pkg).to_string())
+                                .or_default()
+                                .push(version);
+                        }
                     }
                 }
             }
@@ -2366,7 +2382,7 @@ fn cut_actually_publishes_both_crates_to_the_mock_registry() {
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
     let reg = SharedRegistry::default();
-    let cmd = PublishingCmd::new(reg.clone(), TWO_CRATE_METADATA, Some("1.2.3"));
+    let cmd = PublishingCmd::new(reg.clone(), TWO_CRATE_METADATA, false);
     let tagger = FakeTagger::new();
     let root = PathBuf::from("/repo");
     let ctx = EffectCtx {
@@ -2432,7 +2448,7 @@ fn a_noop_publish_leaves_the_registry_empty_even_though_the_cut_succeeds() {
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
     let reg = SharedRegistry::default();
-    let cmd = PublishingCmd::new(reg.clone(), ONE_CRATE_METADATA, None);
+    let cmd = PublishingCmd::new(reg.clone(), ONE_CRATE_METADATA, true);
     let tagger = FakeTagger::new();
     let root = PathBuf::from("/repo");
     let ctx = EffectCtx {

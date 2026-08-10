@@ -2,8 +2,11 @@
 created: 2026-08-10
 updated: 2026-08-10
 type: bug
-status: open
+status: in-progress
 priority: high
+commits:
+- hash: 29d48c9
+  summary: guard --version against tree manifest drift; add mock-registry cut integration test
 ---
 
 # release cut real publish is a no-op: crate never reaches crates.io (index-visibility timeout on an unpublished crate)

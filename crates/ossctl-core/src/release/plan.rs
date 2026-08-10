@@ -274,8 +274,12 @@ pub fn check_version_matches_tree(
         }
     }
     // Deterministic order, and one row per package even if a package backs several
-    // targets (a crate published to crates.io AND repackaged for homebrew).
-    mismatches.sort_by(|a, b| a.package.cmp(&b.package));
+    // targets (a crate published to crates.io AND repackaged for homebrew). Sort and
+    // dedup on the SAME (ecosystem, package) key so equal keys are guaranteed adjacent
+    // before the consecutive-only `dedup_by` runs.
+    mismatches.sort_by(|a, b| {
+        (a.ecosystem.as_str(), &a.package).cmp(&(b.ecosystem.as_str(), &b.package))
+    });
     mismatches.dedup_by(|a, b| a.package == b.package && a.ecosystem == b.ecosystem);
     if mismatches.is_empty() {
         Ok(())

@@ -1238,6 +1238,20 @@ fn derive_resume_plan(
         )
     })?;
     let facts = ossctl_core::facts::gather(root, &RealFs, git);
+    // Guard the sealed version against the CURRENT tree manifest, exactly as `cut`
+    // does. A resume re-derives the plan from live repo state, and a manifest-version
+    // edit between the failed cut and its resume does NOT change `plan_id` (manifest
+    // versions are not part of the content address), so the drift check below would
+    // not catch it — a resume could otherwise publish the new manifest version while
+    // threading the journal's sealed version into every probe/wait/receipt, the exact
+    // `release-cut-publish-noop` mismatch.
+    if let Err(mismatches) = ossctl_core::release::plan::check_version_matches_tree(
+        &normalized.contract,
+        &facts,
+        &state.version,
+    ) {
+        return Err(version_drift_error(&state.version, &mismatches));
+    }
     let plan =
         ossctl_core::release::plan::build(&normalized.contract, &facts, &head_sha, &state.version);
     if plan.plan_id != state.plan_id {
