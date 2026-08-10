@@ -245,6 +245,35 @@ impl RegistryQuery for SeqRegistry {
     }
 }
 
+/// A registry that alternates `Ok(absent)` / `Err` across polls, never showing the
+/// version present — a FLAKY registry that nonetheless answers definitively (absent)
+/// at least once. The window must classify as a genuine absence, not an outage,
+/// proving the classification looks at the whole window (any clean answer) rather
+/// than the parity of the final poll.
+struct AlternatingRegistry {
+    calls: Cell<u32>,
+}
+impl AlternatingRegistry {
+    fn new() -> Self {
+        Self {
+            calls: Cell::new(0),
+        }
+    }
+}
+impl RegistryQuery for AlternatingRegistry {
+    fn published_versions(&self, _ecosystem: &str, _package: &str) -> io::Result<Vec<String>> {
+        let n = self.calls.get();
+        self.calls.set(n + 1);
+        // Even calls answer (absent); odd calls error. The very first call (the
+        // idempotency probe) answers absent, so the publish proceeds.
+        if n % 2 == 0 {
+            Ok(Vec::new())
+        } else {
+            Err(io::Error::from(io::ErrorKind::TimedOut))
+        }
+    }
+}
+
 /// A registry that answers `Ok(absent)` for the first `ok_count` lookups, then
 /// errors on every lookup after — models a registry that is reachable for the
 /// pre-publish idempotency probe but goes unreachable during the post-publish
@@ -1493,7 +1522,38 @@ fn publish_fails_loudly_when_its_own_version_never_indexes() {
         cmd.calls()
     );
     assert!(msg.contains("tool@1.0.0"), "message: {msg}");
-    assert!(msg.contains("did not land"), "message: {msg}");
+    // Honest, uncertainty-preserving wording: it names the crate, does not assert the
+    // upload definitely shipped nothing, and points at the resume/verify recovery.
+    assert!(msg.contains("not visible"), "message: {msg}");
+    assert!(
+        msg.contains("verify") || msg.contains("resume"),
+        "message: {msg}"
+    );
+}
+
+#[test]
+fn confirm_classifies_a_flaky_but_answering_window_as_absent_not_outage() {
+    // A registry that intermittently errors but DID answer absent at least once must
+    // classify the confirm as a genuine absence (PublishNotVisible), not an outage —
+    // the classification looks at the whole window, not just the final poll's parity.
+    // (Regression guard for the last-poll-only classification.)
+    let cmd = FakeCmd::new().with_metadata(&metadata_single("tool", "1.0.0"));
+    let clock = AdvancingClock::new();
+    let reg = AlternatingRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx_advancing(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.0.0",
+    );
+    let err = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap_err();
+    match err {
+        AdapterError::PublishNotVisible { package, .. } => assert_eq!(package, "tool"),
+        other => panic!("a flaky-but-answering window must be PublishNotVisible, got {other:?}"),
+    }
 }
 
 #[test]

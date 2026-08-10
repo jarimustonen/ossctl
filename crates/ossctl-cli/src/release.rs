@@ -1255,8 +1255,17 @@ fn derive_resume_plan(
     // otherwise publish the new manifest version while threading the journal's sealed
     // version into every probe/wait/receipt, the exact `release-cut-publish-noop`
     // mismatch. Passing the sealed version as the confirmation surfaces such an edit
-    // as a `version_mismatch`.
-    resolve_version(&normalized.contract, &facts, Some(&state.version))?;
+    // as a `resume_version_drift` (resume takes no `--version` flag, so it gets a
+    // resume-specific message, not the flag-oriented one).
+    let resolved = ossctl_core::release::plan::resolve_release_version(
+        &normalized.contract,
+        &facts,
+        Some(&state.version),
+    )
+    .map_err(|e| resume_version_error(state, e))?;
+    // The journal is local mutable state, not trusted input — re-validate the sealed
+    // version's shape before it becomes the `v{version}` tag (parity with plan/cut).
+    validate_version(&resolved)?;
     let plan =
         ossctl_core::release::plan::build(&normalized.contract, &facts, &head_sha, &state.version);
     if plan.plan_id != state.plan_id {
@@ -1588,19 +1597,6 @@ fn resolve_version(
 /// each get a distinct, fixable message.
 fn version_resolve_error(err: ossctl_core::release::plan::VersionResolveError) -> CliError {
     use ossctl_core::release::plan::VersionResolveError;
-    let render = |rows: &[ossctl_core::release::plan::VersionMismatch]| {
-        rows.iter()
-            .map(|m| {
-                format!(
-                    "{} ({}) is at {}",
-                    m.package,
-                    m.ecosystem.as_str(),
-                    m.manifest_version
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
     match err {
         VersionResolveError::Mismatch {
             requested,
@@ -1612,7 +1608,7 @@ fn version_resolve_error(err: ossctl_core::release::plan::VersionResolveError) -
                  publish: {}. `ossctl release cut` publishes the version already in the manifest — \
                  it does NOT bump it. Bump the manifest (and finalize the CHANGELOG) in a release \
                  commit first, then plan/cut — or omit --version to use the manifest version.",
-                render(&mismatches)
+                render_version_rows(&mismatches)
             ),
         )
         .with_invalid_value(requested),
@@ -1622,7 +1618,7 @@ fn version_resolve_error(err: ossctl_core::release::plan::VersionResolveError) -
                 "the workspace manifests declare more than one version, so there is no single \
                  release version to derive: {}. Bring every publishable crate to the same version \
                  (a lockstep bump) in a release commit before planning/cutting.",
-                render(&versions)
+                render_version_rows(&versions)
             ),
         ),
         VersionResolveError::Undeterminable => CliError::user(
@@ -1632,6 +1628,57 @@ fn version_resolve_error(err: ossctl_core::release::plan::VersionResolveError) -
              manifest version to confirm it against).",
         ),
     }
+}
+
+/// Render `<package> (<ecosystem>) is at <version>` rows as one comma-joined line —
+/// the shared detail body for every version-resolution error message.
+fn render_version_rows(rows: &[ossctl_core::release::plan::VersionMismatch]) -> String {
+    rows.iter()
+        .map(|m| {
+            format!(
+                "{} ({}) is at {}",
+                m.package,
+                m.ecosystem.as_str(),
+                m.manifest_version
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Map a version-resolution failure encountered during `release resume` to a
+/// resume-appropriate §10 error.
+///
+/// Unlike `plan`/`cut`, resume takes no `--version` flag — the version comes from the
+/// journal — so [`version_resolve_error`]'s "omit --version" / "pass --version"
+/// guidance would be nonsensical here. A failure means the tree manifest was edited
+/// to a *different* version after the run was sealed (a manifest-version edit does
+/// not move the content-addressed `plan_id`, so only this explicit check catches it);
+/// the fix is to restore the sealed version, not to touch a flag.
+fn resume_version_error(
+    state: &ossctl_core::protocol::journal::RunState,
+    err: ossctl_core::release::plan::VersionResolveError,
+) -> CliError {
+    use ossctl_core::release::plan::VersionResolveError;
+    let detail = match &err {
+        VersionResolveError::Mismatch { mismatches, .. } => render_version_rows(mismatches),
+        VersionResolveError::InconsistentTree { versions } => render_version_rows(versions),
+        // Unreachable in practice: resume always passes `Some(state.version)`, so a
+        // zero-checkable tree falls back to that version rather than erroring.
+        VersionResolveError::Undeterminable => "no manifest version detected".to_string(),
+    };
+    CliError::user(
+        "resume_version_drift",
+        format!(
+            "run {} was sealed at version {}, but the tree manifest no longer matches it: {detail}. \
+             A manifest-version edit occurred after the cut (a manifest edit does not move the \
+             plan_id, so this is the check that catches it). Restore the sealed version (a clean \
+             checkout of the sealed commit), or plan and cut a new release — ossctl will not resume \
+             a run under a different version than it was sealed with.",
+            state.run_id, state.version
+        ),
+    )
+    .with_invalid_value(state.run_id.clone())
 }
 
 /// Map a `Journal::create` failure to the error envelope: a held lock is the

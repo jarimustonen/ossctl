@@ -6,6 +6,9 @@ status: in-progress
 priority: normal
 epic: ossctl-phase4-build
 related: ['@cut-noop-self-visibility-check']
+commits:
+- hash: 22a07df
+  summary: derive release version from manifest; --version optional confirmation
 ---
 
 # release version entered in two places (--version flag + workspace manifest) can drift — make the manifest the single source of truth

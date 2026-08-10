@@ -6,6 +6,9 @@ status: in-progress
 priority: high
 epic: ossctl-phase4-build
 related: ['@release-cut-publish-noop']
+commits:
+- hash: 22a07df
+  summary: confirm own publish landed on registry before journaling receipt (+ tests)
 ---
 
 # release cut journals a publish receipt without confirming the version actually landed (silent no-op upload)

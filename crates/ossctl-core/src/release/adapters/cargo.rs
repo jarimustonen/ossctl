@@ -611,15 +611,17 @@ fn is_published(
 /// Why a bounded index-wait gave up without ever observing `package@version` — the
 /// honest distinction the caller maps onto its own [`AdapterError`] variant.
 enum WaitFailure {
-    /// The registry *answered* and the version stayed absent for the whole window —
-    /// a genuine "did not appear" (the dependency never indexed, or the crate's own
-    /// publish shipped nothing).
+    /// The registry *answered at least once* over the window and the version was
+    /// definitively absent every time it did — a genuine "did not appear" (the
+    /// dependency never indexed, or the crate's own publish shipped nothing).
     Absent {
-        /// How long the wait lasted before giving up, in seconds.
+        /// How long the wait actually lasted before giving up, in seconds.
         waited_secs: u64,
     },
-    /// The registry could not be reached (the final poll errored) — an outage, not a
-    /// proven absence. Carries the underlying error so it is surfaced, never masked.
+    /// The registry was **never** reached with a definitive answer over the whole
+    /// window — every poll errored — so absence could not be established: an outage,
+    /// not a proven absence. Carries the last underlying error so it is surfaced,
+    /// never masked.
     Unreachable {
         /// The underlying registry lookup error, rendered as text.
         source: String,
@@ -633,14 +635,16 @@ enum WaitFailure {
 /// [`Clock::sleep`](crate::ports::Clock::sleep) — real time in production, a
 /// virtual advance under test — so the loop is bounded, never busy, and
 /// deterministic in tests. A transient lookup error is retried (waiting is
-/// reversible), and the outcome on timeout is **honest**: if the most recent poll
-/// *observed* the version absent, that is [`WaitFailure::Absent`]; if the registry
-/// could not be reached at all (the last poll errored), that is
-/// [`WaitFailure::Unreachable`] carrying the underlying error — a sustained outage
-/// is never masked as "did not index". The two callers ([`wait_for_index`] for a
-/// dependency, [`confirm_self_published`] for the crate just published) map these to
-/// their own [`AdapterError`] variants, so the same bounded, propagation-lag-
-/// tolerant wait backs both.
+/// reversible), and the outcome on timeout is classified over the **whole window,
+/// not just the final poll**: if *any* poll reached the registry and observed the
+/// version absent, that is [`WaitFailure::Absent`]; if **no** poll ever got a
+/// definitive answer (every one errored), that is [`WaitFailure::Unreachable`]
+/// carrying the last error — a sustained outage is never masked as "did not index"
+/// just because the last poll happened (or failed) to answer. This fails closed:
+/// an all-outage window is `Unreachable`, never a false absence. The two callers
+/// ([`wait_for_index`] for a dependency, [`confirm_self_published`] for the crate
+/// just published) map these to their own [`AdapterError`] variants, so the same
+/// bounded, propagation-lag-tolerant wait backs both.
 fn poll_for_index(
     ctx: &EffectCtx<'_>,
     ecosystem: Ecosystem,
@@ -648,26 +652,42 @@ fn poll_for_index(
     version: &str,
 ) -> Result<(), WaitFailure> {
     let start = ctx.clock.now_unix();
-    // The last poll's registry error, if it errored; cleared on any successful
-    // observation. Assigned on every path of the match below before it is read at
-    // the timeout check, so it needs no initializer. Drives the classification.
-    let mut last_err: Option<String>;
+    // Whether ANY poll reached the registry and got a definitive answer (a version
+    // list, in which the version was absent). Drives the fail-closed classification:
+    // a window that never once saw the registry answer is an outage
+    // (`Unreachable`), never a proven absence — even if the final poll erred or
+    // answered. Only a window that DID observe a clean absence classifies as
+    // `Absent`.
+    let mut observed_absent = false;
+    // The most recent registry error, surfaced when the window was a pure outage.
+    let mut last_err: Option<String> = None;
     loop {
         match ctx.registry.published_versions(ecosystem.as_str(), package) {
             Ok(versions) => {
                 if versions.iter().any(|v| v == version) {
                     return Ok(());
                 }
-                last_err = None;
+                // A definitive answer: the registry was reached and the version is
+                // absent. `last_err` is intentionally NOT cleared — it is only read on
+                // the `Unreachable` path, which is taken solely when `observed_absent`
+                // is false (no clean answer ever occurred), so a stale error string
+                // can never leak into an `Absent` classification.
+                observed_absent = true;
             }
             Err(e) => last_err = Some(e.to_string()),
         }
-        if ctx.clock.now_unix().saturating_sub(start) >= INDEX_WAIT_TIMEOUT_SECS {
-            return Err(match last_err {
-                Some(source) => WaitFailure::Unreachable { source },
-                None => WaitFailure::Absent {
-                    waited_secs: INDEX_WAIT_TIMEOUT_SECS,
-                },
+        let waited = ctx.clock.now_unix().saturating_sub(start);
+        if waited >= INDEX_WAIT_TIMEOUT_SECS {
+            return Err(if observed_absent {
+                WaitFailure::Absent {
+                    waited_secs: waited,
+                }
+            } else {
+                WaitFailure::Unreachable {
+                    source: last_err.unwrap_or_else(|| {
+                        "the registry never returned a definitive answer".to_string()
+                    }),
+                }
             });
         }
         ctx.clock.sleep(INDEX_POLL_INTERVAL);
@@ -700,9 +720,10 @@ fn wait_for_index(
     })
 }
 
-/// Confirm the crate the adapter **just published** actually landed on the index
-/// before a receipt is journaled — the self-visibility check that turns a silent
-/// no-op upload into a loud failure (`cut-noop-self-visibility-check`).
+/// Confirm the crate the adapter **just published** is visible on the index before a
+/// receipt is journaled — the self-visibility check that turns an unconfirmed upload
+/// into a fail-closed refusal rather than a fabricated success
+/// (`cut-noop-self-visibility-check`).
 ///
 /// A `cargo publish` that exits 0 but shipped nothing (a registry-alias/credential/
 /// env difference, an under-declared target) would otherwise fabricate a
@@ -710,11 +731,14 @@ fn wait_for_index(
 /// success while nothing reached crates.io. So after the irreversible upload the
 /// publish path probes the registry for the target's *own* `{package, version}`,
 /// reusing the same bounded [`poll_for_index`] wait as the dependency index-wait so
-/// normal sparse-index propagation lag is tolerated — only a genuine never-appears
-/// no-op fails. An absence-after-wait is [`AdapterError::PublishNotVisible`] (the
-/// loud no-op failure, naming the crate + version); a registry outage is
-/// [`AdapterError::RegistryUnavailable`] (fail-closed — an unreachable registry is
-/// never read as a proven no-op, mirroring the reconcile layer's outage discipline).
+/// normal sparse-index propagation lag is tolerated — only a version that never
+/// appears within the window fails. That failure is
+/// [`AdapterError::PublishNotVisible`] (naming the crate + version): the cut fails
+/// **closed** rather than record a receipt it cannot substantiate — the upload may
+/// have landed on a slow index (resume/verify) or shipped nothing (a genuine no-op).
+/// A registry outage (never reachable across the window) is
+/// [`AdapterError::RegistryUnavailable`] instead (fail-closed too, mirroring the
+/// reconcile layer's outage discipline).
 fn confirm_self_published(
     ctx: &EffectCtx<'_>,
     ecosystem: Ecosystem,
