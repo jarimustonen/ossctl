@@ -2,8 +2,14 @@
 created: 2026-08-10
 updated: 2026-08-10
 type: bug
-status: open
+status: fixed
 priority: high
+commits:
+- hash: 014802e
+  summary: make publish-crates dep-order step idempotent on already-exists
+- hash: 5e222bc
+  summary: anchor already-exists match to exact per-package cargo diagnostic
+closed: 2026-08-10
 ---
 
 # publish-crates.yml dep-order step not idempotent: cargo publish -p ossctl-core dies with exit 101 on 'already exists'
