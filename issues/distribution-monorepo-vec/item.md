@@ -14,3 +14,12 @@ _Source: /llm-review of contract-cannot-model-cargo-dist-release_
 ## Description
 
 Deferred spin-off from the /llm-review of `contract-cannot-model-cargo-dist-release`. The new `distribution` block is a single `Option<Distribution>` on `Contract`, which models a single-artifact repo. A monorepo can ship multiple independently-distributed binaries (each with its own gh-releases/installer/tap). Extend the model to `Vec<Distribution>` with a way to associate each distribution with the package/target it belongs to, without breaking the single-distribution common case.
+
+## Decision (Jari, 2026-08-10) — implement now
+
+**Do it now** (overrides the earlier "defer until a monorepo consumer appears" recommendation).
+Design-first: this is a structural schema change (`schema_version` bump) touching the canonical
+serde model (`schema.rs`) + `normalize.rs`. Must preserve the single-`Distribution` common case
+(back-compat deser: a bare `distribution:` block still parses as one entry) and add the
+per-package/target association key. Sequence strictly AFTER `publish-target-none` (both touch the
+same LANE B hot files). Land via a reviewed worktree (design-first + `/llm-review` before merge).
