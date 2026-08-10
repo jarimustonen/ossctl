@@ -94,10 +94,11 @@ pub fn build(contract: &Contract, facts: &Facts, head_sha: &str, version: &str) 
         // Carried from the (already-hashed) contract so the coordinator can hand
         // the Homebrew adapter its tap + license without re-reading the contract.
         // The first distribution that declares a tap — identical to the old
-        // single-`Distribution` behavior for the 0/1-distribution case. A
-        // per-target tap for a true multi-tap monorepo (the plan carries a single
-        // `homebrew_tap`) is a deliberate follow-up; this unit models the contract,
-        // the engine stays minimal.
+        // single-`Distribution` behavior. The release-engine CLI path
+        // (`ensure_single_distribution`) rejects a multi-distribution monorepo
+        // BEFORE reaching here, so `distributions.len() <= 1` and this `find_map`
+        // never silently drops a second distribution's tap; carrying a per-package
+        // tap for a true multi-tap monorepo is a deliberate follow-up.
         homebrew_tap: contract
             .distributions
             .iter()

@@ -5,6 +5,9 @@ type: feature
 status: in-progress
 priority: normal
 related: ['@contract-cannot-model-cargo-dist-release']
+commits:
+- hash: '2706589'
+  summary: Vec<Distribution> + per-package association, schema_version 1->2, back-compat deser, release-seam threading
 ---
 
 # Monorepo distribution: Vec<Distribution> with per-package association
@@ -65,3 +68,26 @@ in lockstep.
 - `audit::cross_platform_gap` — iterate all distributions; gap ids stay bare
   (`distribution-linux` / `distribution-macos`) for the single case (byte-identical audit), and
   are suffixed with the package for a monorepo (`distribution-linux:<pkg>`).
+
+## Review follow-through (4-model /llm-review, 2026-08-10)
+
+Two criticals (4/4 consensus) + several good catches, all fixed or deferred (report:
+`history/review-distribution-monorepo-vec.md`):
+
+- **schema_version mislabel (FIXED).** The normalizer echoed the DECLARED version, so a
+  `schema_version: 1` doc emitted the v2 `distributions` body still labeled 1. Now emits
+  `schema_version = KNOWN_SCHEMA_VERSION` always — reads v1, emits v2. (The `contract show` fixture
+  test asserted the old buggy echo; corrected: envelope stays 1, contract payload is 2.)
+- **Monorepo tap drop (FIXED).** `plan.homebrew_tap`'s `find_map` would silently drop a second
+  distribution's tap at publish. Added `ensure_single_distribution` — `release plan`/`cut`/`resume`
+  reject `distributions.len() > 1` (`multiple_distributions`) until the engine is per-distribution
+  aware. `dist generate` already rejected ≥2.
+- **Typo guard (FIXED, advisory).** Warn when a monorepo distribution's `package` matches no
+  `targets[].package`. **Package trimming (FIXED).** Second golden vector for a populated
+  distribution (FIXED).
+- **Deferred → `per-distribution-release`:** per-distribution taps in the engine, `dist generate
+  --package`, cargo-dist per-distribution platforms. The contract MODEL is complete; the engine is
+  single-distribution and fails loud on a monorepo.
+- **Declined:** deprecation warning on the singular `distribution:` key (contradicts the
+  zero-change back-compat requirement); bumping the wire-envelope `SCHEMA_VERSION` (versions the
+  envelope, not the payload — the contract's own `schema_version: 2` is the shape signal).

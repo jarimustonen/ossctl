@@ -6,8 +6,9 @@
 use super::*;
 use crate::contract::schema::{
     Adapter, Changelog, ChangelogMode, ChangelogSource, Contract, ContributionProvenance,
-    DependencyBot, DocsSite, Ecosystem, Maturity, ProvenanceLevel, Registry, Release,
-    ReleaseLayout, ReleaseModel, Status, Target, VersioningBase,
+    DependencyBot, Distribution, DistributionAdapter, DocsSite, Ecosystem, Installer, Maturity,
+    ProvenanceLevel, Registry, Release, ReleaseLayout, ReleaseModel, Status, Target,
+    VersioningBase,
 };
 use crate::protocol::facts::{Facts, MaturitySignals, Package};
 use crate::protocol::plan::PlanPhase;
@@ -238,6 +239,36 @@ fn plan_id_golden_vector() {
         plan.plan_id,
         "400133f96f974c3bfe7a6b71d20861c291497c8cde5b23fe79ff96c94c51f855"
     );
+}
+
+/// Golden vector for a contract carrying a POPULATED distribution — locks the
+/// `Distribution` fields (incl. the new `package` association key) into the sealed
+/// pre-image, so a serialization change to that struct is caught, not just the
+/// top-level `distributions` array rename. Same discipline as
+/// [`plan_id_golden_vector`]: a deliberate pre-image change bumps `SEAL_VERSION`
+/// and updates this digest in one commit.
+#[test]
+fn plan_id_golden_vector_with_distribution() {
+    let mut contract = rust_contract();
+    contract.distributions = vec![Distribution {
+        package: Some("acme".to_string()),
+        adapter: DistributionAdapter::CargoDist,
+        gh_releases: true,
+        installers: vec![Installer::Shell, Installer::Homebrew],
+        homebrew_tap: Some("acme/homebrew-acme".to_string()),
+        platforms: vec![
+            "aarch64-apple-darwin".to_string(),
+            "x86_64-unknown-linux-musl".to_string(),
+        ],
+        extra_fields: serde_json::Map::new(),
+    }];
+    let plan = build(&contract, &rust_facts(), HEAD, "1.2.0");
+    assert_eq!(
+        plan.plan_id,
+        "f165e38fac7ac4df378a54a7d2aaa0802ccc3ca166f7eebe17ec542c5b900d20"
+    );
+    // The tap threads into the plan from the sole distribution.
+    assert_eq!(plan.homebrew_tap.as_deref(), Some("acme/homebrew-acme"));
 }
 
 // ── verify: Ok when unchanged, PlanDrift (with reasons) when moved ─────────

@@ -206,32 +206,31 @@ macro_rules! enum_field {
 
 #[allow(clippy::too_many_lines)]
 fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Contract {
-    // schema_version — bound first; a too-new config is a hard stop.
-    let schema_version = match map.get("schema_version") {
-        None => KNOWN_SCHEMA_VERSION,
+    // schema_version — validate the DECLARED version (a too-new config is a hard
+    // stop, a sub-1 or non-integer is an error), but do NOT echo it: the canonical
+    // output is ALWAYS the current shape, so the emitted `schema_version` is
+    // KNOWN_SCHEMA_VERSION regardless of what the (older, still-readable) document
+    // declared. Echoing the declared version would stamp a canonical v2 body with a
+    // v1 number — a mislabeled, self-inconsistent shape a strict consumer cannot
+    // trust. The tool reads a v1 `distribution:` mapping and emits the v2
+    // `distributions: [...]` shape under `schema_version: 2`.
+    match map.get("schema_version") {
+        None => {}
         Some(v) => match v.as_i64() {
-            Some(n) if n > i64::from(KNOWN_SCHEMA_VERSION) => {
-                p.err(format!(
-                    "schema_version {n} exceeds what this tool knows ({KNOWN_SCHEMA_VERSION}); \
-                     upgrade the OSS-release skills before reading this config (refusing rather \
-                     than guessing)."
-                ));
-                u32::try_from(n).unwrap_or(KNOWN_SCHEMA_VERSION)
-            }
-            Some(n) if n < 1 => {
-                p.err(format!("schema_version {n} is invalid (must be >= 1)"));
-                KNOWN_SCHEMA_VERSION
-            }
-            Some(n) => u32::try_from(n).unwrap_or(KNOWN_SCHEMA_VERSION),
-            None => {
-                p.err(format!(
-                    "schema_version must be an integer, got {}",
-                    yaml_display(v)
-                ));
-                KNOWN_SCHEMA_VERSION
-            }
+            Some(n) if n > i64::from(KNOWN_SCHEMA_VERSION) => p.err(format!(
+                "schema_version {n} exceeds what this tool knows ({KNOWN_SCHEMA_VERSION}); \
+                 upgrade the OSS-release skills before reading this config (refusing rather \
+                 than guessing)."
+            )),
+            Some(n) if n < 1 => p.err(format!("schema_version {n} is invalid (must be >= 1)")),
+            Some(_) => {}
+            None => p.err(format!(
+                "schema_version must be an integer, got {}",
+                yaml_display(v)
+            )),
         },
-    };
+    }
+    let schema_version = KNOWN_SCHEMA_VERSION;
 
     let status = enum_field!(map, "status", Status, Status::Draft, p);
 
@@ -316,7 +315,7 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
     // `homebrew_tap` (the release engine's homebrew-tap adapter pushes the formula
     // in its `dist` phase), so it is passed in to suppress the dead-config warning.
     let has_homebrew_target = targets.iter().any(|t| t.registry == Registry::Homebrew);
-    let distributions = parse_distributions(map, has_homebrew_target, schema_version, p);
+    let distributions = parse_distributions(map, &targets, has_homebrew_target, schema_version, p);
 
     // changelog (mode + source + fragment_dir).
     let changelog = match map.get("changelog") {
@@ -692,6 +691,7 @@ const INSTALLER_ORDER: [Installer; 5] = [
 /// floor (a monorepo's `package` must be present and unique) lives here.
 fn parse_distributions(
     map: &Mapping,
+    targets: &[Target],
     has_homebrew_target: bool,
     schema_version: u32,
     p: &mut Problems,
@@ -781,6 +781,31 @@ fn parse_distributions(
                 Some(_) => {}
             }
         }
+
+        // Typo guard (advisory): once a monorepo names packages, a distribution
+        // whose `package` matches NO `targets[].package` is very likely a typo — a
+        // distribution should build a package the contract also tracks as a target.
+        // A warning, not a floor: a binary-only package legitimately need not appear
+        // in the registry `targets`, and `targets` may be empty (a version-tracked,
+        // unpublished repo) — so it fires only when there ARE named target packages
+        // to compare against.
+        let target_pkgs: std::collections::BTreeSet<&str> = targets
+            .iter()
+            .filter_map(|t| t.package.as_deref())
+            .collect();
+        if !target_pkgs.is_empty() {
+            for (idx, d) in distributions.iter().enumerate() {
+                if let Some(pkg) = d.package.as_deref() {
+                    if !target_pkgs.contains(pkg) {
+                        p.warn(format!(
+                            "distributions[{idx}].package '{pkg}' matches no targets[].package \
+                             ({target_pkgs:?}) — likely a typo; a distribution should build a \
+                             package the contract also lists as a target"
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     distributions
@@ -803,7 +828,10 @@ fn parse_one_distribution(
     let package = match m.get("package") {
         None | Some(Value::Null) => None,
         Some(v) => match v.as_str() {
-            Some(s) if !s.trim().is_empty() => Some(s.to_string()),
+            // Store the TRIMMED value: surrounding whitespace would otherwise make
+            // `" alpha"` and `"alpha"` distinct to the uniqueness floor and to the
+            // per-package association/audit keying, silently breaking both.
+            Some(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
             _ => {
                 p.err(
                     "distribution.package must be a non-empty string (the package this \
@@ -1565,7 +1593,9 @@ mod tests {
     #[test]
     fn materializes_all_defaults() {
         let c = norm(MINIMAL).contract;
-        assert_eq!(c.schema_version, KNOWN_SCHEMA_VERSION);
+        // Pinned to the literal (not KNOWN_SCHEMA_VERSION) so a future bump is an
+        // explicit, visible test change rather than silently tracking the constant.
+        assert_eq!(c.schema_version, 2);
         assert_eq!(c.status, Status::Approved);
         assert_eq!(c.maturity, Maturity::Mvp);
         assert!(c.ecosystems.is_empty());
@@ -2090,6 +2120,36 @@ mod tests {
         let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
                     distributions:\n  - {package: dup, adapter: cargo-dist}\n  \
                     - {package: dup, adapter: goreleaser}\n---\n";
+        assert_error_contains(&norm(text), "distinct package");
+    }
+
+    /// A v1 document (explicit `schema_version: 1`, singular `distribution:`)
+    /// normalizes to the v2 canonical shape AND is re-labeled `schema_version: 2` —
+    /// never a v2 body stamped with a v1 number. The tool reads v1, emits v2.
+    #[test]
+    fn v1_document_is_relabeled_to_current_schema_version_on_emit() {
+        let text = "---\nschema_version: 1\nstatus: approved\nmaturity: production\n\
+                    ecosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        // Emitted version is the current one, not the declared 1.
+        assert_eq!(n.contract.schema_version, 2);
+        let json = serde_json::to_value(&n.contract).unwrap();
+        assert_eq!(json["schema_version"], 2);
+        // …and the shape is the v2 `distributions` array (the singular key parsed).
+        assert_eq!(json["distributions"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// A whitespace-padded `package` is trimmed before storing — so `"  alpha "`
+    /// and `"alpha"` are the SAME package to the uniqueness floor and association,
+    /// not two distinct ones that would slip past the dup-check.
+    #[test]
+    fn distribution_package_is_trimmed() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distributions:\n  - {package: '  alpha ', adapter: cargo-dist}\n  \
+                    - {package: alpha, adapter: goreleaser}\n---\n";
+        // The two trimmed packages collide → the duplicate-package floor fires.
         assert_error_contains(&norm(text), "distinct package");
     }
 

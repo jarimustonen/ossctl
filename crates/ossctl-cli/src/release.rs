@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 
-use ossctl_core::contract::schema::Status;
+use ossctl_core::contract::schema::{Contract, Status};
 use ossctl_core::contract::{self, LoadError, Normalized};
 use ossctl_core::ports::GitRepo;
 use ossctl_core::protocol::journal::{
@@ -204,6 +204,7 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
     if !normalized.is_valid() {
         return Err(invalid_contract_error(&normalized));
     }
+    ensure_single_distribution(&normalized.contract)?;
 
     let git = RealGitRepo::new(&root);
     // A release must be sealed against a concrete commit. An unborn repo is the
@@ -1204,6 +1205,7 @@ fn derive_resume_plan(
     if !normalized.is_valid() {
         return Err(invalid_contract_error(&normalized));
     }
+    ensure_single_distribution(&normalized.contract)?;
     // A resume mutates external state (it may publish + tag), so — like `cut` — it
     // refuses a contract a human has not approved.
     if normalized.contract.status != Status::Approved {
@@ -1404,6 +1406,7 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     if !normalized.is_valid() {
         return Err(invalid_contract_error(&normalized));
     }
+    ensure_single_distribution(&normalized.contract)?;
     // A cut mutates external state, so — unlike the read-only `plan` — it refuses a
     // contract a human has not approved (SCHEMA.md: mutating members require
     // `status: approved`).
@@ -1751,6 +1754,38 @@ fn load_error_to_cli(e: LoadError) -> CliError {
 
 /// An invalid contract is a caller-fixable (exit-1) error carrying every problem
 /// — the plan cannot seal against a config that would not normalize.
+/// Refuse a multi-distribution monorepo (`distributions.len() > 1`) in the
+/// release-engine path (plan / cut / resume).
+///
+/// The contract models several independently-distributed binaries, but the
+/// release engine still cuts ONE binary distribution per run: the sealed plan
+/// carries a single `homebrew_tap`, so a second distribution's tap would be
+/// silently dropped at the irreversible publish. Fail loud until per-distribution
+/// release lands, mirroring `dist generate`'s `multiple_distributions`. The
+/// single-distribution common case (`len <= 1`, incl. ossctl itself) is
+/// unaffected.
+fn ensure_single_distribution(contract: &Contract) -> Result<(), CliError> {
+    if contract.distributions.len() > 1 {
+        let packages: Vec<&str> = contract
+            .distributions
+            .iter()
+            .map(|d| d.package.as_deref().unwrap_or("<unnamed>"))
+            .collect();
+        return Err(CliError::user(
+            "multiple_distributions",
+            format!(
+                "the release engine cuts one binary distribution per run, but the contract \
+                 declares {} ({}) — a multi-distribution monorepo is not yet cut end-to-end (its \
+                 per-package homebrew taps would be dropped at publish). Per-distribution release \
+                 is a follow-up",
+                contract.distributions.len(),
+                packages.join(", "),
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn invalid_contract_error(normalized: &Normalized) -> CliError {
     let problems = &normalized.problems.errors;
     let message = format!(
@@ -1797,7 +1832,78 @@ fn render_plan_text(plan: &ReleasePlan, warnings: &[String]) {
 mod tests {
     use super::*;
     use clap::Parser as _;
+    use ossctl_core::contract::schema::{
+        Changelog, ChangelogMode, ChangelogSource, ContributionProvenance, DependencyBot,
+        Distribution, DistributionAdapter, DocsSite, Ecosystem, Maturity, ProvenanceLevel, Release,
+        ReleaseLayout, ReleaseModel, VersioningBase,
+    };
     use ossctl_core::protocol::journal::EventKind;
+
+    /// A minimal approved `Contract` carrying the given distributions — enough to
+    /// exercise the release-engine multi-distribution guard.
+    fn contract_with_distributions(dists: Vec<Distribution>) -> Contract {
+        Contract {
+            schema_version: 2,
+            status: Status::Approved,
+            maturity: Maturity::Production,
+            ecosystems: vec![Ecosystem::Rust],
+            targets: vec![],
+            distributions: dists,
+            versioning: VersioningBase::Semver,
+            versioning_pattern: None,
+            changelog: Changelog {
+                mode: ChangelogMode::Curated,
+                source: ChangelogSource::Manual,
+                fragment_dir: "changelog/fragments".to_string(),
+            },
+            conventional_commits: false,
+            release: Release {
+                model: ReleaseModel::Gated,
+                layout: ReleaseLayout::Single,
+            },
+            contribution_provenance: ContributionProvenance::None,
+            provenance_level: ProvenanceLevel::None,
+            dependency_bot: DependencyBot::None,
+            health_badges: vec![],
+            license: "MIT".to_string(),
+            docs_site: DocsSite::None,
+            extra_fields: serde_json::Map::new(),
+            warnings: vec![],
+        }
+    }
+
+    fn dist(package: &str) -> Distribution {
+        Distribution {
+            package: Some(package.to_string()),
+            adapter: DistributionAdapter::CargoDist,
+            gh_releases: true,
+            installers: vec![],
+            homebrew_tap: None,
+            platforms: vec!["x86_64-unknown-linux-musl".to_string()],
+            extra_fields: serde_json::Map::new(),
+        }
+    }
+
+    /// The single-distribution common case (zero or one) passes the guard — the
+    /// engine cuts it exactly as before.
+    #[test]
+    fn ensure_single_distribution_allows_zero_or_one() {
+        assert!(ensure_single_distribution(&contract_with_distributions(vec![])).is_ok());
+        assert!(
+            ensure_single_distribution(&contract_with_distributions(vec![dist("solo")])).is_ok()
+        );
+    }
+
+    /// A monorepo (≥2 distributions) is refused loudly before any irreversible
+    /// publish — with the `multiple_distributions` code naming every package, so a
+    /// second distribution's homebrew tap is never silently dropped.
+    #[test]
+    fn ensure_single_distribution_rejects_a_monorepo() {
+        let c = contract_with_distributions(vec![dist("alpha"), dist("beta")]);
+        let err = ensure_single_distribution(&c).unwrap_err();
+        assert_eq!(err.code, "multiple_distributions");
+        assert!(err.message.contains("alpha") && err.message.contains("beta"));
+    }
 
     /// A `Write` that always fails, counting attempts — models a reader that
     /// closed the pipe (`| head`).

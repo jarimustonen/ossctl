@@ -116,7 +116,11 @@ fn contract_show_positive_fixtures() {
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout JSON");
         assert_eq!(v["schema_version"], 1, "{name} envelope");
         let data = &v["data"];
-        assert_eq!(data["schema_version"], 1, "{name} contract schema_version");
+        // The CONTRACT schema_version is the current one (2): a fixture declaring
+        // schema_version: 1 is READ as v1 but EMITTED in the v2 canonical shape,
+        // re-labeled 2 (never a v2 body stamped v1). Distinct from the envelope
+        // version above, which versions the CLI JSON envelope, not the payload.
+        assert_eq!(data["schema_version"], 2, "{name} contract schema_version");
         assert!(data["maturity"].is_string(), "{name} maturity: {data}");
         assert!(data["targets"].is_array(), "{name} targets: {data}");
         assert!(data["extra_fields"].is_object(), "{name} extra_fields");
