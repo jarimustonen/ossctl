@@ -1,0 +1,15 @@
+---
+created: 2026-08-10
+updated: 2026-08-10
+type: improvement
+status: open
+priority: normal
+epic: ossctl-phase4-build
+related: ['@cargo-publish-receipt-provenance-resume-safety']
+---
+
+# is_published idempotency short-circuit records a receipt without digest-authenticating the already-published crate
+
+## Description
+
+On resume, cargo.rs::publish (~:347) skips an already-published crate and records a receipt WITHOUT proving the on-registry crate is byte-identical to what we intended — the one remaining receipt-without-fresh-upload path (same shape as the no-op bug just fixed). Digest-authenticate the skip: RegistryQuery returns the crate checksum, compare against the intended package's checksum before trusting the skip; else fail closed. Overlaps heavily with cargo-publish-receipt-provenance-resume-safety — likely folds into / pulls from that cluster; scope to the is_published skip and note if it needs the broader provenance work. Filed from the cut-noop /llm-review (stint #16).
