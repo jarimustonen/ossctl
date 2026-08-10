@@ -284,10 +284,18 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
         }
     };
 
-    // targets — expand from ecosystems when omitted; validate each entry.
+    // targets — expand from ecosystems when the key is OMITTED; but an explicit
+    // empty list is the author's authoritative "never publish anywhere" and is
+    // honored as-is (not re-expanded). Distinguishing *absent* from *explicit
+    // empty* is the whole point: a version-tracked/changelogged repo with no
+    // registry publish (a private service deployed by its own script) must be
+    // expressible. An empty target set is a valid, honored state — every floor
+    // and downstream consumer already treats "no targets" gracefully (no
+    // registry-license floor, no `registry` health badge, "nothing to publish"
+    // in the release engine).
     let targets = match map.get("targets") {
         None | Some(Value::Null) => expand_targets(&ecosystems, layout),
-        Some(Value::Sequence(seq)) if seq.is_empty() => expand_targets(&ecosystems, layout),
+        Some(Value::Sequence(seq)) if seq.is_empty() => Vec::new(),
         Some(Value::Sequence(seq)) => validate_targets(seq, &ecosystems, layout, p),
         Some(_) => {
             p.err(
@@ -1492,6 +1500,76 @@ mod tests {
         assert_eq!(c.targets[0].package, None);
         assert_eq!(c.targets[0].registry, Registry::Pypi);
         assert_eq!(c.targets[0].adapter, Adapter::GhActionPypiPublish);
+    }
+
+    /// Option B (publish-target-none): an explicit empty `targets: []` is the
+    /// author's authoritative "never publish" and is honored as an empty set —
+    /// NOT re-expanded into the ecosystem default. This is the whole fix: a
+    /// version-tracked repo with a registry ecosystem but no publish must be
+    /// expressible.
+    #[test]
+    fn explicit_empty_targets_is_honored_not_expanded() {
+        let n =
+            norm("---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets: []\n---\n");
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        let c = n.contract;
+        // The rust ecosystem is still recorded …
+        assert_eq!(c.ecosystems, vec![Ecosystem::Rust]);
+        // … but NO crates.io target is force-expanded: the empty set is honored.
+        assert!(
+            c.targets.is_empty(),
+            "explicit targets:[] must stay empty, got {:?}",
+            c.targets
+        );
+    }
+
+    /// The counterpart to the above: OMITTING `targets` keeps the unchanged
+    /// ecosystem-default expansion. Absent ≠ explicit-empty.
+    #[test]
+    fn omitted_targets_still_expands_to_ecosystem_default() {
+        let c = norm("---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\n---\n").contract;
+        assert_eq!(c.targets.len(), 1);
+        assert_eq!(c.targets[0].ecosystem, Ecosystem::Rust);
+        assert_eq!(c.targets[0].registry, Registry::CratesIo);
+        assert_eq!(c.targets[0].adapter, Adapter::CargoPublish);
+    }
+
+    /// A YAML `targets:` with a null value (not a list) is treated as *absent*,
+    /// not as an explicit empty set — it still expands. Only a genuine empty
+    /// sequence `[]` is the authoritative "never publish".
+    #[test]
+    fn null_targets_expands_like_omitted() {
+        let c = norm("---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets:\n---\n")
+            .contract;
+        assert_eq!(c.targets.len(), 1);
+        assert_eq!(c.targets[0].registry, Registry::CratesIo);
+    }
+
+    /// An empty-targets contract round-trips through canonical JSON unchanged:
+    /// `targets` serializes as an empty array `[]` (faithfully reporting the
+    /// never-publish intent, not omitting or defaulting it), and re-feeding that
+    /// canonical `targets` value back through the normalizer preserves the empty
+    /// set — the intent survives a normalize→serialize→normalize cycle.
+    #[test]
+    fn empty_targets_round_trips_through_canonical_json() {
+        let n =
+            norm("---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets: []\n---\n");
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        let json = serde_json::to_value(&n.contract).unwrap();
+        // The canonical output faithfully reports the empty set as `[]`.
+        assert_eq!(json["targets"], serde_json::json!([]));
+
+        // Re-feed the canonical `targets` value as frontmatter; the empty set is
+        // preserved (still no expansion), proving the round-trip is stable.
+        let targets_yaml = serde_yaml::to_string(&json["targets"]).unwrap();
+        let refed = format!(
+            "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets: {}\n---\n",
+            targets_yaml.trim()
+        );
+        let n2 = norm(&refed);
+        assert!(n2.is_valid(), "errors: {:?}", n2.problems.errors);
+        assert_eq!(n2.contract.targets, n.contract.targets);
+        assert!(n2.contract.targets.is_empty());
     }
 
     #[test]
