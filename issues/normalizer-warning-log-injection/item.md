@@ -2,11 +2,12 @@
 created: 2026-08-07
 updated: 2026-08-10
 type: improvement
-status: in-progress
+status: done
 priority: normal
 commits:
 - hash: 355ceca
   summary: JSON-encode user keys/values in normalizer diagnostics (log-injection hardening) + tests
+closed: 2026-08-10
 ---
 
 # Diagnostic log-injection: unescaped keys in normalizer warning/error text
