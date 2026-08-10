@@ -1,8 +1,8 @@
 ---
 created: 2026-08-06
-updated: 2026-08-06
+updated: 2026-08-10
 type: bug
-status: open
+status: in-progress
 priority: normal
 epic: ossctl-phase4-build
 ---

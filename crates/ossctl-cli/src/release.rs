@@ -138,8 +138,10 @@ pub struct AbandonArgs {
     #[arg(value_name = "RUN_ID")]
     pub run_id: String,
     /// Why the run is being abandoned (journaled). Optional; a generic reason is
-    /// recorded when omitted.
-    #[arg(long, value_name = "TEXT")]
+    /// recorded when omitted. `allow_hyphen_values` lets a reason begin with `--`
+    /// (e.g. quoting a flag: `--reason "--no-verify insufficient"`) without clap
+    /// mistaking the value for a flag.
+    #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
     pub reason: Option<String>,
     /// Repository whose release journal to write to (default: current directory).
     /// The journal is rooted at `<git-common-dir>/ossctl/releases`, so any linked
@@ -1794,6 +1796,7 @@ fn render_plan_text(plan: &ReleasePlan, warnings: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser as _;
     use ossctl_core::protocol::journal::EventKind;
 
     /// A `Write` that always fails, counting attempts — models a reader that
@@ -1874,6 +1877,42 @@ mod tests {
             assert_eq!(v["kind"], "run_created");
             assert_eq!(v["schema_version"], JOURNAL_SCHEMA_VERSION);
         }
+    }
+
+    /// A minimal `Parser` wrapper so `AbandonArgs` can be exercised through clap's
+    /// argument parsing in isolation (mirrors how the real CLI embeds it under
+    /// `release abandon`).
+    #[derive(clap::Parser, Debug)]
+    struct AbandonHarness {
+        #[command(flatten)]
+        args: AbandonArgs,
+    }
+
+    /// A `--reason` value beginning with `--` must be taken literally, not parsed
+    /// as an unknown flag (`allow_hyphen_values`). Regression for
+    /// `release-abandon-reason-leading-dashes`.
+    #[test]
+    fn abandon_reason_accepts_leading_dashes() {
+        let parsed = AbandonHarness::try_parse_from([
+            "abandon",
+            "RUN01",
+            "--reason",
+            "--no-verify insufficient; cargo package still resolves",
+        ])
+        .expect("a leading-dash --reason value must parse literally");
+        assert_eq!(parsed.args.run_id, "RUN01");
+        assert_eq!(
+            parsed.args.reason.as_deref(),
+            Some("--no-verify insufficient; cargo package still resolves"),
+        );
+    }
+
+    /// The `--reason=<value>` binding form also carries a leading-dash value.
+    #[test]
+    fn abandon_reason_equals_form_accepts_leading_dashes() {
+        let parsed = AbandonHarness::try_parse_from(["abandon", "RUN01", "--reason=--foo bar"])
+            .expect("--reason=<value> must accept a leading-dash value");
+        assert_eq!(parsed.args.reason.as_deref(), Some("--foo bar"));
     }
 
     /// Text mode renders human progress lines, not JSON.
