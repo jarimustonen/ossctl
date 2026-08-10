@@ -8,6 +8,8 @@ related: ['@contract-cannot-model-cargo-dist-release']
 commits:
 - hash: '2706589'
   summary: Vec<Distribution> + per-package association, schema_version 1->2, back-compat deser, release-seam threading
+- hash: 4dfcff6
+  summary: apply /llm-review — schema_version relabel-on-emit, engine multi-dist guard, typo/trim/golden fixes
 ---
 
 # Monorepo distribution: Vec<Distribution> with per-package association
