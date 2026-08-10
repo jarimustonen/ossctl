@@ -358,18 +358,41 @@ pub fn reconcile_for_resume(
 
 /// Whether the run ever entered the publish phase — the point at or after which a
 /// target could have landed on a registry without its receipt fsyncing (a crash
-/// mid-`publish-all`). Derived from [`RunState`]: the phase currently in progress
-/// is [`Phase::Publish`] or later, OR any recorded phase barrier is `Publish` or
-/// later. `Phase`'s `Ord` follows barrier order (`DryRun < Build < Publish < Tag <
-/// Dist`), so `>= Phase::Publish` is exactly "publish-or-beyond".
+/// mid-`publish-all`). Derived from [`RunState`].
 ///
-/// Before that point nothing could have published, so a not-recorded target that
-/// verifies `Unknown` is safe to resume without the `--allow-unverified` go-ahead
-/// (see `classify`). This never affects the `Published` rows: a receipt only
-/// exists because publish ran, so `Published` already implies publish was reached.
+/// This predicate **fails safe**: it returns `true` on any signal that publish ran,
+/// and is only `false` when the projection carries no such signal at all. Because a
+/// wrong `false` is the dangerous direction (it would let a not-recorded `Unknown`
+/// target resume-publish without a go-ahead), it is deliberately over-inclusive:
+///
+/// - the phase currently in progress is `Publish`-or-later, OR any recorded phase
+///   barrier is `Publish`-or-later ([`Phase::is_publish_or_later`]) — the direct
+///   phase signal; but a `PhaseCompleted(Publish, _)` clears `current_phase` while
+///   leaving the durable `phases` record, so both are checked;
+/// - **OR** any durable *effect* of the publish-or-later phases exists even if the
+///   phase records themselves were lost or never written (a crash between the
+///   registry side-effect and its phase/receipt fsync, a v1 journal, a journal
+///   partially reconstructed under the remote-is-ground-truth resume contract):
+///   a landed receipt (`published`), a recorded CI-delegation (`delegated`, decided
+///   inside publish-all), or a tag (`tags`, created only after publish). Any of
+///   these is **irrefutable proof** the run reached publish, independent of whether
+///   the phase bookkeeping survived.
+///
+/// Before publish nothing could have landed, so a not-recorded target that verifies
+/// `Unknown` is safe to resume without the `--allow-unverified` go-ahead (see
+/// `classify`). This never affects the `Published` rows: a receipt only exists
+/// because publish ran, so `Published` already implies publish was reached (the
+/// `published`-non-empty clause makes that implication hold structurally, not just
+/// by the coordinator's event ordering).
 fn publish_phase_reached(state: &RunState) -> bool {
-    state.current_phase.is_some_and(|p| p >= Phase::Publish)
-        || state.phases.iter().any(|r| r.phase >= Phase::Publish)
+    state
+        .current_phase
+        .is_some_and(Phase::is_publish_or_later)
+        || state.phases.iter().any(|r| r.phase.is_publish_or_later())
+        // Irrefutable effect-based proof, robust to lost/partial phase records:
+        || !state.published.is_empty()
+        || !state.delegated.is_empty()
+        || !state.tags.is_empty()
 }
 
 /// Map one (journal-state × remote-outcome) cell to its [`ResumeAction`], folding
@@ -397,8 +420,12 @@ fn classify(
         // never overwrite someone else's artifact, never blind-re-publish.
         (Published, Conflicts | Missing) => ResumeAction::Conflict,
         (Published, Unknown) => {
-            // NB: a receipt only exists because publish ran, so `publish_phase_reached`
-            // is necessarily true here — this row is never relaxed by that signal.
+            // This row is decided WITHOUT consulting `publish_phase_reached`, so the
+            // signal can never relax it. It also can never legitimately co-occur with
+            // `publish_phase_reached == false`: a `Published` journal state is only
+            // reached when `state.published` is non-empty, and the `published`-non-
+            // empty clause in `publish_phase_reached` then forces it `true`. The
+            // mapping stays safe (`Unverifiable`) even in that impossible combination.
             if allow_unverified {
                 // The go-ahead trusts the journal's own receipt.
                 ResumeAction::Skip
@@ -522,9 +549,16 @@ fn action_detail(
                      explicit go-ahead"
                         .to_string()
                 } else {
-                    "the publish phase was never reached, so nothing could have published; \
-                     resuming the publish for this target"
-                        .to_string()
+                    // Publish was never reached, so nothing could have landed — but
+                    // preserve *why* the remote lookup was Unknown (outage vs.
+                    // unqueryable ecosystem vs. unresolvable package) so the
+                    // operator still sees the verification could not be performed.
+                    let base = "the publish phase was never reached, so nothing could have \
+                                published; resuming the publish for this target";
+                    match verify_detail {
+                        Some(d) => format!("{base} ({d})"),
+                        None => base.to_string(),
+                    }
                 }
             }
             _ => "not published; resuming the publish for this target".to_string(),

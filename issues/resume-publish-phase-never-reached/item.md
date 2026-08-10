@@ -5,6 +5,9 @@ type: bug
 status: in-progress
 priority: normal
 epic: ossctl-phase4-build
+commits:
+- hash: e8961f5
+  summary: fix reconcile to resume-publish when publish phase never reached
 ---
 
 # release resume demands --allow-unverified even when the publish phase was never reached

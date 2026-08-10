@@ -98,6 +98,20 @@ impl Phase {
             Self::Dist => "dist",
         }
     }
+
+    /// Whether this phase is [`Self::Publish`] or a later barrier — i.e. a phase in
+    /// which a target could have had a publish side-effect on a registry. Written as
+    /// an explicit match (not `self >= Self::Publish`) so that inserting or
+    /// reordering a phase forces a deliberate review of this safety predicate rather
+    /// than silently changing it through the derived `Ord`. Used by the resume
+    /// reconcile's "publish phase reached" signal (ADR-0003 §4).
+    #[must_use]
+    pub fn is_publish_or_later(self) -> bool {
+        match self {
+            Self::DryRun | Self::Build => false,
+            Self::Publish | Self::Tag | Self::Dist => true,
+        }
+    }
 }
 
 /// How a phase barrier finished.

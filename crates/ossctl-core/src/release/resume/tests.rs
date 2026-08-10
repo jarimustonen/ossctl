@@ -182,8 +182,13 @@ fn state_with(published: &[(&str, PublishReceipt)], targets: &[&str]) -> RunStat
 /// Like [`state_with`], but for a run that failed in the **build** phase — the
 /// publish phase was never reached, so nothing could have published without a
 /// receipt. (`current_phase = Build`, and no phase record is `Publish` or later.)
-fn state_before_publish(published: &[(&str, PublishReceipt)], targets: &[&str]) -> RunState {
-    let mut s = state_with(published, targets);
+///
+/// Deliberately takes **no** published receipts: a run that never reached publish
+/// cannot hold one, and a receipt is itself irrefutable proof publish ran
+/// (`publish_phase_reached`), so an internally-contradictory fixture must not be
+/// constructible through this helper.
+fn state_before_publish(targets: &[&str]) -> RunState {
+    let mut s = state_with(&[], targets);
     s.current_phase = Some(Phase::Build);
     s.phases = vec![PhaseRecord {
         phase: Phase::DryRun,
@@ -228,11 +233,10 @@ fn one_rust_decision(
 /// Like [`one_rust_decision`], but for a run that failed **before** the publish
 /// phase was reached (a build-phase failure).
 fn one_rust_decision_before_publish(
-    published: &[(&str, PublishReceipt)],
     reg: FakeRegistry,
     allow_unverified: bool,
 ) -> super::TargetDecision {
-    let state = state_before_publish(published, &["rust"]);
+    let state = state_before_publish(&["rust"]);
     let (cmd, clock) = (RecordingCmd::default(), FixedClock);
     let r = reconcile(&state, &rust_plan(), &cmd, &clock, &reg, allow_unverified);
     assert_eq!(r.decisions.len(), 1, "expected exactly one decision");
@@ -383,7 +387,7 @@ fn not_recorded_unknown_resumes_without_go_ahead_when_publish_never_reached() {
     // is a rust/cargo target with no wired registry query (Unknown). Nothing could
     // have published, so resume must proceed WITHOUT --allow-unverified. This is the
     // exact scenario the resume-publish-phase-never-reached bug reported.
-    let d = one_rust_decision_before_publish(&[], FakeRegistry::outage(), false);
+    let d = one_rust_decision_before_publish(FakeRegistry::outage(), false);
     assert_eq!(d.journal_state, JournalState::NotRecorded);
     assert_eq!(d.outcome, VerifyOutcome::Unknown);
     assert_eq!(d.action, ResumeAction::ResumePublish);
@@ -413,6 +417,103 @@ fn not_recorded_unknown_stays_unverifiable_mid_publish_crash() {
         d.action.is_blocker(),
         "a mid-publish crash must still demand --allow-unverified"
     );
+}
+
+#[test]
+fn partial_publish_all_keeps_the_unpublished_unknown_target_unverifiable() {
+    // The ADR-0003 §4 driver scenario: publish-all published rust (a receipt lands),
+    // then crashed before node. node is (NotRecorded, Unknown). Because the run
+    // provably reached publish (rust's receipt), node must STILL block without a
+    // go-ahead — the publish-never-reached relaxation must not fire for a run that
+    // clearly reached publish.
+    let state = state_with(
+        &[("rust", journal_receipt("rust", "1.0.0", None))],
+        &["rust", "node"],
+    );
+    let (cmd, clock) = (RecordingCmd::default(), FixedClock);
+    let reg = FakeRegistry::outage(); // node verifies Unknown
+    let r = reconcile(&state, &two_target_plan(), &cmd, &clock, &reg, false);
+
+    let node = r.decisions.iter().find(|d| d.target == "node").unwrap();
+    assert_eq!(node.journal_state, JournalState::NotRecorded);
+    assert_eq!(node.outcome, VerifyOutcome::Unknown);
+    assert_eq!(node.action, ResumeAction::Unverifiable);
+    assert!(
+        r.is_blocked(),
+        "a reached-publish run must not silently resume"
+    );
+}
+
+#[test]
+fn a_landed_receipt_proves_publish_reached_even_if_phase_records_regressed() {
+    // The defensive core of the fix: even if the durable phase bookkeeping is lost
+    // or rewound (a crash between a registry side-effect and its phase fsync, a v1
+    // journal, a journal partially reconstructed under remote-is-ground-truth
+    // resume), a landed receipt is irrefutable proof publish ran. A co-target that
+    // is (NotRecorded, Unknown) must therefore STILL block — the publish-never-
+    // reached relaxation must not leak in through lost phase records.
+    let mut state = state_with(
+        &[("rust", journal_receipt("rust", "1.0.0", None))],
+        &["rust", "node"],
+    );
+    // Simulate lost/rewound phase bookkeeping: no publish-or-later phase signal.
+    state.current_phase = Some(Phase::Build);
+    state.phases = vec![PhaseRecord {
+        phase: Phase::DryRun,
+        outcome: PhaseOutcome::Ok,
+    }];
+
+    let (cmd, clock) = (RecordingCmd::default(), FixedClock);
+    let reg = FakeRegistry::outage(); // node verifies Unknown
+    let r = reconcile(&state, &two_target_plan(), &cmd, &clock, &reg, false);
+
+    let node = r.decisions.iter().find(|d| d.target == "node").unwrap();
+    assert_eq!(node.action, ResumeAction::Unverifiable);
+    assert!(
+        r.is_blocked(),
+        "a receipt proves publish ran, so an Unknown co-target must not resume blind"
+    );
+}
+
+#[test]
+fn publish_phase_reached_recognizes_every_signal_and_the_pristine_pre_publish_state() {
+    // Pristine pre-publish run: only DryRun/Build signals ⇒ not reached.
+    let mut s = state_before_publish(&["rust"]);
+    assert!(!super::publish_phase_reached(&s));
+
+    // Each publish-or-later phase signal, on its own, is enough.
+    s.current_phase = Some(Phase::Publish);
+    assert!(super::publish_phase_reached(&s));
+    s.current_phase = Some(Phase::Build);
+    s.phases.push(PhaseRecord {
+        phase: Phase::Publish,
+        outcome: PhaseOutcome::Failed,
+    });
+    assert!(super::publish_phase_reached(&s));
+
+    // Each durable *effect* is irrefutable proof, even with no phase signal at all.
+    let effect_only = || {
+        let mut s = state_before_publish(&["rust"]);
+        s.current_phase = None;
+        s.phases.clear();
+        s
+    };
+    let mut with_receipt = effect_only();
+    with_receipt
+        .published
+        .insert("rust".into(), journal_receipt("rust", "1.0.0", None));
+    assert!(super::publish_phase_reached(&with_receipt));
+
+    let mut with_delegation = effect_only();
+    with_delegation.delegated.insert("rust".into());
+    assert!(super::publish_phase_reached(&with_delegation));
+
+    let mut with_tag = effect_only();
+    with_tag.tags.insert(
+        "v1.0.0".into(),
+        crate::protocol::journal::TagState::default(),
+    );
+    assert!(super::publish_phase_reached(&with_tag));
 }
 
 // ── Unknown safety: never a false Missing ────────────────────────────────────
