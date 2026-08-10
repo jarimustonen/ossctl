@@ -61,3 +61,13 @@ Introduce one cross-field `check_homebrew_configuration(&targets, distribution.a
 owns the full truth table (tap × installer-producer × target-producer): missing-tap floor for either
 producer, double-publish floor when both, dead-tap advisory when neither. Add the truth-table tests
 (GPT-5.6-sol's §10 matrix) covering all eight rows.
+
+## Decision (Jari, 2026-08-10) — FLOOR (hard error)
+
+**Chosen: hard error (floor), not advisory.** Rationale: the AI-first CLI contract requires reacting
+to errors strictly and immediately — a misconfiguration must fail fast and loud, not slip through as a
+warning to fail later at release time. Implement all three floors (missing-tap for either producer,
+double-publish when both, registry/adapter compatibility) as hard errors, narrowing the predicate to
+`adapter == HomebrewTap` where relevant. Accept that this rejects some currently-accepted contracts —
+that is the intended behavior change. NOTE: read the CURRENT contract shape — `distribution-monorepo-vec`
+(distributions Vec, schema_version 2) and `publish-target-none` (Option<Vec<Target>>) just landed.

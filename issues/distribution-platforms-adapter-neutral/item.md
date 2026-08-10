@@ -29,3 +29,10 @@ _Source: /llm-review spin-off (F7) from `distribution-cross-platform-targets`_
 ## Why its own issue
 
 Touches `DistributionAdapter` semantics and the release-engine `coordinator`/`adapters` seam — a strictly-sequenced shared-logic file per AGENTS.md — and would ripple to the canonical-JSON schema (a `schema_version` decision). Well beyond the "add a Rust target-triple set" scope of the parent issue. The parent diff mitigates in-place by documenting `platforms` as Rust-triple-form (cargo-dist vocabulary).
+
+## Decision (Jari, 2026-08-10) — DEFER
+
+**Deferred.** Not worth the investment until a real non-Rust (e.g. Go/goreleaser) distribution consumer
+appears — ossctl and its current users are Rust (cargo-dist), for which the Rust-triple `platforms`
+field is exactly right. Revisit when the first non-Rust consumer surfaces. Stays in the backlog, does
+not gate anything.

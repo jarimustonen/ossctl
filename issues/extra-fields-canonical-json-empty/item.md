@@ -22,3 +22,13 @@ Decision to make (holistically, for BOTH fields at once so they stay symmetric):
 - **Option B** — keep always-present `{}` as the documented schema-v1 canonical shape and clarify the `KNOWN_SCHEMA_VERSION` doc that `extra_fields: {}` is part of the shape.
 
 Do NOT change one field without the other — asymmetry between top-level and nested is worse than either option.
+
+## Decision (Jari, 2026-08-10) — Option A: omit when empty
+
+**Chosen: A — `skip_serializing_if` so an empty `extra_fields` map is absent from canonical JSON.**
+Apply to BOTH fields symmetrically (`Contract.extra_fields` AND `Distribution.extra_fields`) so the
+"additive = absent-by-default" rule holds literally. Update `serializes_to_schema_v4_shape` (which
+currently asserts the key is present) and any affected fixtures/golden vectors. Consider whether this
+is a canonical-shape change needing a `schema_version` note — but since it only removes an always-empty
+`{}`, existing populated contracts are unaffected; justify the call. NOTE: `distribution-monorepo-vec`
+already moved to schema_version 2 (`distributions` array) — read the current shape.

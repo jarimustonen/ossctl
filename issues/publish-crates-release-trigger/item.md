@@ -24,3 +24,13 @@ on:
   workflow_dispatch: ...
 ```
 and change the publish step's `if` from `github.event_name == 'release'` to `== 'push'`. Runs in parallel with release.yml (crates publish needs only the tagged source). Affects the ossctl AND issuectl repo workflows (and any oss-* skill that emits this template).
+
+## Decision (Jari, 2026-08-10) — Option A: fix the generated template (ossctl's job)
+
+**Chosen: A — this is ossctl's job.** If the `/oss-*` family generates a CI workflow template, it must
+generate a *working* one. Apply the verified fix (trigger on the version-tag `push`, change the publish
+step's `if` to `== 'push'`) to whatever ossctl emits/references as the crates-publish workflow — find
+the source of truth (a template resource / bundled skill / the reference `.github/workflows/publish-
+crates.yml`) and fix it there so every future generated project inherits the working trigger. SCOPE
+NOTE: updating issuectl's OWN repo workflow file is a separate, homebase/issuectl-repo concern — do NOT
+touch other repos from here; only fix what ossctl generates + ossctl's own reference workflow.
