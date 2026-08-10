@@ -299,6 +299,25 @@ pub enum AdapterError {
         /// The underlying registry lookup error, rendered as text.
         source: String,
     },
+    /// A target's own `cargo publish` exited successfully, but the published
+    /// `{package}@{version}` never became visible on the registry index within the
+    /// wait ceiling — the publish did **not** land (a silent no-op upload: a
+    /// registry-alias/credential/env difference, or an under-declared target). The
+    /// cut fails **loudly** here rather than journal a [`PublishReceipt`] for a
+    /// publish that shipped nothing (the issuectl 0.8.1 signature,
+    /// `cut-noop-self-visibility-check`). Distinct from [`Self::IndexTimeout`] (a
+    /// *dependency* that a *dependent* was waiting on) and from
+    /// [`Self::RegistryUnavailable`] (the registry could not be reached at all — an
+    /// outage, not a proven no-op): this is the *self*-visibility confirm of the
+    /// crate the adapter just published, observed *absent* after the wait.
+    PublishNotVisible {
+        /// The package whose own publish did not become index-visible.
+        package: String,
+        /// The version that was published but never appeared.
+        version: String,
+        /// How long the confirm waited before giving up, in seconds.
+        waited_secs: u64,
+    },
     /// An adapter was handed a target whose declared [`registry`](Target::registry)
     /// it does not support, so it refuses the target **before any external action**
     /// rather than risk publishing to an unexpected destination. Raised by the
@@ -356,6 +375,18 @@ impl std::fmt::Display for AdapterError {
                 "cannot reach the registry to determine the published state of \
                  `{package}@{version}` (registry unreachable: {source}); failing closed rather \
                  than risk an unsafe publish decision"
+            ),
+            Self::PublishNotVisible {
+                package,
+                version,
+                waited_secs,
+            } => write!(
+                f,
+                "`cargo publish` of `{package}@{version}` exited successfully, but the version \
+                 never became visible on the crates.io index within {waited_secs}s — the publish \
+                 did not land (a silent no-op upload). Check the registry credentials/config and \
+                 that `{package}` is a correctly-declared crates.io target. Failing the cut rather \
+                 than recording a receipt for a publish that shipped nothing"
             ),
             Self::UnsupportedRegistry { adapter, registry } => write!(
                 f,

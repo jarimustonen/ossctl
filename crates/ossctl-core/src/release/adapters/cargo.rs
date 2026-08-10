@@ -361,6 +361,15 @@ impl ReleaseAdapter for CargoAdapter {
                 &["publish", "--registry", registry, "-p", &t.package],
             )],
         )?;
+        // SELF-VISIBILITY CONFIRM (`cut-noop-self-visibility-check`). `cargo publish`
+        // exiting 0 is NOT proof the crate landed: a registry-alias/credential/env
+        // difference (or an under-declared target) can make it a silent no-op that
+        // ships nothing. Before journaling a receipt, probe the index for this
+        // target's OWN `{package, version}` — reusing the bounded index-wait so
+        // normal propagation lag is tolerated (only a genuine never-appears no-op
+        // fails), and failing closed on a registry outage rather than fabricating a
+        // receipt for a publish that may not have happened.
+        confirm_self_published(ctx, ecosystem, &t.package, &t.version)?;
         // SKELETON: a production publish parses the crates.io checksum from the
         // `cargo publish` output for `digest`; the canonical URL is well-known. One
         // target publishes exactly one crate, so the journal records exactly one
@@ -599,6 +608,24 @@ fn is_published(
     }
 }
 
+/// Why a bounded index-wait gave up without ever observing `package@version` — the
+/// honest distinction the caller maps onto its own [`AdapterError`] variant.
+enum WaitFailure {
+    /// The registry *answered* and the version stayed absent for the whole window —
+    /// a genuine "did not appear" (the dependency never indexed, or the crate's own
+    /// publish shipped nothing).
+    Absent {
+        /// How long the wait lasted before giving up, in seconds.
+        waited_secs: u64,
+    },
+    /// The registry could not be reached (the final poll errored) — an outage, not a
+    /// proven absence. Carries the underlying error so it is surfaced, never masked.
+    Unreachable {
+        /// The underlying registry lookup error, rendered as text.
+        source: String,
+    },
+}
+
 /// Poll the crates.io index (through the injected [`RegistryQuery`]) until
 /// `package@version` is visible, or the per-crate timeout elapses.
 ///
@@ -606,17 +633,20 @@ fn is_published(
 /// [`Clock::sleep`](crate::ports::Clock::sleep) — real time in production, a
 /// virtual advance under test — so the loop is bounded, never busy, and
 /// deterministic in tests. A transient lookup error is retried (waiting is
-/// reversible), but the outcome on timeout is **honest**: if the most recent poll
-/// *observed* the version absent, that is [`AdapterError::IndexTimeout`]; if the
-/// registry could not be reached at all (the last poll errored), that is
-/// [`AdapterError::RegistryUnavailable`] carrying the underlying error — a
-/// sustained outage is never masked as "did not index".
-fn wait_for_index(
+/// reversible), and the outcome on timeout is **honest**: if the most recent poll
+/// *observed* the version absent, that is [`WaitFailure::Absent`]; if the registry
+/// could not be reached at all (the last poll errored), that is
+/// [`WaitFailure::Unreachable`] carrying the underlying error — a sustained outage
+/// is never masked as "did not index". The two callers ([`wait_for_index`] for a
+/// dependency, [`confirm_self_published`] for the crate just published) map these to
+/// their own [`AdapterError`] variants, so the same bounded, propagation-lag-
+/// tolerant wait backs both.
+fn poll_for_index(
     ctx: &EffectCtx<'_>,
     ecosystem: Ecosystem,
     package: &str,
     version: &str,
-) -> Result<(), AdapterError> {
+) -> Result<(), WaitFailure> {
     let start = ctx.clock.now_unix();
     // The last poll's registry error, if it errored; cleared on any successful
     // observation. Assigned on every path of the match below before it is read at
@@ -634,20 +664,75 @@ fn wait_for_index(
         }
         if ctx.clock.now_unix().saturating_sub(start) >= INDEX_WAIT_TIMEOUT_SECS {
             return Err(match last_err {
-                Some(source) => AdapterError::RegistryUnavailable {
-                    package: package.to_string(),
-                    version: version.to_string(),
-                    source,
-                },
-                None => AdapterError::IndexTimeout {
-                    package: package.to_string(),
-                    version: version.to_string(),
+                Some(source) => WaitFailure::Unreachable { source },
+                None => WaitFailure::Absent {
                     waited_secs: INDEX_WAIT_TIMEOUT_SECS,
                 },
             });
         }
         ctx.clock.sleep(INDEX_POLL_INTERVAL);
     }
+}
+
+/// Wait for a **workspace dependency** to be crates.io-index-visible before the
+/// dependent's `cargo publish` (crates.io rejects a crate whose sibling dependency
+/// is not yet indexed). An absence-after-wait is [`AdapterError::IndexTimeout`] (the
+/// dependency never indexed — likely under-declared); an outage is
+/// [`AdapterError::RegistryUnavailable`] (fail-closed, never masked as "did not
+/// index").
+fn wait_for_index(
+    ctx: &EffectCtx<'_>,
+    ecosystem: Ecosystem,
+    package: &str,
+    version: &str,
+) -> Result<(), AdapterError> {
+    poll_for_index(ctx, ecosystem, package, version).map_err(|f| match f {
+        WaitFailure::Absent { waited_secs } => AdapterError::IndexTimeout {
+            package: package.to_string(),
+            version: version.to_string(),
+            waited_secs,
+        },
+        WaitFailure::Unreachable { source } => AdapterError::RegistryUnavailable {
+            package: package.to_string(),
+            version: version.to_string(),
+            source,
+        },
+    })
+}
+
+/// Confirm the crate the adapter **just published** actually landed on the index
+/// before a receipt is journaled — the self-visibility check that turns a silent
+/// no-op upload into a loud failure (`cut-noop-self-visibility-check`).
+///
+/// A `cargo publish` that exits 0 but shipped nothing (a registry-alias/credential/
+/// env difference, an under-declared target) would otherwise fabricate a
+/// [`PublishReceipt`](crate::protocol::release::PublishReceipt) and report the cut a
+/// success while nothing reached crates.io. So after the irreversible upload the
+/// publish path probes the registry for the target's *own* `{package, version}`,
+/// reusing the same bounded [`poll_for_index`] wait as the dependency index-wait so
+/// normal sparse-index propagation lag is tolerated — only a genuine never-appears
+/// no-op fails. An absence-after-wait is [`AdapterError::PublishNotVisible`] (the
+/// loud no-op failure, naming the crate + version); a registry outage is
+/// [`AdapterError::RegistryUnavailable`] (fail-closed — an unreachable registry is
+/// never read as a proven no-op, mirroring the reconcile layer's outage discipline).
+fn confirm_self_published(
+    ctx: &EffectCtx<'_>,
+    ecosystem: Ecosystem,
+    package: &str,
+    version: &str,
+) -> Result<(), AdapterError> {
+    poll_for_index(ctx, ecosystem, package, version).map_err(|f| match f {
+        WaitFailure::Absent { waited_secs } => AdapterError::PublishNotVisible {
+            package: package.to_string(),
+            version: version.to_string(),
+            waited_secs,
+        },
+        WaitFailure::Unreachable { source } => AdapterError::RegistryUnavailable {
+            package: package.to_string(),
+            version: version.to_string(),
+            source,
+        },
+    })
 }
 
 /// A publishable workspace member with its version and its intra-workspace

@@ -203,33 +203,70 @@ impl Clock for AdvancingClock {
     }
 }
 
-/// A registry where a package becomes visible only after `visible_after` polls —
-/// exercises the index-wait poll/sleep loop reaching success mid-wait.
-struct DelayedRegistry {
-    package: String,
-    version: String,
-    visible_after: Cell<u32>,
+/// A registry where each package becomes visible only after a per-package number of
+/// polls (each `published_versions` call for that package counts as one poll). Models
+/// crates.io sparse-index propagation lag AND the absent→present shape the pre-publish
+/// idempotency probe + post-publish self-visibility confirm need for the *same*
+/// package: schedule the target's own package with `1` so the idempotency probe (the
+/// 1st poll) sees it absent and the self-visibility confirm (the 2nd poll) sees it
+/// present. A package never scheduled stays absent forever — the modelled no-op upload.
+struct SeqRegistry {
+    /// package → (version, polls remaining before it becomes visible).
+    schedule: RefCell<HashMap<String, (String, u32)>>,
 }
-impl DelayedRegistry {
-    fn new(package: &str, version: &str, visible_after: u32) -> Self {
+impl SeqRegistry {
+    fn new() -> Self {
         Self {
-            package: package.to_string(),
-            version: version.to_string(),
-            visible_after: Cell::new(visible_after),
+            schedule: RefCell::new(HashMap::new()),
+        }
+    }
+    /// Make `package@version` visible after `polls` further lookups.
+    fn after(self, package: &str, version: &str, polls: u32) -> Self {
+        self.schedule
+            .borrow_mut()
+            .insert(package.to_string(), (version.to_string(), polls));
+        self
+    }
+}
+impl RegistryQuery for SeqRegistry {
+    fn published_versions(&self, _ecosystem: &str, package: &str) -> io::Result<Vec<String>> {
+        let mut sched = self.schedule.borrow_mut();
+        match sched.get_mut(package) {
+            Some((version, remaining)) => {
+                if *remaining == 0 {
+                    Ok(vec![version.clone()])
+                } else {
+                    *remaining -= 1;
+                    Ok(Vec::new())
+                }
+            }
+            None => Ok(Vec::new()),
         }
     }
 }
-impl RegistryQuery for DelayedRegistry {
-    fn published_versions(&self, _ecosystem: &str, package: &str) -> io::Result<Vec<String>> {
-        if package != self.package {
-            return Ok(vec![]);
+
+/// A registry that answers `Ok(absent)` for the first `ok_count` lookups, then
+/// errors on every lookup after — models a registry that is reachable for the
+/// pre-publish idempotency probe but goes unreachable during the post-publish
+/// self-visibility confirm (outage ≠ proven no-op).
+struct AbsentThenErrRegistry {
+    remaining_ok: Cell<u32>,
+}
+impl AbsentThenErrRegistry {
+    fn new(ok_count: u32) -> Self {
+        Self {
+            remaining_ok: Cell::new(ok_count),
         }
-        let remaining = self.visible_after.get();
-        if remaining == 0 {
-            return Ok(vec![self.version.clone()]);
+    }
+}
+impl RegistryQuery for AbsentThenErrRegistry {
+    fn published_versions(&self, _ecosystem: &str, _package: &str) -> io::Result<Vec<String>> {
+        let left = self.remaining_ok.get();
+        if left == 0 {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
         }
-        self.visible_after.set(remaining - 1);
-        Ok(vec![])
+        self.remaining_ok.set(left - 1);
+        Ok(Vec::new())
     }
 }
 
@@ -339,6 +376,26 @@ fn ctx_with<'a>(
         registry,
         repo_root: root,
         artifacts,
+    }
+}
+
+/// Like [`ctx`], but with a trait-object clock and registry — for the publish path,
+/// which polls the registry (and, for the self-visibility confirm, needs a registry
+/// that flips absent→present for the target's own package). Accepting `&dyn Clock`
+/// lets a test keep a fixed [`FakeClock`] (to assert a receipt timestamp) while using
+/// a [`SeqRegistry`] that returns present on the confirm poll without any sleep.
+fn ctx_dyn<'a>(
+    runner: &'a FakeCmd,
+    clock: &'a dyn Clock,
+    registry: &'a dyn RegistryQuery,
+    root: &'a Path,
+) -> EffectCtx<'a> {
+    EffectCtx {
+        runner,
+        clock,
+        registry,
+        repo_root: root,
+        artifacts: &EMPTY_ARTIFACTS,
     }
 }
 
@@ -571,9 +628,13 @@ fn dry_run_available_for_every_ecosystem() {
 fn publish_runs_the_registry_command_and_returns_a_receipt() {
     let cmd = FakeCmd::new().with_metadata(&metadata_single("tool", "2.0.0"));
     let clock = FakeClock(42);
-    let reg = FakeRegistry::new();
+    // `tool` is absent for the pre-publish idempotency probe (poll #1) and present
+    // for the self-visibility confirm (poll #2) — the faithful "publish landed" shape.
+    // The confirm sees it present on its first poll, so no sleep happens and the fixed
+    // clock (42) still stamps the receipt.
+    let reg = SeqRegistry::new().after("tool", "2.0.0", 1);
     let root = Path::new("/repo");
-    let c = ctx(&cmd, &clock, &reg, root);
+    let c = ctx_dyn(&cmd, &clock, &reg, root);
 
     let t = target(
         Ecosystem::Rust,
@@ -583,7 +644,8 @@ fn publish_runs_the_registry_command_and_returns_a_receipt() {
     );
     let r = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap();
 
-    // A single-crate workspace publishes exactly once, with no index-wait after.
+    // A single-crate workspace publishes exactly once. The self-visibility confirm
+    // queries the registry (not the command runner), so the command log is unchanged.
     assert_eq!(
         cmd.calls(),
         vec![
@@ -1184,9 +1246,11 @@ fn target_waits_for_its_workspace_deps_before_publishing_only_its_own_crate() {
     // mid-loop after sleeping.
     let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "1.0.0"));
     let clock = AdvancingClock::new();
-    // visible_after=2: `bin`'s own idempotency probe hits `lib`'s package name only
-    // via the dep-wait; `lib` appears after a couple of polls.
-    let reg = DelayedRegistry::new("lib", "1.0.0", 2);
+    // `lib` appears after a couple of dep-wait polls; `bin` is absent for its own
+    // idempotency probe (poll #1) and present for the self-visibility confirm (poll #2).
+    let reg = SeqRegistry::new()
+        .after("lib", "1.0.0", 2)
+        .after("bin", "1.0.0", 1);
     let root = Path::new("/repo");
     let c = ctx_advancing(&cmd, &clock, &reg, root);
 
@@ -1222,7 +1286,10 @@ fn target_without_workspace_deps_publishes_immediately() {
     // any dependent still to come (the dependent's target owns that wait, ADR-0004).
     let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "1.0.0"));
     let clock = AdvancingClock::new();
-    let reg = FakeRegistry::new(); // empty — lib not yet published
+    // `lib` is absent for its idempotency probe (poll #1) and present for the
+    // self-visibility confirm (poll #2) — present on the confirm's first poll, so no
+    // sleep: the "no dependency index-wait" property (a leaf never waits on a dep) holds.
+    let reg = SeqRegistry::new().after("lib", "1.0.0", 1);
     let root = Path::new("/repo");
     let c = ctx_advancing(&cmd, &clock, &reg, root);
 
@@ -1235,8 +1302,8 @@ fn target_without_workspace_deps_publishes_immediately() {
     );
     resolve(Adapter::CargoPublish).publish(&c, &t).unwrap();
 
-    // Exactly one publish of `lib`, and no wait (lib has no publishable workspace
-    // dependency of its own).
+    // Exactly one publish of `lib`, and no dependency index-wait (lib has no
+    // publishable workspace dependency of its own).
     assert_eq!(
         cmd.calls(),
         vec![
@@ -1247,7 +1314,7 @@ fn target_without_workspace_deps_publishes_immediately() {
     assert_eq!(
         clock.now_unix(),
         0,
-        "an independent crate must not index-wait"
+        "an independent crate must not index-wait (the confirm sees it on the first poll)"
     );
 }
 
@@ -1261,8 +1328,13 @@ fn two_targets_never_double_publish_the_shared_dependency() {
     let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "1.0.0"));
     let clock = AdvancingClock::new();
     // `lib` becomes visible only after a couple of polls — the publish→index lag
-    // window in which the old closure model re-ran `cargo publish -p lib`.
-    let reg = DelayedRegistry::new("lib", "1.0.0", 2);
+    // window in which the old closure model re-ran `cargo publish -p lib`. Once its
+    // own confirm polls it to visible it stays present, so `bin`'s later dep-wait
+    // clears immediately. `bin` is absent for its idempotency probe and present for
+    // its self-visibility confirm.
+    let reg = SeqRegistry::new()
+        .after("lib", "1.0.0", 2)
+        .after("bin", "1.0.0", 1);
     let root = Path::new("/repo");
     let c = ctx_advancing(&cmd, &clock, &reg, root);
 
@@ -1372,6 +1444,96 @@ fn target_index_wait_times_out_and_never_publishes_its_crate() {
         "the dependent published despite a dep index-timeout: {:?}",
         cmd.calls()
     );
+}
+
+// ── Self-visibility confirm (cut-noop-self-visibility-check) ─────────────────
+
+#[test]
+fn publish_fails_loudly_when_its_own_version_never_indexes() {
+    // THE NO-OP: `cargo publish` exits 0 (the fake runner succeeds) but the version
+    // never becomes visible on the registry — a silent no-op upload
+    // (registry-alias/credential/env difference, under-declared target). The publish
+    // MUST fail with `PublishNotVisible` and fabricate NO receipt. `tool` is never
+    // scheduled in the registry, so the idempotency probe sees it absent (proceeds to
+    // publish) and the self-visibility confirm never sees it (times out → the loud
+    // no-op failure). An `AdvancingClock` makes the bounded confirm terminate.
+    let cmd = FakeCmd::new().with_metadata(&metadata_single("tool", "1.0.0"));
+    let clock = AdvancingClock::new();
+    let reg = SeqRegistry::new(); // `tool` never appears — the modelled no-op
+    let root = Path::new("/repo");
+    let c = ctx_advancing(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.0.0",
+    );
+    let err = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap_err();
+
+    // The message names the crate + version and says the publish did not land.
+    let msg = err.to_string();
+    match err {
+        AdapterError::PublishNotVisible {
+            package, version, ..
+        } => {
+            assert_eq!(package, "tool");
+            assert_eq!(version, "1.0.0");
+        }
+        other => panic!("expected PublishNotVisible from the no-op, got {other:?}"),
+    }
+    // The upload was actually attempted (the runner ran `cargo publish`) — the failure
+    // is the *confirm*, not the command — but the method returned Err, so the caller
+    // (coordinator) journals NO receipt.
+    assert!(
+        cmd.calls()
+            .iter()
+            .any(|call| call == "cargo publish --registry crates-io -p tool"),
+        "the publish command should still have been attempted: {:?}",
+        cmd.calls()
+    );
+    assert!(msg.contains("tool@1.0.0"), "message: {msg}");
+    assert!(msg.contains("did not land"), "message: {msg}");
+}
+
+#[test]
+fn publish_confirm_fails_closed_when_the_registry_goes_unreachable() {
+    // OUTAGE ≠ NO-OP. The idempotency probe reaches the registry (absent → proceed),
+    // the publish runs, then the registry becomes unreachable for the self-visibility
+    // confirm. An outage must NOT be read as a proven no-op: it fails closed with
+    // `RegistryUnavailable`, mirroring the reconcile layer's outage discipline — the
+    // publish may well have landed, so we refuse to declare it a no-op.
+    let cmd = FakeCmd::new().with_metadata(&metadata_single("tool", "1.0.0"));
+    let clock = AdvancingClock::new();
+    // Absent for the first lookup (the idempotency probe), then erroring for every
+    // confirm poll.
+    let reg = AbsentThenErrRegistry::new(1);
+    let root = Path::new("/repo");
+    let c = ctx_advancing(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.0.0",
+    );
+    let err = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap_err();
+
+    match err {
+        AdapterError::RegistryUnavailable {
+            package, version, ..
+        } => {
+            assert_eq!(package, "tool");
+            assert_eq!(version, "1.0.0");
+        }
+        other => panic!("expected RegistryUnavailable on a confirm-time outage, got {other:?}"),
+    }
+    // The publish command ran (the outage is after it), but the confirm could not
+    // prove landing, so it fails closed rather than fabricating a receipt.
+    assert!(cmd
+        .calls()
+        .iter()
+        .any(|call| call == "cargo publish --registry crates-io -p tool"));
 }
 
 #[test]
@@ -1544,9 +1706,12 @@ fn target_only_waits_for_crates_io_publishable_deps() {
     ],"workspace_members":["bin 1.0.0","lib 1.0.0","helper 1.0.0","internal 1.0.0"]}"#;
     let cmd = FakeCmd::new().with_metadata(meta);
     let clock = AdvancingClock::new();
-    // Only `lib` is ever reported visible; if the adapter waited on internal/helper
-    // it would time out and this test would fail rather than publish `bin`.
-    let reg = DelayedRegistry::new("lib", "1.0.0", 1);
+    // Only `lib` (a crates.io dep) is scheduled visible; if the adapter waited on
+    // internal/helper it would time out rather than publish `bin`. `bin` itself is
+    // absent for its idempotency probe and present for its self-visibility confirm.
+    let reg = SeqRegistry::new()
+        .after("lib", "1.0.0", 1)
+        .after("bin", "1.0.0", 1);
     let root = Path::new("/repo");
     let c = ctx_advancing(&cmd, &clock, &reg, root);
 

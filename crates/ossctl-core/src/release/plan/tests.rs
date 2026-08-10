@@ -474,29 +474,52 @@ fn build_preserves_multi_target_order() {
     assert_eq!(plan.targets[1].package.as_deref(), Some("acme-py"));
 }
 
-// ── `--version` drift guard (release-cut-publish-noop) ─────────────────────
+// ── version = projection of the manifest (single source of truth) ──────────
+// `--version` is an optional CONFIRMATION; these fold in the old drift guard
+// (release-cut-publish-noop) plus the derive-from-manifest behavior.
 
 #[test]
-fn version_matching_the_manifest_passes_the_drift_guard() {
-    // `rust_facts` declares `acme` at 0.1.0; a cut at 0.1.0 publishes exactly that.
-    assert!(check_version_matches_tree(&rust_contract(), &rust_facts(), "0.1.0").is_ok());
+fn version_derived_from_the_manifest_when_no_flag() {
+    // Single source of truth: with no `--version`, the release version IS the
+    // manifest version. `rust_facts` declares `acme` at 0.1.0.
+    let v = resolve_release_version(&rust_contract(), &rust_facts(), None)
+        .expect("the manifest version must resolve");
+    assert_eq!(v, "0.1.0");
+}
+
+#[test]
+fn version_matching_the_manifest_passes_as_confirmation() {
+    // `--version 0.1.0` confirms the manifest version and resolves to it.
+    let v = resolve_release_version(&rust_contract(), &rust_facts(), Some("0.1.0"))
+        .expect("a matching --version must resolve");
+    assert_eq!(v, "0.1.0");
 }
 
 #[test]
 fn version_drifting_from_the_manifest_is_rejected() {
-    // The exact `release-cut-publish-noop` footgun: `--version 0.2.0` while the tree
-    // manifest is still 0.1.0. `cargo publish` would upload 0.1.0, but the engine
-    // would wait for/record 0.2.0 — refuse before any publish.
-    let err = check_version_matches_tree(&rust_contract(), &rust_facts(), "0.2.0")
+    // The exact `release-cut-publish-noop` footgun, now a confirmation mismatch:
+    // `--version 0.2.0` while the tree manifest is still 0.1.0. `cargo publish` would
+    // upload 0.1.0, but the engine would wait for/record 0.2.0 — refuse before any
+    // publish.
+    let err = resolve_release_version(&rust_contract(), &rust_facts(), Some("0.2.0"))
         .expect_err("a drifted --version must be rejected");
-    assert_eq!(err.len(), 1);
-    assert_eq!(err[0].package, "acme");
-    assert_eq!(err[0].ecosystem, Ecosystem::Rust);
-    assert_eq!(err[0].manifest_version, "0.1.0");
+    match err {
+        VersionResolveError::Mismatch {
+            requested,
+            mismatches,
+        } => {
+            assert_eq!(requested, "0.2.0");
+            assert_eq!(mismatches.len(), 1);
+            assert_eq!(mismatches[0].package, "acme");
+            assert_eq!(mismatches[0].ecosystem, Ecosystem::Rust);
+            assert_eq!(mismatches[0].manifest_version, "0.1.0");
+        }
+        other => panic!("expected a Mismatch, got {other:?}"),
+    }
 }
 
 #[test]
-fn drift_guard_reports_every_mismatched_workspace_member() {
+fn mismatch_reports_every_workspace_member() {
     // A two-crate workspace (the issuectl `core` + `cli` shape) both still at 0.1.0
     // while cutting 0.2.0 — both members must be reported, sorted by package.
     let mut c = rust_contract();
@@ -521,20 +544,96 @@ fn drift_guard_reports_every_mismatched_workspace_member() {
         package: Some("acme-core".to_string()),
         version: Some("0.1.0".to_string()),
     });
-    let err = check_version_matches_tree(&c, &f, "0.2.0")
+    let err = resolve_release_version(&c, &f, Some("0.2.0"))
         .expect_err("both drifted members must be rejected");
-    let packages: Vec<&str> = err.iter().map(|m| m.package.as_str()).collect();
-    assert_eq!(
-        packages,
-        vec!["acme", "acme-core"],
-        "sorted, one row per package"
-    );
+    match err {
+        VersionResolveError::Mismatch { mismatches, .. } => {
+            let packages: Vec<&str> = mismatches.iter().map(|m| m.package.as_str()).collect();
+            assert_eq!(
+                packages,
+                vec!["acme", "acme-core"],
+                "sorted, one row per package"
+            );
+        }
+        other => panic!("expected a Mismatch, got {other:?}"),
+    }
 }
 
 #[test]
-fn drift_guard_skips_targets_with_no_manifest_version() {
-    // A distribution/binary target whose package has no detected manifest version
-    // has no tree version to compare — it must not false-fail the guard.
+fn a_lockstep_two_crate_workspace_derives_the_shared_version() {
+    // Both crates at 0.1.0 (lockstep) — the shared version is the single source of
+    // truth, derivable with no `--version`.
+    let mut c = rust_contract();
+    c.targets = vec![
+        Target {
+            ecosystem: Ecosystem::Rust,
+            package: Some("acme".to_string()),
+            registry: Registry::CratesIo,
+            adapter: Adapter::CargoPublish,
+        },
+        Target {
+            ecosystem: Ecosystem::Rust,
+            package: Some("acme-core".to_string()),
+            registry: Registry::CratesIo,
+            adapter: Adapter::CargoPublish,
+        },
+    ];
+    let mut f = rust_facts();
+    f.packages.push(Package {
+        ecosystem: Ecosystem::Rust,
+        manifest: "core/Cargo.toml".to_string(),
+        package: Some("acme-core".to_string()),
+        version: Some("0.1.0".to_string()),
+    });
+    let v = resolve_release_version(&c, &f, None).expect("a lockstep workspace resolves");
+    assert_eq!(v, "0.1.0");
+}
+
+#[test]
+fn an_inconsistent_tree_has_no_single_source_of_truth() {
+    // Two crates at DIFFERENT versions (0.1.0 and 0.2.0) — there is no single version
+    // to project, so the tree is rejected as inconsistent even with no `--version`.
+    let mut c = rust_contract();
+    c.targets = vec![
+        Target {
+            ecosystem: Ecosystem::Rust,
+            package: Some("acme".to_string()),
+            registry: Registry::CratesIo,
+            adapter: Adapter::CargoPublish,
+        },
+        Target {
+            ecosystem: Ecosystem::Rust,
+            package: Some("acme-core".to_string()),
+            registry: Registry::CratesIo,
+            adapter: Adapter::CargoPublish,
+        },
+    ];
+    let mut f = rust_facts();
+    f.packages.push(Package {
+        ecosystem: Ecosystem::Rust,
+        manifest: "core/Cargo.toml".to_string(),
+        package: Some("acme-core".to_string()),
+        version: Some("0.2.0".to_string()),
+    });
+    let err = resolve_release_version(&c, &f, None)
+        .expect_err("a self-inconsistent tree must be rejected");
+    match err {
+        VersionResolveError::InconsistentTree { versions } => {
+            let pairs: Vec<(&str, &str)> = versions
+                .iter()
+                .map(|m| (m.package.as_str(), m.manifest_version.as_str()))
+                .collect();
+            assert_eq!(pairs, vec![("acme", "0.1.0"), ("acme-core", "0.2.0")]);
+        }
+        other => panic!("expected an InconsistentTree, got {other:?}"),
+    }
+}
+
+#[test]
+fn no_checkable_target_falls_back_to_the_flag_else_undeterminable() {
+    // A target whose package has no detected manifest version (a distribution/binary
+    // target, or an undetected package) is not checkable. With nothing to derive from,
+    // `--version` is used verbatim; without it, the version is undeterminable.
     let mut c = rust_contract();
     c.targets = vec![Target {
         ecosystem: Ecosystem::Rust,
@@ -543,5 +642,11 @@ fn drift_guard_skips_targets_with_no_manifest_version() {
         adapter: Adapter::CargoPublish,
     }];
     // facts name a *different* package, so the target's package is absent from facts.
-    assert!(check_version_matches_tree(&c, &rust_facts(), "9.9.9").is_ok());
+    let v = resolve_release_version(&c, &rust_facts(), Some("9.9.9"))
+        .expect("with nothing to confirm against, --version is used verbatim");
+    assert_eq!(v, "9.9.9");
+    assert!(matches!(
+        resolve_release_version(&c, &rust_facts(), None),
+        Err(VersionResolveError::Undeterminable)
+    ));
 }

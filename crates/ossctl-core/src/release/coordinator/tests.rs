@@ -107,6 +107,17 @@ struct FakeCmd {
     /// Canned `git remote get-url origin` stdout — lets a cut resolve a source
     /// tarball URL. `None` means "no origin" (empty stdout, as a bare repo).
     origin: Option<String>,
+    /// Crates the runner has successfully `cargo publish`ed, keyed by
+    /// `(ecosystem, package)` → published version. Shared with [`FakeRegistry`] via
+    /// [`FakeCmd::registry`] so the self-visibility confirm
+    /// (`cut-noop-self-visibility-check`) sees the crate the runner just published —
+    /// the faithful "publish landed" model. A *failed* publish records nothing (so a
+    /// no-op/failed upload correctly stays invisible).
+    published: Rc<RefCell<HashMap<(String, String), String>>>,
+    /// The version a successful `cargo publish` records for the crate — the plan
+    /// version the confirm checks against (default `1.2.3`; override with
+    /// [`FakeCmd::crate_version`] for a plan cut at a different version).
+    publish_version: String,
 }
 impl FakeCmd {
     fn new() -> Self {
@@ -114,6 +125,8 @@ impl FakeCmd {
             calls: RefCell::new(Vec::new()),
             fail_contains: None,
             origin: None,
+            published: Rc::new(RefCell::new(HashMap::new())),
+            publish_version: "1.2.3".to_string(),
         }
     }
     fn failing_on(substr: &str) -> Self {
@@ -127,6 +140,26 @@ impl FakeCmd {
             origin: Some(origin.to_string()),
             ..Self::new()
         }
+    }
+    /// Record successful `cargo publish`es at this version (default `1.2.3`) — set it
+    /// to a plan's version so the self-visibility confirm of that version passes.
+    fn crate_version(mut self, version: &str) -> Self {
+        self.publish_version = version.to_string();
+        self
+    }
+    /// A [`FakeRegistry`] that reflects this runner's successful publishes — pass the
+    /// SAME handle to the effect context so the confirm sees what the runner landed.
+    fn registry(&self) -> FakeRegistry {
+        FakeRegistry {
+            published: Rc::clone(&self.published),
+        }
+    }
+    /// Share `reg`'s published-crates map, so this runner's publishes land on `reg`
+    /// (and, across a resume, a second runner sees what the first published). Used by
+    /// multi-attempt resume tests where the registry outlives each per-attempt runner.
+    fn sharing(mut self, reg: &FakeRegistry) -> Self {
+        self.published = Rc::clone(&reg.published);
+        self
     }
     fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
@@ -183,6 +216,23 @@ impl CommandRunner for FakeCmd {
             .fail_contains
             .as_ref()
             .is_some_and(|s| line.contains(s.as_str()));
+        // A SUCCESSFUL `cargo publish -p <pkg>` (no `--dry-run`) lands the crate on the
+        // shared registry, so the adapter's self-visibility confirm sees it. A FAILED
+        // publish records nothing — a no-op/failed upload correctly stays invisible.
+        if !fails
+            && program == "cargo"
+            && args.first() == Some(&"publish")
+            && !args.contains(&"--dry-run")
+        {
+            if let Some(pos) = args.iter().position(|a| *a == "-p") {
+                if let Some(pkg) = args.get(pos + 1) {
+                    self.published.borrow_mut().insert(
+                        ("rust".to_string(), (*pkg).to_string()),
+                        self.publish_version.clone(),
+                    );
+                }
+            }
+        }
         Ok(CommandOutput {
             status: Some(i32::from(fails)),
             stdout: String::new(),
@@ -207,10 +257,31 @@ impl IdGen for FakeIdGen {
     }
 }
 
-struct FakeRegistry;
+/// Registry view over a [`FakeCmd`]'s successful publishes (via [`FakeCmd::registry`]):
+/// reports `(ecosystem, package)` present at the recorded version once its
+/// `cargo publish` landed, else absent. This gives the adapter's self-visibility
+/// confirm (`cut-noop-self-visibility-check`) a faithful "did the publish land?" view.
+struct FakeRegistry {
+    published: Rc<RefCell<HashMap<(String, String), String>>>,
+}
+impl FakeRegistry {
+    /// A standalone registry with no publishes reflected — for tests that never reach
+    /// the publish phase (a dry-run/preflight failure, a plan-validation refusal), or
+    /// that own a shared map handed to their runners via [`FakeCmd::sharing`].
+    fn empty() -> Self {
+        Self {
+            published: Rc::new(RefCell::new(HashMap::new())),
+        }
+    }
+}
 impl RegistryQuery for FakeRegistry {
-    fn published_versions(&self, _ecosystem: &str, _package: &str) -> io::Result<Vec<String>> {
-        Ok(Vec::new())
+    fn published_versions(&self, ecosystem: &str, package: &str) -> io::Result<Vec<String>> {
+        Ok(self
+            .published
+            .borrow()
+            .get(&(ecosystem.to_string(), package.to_string()))
+            .map(|v| vec![v.clone()])
+            .unwrap_or_default())
     }
 }
 
@@ -334,7 +405,7 @@ fn phases_are_strict_barriers() {
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
     let cmd = FakeCmd::new();
-    let reg = FakeRegistry;
+    let reg = cmd.registry();
     let tagger = FakeTagger::new();
     let root = PathBuf::from("/repo");
     let ctx = EffectCtx {
@@ -423,7 +494,7 @@ fn tags_exactly_once_after_all_publishes_and_completes_the_run() {
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
     let cmd = FakeCmd::new();
-    let reg = FakeRegistry;
+    let reg = cmd.registry();
     let tagger = FakeTagger::new();
     let root = PathBuf::from("/repo");
     let ctx = EffectCtx {
@@ -485,7 +556,7 @@ fn publish_failure_stops_journals_and_does_not_roll_back() {
     // cargo (rust) is first and publishes fine; npm's publish fails. `npm pack`
     // (build) must still succeed, so we key the failure on the exact publish line.
     let cmd = FakeCmd::failing_on("npm publish");
-    let reg = FakeRegistry;
+    let reg = cmd.registry();
     let tagger = FakeTagger::new();
     let root = PathBuf::from("/repo");
     let ctx = EffectCtx {
@@ -538,7 +609,7 @@ fn a_failed_package_preflight_stops_at_dry_run_before_publish_or_tag() {
     let store = FakeStore::default();
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
-    let reg = FakeRegistry;
+    let reg = FakeRegistry::empty();
     let root = PathBuf::from("/repo");
     let tagger = FakeTagger::new();
     let mut sink = NullSink;
@@ -594,7 +665,7 @@ fn a_tag_push_failure_journals_the_local_tag_and_stops() {
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
     let cmd = FakeCmd::new();
-    let reg = FakeRegistry;
+    let reg = cmd.registry();
     let root = PathBuf::from("/repo");
     // The tag is created locally, then the push fails: no rollback, and the
     // local-tag fact is journalled so a resume retries only the push.
@@ -644,13 +715,13 @@ fn re_execution_resumes_without_re_publishing_landed_targets() {
     let store = FakeStore::default();
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
-    let reg = FakeRegistry;
+    let reg = FakeRegistry::empty();
     let root = PathBuf::from("/repo");
     let tagger = FakeTagger::new();
 
     // First attempt: npm publish fails after rust has published.
     {
-        let cmd = FakeCmd::failing_on("npm publish");
+        let cmd = FakeCmd::failing_on("npm publish").sharing(&reg);
         let ctx = EffectCtx {
             runner: &cmd,
             clock: &clock,
@@ -667,7 +738,7 @@ fn re_execution_resumes_without_re_publishing_landed_targets() {
 
     // Second attempt (resume): everything succeeds now. Reopen the journal from
     // the durable log and re-run the coordinator with a fresh runner.
-    let cmd = FakeCmd::new();
+    let cmd = FakeCmd::new().sharing(&reg);
     let ctx = EffectCtx {
         runner: &cmd,
         clock: &clock,
@@ -732,7 +803,7 @@ fn threads_build_assets_into_binary_publish() {
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
     let cmd = FakeCmd::new();
-    let reg = FakeRegistry;
+    let reg = cmd.registry();
     let tagger = FakeTagger::new();
     let root = PathBuf::from("/repo");
     let ctx = EffectCtx {
@@ -780,8 +851,8 @@ fn threads_source_tarball_url_into_homebrew_publish() {
     let store = FakeStore::default();
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
-    let cmd = FakeCmd::with_origin("git@github.com:o/r.git");
-    let reg = FakeRegistry;
+    let cmd = FakeCmd::with_origin("git@github.com:o/r.git").crate_version("1.0.0");
+    let reg = cmd.registry();
     let tagger = FakeTagger::new();
     let root = PathBuf::from("/repo");
     let ctx = EffectCtx {
@@ -858,7 +929,7 @@ fn no_slug_lookup_without_a_github_distribution_target() {
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
     let cmd = FakeCmd::with_origin("git@github.com:o/r.git");
-    let reg = FakeRegistry;
+    let reg = cmd.registry();
     let tagger = FakeTagger::new();
     let root = PathBuf::from("/repo");
     let ctx = EffectCtx {
@@ -911,7 +982,7 @@ fn threads_repo_slug_into_binary_receipt() {
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
     let cmd = FakeCmd::with_origin("git@github.com:o/r.git");
-    let reg = FakeRegistry;
+    let reg = cmd.registry();
     let tagger = FakeTagger::new();
     let root = PathBuf::from("/repo");
     let ctx = EffectCtx {
@@ -977,7 +1048,7 @@ fn threads_no_assets_when_build_phase_is_resumed() {
     let store = FakeStore::default();
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
-    let reg = FakeRegistry;
+    let reg = FakeRegistry::empty();
     let tagger = FakeTagger::new();
     let root = PathBuf::from("/repo");
 
@@ -998,7 +1069,7 @@ fn threads_no_assets_when_build_phase_is_resumed() {
     // First attempt: the binary publish fails after build completed, leaving the
     // build phase journalled Ok and the run resumable.
     {
-        let cmd = FakeCmd::failing_on("gh release upload");
+        let cmd = FakeCmd::failing_on("gh release upload").sharing(&reg);
         let ctx = EffectCtx {
             runner: &cmd,
             clock: &clock,
@@ -1015,7 +1086,7 @@ fn threads_no_assets_when_build_phase_is_resumed() {
 
     // Resume: build is skipped whole (completed Ok), so `assets` is empty and the
     // binary upload carries no asset path.
-    let cmd = FakeCmd::new();
+    let cmd = FakeCmd::new().sharing(&reg);
     let ctx = EffectCtx {
         runner: &cmd,
         clock: &clock,
@@ -1617,7 +1688,7 @@ fn refuses_a_target_with_no_resolved_package() {
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
     let cmd = FakeCmd::new();
-    let reg = FakeRegistry;
+    let reg = cmd.registry();
     let root = PathBuf::from("/repo");
     let tagger = FakeTagger::new();
     let ctx = EffectCtx {
@@ -1664,8 +1735,8 @@ fn ci_delegated_target_is_skipped_journaled_not_failed() {
     let store = FakeStore::default();
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
-    let cmd = FakeCmd::new();
-    let reg = FakeRegistry;
+    let cmd = FakeCmd::new().crate_version("1.0.0");
+    let reg = cmd.registry();
     let tagger = FakeTagger::new();
     let root = PathBuf::from("/repo");
     let ctx = EffectCtx {
@@ -1953,8 +2024,8 @@ fn a_ci_delegated_plan_delegates_the_github_release_and_never_creates_it() {
     let store = FakeStore::default();
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
-    let cmd = FakeCmd::new();
-    let reg = FakeRegistry;
+    let cmd = FakeCmd::new().crate_version("1.0.0");
+    let reg = cmd.registry();
     let tagger = FakeTagger::new();
     let root = PathBuf::from("/repo");
     let ctx = EffectCtx {
@@ -2035,7 +2106,7 @@ fn a_resumed_delegated_run_completes_without_ever_creating_the_release() {
     let store = FakeStore::default();
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
-    let reg = FakeRegistry;
+    let reg = FakeRegistry::empty();
     let root = PathBuf::from("/repo");
     let plan = delegated_plan();
     let ids = crate::release::journal_target_ids(&plan.targets);
@@ -2044,7 +2115,7 @@ fn a_resumed_delegated_run_completes_without_ever_creating_the_release() {
     // any Release step.
     let first_tagger = FakeTagger::failing("push");
     {
-        let cmd = FakeCmd::new();
+        let cmd = FakeCmd::new().crate_version("1.0.0").sharing(&reg);
         let ctx = EffectCtx {
             runner: &cmd,
             clock: &clock,
@@ -2075,7 +2146,7 @@ fn a_resumed_delegated_run_completes_without_ever_creating_the_release() {
 
     // Resume: the push succeeds now, the delegation is recorded, the run completes.
     let resume_tagger = FakeTagger::new();
-    let cmd = FakeCmd::new();
+    let cmd = FakeCmd::new().crate_version("1.0.0").sharing(&reg);
     let ctx = EffectCtx {
         runner: &cmd,
         clock: &clock,
@@ -2439,13 +2510,20 @@ fn cut_actually_publishes_both_crates_to_the_mock_registry() {
 }
 
 #[test]
-fn a_noop_publish_leaves_the_registry_empty_even_though_the_cut_succeeds() {
-    // A single leaf crate + a runner that runs `cargo publish` but uploads NOTHING.
-    // cargo "succeeds", the cut reports success and even records a receipt — yet the
-    // registry stays empty. This is the `release-cut-publish-noop` shape, and why
-    // the test above must assert on REGISTRY state, not merely a green cut.
+fn a_noop_publish_fails_the_cut_with_no_fabricated_receipt() {
+    // A single leaf crate + a runner that runs `cargo publish` but uploads NOTHING —
+    // the `release-cut-publish-noop` / issuectl 0.8.1 signature. cargo "succeeds", but
+    // the self-visibility confirm (`cut-noop-self-visibility-check`) probes the registry
+    // for the crate's OWN {name, version} after the publish and never finds it, so the
+    // cut FAILS LOUDLY at publish-all and journals NO receipt — the fabricated-success
+    // is turned into a hard failure. This is the fix's integration proof: assert the cut
+    // fails, the journal has no receipt, and the registry stayed empty.
     let store = FakeStore::default();
-    let clock = FakeClock(Cell::new(1000));
+    // A virtual-time clock: the self-visibility confirm polls the (empty) registry
+    // and sleeps between polls, so a real-sleeping clock would take the full 300s
+    // ceiling. This advances virtual time on `sleep`, terminating the bounded wait
+    // instantly and deterministically.
+    let clock = SleepAdvancingClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
     let reg = SharedRegistry::default();
     let cmd = PublishingCmd::new(reg.clone(), ONE_CRATE_METADATA, true);
@@ -2472,12 +2550,70 @@ fn a_noop_publish_leaves_the_registry_empty_even_though_the_cut_succeeds() {
     )
     .unwrap();
 
-    // The cut succeeds and records a receipt …
-    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
-    assert_eq!(journal.state().published.len(), 1);
-    // … yet nothing actually landed on the registry — the defect a green cut hides.
+    // The cut FAILS at publish-all — the confirm caught the no-op.
+    let err = execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap_err();
+    match err {
+        CutError::PhaseFailed { phase, .. } => assert_eq!(phase, Phase::Publish),
+        other => panic!("expected a publish PhaseFailed on the no-op, got {other:?}"),
+    }
+    // NO receipt was fabricated for the crate that never landed, and the run neither
+    // completed nor tagged.
     assert!(
-        reg.versions("acme-core").is_empty(),
-        "a no-op publish must leave the registry empty (that is the bug this asserts)"
+        journal.state().published.is_empty(),
+        "a no-op publish must not journal a fabricated receipt"
     );
+    assert_ne!(journal.state().status, RunStatus::Completed);
+    assert!(tagger.calls().is_empty(), "a failed publish must not tag");
+    // The registry genuinely stayed empty — the confirm's premise held.
+    assert!(reg.versions("acme-core").is_empty());
+}
+
+#[test]
+fn a_real_publish_journals_a_receipt_and_lands_on_the_registry() {
+    // The passing counterpart to the no-op test: a runner that ACTUALLY uploads makes
+    // the crate visible on the shared mock registry, so the self-visibility confirm
+    // passes, the receipt is journaled, and the cut completes + tags. Guards against
+    // the confirm making a normal cut flaky.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let reg = SharedRegistry::default();
+    let cmd = PublishingCmd::new(reg.clone(), ONE_CRATE_METADATA, false);
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = RecordingSink::default();
+    let plan = rust_crate_plan(&["acme-core"]);
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "plan-test".into(),
+        "1.2.3".into(),
+        ids.clone(),
+    )
+    .unwrap();
+
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+    // The confirm saw the crate land, so a receipt is journaled at the cut version …
+    let state = journal.state();
+    assert_eq!(state.published.len(), 1);
+    assert_eq!(
+        state
+            .published
+            .get(&ids[0])
+            .expect("receipt present")
+            .version,
+        "1.2.3"
+    );
+    // … and the crate is genuinely on the (mock) registry.
+    assert_eq!(reg.versions("acme-core"), vec!["1.2.3".to_string()]);
 }

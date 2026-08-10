@@ -64,6 +64,8 @@
 //! pre-image — identical `(contract, facts, head, version)` always yield the
 //! same `plan_id` (proven in tests).
 
+use std::collections::BTreeSet;
+
 use serde::Serialize;
 
 use crate::contract::schema::{Contract, Ecosystem};
@@ -207,56 +209,135 @@ pub struct PlanDrift {
     pub reasons: Vec<String>,
 }
 
-/// A publishable target whose **tree manifest** declares a version different
-/// from the version a cut would seal — the drift the `--version` guard rejects.
+/// One publishable target's resolved package paired with the version its **tree
+/// manifest** declares — the version the ecosystem's publish command (`cargo
+/// publish` reading `Cargo.toml`, …) would **actually** upload.
+///
+/// The workspace manifest is the single source of truth for the release version
+/// ([`resolve_release_version`]); this is one row of that truth. Two failure modes
+/// carry a set of these: a caller `--version` that disagrees with the manifest
+/// ([`VersionResolveError::Mismatch`]), and a tree whose manifests disagree among
+/// themselves ([`VersionResolveError::InconsistentTree`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VersionMismatch {
-    /// The resolved package whose manifest version disagrees with `--version`.
+    /// The resolved package this row describes.
     pub package: String,
     /// The package's ecosystem.
     pub ecosystem: Ecosystem,
     /// The version declared in the tree manifest — what the ecosystem's publish
     /// command (`cargo publish` reading `Cargo.toml`, …) would **actually**
-    /// upload, regardless of the chosen `--version`.
+    /// upload for this package.
     pub manifest_version: String,
 }
 
-/// Reject a chosen `version` that does not match the tree manifest version(s) a
-/// cut would actually publish.
+/// Why a single release version could not be resolved from the workspace manifest
+/// (the single source of truth) — the reconciled superset of the old `--version`
+/// drift guard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VersionResolveError {
+    /// A caller-supplied `--version` disagreed with the version the manifest — and
+    /// therefore the cut — would actually publish (`release-cut-publish-noop`). The
+    /// old drift guard, folded in: `--version` is an optional *confirmation*, and a
+    /// wrong one is refused before any publish. Carries the requested version and the
+    /// checkable targets it disagrees with (sorted, one per package).
+    Mismatch {
+        /// The rejected `--version` the caller supplied.
+        requested: String,
+        /// Every checkable target whose manifest version differs from `requested`.
+        mismatches: Vec<VersionMismatch>,
+    },
+    /// The tree's publishable manifests declare **more than one distinct version**,
+    /// so there is no single source of truth to derive the release version from —
+    /// bring the workspace into lockstep first. Carries each checkable target's
+    /// package + version (sorted, one per package).
+    InconsistentTree {
+        /// Every checkable target and the version its manifest declares.
+        versions: Vec<VersionMismatch>,
+    },
+    /// No manifest version could be detected — every target is a distribution/binary
+    /// target or an undetected package — **and** no `--version` was supplied, so the
+    /// version can neither be derived nor confirmed. Supplying `--version` resolves
+    /// it (there is nothing to confirm against).
+    Undeterminable,
+}
+
+/// Resolve the release version from the workspace manifest — the **single source of
+/// truth** — optionally confirming it against a caller-supplied `--version`.
 ///
 /// `ossctl release cut` does **not** bump the manifest: each ecosystem's publish
 /// command uploads the version already in the tree (`cargo publish` reads
-/// `Cargo.toml`), while the engine threads the chosen `--version` into every
-/// registry probe, index-wait, and receipt (a plan target's
-/// [`version`](crate::protocol::plan::ReleasePlan::version) is the sealed
-/// `--version`, not the manifest's). When the two disagree the engine publishes
-/// the *manifest* version yet waits for — and records — the requested version,
-/// which never lands, so the cut fails obscurely (an index-visibility timeout on
-/// a dependency that was published at a different version) and nothing reaches
-/// the registry at `version` (`release-cut-publish-noop`).
+/// `Cargo.toml`), and the engine threads that version into every registry probe,
+/// index-wait, and receipt. So the version a cut publishes is a **projection of the
+/// tree**, not an independent input — deriving it here removes the two-masters
+/// footgun where a `--version` flag and the manifest could silently drift (the
+/// engine would publish the manifest version while waiting for/recording the flag's,
+/// which never lands — `release-cut-publish-noop`).
 ///
-/// This guard turns that silent footgun into a fast, pre-publish `plan`/`cut`
-/// refusal: for every target whose resolved package declares a version in
-/// `facts`, that version must equal `version`. Targets whose package has no
-/// detectable manifest version — a homebrew/binary distribution target, an
-/// undetected package — are not checked (there is no tree version to compare,
-/// and their release version is bound to the crate they repackage, not to a
-/// manifest of their own).
+/// The manifest version is the distinct version shared by every **checkable** target
+/// (a resolved package with a detected manifest version in `facts`). `requested` —
+/// the `--version` flag — is an **optional confirmation**, kept so the documented
+/// cut recipe (`release plan --version X.Y.Z`) and downstream skill wiring keep
+/// working: when present it must equal the derived version. Targets with no
+/// detectable manifest version (a homebrew/binary distribution target, an undetected
+/// package) are not checkable — their release version is bound to the crate they
+/// repackage, not a manifest of their own.
 ///
 /// # Errors
-/// Returns every [`VersionMismatch`] found (sorted by package, one per package)
-/// when at least one checkable target's manifest version differs from `version`;
-/// `Ok(())` when all checkable targets agree.
-pub fn check_version_matches_tree(
+/// - [`VersionResolveError::Mismatch`] — `requested` disagrees with the single
+///   manifest version (the subsumed drift guard).
+/// - [`VersionResolveError::InconsistentTree`] — the checkable targets declare more
+///   than one distinct version, so no single source of truth exists.
+/// - [`VersionResolveError::Undeterminable`] — nothing to derive from and no
+///   `requested` to fall back to.
+pub fn resolve_release_version(
     contract: &Contract,
     facts: &Facts,
-    version: &str,
-) -> Result<(), Vec<VersionMismatch>> {
-    let mut mismatches: Vec<VersionMismatch> = Vec::new();
+    requested: Option<&str>,
+) -> Result<String, VersionResolveError> {
+    let checkable = tree_manifest_versions(contract, facts);
+    let distinct: BTreeSet<&str> = checkable
+        .iter()
+        .map(|m| m.manifest_version.as_str())
+        .collect();
+
+    match distinct.len() {
+        // Nothing to derive from: fall back to the caller's --version, else fail.
+        0 => match requested {
+            Some(v) => Ok(v.to_string()),
+            None => Err(VersionResolveError::Undeterminable),
+        },
+        // One source of truth. Confirm --version against it when supplied.
+        1 => {
+            // `distinct` is non-empty with exactly one element, and every row shares
+            // it, so any row's version is THE manifest version.
+            let manifest_version = checkable[0].manifest_version.clone();
+            match requested {
+                Some(v) if v != manifest_version => Err(VersionResolveError::Mismatch {
+                    requested: v.to_string(),
+                    // A single-version tree ⇒ every checkable target disagrees with a
+                    // differing `--version`; report them all.
+                    mismatches: checkable,
+                }),
+                _ => Ok(manifest_version),
+            }
+        }
+        // The tree disagrees with itself — no single source of truth to project.
+        _ => Err(VersionResolveError::InconsistentTree {
+            versions: checkable,
+        }),
+    }
+}
+
+/// Every **checkable** target — a resolved package with a detected manifest version
+/// in `facts` — paired with that version, sorted and deduplicated one row per
+/// `(ecosystem, package)`. The raw material [`resolve_release_version`] projects the
+/// single release version from.
+fn tree_manifest_versions(contract: &Contract, facts: &Facts) -> Vec<VersionMismatch> {
+    let mut rows: Vec<VersionMismatch> = Vec::new();
     for t in resolve_targets(contract, facts) {
         let Some(package) = t.package else { continue };
         // The tree manifest version for this resolved (ecosystem, package). Absent
-        // ⇒ nothing to compare (a distribution target, or an undetected manifest).
+        // ⇒ not checkable (a distribution target, or an undetected manifest).
         let Some(manifest_version) = facts
             .packages
             .iter()
@@ -265,27 +346,21 @@ pub fn check_version_matches_tree(
         else {
             continue;
         };
-        if manifest_version != version {
-            mismatches.push(VersionMismatch {
-                package,
-                ecosystem: t.ecosystem,
-                manifest_version,
-            });
-        }
+        rows.push(VersionMismatch {
+            package,
+            ecosystem: t.ecosystem,
+            manifest_version,
+        });
     }
     // Deterministic order, and one row per package even if a package backs several
     // targets (a crate published to crates.io AND repackaged for homebrew). Sort and
     // dedup on the SAME (ecosystem, package) key so equal keys are guaranteed adjacent
     // before the consecutive-only `dedup_by` runs.
-    mismatches.sort_by(|a, b| {
+    rows.sort_by(|a, b| {
         (a.ecosystem.as_str(), &a.package).cmp(&(b.ecosystem.as_str(), &b.package))
     });
-    mismatches.dedup_by(|a, b| a.package == b.package && a.ecosystem == b.ecosystem);
-    if mismatches.is_empty() {
-        Ok(())
-    } else {
-        Err(mismatches)
-    }
+    rows.dedup_by(|a, b| a.package == b.package && a.ecosystem == b.ecosystem);
+    rows
 }
 
 /// Overlay facts-derived package names onto the contract's target set, yielding
