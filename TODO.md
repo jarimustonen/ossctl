@@ -5,70 +5,70 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-08-10 (stint #15). New agent: read this, then continue with a fresh
-`/stint-start`. Main is clean, all pushed. Live: **0.2.4** on all four channels._
+_Handoff written 2026-08-10 (stint #16). New agent: read this, then continue with a fresh
+`/stint-start`. Main is clean, all pushed. Live: **0.2.5** on all four channels._
 
-_🎉 **STINT #15 — 0.2.4 SHIPPED (fully-autonomous engine cut) + ALL 8 OPEN DECISIONS RESOLVED.**
-This stint cleared the entire decision backlog (the 3 held for Jari + 5 more surfaced from the backlog
-triage) and shipped them, plus several do-now fixes, in one release._
+_🎉 **STINT #16 — 0.2.5 SHIPPED. The engine's real-cut publish is now TRUSTWORTHY.** This stint fixed
+the two HIGH bugs that the first real downstream cut (issuectl 0.8.1) exposed, then — on Jari's call —
+built the REAL no-op fix + single-source version and cut 0.2.5 carrying all of it. Fully-autonomous
+engine self-cut, exit 0, all four channels verified live._
 
-_**0.2.4 (2026-08-10)** — fully-autonomous `ossctl release cut`: dry-run-all → build-all → publish-all
-(ossctl-core + ossctl → crates.io) → tag v0.2.4 → dist (homebrew via direct tap-write). GH Release +
-14 cross-platform assets delegated to cargo-dist CI (**succeeded, no hauis 400 this time**). All four
-channels verified live at 0.2.4 (crates.io ×2; GitHub Release v0.2.4; Homebrew tap → v0.2.4). Plan
-`6d7b92b6…`, `schema_version 2`, `SEAL_VERSION 5`._
+_**0.2.5 (2026-08-10)** — `ossctl release cut` self-cut: dry-run-all → build-all → publish-all
+(ossctl-core + ossctl → crates.io) → tag v0.2.5 → dist (homebrew direct tap-write). GH Release + 14
+cross-platform assets delegated to cargo-dist CI (**succeeded, hauis macOS aarch64 clean, no 400**).
+All four channels verified live at 0.2.5 (crates.io ×2 via sparse index; GitHub Release v0.2.5;
+Homebrew tap → v0.2.5). Plan `a59584a3…`, head `ccbab61`._
 
-_**What 0.2.4 contains (all user-facing):**_
-_- `publish-target-none` (Option B) — explicit empty `targets: []` honored authoritatively (never-publish)._
-_- `distribution-monorepo-vec` — `distributions: Vec<Distribution>` + per-package `package` key;
-  **BREAKING wire: schema_version 1→2** (canonical key `distribution`→`distributions`; still READS v1).
-  Engine stays single-distribution, fails loud on len>1 → follow-up `per-distribution-release`._
-_- `homebrew-tap-contract-consistency-floors` — normalizer now HARD-ERRORS on inconsistent homebrew
-  config (missing tap, double-publish, registry/adapter mismatch) instead of failing at release time._
-_- `homebrew-tapwrite-preserve-formula` — engine full-regenerates a tap formula only when it carries
-  an ossctl ownership marker; hand-maintained formulas preserved/surgically-edited/refused._
-_- `extra-fields-canonical-json-empty` — empty `extra_fields` omitted from canonical JSON (SEAL 4→5)._
-_- `publish-crates-release-trigger` (fixed) — generated crates-publish workflow triggers on version-tag
-  push (was dead `release:published`). `resume-publish-phase-never-reached`,
-  `release-abandon-reason-leading-dashes`, `normalizer-warning-log-injection` also fixed._
+_**What 0.2.5 contains (all user-facing):**_
+_- `cut-noop-self-visibility-check` (HIGH, the real fix) — after the irreversible `cargo publish` the
+  cargo adapter now CONFIRMS the target's own `{name,version}` reached the crates.io index (reusing the
+  bounded index-wait, so normal propagation lag is tolerated) BEFORE journaling a receipt. A silent
+  no-op upload now fails the cut CLOSED with no fabricated receipt; a registry outage fails closed
+  distinctly. **Proven live on 0.2.5's own self-cut** (passed on a real upload without flakiness)._
+_- `release-version-single-source` — the release version is derived from the workspace manifest (single
+  source of truth); `--version` is now an OPTIONAL must-match confirmation that subsumes the drift guard._
+_- `release-cut-publish-noop` (HIGH) — the `--version`-vs-tree drift guard + mock-registry integration
+  test + root-cause analysis (first-round landing; the definitive fix is the self-visibility check above)._
+_- `publish-crates-yml` (HIGH regression) — both `cargo publish` lines in the dep-order CI step tolerate
+  cargo's exact "already exists on crates.io index" diagnostic as success (anchored match) → no more
+  spurious red release runs when the tag-push publish races the engine's own publish. CI-only._
 
-_**Decisions — ALL RESOLVED.** The 3 previously held for Jari: `publish-target-none`=B (shipped),
-`distribution-monorepo-vec`=implement-now (shipped), `oss-dist-channel-generator`=APPROVED for a
-**future stint** (new `/oss-*` member, build via `/worktree-make-skill`; UNLANED). The 5 surfaced this
-stint: homebrew-floors=hard-error (shipped), tapwrite=ownership-marker (shipped),
-publish-crates-trigger=fix-generated-template (shipped), extra-fields-json=omit-empty (shipped),
-`distribution-platforms-adapter-neutral`=DEFER (revisit at first non-Rust/goreleaser consumer; stays
-in LANE B, does not gate anything)._
+_**Why the critical bug's root cause was NOT a reproduced source no-op:** the worker judged the issuectl
+timeout most consistent with an env/registry-token difference OR issuectl-core not declared as its own
+release target — not reproducible locally without crates.io creds. The self-visibility check is the
+structural defense: whatever the cause, a cut that doesn't actually upload now fails loudly instead of
+faking success. If a real downstream cut still no-ops after this, capture the exact emitted `cargo
+publish` line, the target manifest versions, and whether every publishable crate is a declared target._
 
-_⚠️ **NO HIGH blocker remains.** Everything left is deferred hardening + review follow-ups. The one
-new active issue: `per-distribution-release` (LANE A) — per-distribution taps in the engine,
-`dist generate --package`, cargo-dist per-distribution platforms; the monorepo contract MODEL is
-complete, only the engine is single-distribution. Not urgent (ossctl is a single-distribution repo)._
+_⚠️ **NO HIGH blocker remains.** Everything left is DEFERRED/optional. Newly filed but NOT yet acted:
+none this stint. The noop `/llm-review` surfaced 4 MED/LOW follow-up ideas (NOT filed — file on demand):
+fail-closed version guard for manifest-versioned node/python, revisit the `is_published` idempotency
+short-circuit, drop `--version` entirely, run cut/resume from a clean checkout of the sealed HEAD._
 
-_**Housekeeping:** the old orphan worktree was removed this stint; no lingering worktrees. Two DROP
-issues closed (`publish-crates-no-auto-trigger` dup, `homebrew-tap-bump-manual-and-missed` subsumed)._
+_**Housekeeping:** no lingering worktrees (all three round workers settled + torn down). A Dependabot
+`clap-4.6.5` PR is open on the remote — adjacent, not triaged this stint._
 
-_**hauis note:** the 0.2.4 CI cut's macOS aarch64 build on `hauis` succeeded with NO 400 — the token
-was healthy. If a future cut 400s: `ssh hauis 'git config --global --unset-all
-"http.https://github.com/.extraheader"'` then `gh run rerun <run-id> --failed`. Tracked as
-`release-macos-hauis-coupling` (homebase-adjacent)._
+_**hauis note:** 0.2.5's CI macOS aarch64 build on `hauis` succeeded with NO 400 — token healthy. If a
+future cut 400s: `ssh hauis 'git config --global --unset-all "http.https://github.com/.extraheader"'`
+then `gh run rerun <run-id> --failed`. Tracked as `release-macos-hauis-coupling` (homebase-adjacent)._
 
 _**Operating policy (see AGENTS.md):** (1) releases may be cut AUTONOMOUSLY; (2) the engine-driven
-`ossctl release cut` is fully autonomous — NO go/no-go, ever (proven again with 0.2.4); safety is
-structural (`release plan` seal + `dry-run-all` + dep-order/index-wait + `resume`/`abandon`); (3)
-`git pull --rebase` → `push` always allowed. Green gate incl.
-`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`._
+`ossctl release cut` is fully autonomous — NO go/no-go, ever (proven again with 0.2.5); safety is
+structural (`release plan` seal + `dry-run-all` + dep-order/index-wait + **the new post-publish
+self-visibility confirm** + `resume`/`abandon`); (3) `git pull --rebase` → `push` always allowed. Green
+gate incl. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`._
 
 _--- older history in git: stints #1–7 built the `/oss-*` deterministic core, #8 finished the
 adapters, #9–11 shipped 0.1.0/0.1.1/0.1.2, #12 multi-target cut, #13 interleave + 0.2.1, #14 completed
 the DOGFOOD (0.2.2/0.2.3 via engine) — `ossctl release cut` cuts ossctl itself end-to-end. #15 shipped
-0.2.4 + cleared all decisions. Epic `ossctl-phase4-build` stays OPEN. Cross-repo standardisation +
+0.2.4 + cleared all decisions. #16 shipped 0.2.5 — made the real-cut publish trustworthy (self-visibility
+confirm + single-source version). Epic `ossctl-phase4-build` stays OPEN. Cross-repo standardisation +
 hauis infra remain HOMEBASE concerns (homebase issue `cross-repo-release-standardisation`), NOT ossctl
 work. ---_
 
 **Read first (the spec):** `docs/adr/000{1,2,3,4}-*.md` (CLI taxonomy, release engine, config+journal, one-target-one-publish-unit).
 
-## Execution DAG (2026-08-10, stint #15 handoff)
+## Execution DAG (2026-08-10, stint #16 handoff)
 
 Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
 (never copied here). Merge at Phase 0/handoff (drop landed, add active, keep existing order).
@@ -80,8 +80,9 @@ The cross-repo standardisation ("Track A") and hauis CI runners are HOMEBASE con
 personal environment), NOT ossctl work — moved to homebase issue `cross-repo-release-standardisation`.
 Do not re-add them here.
 
-**Track B — "ossctl cuts ITSELF through the engine" — ✅ COMPLETE (stint #14) and now ROUTINE (stint
-#15 shipped 0.2.4 the same way).** No HIGH blocker remains. Every node below is DEFERRED hardening,
+**Track B — "ossctl cuts ITSELF through the engine" — ✅ COMPLETE (stint #14) and now ROUTINE (stints
+#15/#16 shipped 0.2.4/0.2.5 the same way; #16 also made the real-cut publish trustworthy).** No HIGH
+blocker remains. Every node below is DEFERRED hardening,
 review follow-ups, or the one approved future feature (`oss-dist-channel-generator`, UNLANED). LANE C
 is retired for ossctl's own cut — only `release-macos-hauis-coupling` survives (homebase-adjacent).
 **Do NOT harden LANE C.** Pick any deferred node for autonomous progress; nothing gates anything.
@@ -142,4 +143,4 @@ UNLANED — /oss-* family completeness (skill/template work; no release-engine h
 
 Post-release hardening + Track B are children/followups under
 [`ossctl-phase4-build`](issues/ossctl-phase4-build/item.md) (still OPEN). `issuectl list` for the
-live view. 0.2.4 is shipped; the epic stays open for its tails (see handoff) and the lanes above.
+live view. 0.2.5 is shipped; the epic stays open for its tails (see handoff) and the lanes above.
