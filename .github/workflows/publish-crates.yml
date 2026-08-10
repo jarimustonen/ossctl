@@ -67,15 +67,25 @@ jobs:
           publish() {
             local pkg="$1"
             local out rc
-            # Capture combined output and the real exit code without tripping
-            # `set -e` (the `&& … || …` list keeps the failure out of set -e's
-            # reach while `rc` records cargo's actual status).
-            out="$(cargo publish -p "$pkg" 2>&1)" && rc=0 || rc=$?
+            # Capture combined output and the real exit code. The command
+            # substitution is its own statement (not `local out=$(…)`, which
+            # would mask cargo's status), and the `if` keeps the failure out of
+            # `set -e`'s reach.
+            if out="$(CARGO_TERM_COLOR=never cargo publish -p "$pkg" 2>&1)"; then
+              rc=0
+            else
+              rc=$?
+            fi
             printf '%s\n' "$out"
             if [ "$rc" -eq 0 ]; then
               return 0
             fi
-            if printf '%s' "$out" | grep -qi 'already exists'; then
+            # Tolerate ONLY cargo's exact duplicate-version diagnostic for THIS
+            # package, e.g. "error: crate ossctl-core@0.2.4 already exists on
+            # crates.io index". A here-string (not a pipe) avoids a pipefail
+            # SIGPIPE false-negative from grep -q closing the pipe early. Any
+            # other failure (network, auth, verification) still propagates.
+            if grep -Eqi "crate ${pkg}@[^[:space:]]+ already exists on crates\.io index" <<<"$out"; then
               echo "$pkg already on the crates.io index — treating as success."
               return 0
             fi
