@@ -7,16 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
+<!-- oss-changelog:unreleased-end -->
+
+## [0.2.4] - 2026-08-10
+
+### Added
+- **The contract can now express "version-tracked but never published".** An explicitly-set empty
+  `targets: []` is honored as authoritative — the normalizer no longer force-expands it into a default
+  `crates.io`/`cargo-publish` target. An *omitted* `targets` key still expands to the ecosystem default
+  as before (the distinction is explicit-empty vs absent). This lets a private/internal project be
+  version-tracked and changelogged without any registry publish target.
+- **Multi-distribution (monorepo) support.** `Contract` now carries `distributions: Vec<Distribution>`
+  with a per-package `package` association key, so a monorepo can declare several independently
+  distributed binaries (each with its own gh-releases/installers/tap). A single bare `distribution:`
+  block still parses unchanged (deserialized as a one-element list); a plural `distributions:` list is
+  also accepted. The release engine remains single-distribution and fails loud on a `distributions`
+  length > 1 (per-distribution engine support tracked in `per-distribution-release`).
 
 ### Changed
+- **BREAKING (canonical wire shape): `schema_version` bumped `1` → `2`.** The canonical-JSON key
+  `distribution` was renamed to `distributions` (now always an array), and every distribution carries a
+  `package` field. ossctl still **reads** v1 documents (a singular `distribution:` mapping) and
+  translates them into the v2 canonical shape. Downstream `/oss-*` members that read the normalized
+  contract should key on `distributions`.
+- **The normalizer now hard-errors on inconsistent Homebrew configuration** (previously silent). A
+  `homebrew`-registry target or a `homebrew` installer with no `homebrew_tap` destination, a
+  double-publish collision (installer **and** target both producing a formula), and a
+  registry/adapter mismatch (`registry: homebrew` requires the `homebrew-tap` adapter) are now rejected
+  at validate time with a clear error, instead of failing later at release time. This can reject some
+  previously-accepted contracts — intended.
+- **The engine's Homebrew tap-write preserves hand-maintained formulas.** A formula is fully
+  regenerated only when it carries an `ossctl`-generated ownership marker; a hand-maintained formula
+  (no marker) is updated surgically (only the `url`/`sha256` lines) or refused, never clobbered. ossctl's
+  own generated formula carries the marker, so its own tap keeps the simple full-render path.
 - **An empty `extra_fields` map is now omitted from canonical JSON** (not emitted as `"extra_fields": {}`),
-  applied symmetrically to both the top-level `Contract` and the nested `Distribution` via
-  `skip_serializing_if`. A populated `extra_fields` serializes exactly as before. This makes the
-  "additive = absent-by-default" migration rule hold literally. No `schema_version` bump (existing
-  populated contracts are byte-identical; consumers already tolerate an absent optional key), but the
-  release-plan `SEAL_VERSION` bumped `4` → `5` because the sealed pre-image of an empty-`extra_fields`
-  contract changed.
-<!-- oss-changelog:unreleased-end -->
+  symmetrically for the top-level `Contract` and the nested `Distribution` (`skip_serializing_if`). A
+  populated `extra_fields` serializes exactly as before. No `schema_version` change from this alone, but
+  the release-plan `SEAL_VERSION` bumped `4` → `5` (the sealed pre-image of an empty-`extra_fields`
+  contract changed). Combined with the monorepo change above, `SEAL_VERSION` is `5` and `schema_version`
+  is `2` in this release.
+
+### Fixed
+- **The generated crates-publish CI workflow now auto-fires.** It triggers on the version-tag `push`
+  instead of `release: published` — GitHub does not emit a `release` event for a Release created by the
+  default `GITHUB_TOKEN` (as cargo-dist does), so the old trigger never ran and crates.io was published
+  only via manual dispatch. `workflow_dispatch` is retained as a manual fallback.
+- **`release resume` no longer demands `--allow-unverified` when the publish phase was never reached.**
+  A run that failed in the build phase (before any publish could have happened) now resumes directly;
+  the genuinely-unsafe cases (publish reached but no receipt; `Published × Unknown`) still require the
+  flag.
+- **`release abandon --reason` accepts a reason that starts with `--`** (previously rejected as an
+  unknown flag by the argument parser).
+- **Normalizer diagnostics JSON-encode user-controlled keys**, so a contract key containing quotes,
+  newlines, or control characters can no longer forge or corrupt diagnostic/JSONL log lines.
 
 ## [0.2.3] - 2026-08-07
 
