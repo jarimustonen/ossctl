@@ -2,9 +2,13 @@
 created: 2026-08-06
 updated: 2026-08-10
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 epic: ossctl-phase4-build
+commits:
+- hash: c8cec19
+  summary: 'fix(cli): release abandon --reason accepts leading-dash values'
+closed: 2026-08-10
 ---
 
 # release abandon --reason fails when the reason starts with --
