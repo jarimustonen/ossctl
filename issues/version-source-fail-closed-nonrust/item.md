@@ -2,13 +2,16 @@
 created: 2026-08-10
 updated: 2026-08-10
 type: improvement
-status: in-progress
+status: done
 priority: normal
 epic: ossctl-phase4-build
 related: ['@cut-noop-self-visibility-check']
 commits:
 - hash: 31b1c2a
   summary: VersionSource capability model; manifest-versioned targets fail closed on missing version
+- hash: 4ae2645
+  summary: re-key VersionSource on Ecosystem (fixes distribution-only-repo regression); harden flag-removal tests
+closed: 2026-08-10
 ---
 
 # version-drift/self-visibility guards fail OPEN for manifest-versioned non-Rust ecosystems (node/python)
