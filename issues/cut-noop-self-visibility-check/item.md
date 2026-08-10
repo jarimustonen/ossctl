@@ -2,13 +2,16 @@
 created: 2026-08-10
 updated: 2026-08-10
 type: bug
-status: in-progress
+status: fixed
 priority: high
 epic: ossctl-phase4-build
 related: ['@release-cut-publish-noop']
 commits:
 - hash: 22a07df
   summary: confirm own publish landed on registry before journaling receipt (+ tests)
+- hash: 809dc7d
+  summary: review fixes — honest confirm wording + whole-window outage classification
+closed: 2026-08-10
 ---
 
 # release cut journals a publish receipt without confirming the version actually landed (silent no-op upload)

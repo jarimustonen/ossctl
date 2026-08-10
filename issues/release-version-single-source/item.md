@@ -2,13 +2,16 @@
 created: 2026-08-10
 updated: 2026-08-10
 type: improvement
-status: in-progress
+status: done
 priority: normal
 epic: ossctl-phase4-build
 related: ['@cut-noop-self-visibility-check']
 commits:
 - hash: 22a07df
   summary: derive release version from manifest; --version optional confirmation
+- hash: 809dc7d
+  summary: review fixes — resume drift error + validate resolved version
+closed: 2026-08-10
 ---
 
 # release version entered in two places (--version flag + workspace manifest) can drift — make the manifest the single source of truth
