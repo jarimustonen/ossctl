@@ -5,6 +5,9 @@ type: feature
 status: in-progress
 priority: normal
 epic: ossctl-phase4-build
+commits:
+- hash: be08674
+  summary: honor explicit empty targets:[] as authoritative (Option B) + tests
 ---
 
 # Contract can't express 'publish target none' for a registry ecosystem

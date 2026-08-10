@@ -1572,6 +1572,58 @@ mod tests {
         assert!(n2.contract.targets.is_empty());
     }
 
+    /// Cross-field: an explicit empty `targets: []` skips the registry-license
+    /// floor (no target → no registry that requires an SPDX license), while a
+    /// genuinely invalid license is still caught by its OWN check. Locks in that
+    /// the `!targets.is_empty()` gate on the floor keeps honoring an empty set.
+    #[test]
+    fn explicit_empty_targets_skips_registry_license_floor() {
+        let n = norm(
+            "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets: []\n\
+             license: not-a-real-spdx-id\n---\n",
+        );
+        // The bad license is still invalid on its own …
+        assert!(!n.is_valid());
+        // … but the registry-requires-license FLOOR must NOT fire — there is no
+        // registry target to trigger it.
+        assert!(
+            !n.problems
+                .errors
+                .iter()
+                .any(|e| e.contains("floor: a target has a registry")),
+            "registry-license floor fired despite empty targets: {:?}",
+            n.problems.errors
+        );
+    }
+
+    /// Cross-field: forcing a `registry` health badge while declaring `targets: []`
+    /// is a floor error — the badge has no producer (no registry to publish to).
+    /// The empty set is honored, and the badge/target consistency floor still
+    /// guards against a badge with nothing behind it.
+    #[test]
+    fn registry_badge_with_explicit_empty_targets_fails() {
+        let n = norm(
+            "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets: []\n\
+             health_badges: [registry, license]\n---\n",
+        );
+        assert_error_contains(&n, "health_badge 'registry' has no producer");
+    }
+
+    /// The expansion-skip is independent of the `ecosystems` list: an explicit
+    /// `targets: []` with NO ecosystems is still an honored empty set (and, like
+    /// the minimal contract, defaults its badges to [ci, license] — no registry
+    /// badge without a target).
+    #[test]
+    fn explicit_empty_targets_with_no_ecosystems() {
+        let n = norm("---\nstatus: approved\nmaturity: mvp\ntargets: []\n---\n");
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(n.contract.targets.is_empty());
+        assert_eq!(
+            n.contract.health_badges,
+            vec![HealthBadge::Ci, HealthBadge::License]
+        );
+    }
+
     #[test]
     fn node_monorepo_adapter_is_changesets() {
         let text = "---\nstatus: approved\nmaturity: production\necosystems: [node]\n\

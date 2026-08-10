@@ -374,11 +374,16 @@ pub struct Contract {
     /// Packaging ecosystems, de-duplicated to canonical order.
     pub ecosystems: Vec<Ecosystem>,
     /// Concrete registry publish targets. Expanded from `ecosystems` when the
-    /// `targets` key is OMITTED; an explicit empty `targets: []` is the author's
-    /// authoritative "never publish anywhere" and is honored as an empty set (not
-    /// re-expanded) — the machine-readable way to declare a version-tracked but
-    /// unpublished repo. An empty set is a valid, honored state, not a
-    /// misconfiguration.
+    /// `targets` key is OMITTED (or written as a bare `targets:` / `targets: null`,
+    /// which read as absent); an explicit empty `targets: []` — the literal empty
+    /// sequence — is the author's authoritative "never publish anywhere" and is
+    /// honored as an empty set (not re-expanded), the machine-readable way to
+    /// declare a version-tracked but unpublished repo. An empty set is a valid,
+    /// honored state, not a misconfiguration. This re-meaning of the specific `[]`
+    /// value did NOT bump [`KNOWN_SCHEMA_VERSION`] deliberately: the serialized
+    /// shape is a JSON array either way (an empty array is already producible today
+    /// by a contract with no ecosystems), so every consumer that reads `targets`
+    /// already handles `[]` — no reader breaks.
     pub targets: Vec<Target>,
     /// The binary-distribution block (cargo-dist / goreleaser binaries +
     /// installers + Homebrew tap), or `null` for a registry-only repo. Coexists
