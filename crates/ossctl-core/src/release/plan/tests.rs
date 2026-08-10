@@ -605,23 +605,15 @@ fn no_manifest_version_anywhere_is_undeterminable() {
 // ── version-source capability model (version-source-fail-closed-nonrust) ────
 
 #[test]
-fn version_source_classifies_every_registry() {
-    // Manifest-versioned registries publish from a version-carrying manifest.
-    for r in [
-        Registry::CratesIo,
-        Registry::Npm,
-        Registry::Pypi,
-        Registry::TestPypi,
-    ] {
-        assert_eq!(VersionSource::of(r), VersionSource::Manifest, "{r:?}");
+fn version_source_classifies_every_ecosystem() {
+    // Ecosystems that carry the package version in a tree manifest.
+    for e in [Ecosystem::Rust, Ecosystem::Node, Ecosystem::Python] {
+        assert_eq!(VersionSource::of(e), VersionSource::Manifest, "{e:?}");
     }
-    // Distribution/repackaging registries have no manifest version by design.
-    for r in [
-        Registry::GhReleases,
-        Registry::Homebrew,
-        Registry::ProxyGolangOrg,
-    ] {
-        assert_eq!(VersionSource::of(r), VersionSource::Distribution, "{r:?}");
+    // Ecosystems with no tree-manifest version: a raw binary (artifact-versioned) and
+    // a Go module (VCS-tag-versioned).
+    for e in [Ecosystem::Binary, Ecosystem::Go] {
+        assert_eq!(VersionSource::of(e), VersionSource::Distribution, "{e:?}");
     }
 }
 
@@ -697,10 +689,10 @@ fn a_versionless_pypi_target_fails_closed_even_beside_a_versioned_rust_target() 
 }
 
 #[test]
-fn a_distribution_target_without_a_manifest_version_is_skipped_not_failed() {
-    // A homebrew and a gh-releases (cargo-dist) target carry NO manifest version by
+fn a_binary_distribution_target_is_skipped_not_failed() {
+    // A `binary` gh-releases (cargo-dist) target carries NO tree-manifest version by
     // design — legitimately skipped. Beside a versioned rust crate the version still
-    // resolves from the crate; the distribution targets never demand a version.
+    // resolves from the crate; the binary target never demands a version.
     let mut c = rust_contract();
     c.targets = vec![
         target(
@@ -709,14 +701,7 @@ fn a_distribution_target_without_a_manifest_version_is_skipped_not_failed() {
             Registry::CratesIo,
             Adapter::CargoPublish,
         ),
-        // A rust crate repackaged for a Homebrew tap — registry Homebrew ⇒ Distribution.
-        target(
-            Ecosystem::Rust,
-            "acme",
-            Registry::Homebrew,
-            Adapter::HomebrewTap,
-        ),
-        // A binary distribution to gh-releases.
+        // A binary distribution to gh-releases — ecosystem `binary` ⇒ Distribution.
         target(
             Ecosystem::Binary,
             "acme",
@@ -725,15 +710,44 @@ fn a_distribution_target_without_a_manifest_version_is_skipped_not_failed() {
         ),
     ];
     let v = resolve_release_version(&c, &rust_facts())
-        .expect("distribution targets are skipped; the crate version resolves");
+        .expect("the binary target is skipped; the crate version resolves");
     assert_eq!(v, "0.1.0");
 }
 
 #[test]
-fn an_all_distribution_repo_has_no_derivable_version() {
-    // Only distribution targets (no manifest-versioned publish): there is no manifest
-    // to derive a version from, and with `--version` removed there is no fallback.
+fn a_distribution_only_rust_repo_resolves_from_the_crate_manifest() {
+    // REGRESSION GUARD: a Rust crate published ONLY via distribution destinations (a
+    // Homebrew tap, gh-releases) still reads its version from `Cargo.toml`. Keying the
+    // capability on the ECOSYSTEM (not the registry) means a rust crate repackaged for
+    // homebrew is manifest-versioned — so the version resolves even with no crates.io
+    // target, rather than the (registry-keyed) misfire that returned Undeterminable
+    // for a version plainly in the tree.
     let mut c = rust_contract();
+    c.targets = vec![
+        target(
+            Ecosystem::Rust,
+            "acme",
+            Registry::Homebrew,
+            Adapter::HomebrewTap,
+        ),
+        target(
+            Ecosystem::Rust,
+            "acme",
+            Registry::GhReleases,
+            Adapter::CargoDist,
+        ),
+    ];
+    let v = resolve_release_version(&c, &rust_facts())
+        .expect("a distribution-only rust repo resolves its version from Cargo.toml");
+    assert_eq!(v, "0.1.0");
+}
+
+#[test]
+fn an_all_distribution_ecosystem_repo_has_no_derivable_version() {
+    // Only distribution ECOSYSTEMS (binary/go) — no tree manifest carries a version, so
+    // there is nothing to derive from and (with `--version` removed) no fallback.
+    let mut c = rust_contract();
+    c.ecosystems = vec![Ecosystem::Binary, Ecosystem::Go];
     c.targets = vec![
         target(
             Ecosystem::Binary,
@@ -742,10 +756,10 @@ fn an_all_distribution_repo_has_no_derivable_version() {
             Adapter::CargoDist,
         ),
         target(
-            Ecosystem::Rust,
+            Ecosystem::Go,
             "acme",
-            Registry::Homebrew,
-            Adapter::HomebrewTap,
+            Registry::ProxyGolangOrg,
+            Adapter::Goreleaser,
         ),
     ];
     assert!(matches!(

@@ -1385,14 +1385,15 @@ fn resume_conflict_error(
     .with_invalid_value(run_id.to_string())
     .with_problems(problems)
 }
-/// `ossctl release cut --plan <id> --version <v>` — execute a sealed plan across
-/// the phase-barrier coordinator, refusing on repo drift (ADR-0002 §2/§3).
+/// `ossctl release cut --plan <id>` — execute a sealed plan across the
+/// phase-barrier coordinator, refusing on repo drift (ADR-0002 §2/§3).
 ///
 /// Flow: re-derive the plan from the *current* contract + facts + `HEAD` and the
-/// supplied `--version`; **refuse (`plan_stale`) unless the recomputed `plan_id`
-/// equals `--plan`** (the drift check — a commit, contract edit, or version
-/// change since `release plan` aborts here rather than publishing something the
-/// human did not approve). On acceptance, create the journalled run (single
+/// manifest-derived version (the single source of truth, no `--version` input);
+/// **refuse (`plan_stale`) unless the recomputed `plan_id` equals `--plan`** (the
+/// drift check — a commit, contract edit, or manifest-version change since `release
+/// plan` aborts here rather than publishing something the human did not approve). On
+/// acceptance, create the journalled run (single
 /// active cut) and drive dry-run-all → build-all → publish-all → tag-once through
 /// the coordinator, streaming each journalled fact.
 ///
@@ -1550,8 +1551,7 @@ fn plan_stale_error(approved: &str, current: &ReleasePlan) -> CliError {
 }
 
 /// Resolve the release version from the workspace manifest (the single source of
-/// truth), confirming an optional `--version` against it, and map any failure to the
-/// §10 error envelope.
+/// truth) and map any failure to the §10 error envelope.
 ///
 /// Thin wrapper over [`ossctl_core::release::plan::resolve_release_version`] used by
 /// `plan`/`cut`/`resume` so all three share one derivation + one error surface.
@@ -2189,9 +2189,12 @@ mod tests {
             PlanHarness::try_parse_from(["plan"]).is_ok(),
             "plan still parses with no --version"
         );
-        assert!(
-            PlanHarness::try_parse_from(["plan", "--version", "0.3.0"]).is_err(),
-            "--version must be an unexpected-argument error, not ignored"
+        let err = PlanHarness::try_parse_from(["plan", "--version", "0.3.0"])
+            .expect_err("--version must be rejected");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "--version must be an unexpected-argument error, not ignored or some other clap error"
         );
     }
 
@@ -2203,9 +2206,12 @@ mod tests {
             CutHarness::try_parse_from(["cut", "--plan", "abc"]).is_ok(),
             "cut still parses with just --plan"
         );
-        assert!(
-            CutHarness::try_parse_from(["cut", "--plan", "abc", "--version", "0.3.0"]).is_err(),
-            "--version must be an unexpected-argument error, not ignored"
+        let err = CutHarness::try_parse_from(["cut", "--plan", "abc", "--version", "0.3.0"])
+            .expect_err("--version must be rejected");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "--version must be an unexpected-argument error, not ignored or some other clap error"
         );
     }
 

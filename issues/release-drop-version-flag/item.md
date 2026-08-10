@@ -6,6 +6,9 @@ status: in-progress
 priority: normal
 epic: ossctl-phase4-build
 related: ['@release-version-single-source']
+commits:
+- hash: 31b1c2a
+  summary: remove --version input; version derived solely from manifest (breaking); all callers updated
 ---
 
 # drop --version as a release input entirely; the workspace manifest is the only source of truth

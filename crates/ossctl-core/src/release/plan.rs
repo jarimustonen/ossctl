@@ -213,49 +213,47 @@ pub struct PlanDrift {
 /// the version guard can read, or has no manifest version by design — the capability
 /// the fail-closed guard keys on (`version-source-fail-closed-nonrust`).
 ///
-/// The distinction is a function of the target's **publish destination**
-/// ([`Registry`]), not its ecosystem: a Rust crate repackaged for a Homebrew tap
-/// publishes to [`Registry::Homebrew`] and is [`Distribution`](VersionSource::Distribution)
-/// even though its ecosystem is `rust`.
+/// The distinction is a function of the target's **[`Ecosystem`]**, not its publish
+/// registry. A Rust/Node/Python package carries its version in a manifest
+/// (`Cargo.toml`/`package.json`/`pyproject.toml`) regardless of *where* it is
+/// published — a Rust crate repackaged for a Homebrew tap still reads its version
+/// from `Cargo.toml`, so it is [`Manifest`](VersionSource::Manifest). Keying on the
+/// registry instead would wrongly treat that crate (and a binary-distribution-only
+/// Rust repo) as versionless and refuse to derive a version that is plainly in the
+/// tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersionSource {
-    /// The publish destination reads the version from a package manifest
-    /// (`crates.io`←`Cargo.toml`, `npm`←`package.json`, `PyPI`←`pyproject.toml`/`setup.py`).
+    /// The ecosystem carries the package version in a manifest
+    /// (`rust`←`Cargo.toml`, `node`←`package.json`, `python`←`pyproject.toml`/`setup.py`).
     /// A resolved target of this class **must** expose a detected manifest version in
     /// `facts`; a resolved package with none is a *detector failure* that fails the
     /// guard **closed** ([`VersionResolveError::MissingManifestVersion`]) rather than
     /// silently skipping the version check (the fail-OPEN gap for manifest-versioned
     /// non-Rust ecosystems this model closes).
     Manifest,
-    /// No manifest version **by design**: a distribution/repackaging destination whose
-    /// version binds to the artifact it ships, not a manifest of its own — a
-    /// `gh-releases` binary set (cargo-dist), a Homebrew tap formula, or a
-    /// VCS-tag-versioned Go module (`proxy.golang.org`). Legitimately **skipped** by
-    /// the version guard: there is no manifest to read a version from and none is
-    /// expected.
+    /// No manifest version **by design**: the ecosystem's version does not live in a
+    /// tree manifest — a raw `binary` distribution (its version binds to the artifact
+    /// it ships), or a VCS-tag-versioned `go` module (`go.mod` declares no version).
+    /// Legitimately **skipped** by the version guard: there is no manifest to read a
+    /// version from and none is expected.
     Distribution,
 }
 
 impl VersionSource {
-    /// Classify a target by its publish [`Registry`] (the destination is the
-    /// authority on whether a manifest version is meaningful).
+    /// Classify a target by its [`Ecosystem`] (the ecosystem is the authority on
+    /// whether a package's version lives in a tree manifest).
     ///
-    /// Exhaustive over [`Registry`] on purpose — a new publish destination must make
-    /// a deliberate manifest-vs-distribution choice here rather than default to a
-    /// silent skip (which would re-open the fail-OPEN gap).
+    /// Exhaustive over [`Ecosystem`] on purpose — a new ecosystem must make a
+    /// deliberate manifest-vs-distribution choice here rather than default to a silent
+    /// skip (which would re-open the fail-OPEN gap).
     #[must_use]
-    pub fn of(registry: Registry) -> Self {
-        match registry {
-            // Registries that publish from a version-carrying package manifest.
-            Registry::CratesIo | Registry::Npm | Registry::Pypi | Registry::TestPypi => {
-                Self::Manifest
-            }
-            // Distribution/repackaging destinations with no manifest version of their
-            // own: binaries (gh-releases), a Homebrew formula, a VCS-tag-versioned Go
-            // module.
-            Registry::GhReleases | Registry::Homebrew | Registry::ProxyGolangOrg => {
-                Self::Distribution
-            }
+    pub fn of(ecosystem: Ecosystem) -> Self {
+        match ecosystem {
+            // Ecosystems whose package version lives in a version-carrying manifest.
+            Ecosystem::Rust | Ecosystem::Node | Ecosystem::Python => Self::Manifest,
+            // No tree-manifest version: a raw binary (versioned by the built artifact),
+            // or a Go module (versioned by its VCS tag).
+            Ecosystem::Go | Ecosystem::Binary => Self::Distribution,
         }
     }
 }
@@ -413,25 +411,27 @@ struct ClassifiedVersions {
 /// manifest versions from the manifest-versioned targets whose version could not be
 /// read.
 ///
-/// - A [`VersionSource::Distribution`] target is skipped regardless of version: it has
-///   no manifest version by design (its version binds to the crate it repackages).
+/// - A [`VersionSource::Distribution`] target (a `binary`/`go` ecosystem) is skipped
+///   regardless of version: it has no tree-manifest version by design.
 /// - A [`VersionSource::Manifest`] target with a detected version becomes a `checkable`
 ///   row; one with a resolved package but **no** detected version becomes a `missing`
 ///   row (fail closed).
-/// - A manifest target with **no resolved package** cannot be looked up here at all;
-///   it is left to the CLI's separate null-package plan refusal rather than
-///   double-reported as a version failure.
+/// - A manifest target with **no resolved package** cannot be looked up here at all.
+///   Package resolution is a separate concern guarded elsewhere — `release plan` warns
+///   and `release cut` refuses via `coordinator::validate_plan` — so it is not
+///   double-reported here as a version failure. (Deeper: hardening the resolver itself
+///   to fail closed on an unresolved manifest target is tracked as a follow-up.)
 fn classify_target_versions(contract: &Contract, facts: &Facts) -> ClassifiedVersions {
     let mut checkable: Vec<VersionMismatch> = Vec::new();
     let mut missing: Vec<UnversionedTarget> = Vec::new();
     for t in resolve_targets(contract, facts) {
-        // Distribution targets have no manifest version by design — skip them whether
-        // or not `facts` happens to carry a version for their package.
-        if VersionSource::of(t.registry) == VersionSource::Distribution {
+        // Distribution ecosystems have no tree-manifest version by design — skip them
+        // whether or not `facts` happens to carry a version for their package.
+        if VersionSource::of(t.ecosystem) == VersionSource::Distribution {
             continue;
         }
-        // A manifest target with no resolved package cannot be version-checked here;
-        // the CLI's null-package refusal already rejects such a plan.
+        // A manifest target with no resolved package cannot be version-checked here
+        // (see the null-package guards named above).
         let Some(package) = t.package else { continue };
         match facts
             .packages
