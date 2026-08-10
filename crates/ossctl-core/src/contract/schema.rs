@@ -19,18 +19,26 @@ use serde::Serialize;
 ///
 /// A config declaring a higher version is refused rather than guessed
 /// (SCHEMA.md §2 floor 5) — skills upgrade independently of the repos they act
-/// on. Distinct from the wire-envelope [`crate::SCHEMA_VERSION`]; both are `1`
-/// today but version different things (the contract document vs. the JSON
-/// envelope). Mirrors the Python `KNOWN_SCHEMA_VERSION`.
+/// on. Distinct from the wire-envelope [`crate::SCHEMA_VERSION`], which versions
+/// the JSON envelope, not the contract document. Mirrors the Python
+/// `KNOWN_SCHEMA_VERSION`.
 ///
-/// Stays `1` across a *purely additive* field (a new optional top-level key that
-/// defaults to absent/`null`, e.g. [`Distribution`]): an older reader preserves
-/// the unknown key under [`Contract::extra_fields`] and warns rather than
-/// failing, and every existing contract's shape is unchanged. The migration rule
+/// **Bumped `1` → `2`** for the monorepo-distribution change: the single
+/// top-level [`Distribution`] key `distribution` (an object-or-`null`) became the
+/// collection [`Contract::distributions`] (`distributions`, always a JSON array),
+/// and every distribution gained an association key [`Distribution::package`].
+/// Renaming the canonical key and re-shaping the value is a **breaking** change,
+/// not a pure addition, so it bumps deliberately (never silently). This tool
+/// still *reads* a v1 document — a bare `distribution:` mapping deserializes as a
+/// one-element `distributions` list — but *emits* the v2 canonical shape.
+///
+/// A purely additive field (a new optional top-level key defaulting to
+/// absent/`null`) does NOT bump: an older reader preserves the unknown key under
+/// [`Contract::extra_fields`] and warns rather than failing. The migration rule
 /// bumps only on a **breaking** change — renaming/removing a field or re-meaning
-/// an existing one — never on a pure addition, which is the case the
-/// forward-compat mechanism is built to absorb.
-pub const KNOWN_SCHEMA_VERSION: u32 = 1;
+/// an existing one — never on a pure addition, which the forward-compat mechanism
+/// absorbs.
+pub const KNOWN_SCHEMA_VERSION: u32 = 2;
 
 /// The changelog fragment directory materialized when the config omits it.
 pub const DEFAULT_FRAGMENT_DIR: &str = "changelog/fragments";
@@ -290,8 +298,10 @@ pub struct Target {
 /// members SEE the tap + installer and neither under-describe the release nor
 /// regenerate the existing `release.yml`.
 ///
-/// `Option` on [`Contract`]: `null` for a registry-only repo (the common case),
-/// so this addition leaves every existing contract's shape unchanged.
+/// One element of [`Contract::distributions`]: a registry-only repo has an empty
+/// list, a single-binary repo one entry, a **monorepo** one entry per
+/// independently-distributed binary (each with its own installers / tap /
+/// platforms), tagged by [`Self::package`].
 ///
 /// Keeps `Eq` even after gaining [`Self::extra_fields`]: `serde_json::Value`
 /// (and `serde_json::Map`) implement `Eq` — JSON numbers exclude non-finite
@@ -299,6 +309,17 @@ pub struct Target {
 /// [`Contract`], which is `PartialEq`-only for unrelated historical reasons).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Distribution {
+    /// The package/target this distribution belongs to (matches a
+    /// [`Target::package`] or a manifest package name), or `null` for the sole /
+    /// unassociated distribution.
+    ///
+    /// The monorepo association key: a repo shipping multiple independently
+    /// distributed binaries gives each its own [`Distribution`] tagged with the
+    /// package it builds. `null` is the single-distribution back-compat case (a
+    /// bare `distribution:` mapping carries no package). The normalizer requires a
+    /// non-null, **unique** `package` on every entry once there are two or more
+    /// distributions — otherwise a monorepo's entries would be indistinguishable.
+    pub package: Option<String>,
     /// The binary-distribution engine that owns the tag-triggered release
     /// workflow.
     pub adapter: DistributionAdapter,
@@ -385,10 +406,14 @@ pub struct Contract {
     /// by a contract with no ecosystems), so every consumer that reads `targets`
     /// already handles `[]` — no reader breaks.
     pub targets: Vec<Target>,
-    /// The binary-distribution block (cargo-dist / goreleaser binaries +
-    /// installers + Homebrew tap), or `null` for a registry-only repo. Coexists
-    /// with `targets` — a cargo-dist repo has both.
-    pub distribution: Option<Distribution>,
+    /// The binary-distribution blocks (cargo-dist / goreleaser binaries +
+    /// installers + Homebrew tap). Empty for a registry-only repo, one entry for
+    /// a single-binary repo, one per independently-distributed binary for a
+    /// **monorepo** (each tagged by [`Distribution::package`]). Always a JSON
+    /// array in canonical output. Coexists with `targets` — a cargo-dist repo has
+    /// both. A bare `distribution:` mapping in the source deserializes as a
+    /// one-element list (v1 back-compat); a `distributions:` sequence carries many.
+    pub distributions: Vec<Distribution>,
     /// Base versioning scheme.
     pub versioning: VersioningBase,
     /// The calver pattern string, or `null` for non-calver schemes.

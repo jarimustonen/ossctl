@@ -1,8 +1,8 @@
 ---
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-08-10
 type: feature
-status: open
+status: in-progress
 priority: normal
 related: ['@contract-cannot-model-cargo-dist-release']
 ---
@@ -23,3 +23,45 @@ serde model (`schema.rs`) + `normalize.rs`. Must preserve the single-`Distributi
 (back-compat deser: a bare `distribution:` block still parses as one entry) and add the
 per-package/target association key. Sequence strictly AFTER `publish-target-none` (both touch the
 same LANE B hot files). Land via a reviewed worktree (design-first + `/llm-review` before merge).
+
+## Design note (implementation, 2026-08-10)
+
+**Field shape.** `Contract.distribution: Option<Distribution>` → `Contract.distributions:
+Vec<Distribution>`. Canonical output is ALWAYS a JSON array (`[]` for a registry-only repo,
+replacing the old `distribution: null`). This renames the top-level canonical key
+`distribution` → `distributions`.
+
+**Association key.** `Distribution` gains `package: Option<String>` (first field). It names the
+package/target this distribution belongs to (matches a `Target.package` / a manifest package).
+`null` for the sole/unassociated distribution (back-compat); always present in canonical output
+(like `Target.package`). Floor: when `distributions.len() >= 2`, every entry MUST carry a
+non-null, unique `package` — otherwise a monorepo's two distributions are indistinguishable. A
+single distribution may leave `package` null.
+
+**Back-compat deser — accept BOTH input keys (chosen over "one key, mapping-or-sequence").**
+- `distribution:` (a single mapping) → parsed to a one-element `Vec` (the overwhelmingly common
+  case, incl. ossctl's own `OSS-RELEASE.md` — the author changes NOTHING).
+- `distributions:` (a sequence of mappings) → each parsed; each may carry `package:`.
+- Declaring BOTH keys is an error (ambiguous). Both keys are in `KNOWN_KEYS`.
+
+Justification for two distinct keys over a polymorphic single key: (1) a plural key is
+self-documenting — `distributions:` reads as "many" at a glance; (2) each input key stays
+*monomorphic* (one YAML type), matching the normalizer's style and avoiding the shape-polymorphism
+that makes `targets`' absent-vs-empty subtle; (3) zero-change back-compat for the singular author.
+
+**schema_version bump (deliberate).** Renaming the canonical key `distribution` → `distributions`
+and adding `package` to every distribution is a BREAKING wire change (not a pure addition), so
+`KNOWN_SCHEMA_VERSION` bumps 1 → 2. The tool still READS v1 documents (a `distribution:` mapping),
+translating them into the v2 canonical shape. `SEAL_VERSION` bumps 3 → 4 (the sealed pre-image
+embeds the serialized `Contract`, whose shape changed) and the golden `plan_id` vector is updated
+in lockstep.
+
+**Release-seam threading (minimal, mechanical — len==1 is byte-identical to today).**
+- `release::plan::build` — `homebrew_tap` = first distribution carrying a tap
+  (`distributions.iter().find_map(|d| d.homebrew_tap.clone())`); identical to today for 0/1
+  distributions. A per-target tap for a true multi-tap monorepo is a documented follow-up.
+- `ossctl dist generate` — 0 → existing `no_distribution`; 1 → today's behavior; ≥2 → a new
+  `multiple_distributions` user error (per-package dist scaffolding is a follow-up).
+- `audit::cross_platform_gap` — iterate all distributions; gap ids stay bare
+  (`distribution-linux` / `distribution-macos`) for the single case (byte-identical audit), and
+  are suffixed with the package for a monorepo (`distribution-linux:<pkg>`).

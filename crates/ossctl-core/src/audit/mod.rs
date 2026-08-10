@@ -573,15 +573,33 @@ fn workflow_mentions(repo_root: &Path, fs: &dyn Fs, tokens: &[&str]) -> Presence
 /// `security-policy` gap uses), but the wording escalates at production, where a
 /// one-OS release is a hard gap.
 fn cross_platform_gap(gaps: &mut Vec<Gap>, contract: &Contract, maturity: Maturity) {
-    let Some(dist) = &contract.distribution else {
-        return;
-    };
     let production = tier_rank(maturity) >= tier_rank(Maturity::Production);
-    if !dist.platforms.iter().any(|t| is_linux_triple(t)) {
-        gaps.push(platform_gap("distribution-linux", "Linux", production));
-    }
-    if !dist.platforms.iter().any(|t| is_darwin_triple(t)) {
-        gaps.push(platform_gap("distribution-macos", "macOS", production));
+    let multi = contract.distributions.len() > 1;
+    for (idx, dist) in contract.distributions.iter().enumerate() {
+        // Keep the gap ids bare (`distribution-linux`/`distribution-macos`) for the
+        // single-distribution case — byte-identical audit output — and disambiguate
+        // per package for a monorepo so two distributions missing the same OS do not
+        // collide on one id.
+        let suffix = if multi {
+            let key = dist.package.clone().unwrap_or_else(|| idx.to_string());
+            format!(":{key}")
+        } else {
+            String::new()
+        };
+        if !dist.platforms.iter().any(|t| is_linux_triple(t)) {
+            gaps.push(platform_gap(
+                &format!("distribution-linux{suffix}"),
+                "Linux",
+                production,
+            ));
+        }
+        if !dist.platforms.iter().any(|t| is_darwin_triple(t)) {
+            gaps.push(platform_gap(
+                &format!("distribution-macos{suffix}"),
+                "macOS",
+                production,
+            ));
+        }
     }
 }
 

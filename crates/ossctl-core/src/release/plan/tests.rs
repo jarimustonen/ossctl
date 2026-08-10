@@ -84,7 +84,7 @@ fn rust_contract() -> Contract {
             registry: Registry::CratesIo,
             adapter: Adapter::CargoPublish,
         }],
-        distribution: None,
+        distributions: vec![],
         versioning: VersioningBase::Semver,
         versioning_pattern: None,
         changelog: Changelog {
@@ -236,7 +236,7 @@ fn plan_id_golden_vector() {
     let plan = build(&rust_contract(), &rust_facts(), HEAD, "1.2.0");
     assert_eq!(
         plan.plan_id,
-        "2a6151c8bdb2740be22ef1721e05fcb4c9b84305029c0135f287dcdb5411bcf9"
+        "400133f96f974c3bfe7a6b71d20861c291497c8cde5b23fe79ff96c94c51f855"
     );
 }
 

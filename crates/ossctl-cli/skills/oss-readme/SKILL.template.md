@@ -254,15 +254,18 @@ package's snippet plus a one-line "see the docs for the individual packages" not
 names come from `targets[].package` / `facts.packages[].package`; the module path / repo
 slug for `go install` / `gh-releases` comes from `git remote get-url origin` (read-only).
 
-**Cross-platform install from the `distribution` block (macOS AND Linux — family canon).**
-When `contract.distribution` is **not null**, the project ships a binary distribution
-(cargo-dist / goreleaser: prebuilt GitHub-Release binaries + a generated installer set)
-*in addition to* any registry `targets[]`. These paths are what let a downstream README
+**Cross-platform install from the `distributions[]` blocks (macOS AND Linux — family canon).**
+`contract.distributions` is an **array** (empty for a registry-only repo, one entry for a
+single-binary repo, one per independently-distributed binary for a **monorepo** — each tagged
+with `distributions[].package`). When it is **non-empty**, the project ships a binary
+distribution (cargo-dist / goreleaser: prebuilt GitHub-Release binaries + a generated installer
+set) *in addition to* any registry `targets[]`. These paths are what let a downstream README
 show install steps on **both macOS and Linux** — not only registry commands — so emit them
-whenever the block is present. Read `distribution.installers[]`, `distribution.gh_releases`,
-`distribution.homebrew_tap`, and `distribution.platforms[]`; the `<owner>/<repo>` and `<pkg>`
-come from `git remote get-url origin` (read-only) and `targets[].package` /
-`facts.packages[].package` (the root/primary package for the installer artifact name):
+whenever a block is present. For the common single-binary repo read `distributions[0]`; for a
+monorepo emit one install group per entry, keyed by its `package`. From each distribution read
+`.installers[]`, `.gh_releases`, `.homebrew_tap`, and `.platforms[]`; the `<owner>/<repo>` and
+`<pkg>` come from `git remote get-url origin` (read-only) and the distribution's `package` /
+`targets[].package` / `facts.packages[].package` (the package for the installer artifact name):
 
 - **Shell installer** — emit **only when `installers[]` includes `shell`**. One line, works
   on macOS **and** Linux:
@@ -285,8 +288,8 @@ come from `git remote get-url origin` (read-only) and `targets[].package` /
   arch the set does not list (an explicit `platforms[]` may be Linux-less or Windows-bearing;
   read what is there).
 - **Homebrew is cross-platform too.** When a `homebrew` install snippet is emitted (from a
-  `homebrew` registry target or `installers[]` including `homebrew`, using
-  `distribution.homebrew_tap` as the tap), add a short note that `brew install` works on
+  `homebrew` registry target or `installers[]` including `homebrew`, using the distribution's
+  `homebrew_tap` as the tap), add a short note that `brew install` works on
   **macOS and Linux (Linuxbrew)** — the same command covers both.
 
 **Ordering under `## Installation`.** Put the **always-works** source/registry paths first —
@@ -294,7 +297,7 @@ come from `git remote get-url origin` (read-only) and `targets[].package` /
 **shell installer**, then the **prebuilt-binary** path. Rationale: a reader who has the
 toolchain wants the one-liner they already trust; the installer/binary paths are the
 no-toolchain fallback and the explicit cross-platform coverage statement. Keep every registry
-snippet — the `distribution` paths are **additive**, never a replacement for them.
+snippet — the `distributions[]` paths are **additive**, never a replacement for them.
 
 **Badge row — render exactly the badges in `health_badges[]`** (the contract already
 guarantees each has an enabled producer). Build each from conventional shields.io / service

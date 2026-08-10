@@ -1782,6 +1782,42 @@ fn dist_generate_without_distribution_is_user_error() {
     );
 }
 
+/// A monorepo contract with multiple `distributions:` is a user error (exit 1):
+/// `dist generate` scaffolds one `dist-workspace.toml` and cannot yet target a
+/// single package of a monorepo. Nothing is written.
+#[test]
+fn dist_generate_with_multiple_distributions_is_user_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let doc = "---\n\
+        schema_version: 2\n\
+        status: approved\n\
+        maturity: mvp\n\
+        ecosystems: [rust]\n\
+        versioning: semver\n\
+        changelog: {mode: fragment, source: issuectl-trailers}\n\
+        release: {model: gated, layout: monorepo}\n\
+        health_badges: [ci]\n\
+        license: MIT\n\
+        distributions:\n\
+        \x20 - {package: alpha, adapter: cargo-dist}\n\
+        \x20 - {package: beta, adapter: cargo-dist}\n\
+        ---\n\n# Test\n";
+    std::fs::write(dir.path().join("OSS-RELEASE.md"), doc).unwrap();
+
+    let out = ossctl()
+        .args(["dist", "generate", "--no-workflow", "--repo-root"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "user error → exit 1");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
+    assert_eq!(v["error"]["code"], "multiple_distributions");
+    assert!(
+        !dir.path().join("dist-workspace.toml").exists(),
+        "nothing written"
+    );
+}
+
 /// An existing config is not clobbered without `--force`.
 #[test]
 fn dist_generate_refuses_to_clobber_without_force() {

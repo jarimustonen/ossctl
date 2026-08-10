@@ -61,7 +61,11 @@ const KNOWN_KEYS: &[&str] = &[
     "maturity",
     "ecosystems",
     "targets",
+    // Both distribution input keys are known: `distribution` (a single mapping,
+    // v1 back-compat) and `distributions` (a sequence, the monorepo shape). See
+    // [`parse_distributions`]; declaring both is an error, not an unknown-field.
     "distribution",
+    "distributions",
     "versioning",
     "changelog",
     "conventional_commits",
@@ -306,18 +310,13 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
         }
     };
 
-    // distribution — the binary-distribution block (cargo-dist/goreleaser); a
-    // registry-only repo omits it (→ None), leaving its contract shape unchanged.
-    // A `homebrew`-registry target is the OTHER consumer of `homebrew_tap` (the
-    // release engine's homebrew-tap adapter pushes the formula in its `dist`
-    // phase), so it is passed in to suppress the dead-config warning.
+    // distributions — the binary-distribution blocks (cargo-dist/goreleaser); a
+    // registry-only repo has none (→ empty list), leaving its contract shape
+    // unchanged. A `homebrew`-registry target is the OTHER consumer of
+    // `homebrew_tap` (the release engine's homebrew-tap adapter pushes the formula
+    // in its `dist` phase), so it is passed in to suppress the dead-config warning.
     let has_homebrew_target = targets.iter().any(|t| t.registry == Registry::Homebrew);
-    let distribution = parse_distribution(
-        map.get("distribution"),
-        has_homebrew_target,
-        schema_version,
-        p,
-    );
+    let distributions = parse_distributions(map, has_homebrew_target, schema_version, p);
 
     // changelog (mode + source + fragment_dir).
     let changelog = match map.get("changelog") {
@@ -466,8 +465,8 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
     // A distribution block ships public binaries (GH-Release artifacts, a curl-pipe
     // installer, a Homebrew tap PR) — that is publishing, and a spike is not being
     // published. Mirrors the `release.model: auto` floor: raise maturity or drop the
-    // block. (Absent block → no constraint; registry-only spikes are unaffected.)
-    if distribution.is_some() && maturity == Maturity::Spike {
+    // block. (No blocks → no constraint; registry-only spikes are unaffected.)
+    if !distributions.is_empty() && maturity == Maturity::Spike {
         p.err(
             "floor: a distribution block ships public binaries (installer + tap) — not allowed on \
              maturity 'spike' (a spike is not being published); raise maturity or drop distribution"
@@ -499,7 +498,7 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
         maturity,
         ecosystems,
         targets,
-        distribution,
+        distributions,
         versioning,
         versioning_pattern,
         changelog,
@@ -662,6 +661,7 @@ fn validate_targets(
 /// `warnings` (those live only at the top level), so only `extra_fields` needs
 /// reserving here.
 const KNOWN_DISTRIBUTION_KEYS: &[&str] = &[
+    "package",
     "adapter",
     "gh_releases",
     "installers",
@@ -681,28 +681,138 @@ const INSTALLER_ORDER: [Installer; 5] = [
     Installer::Npm,
 ];
 
-/// Parse the optional `distribution` block (the cargo-dist/goreleaser binary
-/// layer). Absent/null → `None`, leaving a registry-only contract unchanged. A
-/// present-but-non-mapping value is an error (with `None` on the error path — the
-/// document is never emitted while `problems.errors` is non-empty).
-#[allow(clippy::too_many_lines)]
-fn parse_distribution(
-    value: Option<&Value>,
+/// Parse the optional distribution layer, accepting BOTH input spellings:
+/// `distribution:` (a single mapping — v1 back-compat, the overwhelmingly common
+/// case) and `distributions:` (a sequence of mappings — a monorepo shipping
+/// several independently-distributed binaries). A registry-only repo declares
+/// neither (or a bare/null key) and gets an empty list, leaving its contract
+/// shape unchanged. Declaring BOTH keys at once is ambiguous and is an error.
+///
+/// Each element is parsed by [`parse_one_distribution`]; the collection-level
+/// floor (a monorepo's `package` must be present and unique) lives here.
+fn parse_distributions(
+    map: &Mapping,
     has_homebrew_target: bool,
     schema_version: u32,
     p: &mut Problems,
-) -> Option<Distribution> {
-    let m = match value {
-        None | Some(Value::Null) => return None,
-        Some(Value::Mapping(m)) => m,
-        Some(_) => {
+) -> Vec<Distribution> {
+    let single = map.get("distribution");
+    let many = map.get("distributions");
+    // Distinguish "absent" from "present-but-null": a bare `distribution:` /
+    // `distributions:` (null value) reads as absent, exactly like the sibling keys.
+    let single_present = matches!(single, Some(v) if !v.is_null());
+    let many_present = matches!(many, Some(v) if !v.is_null());
+    if single_present && many_present {
+        p.err(
+            "declare either `distribution` (one block) or `distributions` (a list), not both — \
+             they are the singular and plural spellings of the same field"
+                .to_string(),
+        );
+        // Fall through parsing the plural so the rest of the pass still surfaces
+        // problems; the document is never emitted while `errors` is non-empty.
+    }
+
+    let distributions = match (single, many) {
+        // `distributions:` — a sequence of mappings (the monorepo shape). Wins
+        // over a stray singular key (already flagged above).
+        (_, Some(Value::Sequence(seq))) => {
+            let mut out = Vec::with_capacity(seq.len());
+            for (idx, item) in seq.iter().enumerate() {
+                match item {
+                    Value::Mapping(m) => out.push(parse_one_distribution(
+                        m,
+                        has_homebrew_target,
+                        schema_version,
+                        p,
+                    )),
+                    _ => p.err(format!(
+                        "distributions[{idx}] must be a mapping with {{package, adapter, \
+                         gh_releases?, installers?, homebrew_tap?, platforms?}}"
+                    )),
+                }
+            }
+            out
+        }
+        (_, Some(v)) if !v.is_null() => {
+            p.err(format!(
+                "distributions must be a list of distribution mappings, got {}",
+                yaml_display(v)
+            ));
+            Vec::new()
+        }
+        // `distribution:` — a single mapping (v1 back-compat) → a one-element list.
+        (Some(Value::Mapping(m)), _) => {
+            vec![parse_one_distribution(
+                m,
+                has_homebrew_target,
+                schema_version,
+                p,
+            )]
+        }
+        (Some(v), _) if !v.is_null() => {
             p.err(
                 "distribution must be a mapping with {adapter?, gh_releases?, installers?, \
-                 homebrew_tap?, platforms?}"
+                 homebrew_tap?, platforms?} (or use `distributions:` for a list)"
                     .to_string(),
             );
-            return None;
+            Vec::new()
         }
+        // Neither key (or both null) → a registry-only repo.
+        _ => Vec::new(),
+    };
+
+    // Collection floor: a monorepo (≥2 distributions) must tag each entry with a
+    // non-null, UNIQUE `package` — otherwise its distributions are
+    // indistinguishable and the association is meaningless. A single distribution
+    // may leave `package` null (the bare `distribution:` back-compat case).
+    if distributions.len() >= 2 {
+        let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for (idx, d) in distributions.iter().enumerate() {
+            match d.package.as_deref() {
+                None => p.err(format!(
+                    "floor: distributions[{idx}] has no `package` — with two or more \
+                     distributions each must name the package it builds (the monorepo \
+                     association key), so they can be told apart"
+                )),
+                Some(pkg) if !seen.insert(pkg) => p.err(format!(
+                    "floor: distributions[{idx}].package '{pkg}' is used by more than one \
+                     distribution — each distribution must name a distinct package"
+                )),
+                Some(_) => {}
+            }
+        }
+    }
+
+    distributions
+}
+
+/// Parse ONE distribution mapping (an element of `distributions`, or the sole
+/// `distribution:` block) into a [`Distribution`]. On the error path it records
+/// problems and returns a placeholder — the document is never emitted while
+/// `problems.errors` is non-empty.
+#[allow(clippy::too_many_lines)]
+fn parse_one_distribution(
+    m: &Mapping,
+    has_homebrew_target: bool,
+    schema_version: u32,
+    p: &mut Problems,
+) -> Distribution {
+    // package — the monorepo association key. Optional (null for the sole/bare
+    // distribution); the collection-level floor in `parse_distributions` requires
+    // it once there are two or more distributions.
+    let package = match m.get("package") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_str() {
+            Some(s) if !s.trim().is_empty() => Some(s.to_string()),
+            _ => {
+                p.err(
+                    "distribution.package must be a non-empty string (the package this \
+                     distribution builds)"
+                        .to_string(),
+                );
+                None
+            }
+        },
     };
 
     // adapter — required when the block is present. Which tool OWNS the existing
@@ -919,14 +1029,15 @@ fn parse_distribution(
         p,
     );
 
-    Some(Distribution {
+    Distribution {
+        package,
         adapter,
         gh_releases,
         installers,
         homebrew_tap,
         platforms,
         extra_fields,
-    })
+    }
 }
 
 /// The cross-platform default `distribution.platforms` set as owned strings —
@@ -1454,7 +1565,7 @@ mod tests {
     #[test]
     fn materializes_all_defaults() {
         let c = norm(MINIMAL).contract;
-        assert_eq!(c.schema_version, 1);
+        assert_eq!(c.schema_version, KNOWN_SCHEMA_VERSION);
         assert_eq!(c.status, Status::Approved);
         assert_eq!(c.maturity, Maturity::Mvp);
         assert!(c.ecosystems.is_empty());
@@ -1810,7 +1921,7 @@ mod tests {
             "maturity",
             "ecosystems",
             "targets",
-            "distribution",
+            "distributions",
             "versioning",
             "versioning_pattern",
             "changelog",
@@ -1828,19 +1939,19 @@ mod tests {
             assert!(json.get(key).is_some(), "missing §4 key {key}");
         }
         assert!(json["versioning_pattern"].is_null());
-        // A registry-only contract carries an explicit `distribution: null` — the
-        // additive field is present but shape-neutral for existing configs.
-        assert!(json["distribution"].is_null());
+        // A registry-only contract carries an explicit empty `distributions: []` —
+        // the collection is always a JSON array (v2 canonical shape).
+        assert_eq!(json["distributions"], serde_json::json!([]));
     }
 
     // ── distribution (cargo-dist binary layer) ───────────────────────────────
 
-    /// A registry-only contract is unchanged by the additive `distribution`
-    /// field: it normalizes clean and `distribution` is `None`.
+    /// A registry-only contract has no distribution: it normalizes clean and
+    /// `distributions` is empty.
     #[test]
     fn registry_only_contract_has_no_distribution() {
         let c = norm("---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\n---\n").contract;
-        assert_eq!(c.distribution, None);
+        assert!(c.distributions.is_empty());
         assert_eq!(c.targets.len(), 1);
         assert_eq!(c.targets[0].registry, Registry::CratesIo);
     }
@@ -1861,7 +1972,11 @@ mod tests {
         assert_eq!(c.targets[0].registry, Registry::CratesIo);
         assert_eq!(c.targets[0].adapter, Adapter::CargoPublish);
         // The binary layer is the Distribution block.
-        let d = c.distribution.expect("distribution present");
+        let d = c
+            .distributions
+            .into_iter()
+            .next()
+            .expect("distribution present");
         assert_eq!(d.adapter, DistributionAdapter::CargoDist);
         assert!(d.gh_releases); // default true
         assert_eq!(d.installers, vec![Installer::Shell, Installer::Homebrew]);
@@ -1878,11 +1993,116 @@ mod tests {
                     distribution:\n  adapter: cargo-dist\n  gh_releases: true\n  \
                     installers: [shell, homebrew]\n  homebrew_tap: jarimustonen/homebrew-issuectl\n---\n";
         let json = serde_json::to_value(&norm(text).contract).unwrap();
-        let d = &json["distribution"];
+        let d = &json["distributions"][0];
         assert_eq!(d["adapter"], "cargo-dist");
         assert_eq!(d["gh_releases"], true);
         assert_eq!(d["installers"], serde_json::json!(["shell", "homebrew"]));
         assert_eq!(d["homebrew_tap"], "jarimustonen/homebrew-issuectl");
+        // A bare (singular) block carries a `null` association key.
+        assert!(d["package"].is_null());
+    }
+
+    // ── monorepo: Vec<Distribution> + per-package association ─────────────────
+
+    /// Back-compat: a bare singular `distribution:` mapping deserializes as a
+    /// one-element `distributions` list with a `null` package — the v1 author
+    /// changes nothing.
+    #[test]
+    fn singular_distribution_parses_as_one_element_list() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n---\n";
+        let c = norm(text).contract;
+        assert_eq!(c.distributions.len(), 1);
+        assert_eq!(c.distributions[0].package, None);
+        assert_eq!(c.distributions[0].adapter, DistributionAdapter::CargoDist);
+    }
+
+    /// A monorepo: a plural `distributions:` sequence, each entry tagged with the
+    /// package it builds, parses with the per-package association preserved in
+    /// order (each distribution keeps its own installers/tap).
+    #[test]
+    fn plural_distributions_parse_with_per_package_association() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    targets:\n  - {ecosystem: rust, package: alpha, registry: crates.io}\n  \
+                    - {ecosystem: rust, package: beta, registry: crates.io}\n\
+                    distributions:\n  - {package: alpha, adapter: cargo-dist, installers: [shell]}\n  \
+                    - {package: beta, adapter: cargo-dist, installers: [homebrew], homebrew_tap: owner/tap}\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        let d = n.contract.distributions;
+        assert_eq!(d.len(), 2);
+        assert_eq!(d[0].package.as_deref(), Some("alpha"));
+        assert_eq!(d[0].installers, vec![Installer::Shell]);
+        assert_eq!(d[1].package.as_deref(), Some("beta"));
+        assert_eq!(d[1].homebrew_tap.as_deref(), Some("owner/tap"));
+    }
+
+    /// Canonical JSON round-trips for BOTH shapes: the emitted `distributions`
+    /// array re-feeds as YAML frontmatter and normalizes to the same list — the
+    /// single (bare `distribution:`) and the monorepo (`distributions:`) cases.
+    #[test]
+    fn distributions_canonical_json_round_trip() {
+        for text in [
+            "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+             distribution:\n  adapter: cargo-dist\n  installers: [shell]\n---\n",
+            "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+             targets:\n  - {ecosystem: rust, package: a, registry: crates.io}\n  \
+             - {ecosystem: rust, package: b, registry: crates.io}\n\
+             distributions:\n  - {package: a, adapter: cargo-dist}\n  \
+             - {package: b, adapter: goreleaser}\n---\n",
+        ] {
+            let first = norm(text).contract;
+            assert!(!first.distributions.is_empty());
+            // Re-feed the canonical JSON as the frontmatter of a fresh document.
+            let json = serde_json::to_value(&first).unwrap();
+            let refed = format!("---\n{}---\n", serde_yaml::to_string(&json).unwrap());
+            let second = norm(&refed).contract;
+            assert_eq!(
+                first.distributions, second.distributions,
+                "round-trip drift for: {text}"
+            );
+        }
+    }
+
+    /// Declaring BOTH `distribution:` and `distributions:` is ambiguous → error.
+    #[test]
+    fn both_distribution_keys_is_an_error() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distribution:\n  adapter: cargo-dist\n\
+                    distributions:\n  - {package: a, adapter: cargo-dist}\n---\n";
+        assert_error_contains(&norm(text), "not both");
+    }
+
+    /// A monorepo (≥2 distributions) with an entry missing `package` → floor error
+    /// (the entries would be indistinguishable).
+    #[test]
+    fn multi_distribution_missing_package_is_a_floor_error() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    targets:\n  - {ecosystem: rust, package: a, registry: crates.io}\n\
+                    distributions:\n  - {package: a, adapter: cargo-dist}\n  \
+                    - {adapter: cargo-dist}\n---\n";
+        assert_error_contains(&norm(text), "must name the package it builds");
+    }
+
+    /// A monorepo with a duplicate `package` across distributions → floor error.
+    #[test]
+    fn multi_distribution_duplicate_package_is_a_floor_error() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    distributions:\n  - {package: dup, adapter: cargo-dist}\n  \
+                    - {package: dup, adapter: goreleaser}\n---\n";
+        assert_error_contains(&norm(text), "distinct package");
+    }
+
+    /// A single distribution MAY carry a `package` (no floor below the ≥2
+    /// threshold) — the association key is optional, not forbidden, for one block.
+    #[test]
+    fn single_distribution_may_carry_a_package() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
+                    targets:\n  - {ecosystem: rust, package: solo, registry: crates.io}\n\
+                    distributions:\n  - {package: solo, adapter: cargo-dist}\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert_eq!(n.contract.distributions[0].package.as_deref(), Some("solo"));
     }
 
     /// Forward-compat: an unknown key inside the `distribution` block is preserved
@@ -1899,7 +2119,9 @@ mod tests {
         let d = n
             .contract
             .clone()
-            .distribution
+            .distributions
+            .into_iter()
+            .next()
             .expect("distribution present");
         // The unknown sub-key is captured, with its nested value intact.
         assert_eq!(
@@ -1915,7 +2137,7 @@ mod tests {
         // It round-trips through the serialized JSON downstream members read.
         let json = serde_json::to_value(&n.contract).unwrap();
         assert_eq!(
-            json["distribution"]["extra_fields"]["future_signing"]["enabled"],
+            json["distributions"][0]["extra_fields"]["future_signing"]["enabled"],
             serde_json::json!(true)
         );
         // Reported once, scoped to the block, naming the key.
@@ -2228,7 +2450,12 @@ mod tests {
                     platforms: [x86_64-unknown-linux-musl]\n---\n";
         let n = norm(text);
         assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
-        let d = n.contract.distribution.expect("distribution present");
+        let d = n
+            .contract
+            .distributions
+            .into_iter()
+            .next()
+            .expect("distribution present");
         assert!(d.extra_fields.is_empty());
         assert!(
             !n.problems
@@ -2253,14 +2480,19 @@ mod tests {
         assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
         let c = n.contract.clone();
         assert!(c.extra_fields.contains_key("roadmap_url"));
-        let d = c.distribution.expect("distribution present");
+        let d = c
+            .distributions
+            .into_iter()
+            .next()
+            .expect("distribution present");
         assert_eq!(d.extra_fields.get("future_x"), Some(&serde_json::json!(1)));
-        // Two independent forward-compat warnings, each naming schema_version 1.
+        // Two independent forward-compat warnings, each naming schema_version 2
+        // (the contract omits schema_version → defaults to KNOWN_SCHEMA_VERSION).
         let fc: Vec<&String> = n
             .problems
             .warnings
             .iter()
-            .filter(|w| w.contains("forward-compat") && w.contains("schema_version 1"))
+            .filter(|w| w.contains("forward-compat") && w.contains("schema_version 2"))
             .collect();
         assert_eq!(fc.len(), 2, "expected two versioned warnings: {fc:?}");
     }
@@ -2349,7 +2581,12 @@ mod tests {
                     distribution:\n  adapter: cargo-dist\n  extra_fields:\n    foo: 1\n---\n";
         let n = norm(text);
         assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
-        let d = n.contract.distribution.expect("distribution present");
+        let d = n
+            .contract
+            .distributions
+            .into_iter()
+            .next()
+            .expect("distribution present");
         assert_eq!(d.extra_fields.get("foo"), Some(&serde_json::json!(1)));
         assert!(!d.extra_fields.contains_key("extra_fields"));
     }
@@ -2439,7 +2676,12 @@ mod tests {
         let text = "---\nstatus: approved\nmaturity: mvp\n\
                     distribution:\n  adapter: cargo-dist\n  installers: [homebrew, shell, homebrew]\n  \
                     homebrew_tap: owner/tap\n---\n";
-        let d = norm(text).contract.distribution.unwrap();
+        let d = norm(text)
+            .contract
+            .distributions
+            .into_iter()
+            .next()
+            .unwrap();
         assert_eq!(d.installers, vec![Installer::Shell, Installer::Homebrew]);
     }
 
@@ -2473,7 +2715,15 @@ mod tests {
             n.problems.errors
         );
         // The malformed slug never leaks into the built block.
-        assert_eq!(n.contract.distribution.unwrap().homebrew_tap, None);
+        assert_eq!(
+            n.contract
+                .distributions
+                .into_iter()
+                .next()
+                .unwrap()
+                .homebrew_tap,
+            None
+        );
     }
 
     /// An unknown installer flavor surfaces an error listing the valid set.
@@ -2557,7 +2807,7 @@ mod tests {
                     distribution:\n  adapter: goreleaser\n  gh_releases: true\n---\n";
         let n = norm(text);
         assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
-        let d = n.contract.distribution.unwrap();
+        let d = n.contract.distributions.into_iter().next().unwrap();
         assert_eq!(d.adapter, DistributionAdapter::Goreleaser);
         assert!(d.installers.is_empty());
         assert_eq!(d.homebrew_tap, None);
@@ -2591,7 +2841,9 @@ mod tests {
                     distribution:\n  adapter: cargo-dist\n---\n";
         let d = norm(text)
             .contract
-            .distribution
+            .distributions
+            .into_iter()
+            .next()
             .expect("distribution present");
         assert_eq!(
             d.platforms,
@@ -2618,14 +2870,14 @@ mod tests {
                     platforms: [x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc]\n---\n";
         let n = norm(text);
         assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
-        let d = n.contract.clone().distribution.unwrap();
+        let d = n.contract.clone().distributions.into_iter().next().unwrap();
         assert_eq!(
             d.platforms,
             vec!["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
         );
         let json = serde_json::to_value(&n.contract).unwrap();
         assert_eq!(
-            json["distribution"]["platforms"],
+            json["distributions"][0]["platforms"],
             serde_json::json!(["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"])
         );
     }
@@ -2648,7 +2900,12 @@ mod tests {
         let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
                     distribution:\n  adapter: cargo-dist\n  \
                     platforms: [aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-darwin]\n---\n";
-        let d = norm(text).contract.distribution.unwrap();
+        let d = norm(text)
+            .contract
+            .distributions
+            .into_iter()
+            .next()
+            .unwrap();
         assert_eq!(
             d.platforms,
             vec!["aarch64-apple-darwin", "x86_64-apple-darwin"]
@@ -2688,7 +2945,7 @@ mod tests {
             &norm("---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\n---\n").contract,
         )
         .unwrap();
-        assert!(json["distribution"].is_null());
+        assert_eq!(json["distributions"], serde_json::json!([]));
     }
 
     #[test]

@@ -93,10 +93,15 @@ pub fn build(contract: &Contract, facts: &Facts, head_sha: &str, version: &str) 
         phases: PlanPhase::SEQUENCE.to_vec(),
         // Carried from the (already-hashed) contract so the coordinator can hand
         // the Homebrew adapter its tap + license without re-reading the contract.
+        // The first distribution that declares a tap — identical to the old
+        // single-`Distribution` behavior for the 0/1-distribution case. A
+        // per-target tap for a true multi-tap monorepo (the plan carries a single
+        // `homebrew_tap`) is a deliberate follow-up; this unit models the contract,
+        // the engine stays minimal.
         homebrew_tap: contract
-            .distribution
-            .as_ref()
-            .and_then(|d| d.homebrew_tap.clone()),
+            .distributions
+            .iter()
+            .find_map(|d| d.homebrew_tap.clone()),
         license: Some(contract.license.clone()),
     }
 }
@@ -256,7 +261,7 @@ const SEAL_DOMAIN: &str = "ossctl.release-plan";
 /// versions. Bump this (never silently) whenever the pre-image shape changes
 /// (e.g. once resolved adapter versions are folded in), so old and new plan ids
 /// are intentionally disjoint rather than accidentally colliding.
-const SEAL_VERSION: u32 = 3;
+const SEAL_VERSION: u32 = 4;
 
 /// The canonical hashed pre-image (see the module docs for the exact contents).
 /// A dedicated struct rather than an ad-hoc byte concatenation so the field set

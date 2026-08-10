@@ -113,19 +113,41 @@ pub fn generate(
         .with_invalid_value(normalized.contract.status.as_str().to_string()));
     }
 
-    // The contract must declare a distribution block — there is nothing to
-    // generate for a registry-only repo.
-    let distribution = normalized.contract.distribution.as_ref().ok_or_else(|| {
-        CliError::user(
-            "no_distribution",
-            format!(
-                "{} declares no `distribution` block — there is no binary-release infra to \
-                 generate. Add a distribution block (adapter, platforms, installers) to the \
-                 contract, or use a registry-only release",
-                contract::CONTRACT_FILENAME,
-            ),
-        )
-    })?;
+    // The contract must declare exactly one distribution block. A registry-only
+    // repo declares none (nothing to generate); a monorepo declares several, which
+    // this single-`dist-workspace.toml` generator cannot yet scaffold (per-package
+    // dist generation is a follow-up).
+    let distribution = match normalized.contract.distributions.as_slice() {
+        [d] => d,
+        [] => {
+            return Err(CliError::user(
+                "no_distribution",
+                format!(
+                    "{} declares no `distribution` block — there is no binary-release infra to \
+                     generate. Add a distribution block (adapter, platforms, installers) to the \
+                     contract, or use a registry-only release",
+                    contract::CONTRACT_FILENAME,
+                ),
+            ));
+        }
+        many => {
+            let packages: Vec<&str> = many
+                .iter()
+                .map(|d| d.package.as_deref().unwrap_or("<unnamed>"))
+                .collect();
+            return Err(CliError::user(
+                "multiple_distributions",
+                format!(
+                    "{} declares {} distributions ({}) — `dist generate` scaffolds a single \
+                     {DIST_CONFIG_FILENAME} and cannot yet target one package of a monorepo \
+                     (per-package dist generation is a follow-up)",
+                    contract::CONTRACT_FILENAME,
+                    many.len(),
+                    packages.join(", "),
+                ),
+            ));
+        }
+    };
 
     // This generator emits cargo-dist config only; a goreleaser/manual adapter is
     // a different toolchain the generator does not (yet) know how to scaffold.

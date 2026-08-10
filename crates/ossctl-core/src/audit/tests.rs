@@ -186,7 +186,7 @@ fn contract_at(maturity: Maturity) -> Contract {
             registry: Registry::CratesIo,
             adapter: crate::contract::schema::Adapter::CargoPublish,
         }],
-        distribution: None,
+        distributions: vec![],
         versioning: VersioningBase::Semver,
         versioning_pattern: None,
         changelog: Changelog {
@@ -213,6 +213,7 @@ fn contract_at(maturity: Maturity) -> Contract {
 /// A binary-distribution block that builds exactly the given `platforms`.
 fn dist_with(platforms: &[&str]) -> Distribution {
     Distribution {
+        package: None,
         adapter: DistributionAdapter::CargoDist,
         gh_releases: true,
         installers: vec![],
@@ -548,7 +549,7 @@ fn registry_target_without_license_is_producer_gap() {
 fn distribution_without_linux_target_is_producer_gap() {
     // An explicit, macOS-only platform set builds no Linux binary → gap.
     let mut contract = contract_at(Maturity::Mvp);
-    contract.distribution = Some(dist_with(&["aarch64-apple-darwin", "x86_64-apple-darwin"]));
+    contract.distributions = vec![dist_with(&["aarch64-apple-darwin", "x86_64-apple-darwin"])];
     let fs = FakeFs::default()
         .file("/repo/README.md", "# tool\n")
         .file("/repo/LICENSE", "MIT\n");
@@ -574,7 +575,7 @@ fn distribution_without_macos_target_is_producer_gap() {
     // Symmetric to the Linux case: a Linux-only set builds no macOS binary → the
     // macOS gap fires (and the Linux gap does not).
     let mut contract = contract_at(Maturity::Mvp);
-    contract.distribution = Some(dist_with(&["x86_64-unknown-linux-gnu"]));
+    contract.distributions = vec![dist_with(&["x86_64-unknown-linux-gnu"])];
     let fs = FakeFs::default()
         .file("/repo/README.md", "# tool\n")
         .file("/repo/LICENSE", "MIT\n");
@@ -595,7 +596,7 @@ fn distribution_without_macos_target_is_producer_gap() {
 fn distribution_missing_both_oses_yields_two_gaps() {
     // A Windows-only distribution covers neither macOS nor Linux → both gaps.
     let mut contract = contract_at(Maturity::Mvp);
-    contract.distribution = Some(dist_with(&["x86_64-pc-windows-msvc"]));
+    contract.distributions = vec![dist_with(&["x86_64-pc-windows-msvc"])];
     let fs = FakeFs::default()
         .file("/repo/README.md", "# tool\n")
         .file("/repo/LICENSE", "MIT\n");
@@ -616,10 +617,10 @@ fn android_triple_does_not_satisfy_the_linux_requirement() {
     // install target: it must NOT satisfy the policy. (macOS is present here, so
     // only the Linux gap fires.)
     let mut contract = contract_at(Maturity::Mvp);
-    contract.distribution = Some(dist_with(&[
+    contract.distributions = vec![dist_with(&[
         "aarch64-linux-android",
         "aarch64-apple-darwin",
-    ]));
+    ])];
     let fs = FakeFs::default()
         .file("/repo/README.md", "# tool\n")
         .file("/repo/LICENSE", "MIT\n");
@@ -638,12 +639,12 @@ fn android_triple_does_not_satisfy_the_linux_requirement() {
 fn distribution_with_linux_target_yields_no_gap() {
     // The cross-platform default set (macOS + Linux musl) covers both → no gap.
     let mut contract = contract_at(Maturity::Mvp);
-    contract.distribution = Some(dist_with(&[
+    contract.distributions = vec![dist_with(&[
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",
         "aarch64-unknown-linux-musl",
         "x86_64-unknown-linux-musl",
-    ]));
+    ])];
     let fs = FakeFs::default()
         .file("/repo/README.md", "# tool\n")
         .file("/repo/LICENSE", "MIT\n");
@@ -684,10 +685,10 @@ fn platform_triple_classifiers() {
 fn distribution_with_gnu_linux_target_yields_no_gap() {
     // A gnu (not musl) Linux triple + a macOS triple satisfies the policy.
     let mut contract = contract_at(Maturity::Mvp);
-    contract.distribution = Some(dist_with(&[
+    contract.distributions = vec![dist_with(&[
         "aarch64-apple-darwin",
         "x86_64-unknown-linux-gnu",
-    ]));
+    ])];
     let fs = FakeFs::default()
         .file("/repo/README.md", "# tool\n")
         .file("/repo/LICENSE", "MIT\n");
@@ -724,7 +725,7 @@ fn no_distribution_block_yields_no_cross_platform_gap() {
 fn distribution_without_linux_escalates_wording_at_production() {
     // Same gap fires at production, but the detail marks it as policy-required.
     let mut contract = contract_at(Maturity::Production);
-    contract.distribution = Some(dist_with(&["aarch64-apple-darwin"]));
+    contract.distributions = vec![dist_with(&["aarch64-apple-darwin"])];
     let fs = FakeFs::default()
         .file("/repo/README.md", "# tool\n")
         .file("/repo/LICENSE", "MIT\n");
@@ -737,6 +738,34 @@ fn distribution_without_linux_escalates_wording_at_production() {
     );
     let g = gap(&report, "distribution-linux");
     assert!(g.detail.contains("required"), "detail: {}", g.detail);
+}
+
+#[test]
+fn monorepo_distributions_yield_per_package_gap_ids() {
+    // Two distributions, each missing a different OS: the gap ids are suffixed
+    // with the package so they do not collide (bare ids are the single-dist case).
+    let mut contract = contract_at(Maturity::Mvp);
+    let mut alpha = dist_with(&["aarch64-apple-darwin"]); // no Linux
+    alpha.package = Some("alpha".to_string());
+    let mut beta = dist_with(&["x86_64-unknown-linux-musl"]); // no macOS
+    beta.package = Some("beta".to_string());
+    contract.distributions = vec![alpha, beta];
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n");
+    let report = audit(
+        repo(),
+        &contract,
+        &facts_with(Maturity::Mvp, true, None),
+        &fs,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    let all = ids(&report);
+    assert!(all.contains(&"distribution-linux:alpha"), "ids: {all:?}");
+    assert!(all.contains(&"distribution-macos:beta"), "ids: {all:?}");
+    // The bare (single-dist) ids never appear when there are several.
+    assert!(!all.contains(&"distribution-linux"));
+    assert!(!all.contains(&"distribution-macos"));
 }
 
 // ── GitHub community standards + the unknown discipline ────────────────────

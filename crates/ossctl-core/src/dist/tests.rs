@@ -6,6 +6,7 @@ use crate::contract::schema::{Distribution, DistributionAdapter, Installer};
 /// A `Distribution` with the given installers + platforms (adapter cargo-dist).
 fn dist(installers: Vec<Installer>, platforms: Vec<&str>) -> Distribution {
     Distribution {
+        package: None,
         adapter: DistributionAdapter::CargoDist,
         gh_releases: true,
         installers,
