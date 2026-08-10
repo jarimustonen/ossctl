@@ -6,6 +6,9 @@ status: in-progress
 priority: normal
 epic: ossctl-phase4-build
 related: ['@homebrew-dist-brew-audit-fails']
+commits:
+- hash: d45c205
+  summary: homebrew tap-write ownership marker preserves hand-maintained formulas (Option 2)
 ---
 
 # homebrew tap-write regenerates the whole formula, obliterating hand-maintained stanzas
