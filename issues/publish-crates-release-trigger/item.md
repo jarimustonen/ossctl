@@ -1,9 +1,13 @@
 ---
 created: 2026-08-06
-updated: 2026-08-06
+updated: 2026-08-10
 type: bug
-status: open
+status: fixed
 priority: high
+commits:
+- hash: 1e186968a9270a8dac6f577e5d32e18c2297249e
+  summary: trigger publish-crates on version-tag push (fix release:published dead trigger)
+closed: 2026-08-10
 ---
 
 # publish-crates.yml never auto-fires: release:published dead for cargo-dist releases
