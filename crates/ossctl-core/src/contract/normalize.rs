@@ -356,9 +356,9 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
     // fragment_dir must be a relative path inside the repo (floor 6).
     if !path_inside_repo(&changelog.fragment_dir) {
         p.err(format!(
-            "floor: changelog.fragment_dir '{}' must be a relative path inside the repo (an \
+            "floor: changelog.fragment_dir {} must be a relative path inside the repo (an \
              absolute or '../'-escaping path is refused)",
-            changelog.fragment_dir
+            quote_for_diagnostic(&changelog.fragment_dir)
         ));
     }
 
@@ -404,8 +404,9 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
             Some(s) if !s.trim().is_empty() => {
                 if !spdx_valid(s) {
                     p.err(format!(
-                        "license '{s}' is not a valid SPDX expression (unknown id or malformed \
-                         AND/OR/WITH grammar)"
+                        "license {} is not a valid SPDX expression (unknown id or malformed \
+                         AND/OR/WITH grammar)",
+                        quote_for_diagnostic(s)
                     ));
                 }
                 s.to_string()
@@ -457,7 +458,8 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
     if !targets.is_empty() && !spdx_valid(&license) {
         p.err(format!(
             "floor: a target has a registry (crates.io/npm/PyPI/… require a license) but license \
-             '{license}' is not a valid SPDX expression"
+             {} is not a valid SPDX expression",
+            quote_for_diagnostic(&license)
         ));
     }
     check_badge_producers(&health_badges, maturity, &targets, p);
@@ -479,9 +481,9 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
         && !fs.is_dir(&repo_root.join(&changelog.fragment_dir))
     {
         p.warn(format!(
-            "changelog.mode 'fragment' but the fragment dir '{}' does not exist yet under {} — \
+            "changelog.mode 'fragment' but the fragment dir {} does not exist yet under {} — \
              /oss-changelog creates it; /oss-readiness reports it as a gap until then",
-            changelog.fragment_dir,
+            quote_for_diagnostic(&changelog.fragment_dir),
             repo_root.display()
         ));
     }
@@ -543,7 +545,8 @@ fn parse_versioning(value: Option<&Value>, p: &mut Problems) -> (VersioningBase,
         (base, None)
     } else {
         p.err(format!(
-            "versioning '{s}' invalid — must be semver | calver:<pattern> | zerover"
+            "versioning {} invalid — must be semver | calver:<pattern> | zerover",
+            quote_for_diagnostic(s)
         ));
         (VersioningBase::Semver, None)
     }
@@ -581,14 +584,16 @@ fn validate_targets(
             if let Some(e) = Ecosystem::parse(s) {
                 if !ecosystems.is_empty() && !ecosystems.contains(&e) {
                     p.err(format!(
-                        "targets[{idx}].ecosystem '{s}' is not in ecosystems {:?}",
+                        "targets[{idx}].ecosystem {} is not in ecosystems {:?}",
+                        quote_for_diagnostic(s),
                         ecosystems.iter().map(|e| e.as_str()).collect::<Vec<_>>()
                     ));
                 }
                 Some(e)
             } else {
                 p.err(format!(
-                    "targets[{idx}].ecosystem '{s}' invalid — one of {:?}",
+                    "targets[{idx}].ecosystem {} invalid — one of {:?}",
+                    quote_for_diagnostic(s),
                     Ecosystem::VALID
                 ));
                 None
@@ -613,7 +618,8 @@ fn validate_targets(
                     Some(r)
                 } else {
                     p.err(format!(
-                        "targets[{idx}].registry '{s}' invalid — one of {:?}",
+                        "targets[{idx}].registry {} invalid — one of {:?}",
+                        quote_for_diagnostic(s),
                         Registry::VALID
                     ));
                     None
@@ -775,8 +781,9 @@ fn parse_distributions(
                      association key), so they can be told apart"
                 )),
                 Some(pkg) if !seen.insert(pkg) => p.err(format!(
-                    "floor: distributions[{idx}].package '{pkg}' is used by more than one \
-                     distribution — each distribution must name a distinct package"
+                    "floor: distributions[{idx}].package {} is used by more than one \
+                     distribution — each distribution must name a distinct package",
+                    quote_for_diagnostic(pkg)
                 )),
                 Some(_) => {}
             }
@@ -798,9 +805,10 @@ fn parse_distributions(
                 if let Some(pkg) = d.package.as_deref() {
                     if !target_pkgs.contains(pkg) {
                         p.warn(format!(
-                            "distributions[{idx}].package '{pkg}' matches no targets[].package \
+                            "distributions[{idx}].package {} matches no targets[].package \
                              ({target_pkgs:?}) — likely a typo; a distribution should build a \
-                             package the contract also lists as a target"
+                             package the contract also lists as a target",
+                            quote_for_diagnostic(pkg)
                         ));
                     }
                 }
@@ -912,7 +920,8 @@ fn parse_one_distribution(
             // still fire (a present-but-invalid tap is no tap).
             Some(s) => {
                 p.err(format!(
-                    "distribution.homebrew_tap '{s}' invalid — must be an 'owner/repo' slug"
+                    "distribution.homebrew_tap {} invalid — must be an 'owner/repo' slug",
+                    quote_for_diagnostic(s)
                 ));
                 None
             }
@@ -981,9 +990,10 @@ fn parse_one_distribution(
                         }
                     }
                     Some(s) => p.err(format!(
-                        "distribution.platforms: '{s}' is not a well-formed target-triple \
+                        "distribution.platforms: {} is not a well-formed target-triple \
                          (e.g. x86_64-unknown-linux-musl, aarch64-apple-darwin) — structural \
-                         check only; the toolchain is the final authority on what builds"
+                         check only; the toolchain is the final authority on what builds",
+                        quote_for_diagnostic(s)
                     )),
                     None => p.err(format!(
                         "distribution.platforms: {} invalid — each entry must be a \
@@ -1301,7 +1311,7 @@ fn as_list(v: Option<&Value>) -> Vec<Value> {
 /// A compact display of a YAML scalar for error messages (strings are quoted).
 fn yaml_display(v: &Value) -> String {
     match v {
-        Value::String(s) => format!("'{s}'"),
+        Value::String(s) => quote_for_diagnostic(s),
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => n.to_string(),
         Value::Null => "null".to_string(),
@@ -1309,6 +1319,21 @@ fn yaml_display(v: &Value) -> String {
         Value::Mapping(_) => "<map>".to_string(),
         Value::Tagged(t) => yaml_display(&t.value),
     }
+}
+
+/// Quote a user-controlled string for safe embedding in a warning/error message.
+///
+/// Diagnostics interleave user-controlled text (unknown field keys, rejected enum
+/// values, package/tap/path strings) into a single line that lands in the §10
+/// error envelope and the JSONL log. Wrapping such a value in bare single quotes
+/// (`'{s}'`) lets a value carrying a quote, newline, or control character forge a
+/// second diagnostic line or corrupt the log — a log-injection vector. JSON string
+/// encoding escapes `"`, `\`, newlines, and C0 control characters (and leaves
+/// ordinary text readable), so `foo` renders as `"foo"` and a hostile
+/// `a"\ninjected` renders as `"a\"\ninjected"` on one intact line. Infallible:
+/// serializing a string to JSON never fails.
+fn quote_for_diagnostic(s: &str) -> String {
+    serde_json::Value::String(s.to_owned()).to_string()
 }
 
 /// Whether `rel` is a relative path that stays inside the repo — no absolute
@@ -1433,10 +1458,12 @@ fn capture_unknown_fields(
     }
     if !extra_fields.is_empty() {
         // serde_json::Map is ordered (BTreeMap, no `preserve_order`) → keys already
-        // sorted. Rendered as a single-quoted list to match the Python normalizer.
+        // sorted. Each key is a user-controlled map key, so JSON-encode it (rather
+        // than bare single-quoting) to keep a hostile key from forging a diagnostic
+        // line — see [`quote_for_diagnostic`].
         let keys = extra_fields
             .keys()
-            .map(|k| format!("'{k}'"))
+            .map(|k| quote_for_diagnostic(k))
             .collect::<Vec<_>>()
             .join(", ");
         p.warn(format!(
@@ -3053,5 +3080,76 @@ mod tests {
         assert!(!is_tap_slug("owner/repo;rm -rf"));
         assert!(!is_tap_slug("owner/@repo"));
         assert!(!is_tap_slug("ownér/repo"));
+    }
+
+    /// `quote_for_diagnostic` JSON-encodes: quotes/backslashes/newlines/control
+    /// chars are escaped, ordinary text stays readable.
+    #[test]
+    fn quote_for_diagnostic_escapes_hostile_input() {
+        assert_eq!(quote_for_diagnostic("foo"), "\"foo\"");
+        assert_eq!(quote_for_diagnostic("a\"b"), "\"a\\\"b\"");
+        assert_eq!(quote_for_diagnostic("a\nb"), "\"a\\nb\"");
+        assert_eq!(quote_for_diagnostic("a\tb"), "\"a\\tb\"");
+        // A bare C0 control char (0x01) escapes to , never a raw byte.
+        assert_eq!(quote_for_diagnostic("\u{1}"), "\"\\u0001\"");
+    }
+
+    /// Log-injection hardening: a user-controlled unknown-field KEY carrying a
+    /// quote, newline, and control char cannot forge a diagnostic line or emit a
+    /// raw control char — it is JSON-encoded onto a single intact line.
+    #[test]
+    fn unknown_field_key_is_escaped_in_warning() {
+        // The key is `evil"key` + newline + a forged-looking line + a control char.
+        // Quoted in YAML so the literal quote/newline/control byte are the KEY text.
+        let text =
+            "---\nstatus: approved\nmaturity: mvp\n\"evil\\\"key\\nforged: line\\u0001\": 1\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        let warning = n
+            .problems
+            .warnings
+            .iter()
+            .find(|w| w.contains("unknown field(s) preserved"))
+            .expect("expected an unknown-field warning");
+        // The raw quote/newline/control char never appear unescaped in the message:
+        // no forged second line, no bare control byte.
+        assert!(
+            !warning.contains('\n'),
+            "warning must stay on one line: {warning:?}"
+        );
+        assert!(
+            !warning.contains('\u{1}'),
+            "warning must not carry a raw control char: {warning:?}"
+        );
+        assert!(
+            !warning.contains("evil\"key"),
+            "the raw unescaped key must not appear: {warning:?}"
+        );
+        // The escaped JSON form is present (quote → \", newline → \n, ctrl → ).
+        assert!(
+            warning.contains("\\\"") && warning.contains("\\n") && warning.contains("\\u0001"),
+            "the key must be JSON-escaped: {warning:?}"
+        );
+    }
+
+    /// The same hardening on a user-controlled VALUE routed through `yaml_display`
+    /// (an invalid enum): a newline in the rejected value cannot forge an error
+    /// line.
+    #[test]
+    fn invalid_enum_value_is_escaped_in_error() {
+        let text = "---\nstatus: approved\nmaturity: \"mvp\\nforged: line\"\n---\n";
+        let n = norm(text);
+        assert_error_contains(&n, "maturity");
+        let err = n
+            .problems
+            .errors
+            .iter()
+            .find(|e| e.contains("maturity") && e.contains("invalid"))
+            .expect("expected a maturity-invalid error");
+        assert!(!err.contains('\n'), "error must stay on one line: {err:?}");
+        assert!(
+            err.contains("\\n"),
+            "the rejected value's newline must be escaped: {err:?}"
+        );
     }
 }
