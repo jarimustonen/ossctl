@@ -2,9 +2,13 @@
 created: 2026-08-07
 updated: 2026-08-10
 type: improvement
-status: in-progress
+status: done
 priority: normal
 related: ['@distribution-extra-fields']
+commits:
+- hash: de71acc
+  summary: omit empty extra_fields from canonical JSON (Option A, both fields); SEAL_VERSION 4->5
+closed: 2026-08-10
 ---
 
 # extra_fields: decide skip_serializing_if vs always-present {} in canonical JSON
