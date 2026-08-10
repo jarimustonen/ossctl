@@ -3,7 +3,7 @@ created: 2026-08-10
 updated: 2026-08-10
 type: bug
 status: open
-priority: normal
+priority: high
 ---
 
 # publish-crates.yml dep-order step not idempotent: cargo publish -p ossctl-core dies with exit 101 on 'already exists'
