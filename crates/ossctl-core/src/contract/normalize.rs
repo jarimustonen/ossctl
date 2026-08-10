@@ -1259,6 +1259,19 @@ fn check_badge_producers(
 ///
 /// Plus one **advisory** (warning, not a floor): a configured tap with no producer
 /// of either kind is dead config — nothing ever writes to it.
+///
+/// **Why aggregate, not per-package (deliberate).** The three signals are OR-ed
+/// across all distributions/targets rather than grouped by the monorepo `package`
+/// key. This matches the release engine's actual homebrew model: a cut carries a
+/// SINGLE tap (`ReleasePlan::homebrew_tap` is the first-found tap, see
+/// `release::plan`), and the CLI's `ensure_single_distribution` rejects a
+/// multi-distribution monorepo BEFORE it can be planned — a per-package multi-tap
+/// monorepo is an explicit deferred follow-up, not a shape the engine can cut. For
+/// everything the engine supports (≤1 distribution), aggregate == per-package, and
+/// crucially the aggregate view is what lets a bare `package: null` distribution's
+/// tap serve a named-package `homebrew-tap` target (ossctl's OWN contract shape) —
+/// a strict `target.package == distribution.package` grouping would wrongly reject
+/// it. Revisit this only alongside the engine's per-package-tap follow-up.
 fn check_homebrew_configuration(
     targets: &[Target],
     distributions: &[Distribution],
@@ -2261,6 +2274,45 @@ mod tests {
                     - {ecosystem: rust, package: ossctl, registry: homebrew, adapter: homebrew-core}\n---\n";
         let n = norm(text);
         assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+    }
+
+    /// registry/adapter compat, OMITTED adapter: a `homebrew`-registry target with
+    /// no adapter resolves to the ecosystem default (`cargo-publish` for rust),
+    /// which is non-homebrew — so it hits the same floor. The normalizer never
+    /// registry-defaults a homebrew target to `homebrew-tap` (that would silently
+    /// choose personal-tap publication over a homebrew-core PR); the author must
+    /// spell the adapter. This locks the omitted-adapter path, not just explicit
+    /// `manual`.
+    #[test]
+    fn homebrew_registry_omitted_adapter_is_a_floor() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\ntargets:\n  \
+                    - {ecosystem: rust, package: ossctl, registry: homebrew}\n---\n";
+        assert_error_contains(
+            &norm(text),
+            "requires adapter 'homebrew-tap' (personal tap) or 'homebrew-core'",
+        );
+    }
+
+    /// The homebrew cross-field check reads the plural `distributions:` (Vec) path,
+    /// not only the singular back-compat mapping: a one-entry `distributions:` list
+    /// carrying the tap satisfies a `homebrew-tap` target (row 6 via the Vec shape).
+    #[test]
+    fn homebrew_tap_target_satisfied_via_plural_distributions() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\ntargets:\n  \
+                    - {ecosystem: rust, package: ossctl, registry: crates.io, adapter: cargo-publish}\n  \
+                    - {ecosystem: rust, package: ossctl, registry: homebrew, adapter: homebrew-tap}\n\
+                    distributions:\n  \
+                    - {package: ossctl, adapter: cargo-dist, installers: [shell], homebrew_tap: owner/tap}\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            !n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("the tap will never be updated")),
+            "unexpected dead-tap advisory: {:?}",
+            n.problems.warnings
+        );
     }
 
     // ── monorepo: Vec<Distribution> + per-package association ─────────────────

@@ -4,6 +4,9 @@ updated: 2026-08-10
 type: improvement
 status: in-progress
 priority: normal
+commits:
+- hash: 48440c1
+  summary: homebrew contract-consistency floors (hard errors) + 8-row truth table
 ---
 
 # Homebrew contract-consistency floors: target-without-tap, double-publish, registry/adapter compat
