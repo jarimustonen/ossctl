@@ -311,11 +311,10 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
 
     // distributions — the binary-distribution blocks (cargo-dist/goreleaser); a
     // registry-only repo has none (→ empty list), leaving its contract shape
-    // unchanged. A `homebrew`-registry target is the OTHER consumer of
-    // `homebrew_tap` (the release engine's homebrew-tap adapter pushes the formula
-    // in its `dist` phase), so it is passed in to suppress the dead-config warning.
-    let has_homebrew_target = targets.iter().any(|t| t.registry == Registry::Homebrew);
-    let distributions = parse_distributions(map, &targets, has_homebrew_target, schema_version, p);
+    // unchanged. The homebrew cross-field truth table (tap ↔ installer-producer ↔
+    // target-producer) is enforced afterwards by [`check_homebrew_configuration`],
+    // once both `targets` and `distributions` are resolved.
+    let distributions = parse_distributions(map, &targets, schema_version, p);
 
     // changelog (mode + source + fragment_dir).
     let changelog = match map.get("changelog") {
@@ -463,6 +462,9 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
         ));
     }
     check_badge_producers(&health_badges, maturity, &targets, p);
+    // Homebrew cross-field consistency: missing-tap (either producer), the
+    // double-publish collision, and the dead-tap advisory — the full truth table.
+    check_homebrew_configuration(&targets, &distributions, p);
     // A distribution block ships public binaries (GH-Release artifacts, a curl-pipe
     // installer, a Homebrew tap PR) — that is publishing, and a spike is not being
     // published. Mirrors the `release.model: auto` floor: raise maturity or drop the
@@ -643,6 +645,24 @@ fn validate_targets(
             }
         };
 
+        // Floor: registry/adapter compatibility. A `homebrew`-registry target is
+        // served only by a homebrew adapter — `homebrew-tap` (push a formula to a
+        // personal tap) or `homebrew-core` (bump the central formula). Any other
+        // adapter (e.g. the ecosystem default `cargo-publish`, or `manual`) has no
+        // homebrew formula path, so the target would silently do nothing at cut
+        // time. Reject it here rather than at release time. Only checked once both
+        // are well-formed (a parse error already reported its own problem).
+        if let (Some(Registry::Homebrew), Some(a)) = (registry, adapter) {
+            if !matches!(a, Adapter::HomebrewTap | Adapter::HomebrewCore) {
+                p.err(format!(
+                    "floor: targets[{idx}] has registry 'homebrew' but adapter {} — a \
+                     homebrew-registry target requires adapter 'homebrew-tap' (personal tap) \
+                     or 'homebrew-core' (central formula)",
+                    quote_for_diagnostic(a.as_str())
+                ));
+            }
+        }
+
         // On the error path, placeholders keep the strong type; the document is
         // never emitted when problems.errors is non-empty.
         out.push(Target {
@@ -698,7 +718,6 @@ const INSTALLER_ORDER: [Installer; 5] = [
 fn parse_distributions(
     map: &Mapping,
     targets: &[Target],
-    has_homebrew_target: bool,
     schema_version: u32,
     p: &mut Problems,
 ) -> Vec<Distribution> {
@@ -725,12 +744,9 @@ fn parse_distributions(
             let mut out = Vec::with_capacity(seq.len());
             for (idx, item) in seq.iter().enumerate() {
                 match item {
-                    Value::Mapping(m) => out.push(parse_one_distribution(
-                        m,
-                        has_homebrew_target,
-                        schema_version,
-                        p,
-                    )),
+                    Value::Mapping(m) => {
+                        out.push(parse_one_distribution(m, schema_version, p));
+                    }
                     _ => p.err(format!(
                         "distributions[{idx}] must be a mapping with {{package, adapter, \
                          gh_releases?, installers?, homebrew_tap?, platforms?}}"
@@ -748,12 +764,7 @@ fn parse_distributions(
         }
         // `distribution:` — a single mapping (v1 back-compat) → a one-element list.
         (Some(Value::Mapping(m)), _) => {
-            vec![parse_one_distribution(
-                m,
-                has_homebrew_target,
-                schema_version,
-                p,
-            )]
+            vec![parse_one_distribution(m, schema_version, p)]
         }
         (Some(v), _) if !v.is_null() => {
             p.err(
@@ -824,12 +835,7 @@ fn parse_distributions(
 /// problems and returns a placeholder — the document is never emitted while
 /// `problems.errors` is non-empty.
 #[allow(clippy::too_many_lines)]
-fn parse_one_distribution(
-    m: &Mapping,
-    has_homebrew_target: bool,
-    schema_version: u32,
-    p: &mut Problems,
-) -> Distribution {
+fn parse_one_distribution(m: &Mapping, schema_version: u32, p: &mut Problems) -> Distribution {
     // package — the monorepo association key. Optional (null for the sole/bare
     // distribution); the collection-level floor in `parse_distributions` requires
     // it once there are two or more distributions.
@@ -934,25 +940,15 @@ fn parse_one_distribution(
 
     let wants_homebrew = installers.contains(&Installer::Homebrew);
     // Floor: a `homebrew` installer needs a tap to push the generated formula to.
+    // This is a PER-BLOCK check — cargo-dist pushes the formula to the tap
+    // configured in this same distribution, so the tap must live here, not in a
+    // sibling distribution. (The target-side missing-tap floor, the double-publish
+    // collision, and the dead-tap advisory are cross-field and aggregate over all
+    // distributions + targets — they live in [`check_homebrew_configuration`].)
     if wants_homebrew && homebrew_tap.is_none() {
         p.err(
             "floor: distribution.installers includes 'homebrew' but no distribution.homebrew_tap \
              is set — the generated formula has nowhere to be pushed"
-                .to_string(),
-        );
-    }
-    // Advisory: a tap with NEITHER a `homebrew` installer NOR a `homebrew`-registry
-    // target is dead config — no formula is ever generated, so the tap is never
-    // pushed to. A warning, not a floor: the contract is internally consistent,
-    // just wasteful. The tap has TWO possible consumers: cargo-dist's `homebrew`
-    // installer, and the release engine's homebrew-tap adapter target (whose `dist`
-    // phase generates + pushes the formula). Either one means the tap IS updated —
-    // so the warning fires only when both are absent.
-    if homebrew_tap.is_some() && !wants_homebrew && !has_homebrew_target {
-        p.warn(
-            "distribution.homebrew_tap is set but there is neither a 'homebrew' installer in \
-             distribution.installers nor a 'homebrew'-registry target — no formula is generated, \
-             so the tap will never be updated"
                 .to_string(),
         );
     }
@@ -1241,6 +1237,74 @@ fn check_badge_producers(
             )),
             _ => {}
         }
+    }
+}
+
+/// Cross-field Homebrew consistency — the full truth table over three aggregate
+/// signals: a **tap** configured on any distribution, an installer-side formula
+/// **producer** (a `homebrew` installer on any distribution — cargo-dist), and a
+/// target-side formula **producer** (a `homebrew`-registry target whose adapter is
+/// `homebrew-tap`, i.e. the release engine pushes a formula to the personal tap).
+///
+/// A `homebrew-core` target is deliberately NOT a tap-producer: it bumps the
+/// central formula via a PR and needs no personal tap, so it neither requires a
+/// `homebrew_tap` nor collides with the installer's tap push.
+///
+/// The floors (all hard errors, per the AI-first fail-fast contract):
+/// - **missing-tap (target side):** a `homebrew-tap` target with no `homebrew_tap`
+///   anywhere — the engine's `dist` phase has nowhere to push the formula. (The
+///   installer side is floored per-block in [`parse_one_distribution`].)
+/// - **double-publish:** a `homebrew` installer AND a `homebrew-tap` target both
+///   generate + push a formula to the personal tap — a guaranteed collision.
+///
+/// Plus one **advisory** (warning, not a floor): a configured tap with no producer
+/// of either kind is dead config — nothing ever writes to it.
+fn check_homebrew_configuration(
+    targets: &[Target],
+    distributions: &[Distribution],
+    p: &mut Problems,
+) {
+    let has_tap = distributions.iter().any(|d| d.homebrew_tap.is_some());
+    let installer_producer = distributions
+        .iter()
+        .any(|d| d.installers.contains(&Installer::Homebrew));
+    // Narrowed to `homebrew-tap` (not merely `registry == homebrew`): only the tap
+    // adapter pushes a formula to the personal tap. `validate_targets` already
+    // floors any other adapter on a `homebrew` registry, so a `homebrew-core`
+    // target is the only other well-formed case, and it is not a tap-producer.
+    let tap_target_producer = targets
+        .iter()
+        .any(|t| t.registry == Registry::Homebrew && t.adapter == Adapter::HomebrewTap);
+
+    // Floor: a homebrew-tap target needs a tap destination for its formula.
+    if tap_target_producer && !has_tap {
+        p.err(
+            "floor: a 'homebrew'-registry target with adapter 'homebrew-tap' generates a formula \
+             but no distribution sets homebrew_tap — the formula has nowhere to be pushed (set \
+             distribution.homebrew_tap to the 'owner/repo' tap)"
+                .to_string(),
+        );
+    }
+
+    // Floor: the double-publish collision — two mechanisms push a formula to the
+    // personal tap (cargo-dist's installer AND the engine's homebrew-tap adapter).
+    if installer_producer && tap_target_producer {
+        p.err(
+            "floor: both a 'homebrew' installer (distribution.installers) and a 'homebrew'-registry \
+             target with adapter 'homebrew-tap' generate + push a formula to the tap — they would \
+             collide; keep exactly one homebrew formula producer, not both"
+                .to_string(),
+        );
+    }
+
+    // Advisory: a tap nobody writes to (no installer producer, no tap target).
+    if has_tap && !installer_producer && !tap_target_producer {
+        p.warn(
+            "distribution.homebrew_tap is set but there is neither a 'homebrew' installer in \
+             distribution.installers nor a 'homebrew'-registry target with adapter 'homebrew-tap' \
+             — no formula is generated, so the tap will never be updated"
+                .to_string(),
+        );
     }
 }
 
@@ -2057,6 +2121,146 @@ mod tests {
         assert_eq!(d["homebrew_tap"], "jarimustonen/homebrew-issuectl");
         // A bare (singular) block carries a `null` association key.
         assert!(d["package"].is_null());
+    }
+
+    // ── homebrew cross-field consistency floors (truth table) ────────────────
+
+    /// Build a production contract exercising the three homebrew signals: a
+    /// configured `tap`, an `installer` producer (a `homebrew` installer), and a
+    /// `tap_target` producer (a `homebrew`-registry target with adapter
+    /// `homebrew-tap`). A crates.io target is always present so the contract has a
+    /// licensed publishable target.
+    fn hb_case(tap: bool, installer: bool, tap_target: bool) -> String {
+        let mut fm = String::from(
+            "---\nstatus: approved\nmaturity: production\necosystems: [rust]\ntargets:\n  \
+             - {ecosystem: rust, package: ossctl, registry: crates.io, adapter: cargo-publish}\n",
+        );
+        if tap_target {
+            fm.push_str(
+                "  - {ecosystem: rust, package: ossctl, registry: homebrew, adapter: homebrew-tap}\n",
+            );
+        }
+        // A distribution block exists whenever we need to express an installer
+        // producer or a configured tap; otherwise the contract is registry-only.
+        if installer || tap {
+            fm.push_str("distribution:\n  adapter: cargo-dist\n");
+            if installer {
+                fm.push_str("  installers: [homebrew]\n");
+            } else {
+                fm.push_str("  installers: [shell]\n");
+            }
+            if tap {
+                fm.push_str("  homebrew_tap: owner/tap\n");
+            }
+        }
+        fm.push_str("---\n");
+        fm
+    }
+
+    /// The full 8-row truth table (tap × installer-producer × tap-target-producer).
+    /// Each row asserts the accept/reject verdict; the floor/advisory messages are
+    /// pinned in the focused tests below.
+    #[test]
+    fn homebrew_truth_table_all_eight_rows() {
+        // (tap, installer, tap_target, expect_valid)
+        let rows = [
+            (false, false, false, true), // 1: nothing homebrew → clean
+            (false, false, true, false), // 2: tap-target, no tap → missing-tap floor
+            (false, true, false, false), // 3: installer, no tap → per-block floor
+            (false, true, true, false),  // 4: both producers, no tap → floors
+            (true, false, false, true),  // 5: tap, no producer → dead-tap advisory (valid)
+            (true, false, true, true),   // 6: tap + tap-target → well-formed (ossctl's case)
+            (true, true, false, true),   // 7: tap + installer → well-formed (cargo-dist)
+            (true, true, true, false),   // 8: tap + both producers → double-publish floor
+        ];
+        for (tap, installer, tap_target, expect_valid) in rows {
+            let n = norm(&hb_case(tap, installer, tap_target));
+            assert_eq!(
+                n.is_valid(),
+                expect_valid,
+                "row (tap={tap}, installer={installer}, tap_target={tap_target}) expected \
+                 valid={expect_valid}; errors were {:?}",
+                n.problems.errors
+            );
+        }
+    }
+
+    /// Row 2: a `homebrew-tap` target with no tap anywhere is a hard error (the
+    /// target-side counterpart of the per-block installer-without-tap floor).
+    #[test]
+    fn homebrew_tap_target_without_tap_is_a_floor() {
+        assert_error_contains(
+            &norm(&hb_case(false, false, true)),
+            "generates a formula but no distribution sets homebrew_tap",
+        );
+    }
+
+    /// Row 8: an installer producer AND a `homebrew-tap` target both push a formula
+    /// to the tap — the double-publish collision is a hard error.
+    #[test]
+    fn homebrew_double_publish_is_a_floor() {
+        assert_error_contains(
+            &norm(&hb_case(true, true, true)),
+            "they would collide; keep exactly one homebrew formula producer",
+        );
+    }
+
+    /// Row 5: a configured tap with neither producer is dead config — an advisory
+    /// warning, and the contract still normalizes clean.
+    #[test]
+    fn homebrew_dead_tap_is_an_advisory_not_a_floor() {
+        let n = norm(&hb_case(true, false, false));
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("the tap will never be updated")),
+            "expected dead-tap advisory, warnings were {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// Row 6: a `homebrew-tap` target with a configured tap and no installer
+    /// producer is the well-formed case (ossctl's own shape) — clean, no advisory.
+    #[test]
+    fn homebrew_tap_target_with_tap_is_clean() {
+        let n = norm(&hb_case(true, false, true));
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            !n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("the tap will never be updated")),
+            "unexpected dead-tap advisory: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// registry/adapter compatibility: a `homebrew`-registry target with a
+    /// non-homebrew adapter (here the ecosystem default via an explicit `manual`)
+    /// is a hard error — it has no homebrew formula path.
+    #[test]
+    fn homebrew_registry_requires_homebrew_adapter() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\ntargets:\n  \
+                    - {ecosystem: rust, package: ossctl, registry: homebrew, adapter: manual}\n\
+                    distribution:\n  adapter: cargo-dist\n  homebrew_tap: owner/tap\n---\n";
+        assert_error_contains(
+            &norm(text),
+            "requires adapter 'homebrew-tap' (personal tap) or 'homebrew-core'",
+        );
+    }
+
+    /// A `homebrew-core` target is a valid homebrew adapter and needs NO personal
+    /// tap (it bumps the central formula) — it is neither a missing-tap floor nor a
+    /// dead-tap advisory, and does not collide with a `homebrew` installer.
+    #[test]
+    fn homebrew_core_target_needs_no_tap() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\ntargets:\n  \
+                    - {ecosystem: rust, package: ossctl, registry: crates.io, adapter: cargo-publish}\n  \
+                    - {ecosystem: rust, package: ossctl, registry: homebrew, adapter: homebrew-core}\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
     }
 
     // ── monorepo: Vec<Distribution> + per-package association ─────────────────

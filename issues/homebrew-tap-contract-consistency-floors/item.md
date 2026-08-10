@@ -1,8 +1,8 @@
 ---
 created: 2026-08-07
-updated: 2026-08-07
+updated: 2026-08-10
 type: improvement
-status: open
+status: in-progress
 priority: normal
 ---
 
