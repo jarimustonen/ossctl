@@ -2,12 +2,15 @@
 created: 2026-08-05
 updated: 2026-08-10
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 epic: ossctl-phase4-build
 commits:
 - hash: e8961f5
   summary: fix reconcile to resume-publish when publish phase never reached
+- hash: 119a26f
+  summary: harden publish_phase_reached to fail-safe per llm-review
+closed: 2026-08-10
 ---
 
 # release resume demands --allow-unverified even when the publish phase was never reached
