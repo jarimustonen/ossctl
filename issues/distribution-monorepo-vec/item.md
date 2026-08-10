@@ -2,7 +2,7 @@
 created: 2026-08-04
 updated: 2026-08-10
 type: feature
-status: in-progress
+status: done
 priority: normal
 related: ['@contract-cannot-model-cargo-dist-release']
 commits:
@@ -10,6 +10,7 @@ commits:
   summary: Vec<Distribution> + per-package association, schema_version 1->2, back-compat deser, release-seam threading
 - hash: 4dfcff6
   summary: apply /llm-review — schema_version relabel-on-emit, engine multi-dist guard, typo/trim/golden fixes
+closed: 2026-08-10
 ---
 
 # Monorepo distribution: Vec<Distribution> with per-package association
