@@ -73,7 +73,7 @@ app beyond what the ADRs already fix.
   crates.io partial-publish case, and `ossctl release resume`/`abandon` recover an interrupted
   run. Still: green gate first, dry-run/plan first, never publish red, report each phase.
   - **Shipped: 0.1.0 (2026-08-04), 0.1.1 (2026-08-05), 0.1.2 (2026-08-05), 0.2.0 (2026-08-06),
-    0.2.1 (2026-08-06), 0.2.2 (2026-08-06), 0.2.3 (2026-08-07), 0.2.4 (2026-08-10).**
+    0.2.1 (2026-08-06), 0.2.2 (2026-08-06), 0.2.3 (2026-08-07), 0.2.4 (2026-08-10), 0.2.5 (2026-08-10).**
     All on crates.io (`ossctl` + `ossctl-core`), GitHub Releases (cross-platform: macOS aarch64,
     Linux musl x86_64+aarch64, Windows, `.sh`+`.ps1` installers), and the Homebrew tap
     `jarimustonen/homebrew-ossctl`. Repo is **public**. 0.1.2 added `ossctl dist generate`. 0.2.0
@@ -84,7 +84,12 @@ app beyond what the ADRs already fix.
     to clear `dry-run-all` + `build-all` through the engine for all four targets. 0.2.2 wired the
     crates.io **RegistryQuery** for `rust` (sparse index), clearing the PUBLISH barrier. 0.2.3 made
     the homebrew dist leg **self-sufficient** (direct tap-write, dropping the `brew bump-formula-pr`/
-    `brew audit` dependency) + unified the registry probes behind a `ureq` `http_get` seam.
+    `brew audit` dependency) + unified the registry probes behind a `ureq` `http_get` seam. 0.2.5
+    hardened the real-cut publish: a **self-visibility confirm** (the adapter verifies the target's own
+    `{name,version}` reached the index — reusing the bounded index-wait — before journaling a receipt,
+    so a silent no-op upload fails the cut closed instead of fabricating a receipt) + made the release
+    version **single-source** (derived from the workspace manifest; `--version` is an optional must-match
+    confirmation) + made the generated/own `publish-crates.yml` idempotent on "already exists".
   - **🎉 THE DOGFOOD IS COMPLETE (stint #14).** `ossctl release cut` now cuts ossctl ITSELF
     end-to-end, fully autonomously, with zero manual publish steps — proven by the **0.2.3 cut
     (2026-08-07)**: dry-run-all → build-all → publish-all (both crates → crates.io) → tag → dist,
