@@ -56,8 +56,12 @@ Resume does **not** trust the local journal as authoritative — the journal is 
 | target published | `Unknown` (degenerate verify) | surface as unverifiable; require explicit human go-ahead to proceed |
 | target *not* recorded | `Matches` | reconcile forward — a publish landed before its receipt fsynced; adopt it, continue |
 | target *not* recorded | `Missing` | resume the publish for this target |
+| target *not* recorded | `Unknown`, **publish phase reached** | surface as unverifiable; require explicit human go-ahead (a publish could have landed before its receipt fsynced) |
+| target *not* recorded | `Unknown`, **publish phase never reached** | resume the publish for this target (the run failed in dry-run/build; nothing could have published) |
 | tag `created_local` only | (git) tag not on remote | retry push (idempotent) |
 | tag `pushed_remote`, no Release | GitHub Release absent | create the Release (idempotent) |
+
+The two `not recorded × Unknown` rows are discriminated by a **publish-phase-reached** signal derived from the run state (`current_phase >= Publish`, or any completed phase barrier `>= Publish`). `Unknown` is the tri-state degenerate outcome (an ecosystem the binary cannot query, e.g. rust/cargo, or a registry outage): before publish-all was ever entered, nothing could have landed on a registry, so requiring `--allow-unverified` there would be needlessly conservative — resume proceeds. Once publish-all was entered (a crash mid-publish, where a publish could have landed before its receipt fsynced), the row stays unverifiable pending the go-ahead. The signal never relaxes the `target published × Unknown` row: a receipt exists only because publish ran.
 
 Resume continues **from the first incomplete step**; "already-done and matching" is success, "exists and conflicting" is a hard stop, and there is **no auto-rollback** (ADR-0002). `release verify <run_id>` runs this reconciliation **read-only** (no mutation) so an operator can inspect "what actually landed" before choosing `resume` vs `abandon`.
 

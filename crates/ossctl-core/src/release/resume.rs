@@ -24,16 +24,26 @@
 //! | published | `Unknown` | [`Unverifiable`](ResumeAction::Unverifiable) — needs explicit go-ahead |
 //! | not recorded | `Matches` | [`AdoptForward`](ResumeAction::AdoptForward) — publish landed pre-receipt; adopt it |
 //! | not recorded | `Missing` | [`ResumePublish`](ResumeAction::ResumePublish) — resume the publish |
-//! | not recorded | `Unknown` | [`Unverifiable`](ResumeAction::Unverifiable) — needs explicit go-ahead |
+//! | not recorded | `Unknown`, publish phase reached | [`Unverifiable`](ResumeAction::Unverifiable) — a publish could have landed pre-receipt; needs explicit go-ahead |
+//! | not recorded | `Unknown`, publish phase **never** reached | [`ResumePublish`](ResumeAction::ResumePublish) — nothing could have published; resume the publish |
 //!
 //! The `Unknown` rows are the tri-state discipline (also ADR-0002 §1): a lookup
 //! that **could not be performed** — a registry outage, a package with no name, an
 //! ecosystem this binary cannot query, or a structurally-unobservable distribution
 //! target (homebrew taps / GitHub Releases) — is **never** read as `Missing` (which
-//! would drive a dangerous blind re-publish of an already-published version). It is
-//! surfaced as unverifiable; a resume proceeds past it only with an explicit human
-//! go-ahead (`allow_unverified`), which collapses `Unknown` to trust-the-journal
-//! (`Skip` when published, `ResumePublish` when not) rather than a hard stop.
+//! would drive a dangerous blind re-publish of an already-published version). When a
+//! receipt exists (`published × Unknown`) it is surfaced as unverifiable; a resume
+//! proceeds past it only with an explicit human go-ahead (`allow_unverified`), which
+//! collapses `Unknown` to trust-the-journal (`Skip`) rather than a hard stop.
+//!
+//! For a **not-recorded** target the `Unknown` disposition is refined by whether the
+//! run ever entered the publish phase (`publish_phase_reached`, derived from
+//! [`RunState`]): if publish was **never reached** (the run failed in dry-run/build),
+//! nothing could have published without a receipt, so the cell resolves directly to
+//! `ResumePublish` — no go-ahead needed. Only when publish *was* reached (a crash
+//! mid-`publish-all`, where a publish could have landed before its receipt fsynced)
+//! does it stay `Unverifiable` pending the `allow_unverified` go-ahead. This never
+//! touches the `published × Unknown` row: a receipt implies publish ran.
 //!
 //! The **tag** rows of the ADR table (`created_local` only → retry push;
 //! `pushed_remote`, no Release → create Release) are *not* reconciled here: the
@@ -52,7 +62,7 @@
 use std::collections::HashMap;
 
 use crate::contract::schema::Ecosystem;
-use crate::protocol::journal::{PublishReceipt as JournalReceipt, RunState};
+use crate::protocol::journal::{Phase, PublishReceipt as JournalReceipt, RunState};
 use crate::protocol::plan::{PlanTarget, ReleasePlan};
 use crate::protocol::release::{PublishReceipt as AdapterReceipt, VerifyOutcome};
 
@@ -239,6 +249,12 @@ pub fn reconcile_for_resume(
     // ecosystem carries several (never the bare ecosystem, which would collide and
     // risk re-publishing an already-landed crate).
     let target_ids = super::journal_target_ids(&plan.targets);
+    // A run-level fact: did this run ever enter the publish phase? Before that
+    // point nothing could have landed on a registry, so a not-recorded target that
+    // verifies `Unknown` (an unqueryable ecosystem, e.g. rust/cargo) is safe to
+    // resume without the `--allow-unverified` go-ahead — the "publish never
+    // reached" refinement of the ADR-0003 §4 `(not recorded, Unknown)` cell.
+    let publish_reached = publish_phase_reached(state);
     let mut decisions = Vec::with_capacity(plan.targets.len());
     for (pt, target) in plan.targets.iter().zip(target_ids) {
         // A cancelled target is a deliberate skip, not a publish candidate. The
@@ -304,7 +320,7 @@ pub fn reconcile_for_resume(
             (JournalState::NotRecorded, outcome, detail)
         };
 
-        let action = classify(journal_state, outcome, allow_unverified);
+        let action = classify(journal_state, outcome, allow_unverified, publish_reached);
         let adopted_receipt = (action == ResumeAction::AdoptForward).then(|| JournalReceipt {
             ecosystem: pt.ecosystem.as_str().to_string(),
             package: pt.package.clone(),
@@ -317,7 +333,13 @@ pub fn reconcile_for_resume(
             digest: None,
         });
         decisions.push(TargetDecision {
-            detail: action_detail(action, outcome, journal_state, verify_detail),
+            detail: action_detail(
+                action,
+                outcome,
+                journal_state,
+                publish_reached,
+                verify_detail,
+            ),
             target,
             ecosystem: pt.ecosystem,
             journal_state,
@@ -334,8 +356,25 @@ pub fn reconcile_for_resume(
     }
 }
 
+/// Whether the run ever entered the publish phase — the point at or after which a
+/// target could have landed on a registry without its receipt fsyncing (a crash
+/// mid-`publish-all`). Derived from [`RunState`]: the phase currently in progress
+/// is [`Phase::Publish`] or later, OR any recorded phase barrier is `Publish` or
+/// later. `Phase`'s `Ord` follows barrier order (`DryRun < Build < Publish < Tag <
+/// Dist`), so `>= Phase::Publish` is exactly "publish-or-beyond".
+///
+/// Before that point nothing could have published, so a not-recorded target that
+/// verifies `Unknown` is safe to resume without the `--allow-unverified` go-ahead
+/// (see `classify`). This never affects the `Published` rows: a receipt only
+/// exists because publish ran, so `Published` already implies publish was reached.
+fn publish_phase_reached(state: &RunState) -> bool {
+    state.current_phase.is_some_and(|p| p >= Phase::Publish)
+        || state.phases.iter().any(|r| r.phase >= Phase::Publish)
+}
+
 /// Map one (journal-state × remote-outcome) cell to its [`ResumeAction`], folding
-/// the `allow_unverified` go-ahead into the two `Unknown` rows.
+/// the `allow_unverified` go-ahead and the `publish_phase_reached` signal into the
+/// `(not recorded, Unknown)` row.
 // Each arm is one cell of the ADR-0003 §4 state table, kept separate (even where
 // two resolve to the same action) so the mapping reads as the documented table and
 // a future divergence is a one-line edit, not a pattern split.
@@ -344,6 +383,7 @@ fn classify(
     journal_state: JournalState,
     outcome: VerifyOutcome,
     allow_unverified: bool,
+    publish_phase_reached: bool,
 ) -> ResumeAction {
     use JournalState::{Cancelled, Delegated, NotRecorded, Published};
     use VerifyOutcome::{Conflicts, Matches, Missing, Unknown};
@@ -357,6 +397,8 @@ fn classify(
         // never overwrite someone else's artifact, never blind-re-publish.
         (Published, Conflicts | Missing) => ResumeAction::Conflict,
         (Published, Unknown) => {
+            // NB: a receipt only exists because publish ran, so `publish_phase_reached`
+            // is necessarily true here — this row is never relaxed by that signal.
             if allow_unverified {
                 // The go-ahead trusts the journal's own receipt.
                 ResumeAction::Skip
@@ -372,7 +414,15 @@ fn classify(
         // classify it as a hard stop rather than guess if a future port surfaces it.
         (NotRecorded, Conflicts) => ResumeAction::Conflict,
         (NotRecorded, Unknown) => {
-            if allow_unverified {
+            if !publish_phase_reached {
+                // The publish phase was provably never entered (the run failed in
+                // dry-run/build), so nothing could have published without a
+                // receipt: resume the publish, no go-ahead needed. This does NOT
+                // relax the mid-publish crash case (publish reached, no receipt),
+                // which stays `Unverifiable` below.
+                ResumeAction::ResumePublish
+            } else if allow_unverified {
+                // Publish WAS reached, so a publish could have landed pre-receipt.
                 // The go-ahead accepts the double-publish risk on an unverifiable,
                 // not-recorded target (adapters treat "already published" as an
                 // error the coordinator then surfaces — never a silent overwrite).
@@ -453,6 +503,7 @@ fn action_detail(
     action: ResumeAction,
     outcome: VerifyOutcome,
     journal_state: JournalState,
+    publish_phase_reached: bool,
     verify_detail: Option<String>,
 ) -> Option<String> {
     match action {
@@ -466,9 +517,15 @@ fn action_detail(
         ),
         ResumeAction::ResumePublish => Some(match journal_state {
             JournalState::NotRecorded if outcome == VerifyOutcome::Unknown => {
-                "unverifiable and not recorded as published; resuming the publish under the \
-                 explicit go-ahead"
-                    .to_string()
+                if publish_phase_reached {
+                    "unverifiable and not recorded as published; resuming the publish under the \
+                     explicit go-ahead"
+                        .to_string()
+                } else {
+                    "the publish phase was never reached, so nothing could have published; \
+                     resuming the publish for this target"
+                        .to_string()
+                }
             }
             _ => "not published; resuming the publish for this target".to_string(),
         }),

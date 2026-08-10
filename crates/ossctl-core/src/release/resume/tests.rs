@@ -14,7 +14,9 @@ use std::path::Path;
 use super::{reconcile_for_resume, JournalState, ResumeAction};
 use crate::contract::schema::{Adapter, Ecosystem, Registry};
 use crate::ports::{Clock, CommandOutput, CommandRunner, RegistryQuery};
-use crate::protocol::journal::{PublishReceipt, RunState, RunStatus};
+use crate::protocol::journal::{
+    Phase, PhaseOutcome, PhaseRecord, PublishReceipt, RunState, RunStatus,
+};
 use crate::protocol::plan::{PlanPhase, PlanTarget, ReleasePlan};
 use crate::protocol::release::VerifyOutcome;
 use crate::release::adapters::EffectCtx;
@@ -147,6 +149,12 @@ fn journal_receipt(ecosystem: &str, version: &str, digest: Option<&str>) -> Publ
 }
 
 /// A `RunState` for `plan-abc` with the given published `(target_id, receipt)` set.
+///
+/// The run is placed **in the publish phase** (`current_phase = Publish`) — the
+/// realistic resume scenario (a crash during/after `publish-all`, where a publish
+/// could have landed before its receipt fsynced). This keeps the not-recorded
+/// `Unknown` row `Unverifiable` without an explicit go-ahead. For a run that failed
+/// *before* publish was ever reached, use [`state_before_publish`].
 fn state_with(published: &[(&str, PublishReceipt)], targets: &[&str]) -> RunState {
     let mut s = RunState::empty();
     s.run_id = "RUN01".into();
@@ -154,9 +162,33 @@ fn state_with(published: &[(&str, PublishReceipt)], targets: &[&str]) -> RunStat
     s.version = "1.0.0".into();
     s.status = RunStatus::InProgress;
     s.targets = targets.iter().map(|t| (*t).to_string()).collect();
+    s.current_phase = Some(Phase::Publish);
+    s.phases = vec![
+        PhaseRecord {
+            phase: Phase::DryRun,
+            outcome: PhaseOutcome::Ok,
+        },
+        PhaseRecord {
+            phase: Phase::Build,
+            outcome: PhaseOutcome::Ok,
+        },
+    ];
     for (id, r) in published {
         s.published.insert((*id).to_string(), r.clone());
     }
+    s
+}
+
+/// Like [`state_with`], but for a run that failed in the **build** phase — the
+/// publish phase was never reached, so nothing could have published without a
+/// receipt. (`current_phase = Build`, and no phase record is `Publish` or later.)
+fn state_before_publish(published: &[(&str, PublishReceipt)], targets: &[&str]) -> RunState {
+    let mut s = state_with(published, targets);
+    s.current_phase = Some(Phase::Build);
+    s.phases = vec![PhaseRecord {
+        phase: Phase::DryRun,
+        outcome: PhaseOutcome::Ok,
+    }];
     s
 }
 
@@ -193,6 +225,21 @@ fn one_rust_decision(
     r.decisions.into_iter().next().unwrap()
 }
 
+/// Like [`one_rust_decision`], but for a run that failed **before** the publish
+/// phase was reached (a build-phase failure).
+fn one_rust_decision_before_publish(
+    published: &[(&str, PublishReceipt)],
+    reg: FakeRegistry,
+    allow_unverified: bool,
+) -> super::TargetDecision {
+    let state = state_before_publish(published, &["rust"]);
+    let (cmd, clock) = (RecordingCmd::default(), FixedClock);
+    let r = reconcile(&state, &rust_plan(), &cmd, &clock, &reg, allow_unverified);
+    assert_eq!(r.decisions.len(), 1, "expected exactly one decision");
+    assert!(cmd.calls.borrow().is_empty(), "reconcile ran a command");
+    r.decisions.into_iter().next().unwrap()
+}
+
 // ── The state table, cell by cell ────────────────────────────────────────────
 
 #[test]
@@ -225,7 +272,12 @@ fn published_conflicts_is_a_hard_stop() {
     // digest-mismatch Conflicts path is exercised by the adapter layer's own
     // classify_receipt tests. Here we assert the *mapping* directly instead:
     assert_eq!(
-        super::classify(JournalState::Published, VerifyOutcome::Conflicts, false),
+        super::classify(
+            JournalState::Published,
+            VerifyOutcome::Conflicts,
+            false,
+            true
+        ),
         ResumeAction::Conflict
     );
     // …and that a present version is at least not a spurious blocker.
@@ -321,6 +373,46 @@ fn not_recorded_unknown_with_go_ahead_resumes_the_publish() {
     assert_eq!(d.outcome, VerifyOutcome::Unknown);
     assert_eq!(d.action, ResumeAction::ResumePublish);
     assert!(!d.action.is_blocker());
+}
+
+// ── Publish-phase-reached refinement of (not recorded, Unknown) ───────────────
+
+#[test]
+fn not_recorded_unknown_resumes_without_go_ahead_when_publish_never_reached() {
+    // The run failed in the BUILD phase (publish-all never started), and the target
+    // is a rust/cargo target with no wired registry query (Unknown). Nothing could
+    // have published, so resume must proceed WITHOUT --allow-unverified. This is the
+    // exact scenario the resume-publish-phase-never-reached bug reported.
+    let d = one_rust_decision_before_publish(&[], FakeRegistry::outage(), false);
+    assert_eq!(d.journal_state, JournalState::NotRecorded);
+    assert_eq!(d.outcome, VerifyOutcome::Unknown);
+    assert_eq!(d.action, ResumeAction::ResumePublish);
+    assert!(
+        !d.action.is_blocker(),
+        "a build-phase failure must not demand --allow-unverified"
+    );
+    assert!(d.adopted_receipt.is_none());
+    assert!(d
+        .detail
+        .as_deref()
+        .unwrap()
+        .contains("publish phase was never reached"));
+}
+
+#[test]
+fn not_recorded_unknown_stays_unverifiable_mid_publish_crash() {
+    // The mid-publish crash: publish-all WAS entered (a publish could have landed
+    // before its receipt fsynced), the target verifies Unknown, and there is no
+    // go-ahead. This must STILL block — the publish-never-reached relaxation must
+    // not leak into this genuinely-unsafe row.
+    let d = one_rust_decision(&[], FakeRegistry::outage(), false);
+    assert_eq!(d.journal_state, JournalState::NotRecorded);
+    assert_eq!(d.outcome, VerifyOutcome::Unknown);
+    assert_eq!(d.action, ResumeAction::Unverifiable);
+    assert!(
+        d.action.is_blocker(),
+        "a mid-publish crash must still demand --allow-unverified"
+    );
 }
 
 // ── Unknown safety: never a false Missing ────────────────────────────────────
@@ -570,22 +662,80 @@ fn classify_covers_every_cell() {
     use ResumeAction::{AdoptForward, Conflict, ResumePublish, Skip, Unverifiable};
     use VerifyOutcome::{Conflicts, Matches, Missing, Unknown};
 
-    // Without the go-ahead.
-    assert_eq!(super::classify(Published, Matches, false), Skip);
-    assert_eq!(super::classify(Published, Conflicts, false), Conflict);
-    assert_eq!(super::classify(Published, Missing, false), Conflict);
-    assert_eq!(super::classify(Published, Unknown, false), Unverifiable);
-    assert_eq!(super::classify(NotRecorded, Matches, false), AdoptForward);
-    assert_eq!(super::classify(NotRecorded, Missing, false), ResumePublish);
-    assert_eq!(super::classify(NotRecorded, Conflicts, false), Conflict);
-    assert_eq!(super::classify(NotRecorded, Unknown, false), Unverifiable);
-
-    // The go-ahead only ever relaxes the two Unknown rows.
-    assert_eq!(super::classify(Published, Unknown, true), Skip);
-    assert_eq!(super::classify(NotRecorded, Unknown, true), ResumePublish);
+    // The state table with publish reached (the resume-time default) and no
+    // go-ahead. `reached` is the publish_phase_reached signal.
+    let reached = true;
+    assert_eq!(super::classify(Published, Matches, false, reached), Skip);
     assert_eq!(
-        super::classify(Published, Missing, true),
+        super::classify(Published, Conflicts, false, reached),
+        Conflict
+    );
+    assert_eq!(
+        super::classify(Published, Missing, false, reached),
+        Conflict
+    );
+    assert_eq!(
+        super::classify(Published, Unknown, false, reached),
+        Unverifiable
+    );
+    assert_eq!(
+        super::classify(NotRecorded, Matches, false, reached),
+        AdoptForward
+    );
+    assert_eq!(
+        super::classify(NotRecorded, Missing, false, reached),
+        ResumePublish
+    );
+    assert_eq!(
+        super::classify(NotRecorded, Conflicts, false, reached),
+        Conflict
+    );
+    assert_eq!(
+        super::classify(NotRecorded, Unknown, false, reached),
+        Unverifiable,
+        "mid-publish crash (publish reached, no receipt) stays unverifiable"
+    );
+
+    // The go-ahead relaxes the two Unknown rows.
+    assert_eq!(super::classify(Published, Unknown, true, reached), Skip);
+    assert_eq!(
+        super::classify(NotRecorded, Unknown, true, reached),
+        ResumePublish
+    );
+    assert_eq!(
+        super::classify(Published, Missing, true, reached),
         Conflict,
         "the go-ahead must never downgrade a genuine hard stop"
+    );
+
+    // Publish phase NEVER reached: only the (not recorded, Unknown) cell changes —
+    // it resolves to ResumePublish even without the go-ahead (nothing could have
+    // published). Every other cell is invariant under this signal.
+    let never = false;
+    assert_eq!(
+        super::classify(NotRecorded, Unknown, false, never),
+        ResumePublish,
+        "publish never reached ⇒ nothing could have published ⇒ resume, no go-ahead"
+    );
+    assert_eq!(
+        super::classify(NotRecorded, Unknown, true, never),
+        ResumePublish
+    );
+    // The Published × Unknown row must NOT be relaxed by the never-reached signal
+    // (a receipt implies publish ran; the signal never legitimately co-occurs, but
+    // the mapping must stay safe even if it did).
+    assert_eq!(
+        super::classify(Published, Unknown, false, never),
+        Unverifiable,
+        "published × Unknown is never relaxed by the publish-phase signal"
+    );
+    assert_eq!(super::classify(Published, Missing, false, never), Conflict);
+    assert_eq!(
+        super::classify(NotRecorded, Matches, false, never),
+        AdoptForward
+    );
+    assert_eq!(
+        super::classify(NotRecorded, Missing, false, never),
+        ResumePublish
     );
 }
