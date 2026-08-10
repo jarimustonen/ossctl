@@ -117,8 +117,11 @@ app beyond what the ADRs already fix.
        runtime, so `release plan` shows the NEW version even from a stale old binary — `plan`/`cut`
        will then run OLD engine code silently. `ossctl version` is the only tell. (Stale-binary guard
        tracked in `release-cut-stale-binary-guard`.) Then
-       `ossctl release plan --version X.Y.Z` (seal + inspect; side-effect-free) → then
-       `ossctl release cut --plan <id> --version X.Y.Z`. The engine runs
+       `ossctl release plan` (seal + inspect; side-effect-free) → then
+       `ossctl release cut --plan <id>`. **There is no `--version` flag** (removed in 0.3.0,
+       `release-drop-version-flag`): the release version comes solely from the workspace manifest
+       (the version you bumped in step 1), so a stray `--version` is now a hard clap error, not a
+       silently-ignored confirmation. The engine runs
        `dry-run-all → build-all → publish-all (crates.io, dep-ordered, index-waited) → tag →
        dist (homebrew: real sha256 pushed to the tap)`. It **skips** the CI-delegated
        cargo-dist target and **delegates the GitHub Release to CI** (Option 1,

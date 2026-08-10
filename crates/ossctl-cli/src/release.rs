@@ -32,19 +32,17 @@ use crate::sys::{
 };
 
 /// Arguments for `release plan`.
+///
+/// There is deliberately **no** `--version` input: the release version is derived
+/// solely from the workspace manifest (the single source of truth), because a cut
+/// publishes the version already in the tree — it does not bump it
+/// (`release-drop-version-flag`). A stray `--version` fails at the clap boundary
+/// (`unexpected argument`) rather than being silently ignored.
 #[derive(Args, Debug)]
 pub struct PlanArgs {
     /// Repository root to plan a release for (default: current directory).
     #[arg(long, value_name = "PATH")]
     pub repo_root: Option<PathBuf>,
-    /// Optional confirmation of the release version. The version is derived from the
-    /// workspace manifest (the single source of truth) — `ossctl release cut`
-    /// publishes the version already in the tree, it does not bump it. When supplied,
-    /// `--version` must equal the manifest version or the plan refuses; when omitted,
-    /// the manifest version is used. Kept so the documented recipe
-    /// (`release plan --version X.Y.Z`) and skill wiring keep working.
-    #[arg(long, value_name = "VERSION")]
-    pub version: Option<String>,
 }
 
 /// Arguments for `release cut`.
@@ -52,22 +50,14 @@ pub struct PlanArgs {
 /// `release plan` is read-only and persists nothing, so `cut` re-derives the plan
 /// from the *current* repo state (the version is derived from the workspace
 /// manifest, the single source of truth), then refuses unless the recomputed
-/// `plan_id` equals the approved `--plan` (drift check, ADR-0002 §3). `--version` is
-/// an optional confirmation: when supplied it must equal the manifest version, and a
-/// version that differs from the one `release plan` sealed simply fails the drift
-/// check.
+/// `plan_id` equals the approved `--plan` (drift check, ADR-0002 §3). Like `plan`,
+/// there is **no** `--version` input (`release-drop-version-flag`).
 #[derive(Args, Debug)]
 pub struct CutArgs {
     /// The sealed plan id to execute (from `release plan`). The cut refuses if the
     /// current repository no longer hashes to it.
     #[arg(long, value_name = "PLAN_ID")]
     pub plan: String,
-    /// Optional confirmation of the release version. Derived from the workspace
-    /// manifest (the single source of truth); when supplied, must equal the manifest
-    /// version or the cut refuses. Kept so the documented recipe
-    /// (`release cut --plan <id> --version X.Y.Z`) and skill wiring keep working.
-    #[arg(long, value_name = "VERSION")]
-    pub version: Option<String>,
     /// Repository root to cut the release in (default: current directory).
     #[arg(long, value_name = "PATH")]
     pub repo_root: Option<PathBuf>,
@@ -182,12 +172,6 @@ pub fn dispatch(action: ReleaseAction, format: OutputFormat) -> Result<(), CliEr
 /// `/oss-init` agree on the contract down to the byte (ADR-0001 §3). Emits the
 /// plan and its `plan_id` under the canonical envelope.
 pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
-    // Validate an *optional* `--version` confirmation up front (fail fast on a
-    // malformed flag); the authoritative version is derived from the manifest below.
-    if let Some(v) = args.version.as_deref() {
-        validate_version(v)?;
-    }
-
     let repo_root = resolve_repo_root(args.repo_root.as_ref())?;
     if !repo_root.is_dir() {
         return Err(CliError::user(
@@ -231,14 +215,14 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
     let facts = ossctl_core::facts::gather(&root, &RealFs, &git);
 
     // Derive the release version from the workspace manifest (the single source of
-    // truth); an optional `--version` must equal it. A cut publishes the version
-    // already in the manifest — it does not bump it — so making the version a
-    // projection of the tree (rather than an independent input) removes the
-    // two-masters `--version`-vs-tree drift footgun (`release-cut-publish-noop`).
-    let version = resolve_version(&normalized.contract, &facts, args.version.as_deref())?;
-    // The derived/confirmed version becomes the `v{version}` git tag — validate its
-    // shape even when it came from the manifest (a manifest could carry a tag-unsafe
-    // version string).
+    // truth). A cut publishes the version already in the manifest — it does not bump
+    // it — so the version is a projection of the tree, never an independent input:
+    // there is no `--version` flag, which removes the two-masters drift footgun at the
+    // root (`release-drop-version-flag`, closing `release-cut-publish-noop`).
+    let version = resolve_version(&normalized.contract, &facts)?;
+    // The derived version becomes the `v{version}` git tag — validate its shape even
+    // though it came from the manifest (a manifest could carry a tag-unsafe version
+    // string).
     validate_version(&version)?;
 
     let plan = ossctl_core::release::plan::build(&normalized.contract, &facts, &head_sha, &version);
@@ -1248,21 +1232,20 @@ fn derive_resume_plan(
     })?;
     let facts = ossctl_core::facts::gather(root, &RealFs, git);
     // Confirm the journal's sealed version still matches the CURRENT tree manifest
-    // (single source of truth), exactly as `cut` resolves it. A resume re-derives the
+    // (single source of truth), exactly as `cut` derives it. A resume re-derives the
     // plan from live repo state, and a manifest-version edit between the failed cut
     // and its resume does NOT change `plan_id` (manifest versions are not part of the
     // content address), so the drift check below would not catch it — a resume could
     // otherwise publish the new manifest version while threading the journal's sealed
     // version into every probe/wait/receipt, the exact `release-cut-publish-noop`
-    // mismatch. Passing the sealed version as the confirmation surfaces such an edit
-    // as a `resume_version_drift` (resume takes no `--version` flag, so it gets a
-    // resume-specific message, not the flag-oriented one).
-    let resolved = ossctl_core::release::plan::resolve_release_version(
-        &normalized.contract,
-        &facts,
-        Some(&state.version),
-    )
-    .map_err(|e| resume_version_error(state, e))?;
+    // mismatch. Deriving the tree version and comparing it to the sealed version
+    // surfaces such an edit as a `resume_version_drift`.
+    let resolved =
+        ossctl_core::release::plan::resolve_release_version(&normalized.contract, &facts)
+            .map_err(|e| resume_version_error(state, e))?;
+    if resolved != state.version {
+        return Err(resume_version_drift_error(state, &resolved));
+    }
     // The journal is local mutable state, not trusted input — re-validate the sealed
     // version's shape before it becomes the `v{version}` tag (parity with plan/cut).
     validate_version(&resolved)?;
@@ -1420,12 +1403,6 @@ fn resume_conflict_error(
 /// On any phase failure the run **stops with no rollback**; what landed is
 /// journalled and the error names the `run_id` for `release verify` / `resume`.
 pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
-    // Validate an *optional* `--version` confirmation up front; the authoritative
-    // version is derived from the manifest below.
-    if let Some(v) = args.version.as_deref() {
-        validate_version(v)?;
-    }
-
     let repo_root = resolve_repo_root(args.repo_root.as_ref())?;
     if !repo_root.is_dir() {
         return Err(CliError::user(
@@ -1475,15 +1452,14 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     })?;
     let facts = ossctl_core::facts::gather(&root, &RealFs, &git);
 
-    // Derive the release version from the manifest (single source of truth) and
-    // confirm the optional `--version` against it. The cut publishes the version in
-    // the manifest — deriving it here means a `--version` can never silently publish
-    // the wrong version and then wait forever for the requested one
-    // (`release-cut-publish-noop`). Resolved here as well as in `plan` because the
-    // manifest can change between plan and cut (the plan-drift hash below would also
-    // catch a manifest-version edit, but this yields the precise, actionable message
-    // rather than a generic `plan_stale`).
-    let version = resolve_version(&normalized.contract, &facts, args.version.as_deref())?;
+    // Derive the release version from the manifest (single source of truth). The cut
+    // publishes the version in the manifest, so deriving it here — with no `--version`
+    // input to override it (`release-drop-version-flag`) — means the engine can never
+    // publish one version while waiting forever for another (`release-cut-publish-noop`).
+    // Resolved here as well as in `plan` because the manifest can change between plan
+    // and cut (the plan-drift hash below would also catch a manifest-version edit, but
+    // this yields the precise, actionable message rather than a generic `plan_stale`).
+    let version = resolve_version(&normalized.contract, &facts)?;
     validate_version(&version)?;
 
     // Drift check: the current repo + resolved version must hash to the approved
@@ -1582,9 +1558,8 @@ fn plan_stale_error(approved: &str, current: &ReleasePlan) -> CliError {
 fn resolve_version(
     contract: &Contract,
     facts: &ossctl_core::protocol::facts::Facts,
-    requested: Option<&str>,
 ) -> Result<String, CliError> {
-    ossctl_core::release::plan::resolve_release_version(contract, facts, requested)
+    ossctl_core::release::plan::resolve_release_version(contract, facts)
         .map_err(version_resolve_error)
 }
 
@@ -1592,26 +1567,28 @@ fn resolve_version(
 /// the §10 error envelope with an actionable, operator-facing message.
 ///
 /// `ossctl release cut` publishes the version already in the manifest — it does not
-/// bump it — so the version is derived from the manifest (the single source of
-/// truth) and `--version` is only an optional confirmation. The three failure modes
-/// each get a distinct, fixable message.
+/// bump it — so the version is derived **solely** from the manifest (the single source
+/// of truth); there is no `--version` input (`release-drop-version-flag`). Each
+/// failure mode gets a distinct, fixable message.
 fn version_resolve_error(err: ossctl_core::release::plan::VersionResolveError) -> CliError {
     use ossctl_core::release::plan::VersionResolveError;
     match err {
-        VersionResolveError::Mismatch {
-            requested,
-            mismatches,
-        } => CliError::user(
-            "version_mismatch",
+        // Fail CLOSED: a manifest-versioned target (npm/PyPI/…) whose version the
+        // detector could not read — `version-source-fail-closed-nonrust`. A
+        // distribution target (homebrew/binary) is skipped by design; a manifest
+        // target with no readable version is a bug that must not publish blind.
+        VersionResolveError::MissingManifestVersion { targets } => CliError::user(
+            "version_source_unreadable",
             format!(
-                "--version {requested} does not match the tree manifest version(s) a cut would \
-                 publish: {}. `ossctl release cut` publishes the version already in the manifest — \
-                 it does NOT bump it. Bump the manifest (and finalize the CHANGELOG) in a release \
-                 commit first, then plan/cut — or omit --version to use the manifest version.",
-                render_version_rows(&mismatches)
+                "these manifest-versioned target(s) have no readable manifest version, so the \
+                 release version cannot be confirmed for them: {}. These ecosystems ARE \
+                 manifest-versioned (unlike a homebrew/binary distribution target, which is \
+                 skipped by design), so ossctl fails closed rather than publish an unchecked \
+                 version. Ensure each package's manifest declares a version the detector can read \
+                 (`ossctl facts --json` shows what was detected).",
+                render_unversioned_rows(&targets)
             ),
-        )
-        .with_invalid_value(requested),
+        ),
         VersionResolveError::InconsistentTree { versions } => CliError::user(
             "version_inconsistent_tree",
             format!(
@@ -1623,15 +1600,15 @@ fn version_resolve_error(err: ossctl_core::release::plan::VersionResolveError) -
         ),
         VersionResolveError::Undeterminable => CliError::user(
             "version_undeterminable",
-            "no manifest version could be detected for any target and no --version was supplied, \
-             so the release version cannot be derived. Pass --version <X.Y.Z> (there is no \
-             manifest version to confirm it against).",
+            "no manifest version could be detected for any target, so the release version cannot \
+             be derived. The version comes solely from the workspace manifest — ensure a \
+             publishable package's manifest declares a version.",
         ),
     }
 }
 
 /// Render `<package> (<ecosystem>) is at <version>` rows as one comma-joined line —
-/// the shared detail body for every version-resolution error message.
+/// the shared detail body for the tree-inconsistency error message.
 fn render_version_rows(rows: &[ossctl_core::release::plan::VersionMismatch]) -> String {
     rows.iter()
         .map(|m| {
@@ -1646,35 +1623,70 @@ fn render_version_rows(rows: &[ossctl_core::release::plan::VersionMismatch]) -> 
         .join(", ")
 }
 
+/// Render `<package> (<ecosystem> → <registry>)` rows as one comma-joined line — the
+/// detail body for the fail-closed `version_source_unreadable` error.
+fn render_unversioned_rows(rows: &[ossctl_core::release::plan::UnversionedTarget]) -> String {
+    rows.iter()
+        .map(|t| {
+            format!(
+                "{} ({} → {})",
+                t.package,
+                t.ecosystem.as_str(),
+                t.registry.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Map a version-resolution failure encountered during `release resume` to a
 /// resume-appropriate §10 error.
 ///
-/// Unlike `plan`/`cut`, resume takes no `--version` flag — the version comes from the
-/// journal — so [`version_resolve_error`]'s "omit --version" / "pass --version"
-/// guidance would be nonsensical here. A failure means the tree manifest was edited
-/// to a *different* version after the run was sealed (a manifest-version edit does
-/// not move the content-addressed `plan_id`, so only this explicit check catches it);
-/// the fix is to restore the sealed version, not to touch a flag.
+/// Reached when the tree can no longer produce **any** release version (a manifest
+/// version went unreadable, the tree became self-inconsistent, or no manifest version
+/// remains). The version comes from the journal, so the fix is to restore the sealed
+/// tree, not to derive a new one.
 fn resume_version_error(
     state: &ossctl_core::protocol::journal::RunState,
     err: ossctl_core::release::plan::VersionResolveError,
 ) -> CliError {
     use ossctl_core::release::plan::VersionResolveError;
     let detail = match &err {
-        VersionResolveError::Mismatch { mismatches, .. } => render_version_rows(mismatches),
+        VersionResolveError::MissingManifestVersion { targets } => render_unversioned_rows(targets),
         VersionResolveError::InconsistentTree { versions } => render_version_rows(versions),
-        // Unreachable in practice: resume always passes `Some(state.version)`, so a
-        // zero-checkable tree falls back to that version rather than erroring.
-        VersionResolveError::Undeterminable => "no manifest version detected".to_string(),
+        VersionResolveError::Undeterminable => "no manifest version could be detected".to_string(),
     };
     CliError::user(
         "resume_version_drift",
         format!(
-            "run {} was sealed at version {}, but the tree manifest no longer matches it: {detail}. \
-             A manifest-version edit occurred after the cut (a manifest edit does not move the \
+            "run {} was sealed at version {}, but the tree manifest can no longer produce that \
+             version: {detail}. A manifest edit occurred after the cut (a manifest edit does not \
+             move the plan_id, so this is the check that catches it). Restore the sealed tree (a \
+             clean checkout of the sealed commit), or plan and cut a new release — ossctl will not \
+             resume a run under a different version than it was sealed with.",
+            state.run_id, state.version
+        ),
+    )
+    .with_invalid_value(state.run_id.clone())
+}
+
+/// The `resume_version_drift` refusal for the common case: the tree still resolves to
+/// a single manifest version, but a *different* one than the run was sealed with (a
+/// lockstep re-bump after the cut). A manifest-version edit does not move the
+/// content-addressed `plan_id`, so this explicit comparison is the check that catches
+/// it — the fix is to restore the sealed version, not to resume under a new one.
+fn resume_version_drift_error(
+    state: &ossctl_core::protocol::journal::RunState,
+    tree_version: &str,
+) -> CliError {
+    CliError::user(
+        "resume_version_drift",
+        format!(
+            "run {} was sealed at version {}, but the tree manifest is now at {tree_version}. A \
+             manifest-version edit occurred after the cut (a manifest edit does not move the \
              plan_id, so this is the check that catches it). Restore the sealed version (a clean \
-             checkout of the sealed commit), or plan and cut a new release — ossctl will not resume \
-             a run under a different version than it was sealed with.",
+             checkout of the sealed commit), or plan and cut a new release — ossctl will not \
+             resume a run under a different version than it was sealed with.",
             state.run_id, state.version
         ),
     )
@@ -1985,10 +1997,7 @@ fn render_plan_text(plan: &ReleasePlan, warnings: &[String]) {
     }
     println!();
     println!("To execute this exact plan (refuses if the repo drifts):");
-    println!(
-        "  ossctl release cut --plan {} --version {}",
-        plan.plan_id, plan.version
-    );
+    println!("  ossctl release cut --plan {}", plan.plan_id);
 }
 
 #[cfg(test)]
@@ -2155,6 +2164,49 @@ mod tests {
     struct AbandonHarness {
         #[command(flatten)]
         args: AbandonArgs,
+    }
+
+    /// Clap harnesses for `plan` / `cut` argument parsing, to assert the `--version`
+    /// input is gone (`release-drop-version-flag`).
+    #[derive(clap::Parser, Debug)]
+    struct PlanHarness {
+        #[command(flatten)]
+        args: PlanArgs,
+    }
+    #[derive(clap::Parser, Debug)]
+    struct CutHarness {
+        #[command(flatten)]
+        args: CutArgs,
+    }
+
+    /// `release plan --version X.Y.Z` is a HARD ERROR, not a silently-ignored flag:
+    /// the release version comes solely from the workspace manifest, so a stray
+    /// `--version` fails loudly at the clap boundary rather than misleading a caller
+    /// into thinking it set the version (`release-drop-version-flag`).
+    #[test]
+    fn plan_rejects_the_removed_version_flag() {
+        assert!(
+            PlanHarness::try_parse_from(["plan"]).is_ok(),
+            "plan still parses with no --version"
+        );
+        assert!(
+            PlanHarness::try_parse_from(["plan", "--version", "0.3.0"]).is_err(),
+            "--version must be an unexpected-argument error, not ignored"
+        );
+    }
+
+    /// `release cut --plan <id> --version X.Y.Z` likewise rejects the removed flag,
+    /// while `--plan` alone still parses.
+    #[test]
+    fn cut_rejects_the_removed_version_flag() {
+        assert!(
+            CutHarness::try_parse_from(["cut", "--plan", "abc"]).is_ok(),
+            "cut still parses with just --plan"
+        );
+        assert!(
+            CutHarness::try_parse_from(["cut", "--plan", "abc", "--version", "0.3.0"]).is_err(),
+            "--version must be an unexpected-argument error, not ignored"
+        );
     }
 
     /// A `--reason` value beginning with `--` must be taken literally, not parsed

@@ -1308,9 +1308,14 @@ fn approved_git_repo() -> tempfile::TempDir {
         .unwrap()
         .replace("status: draft", "status: approved");
     std::fs::write(dir.path().join("OSS-RELEASE.md"), contract).unwrap();
+    // The manifest carries the release version — the single source of truth now that
+    // `--version` is gone (`release-drop-version-flag`). Without a version here the
+    // fail-closed guard (`version-source-fail-closed-nonrust`) would refuse to plan.
     std::fs::write(
         dir.path().join("Cargo.toml"),
-        "[package]\nname = \"tool\"\n",
+        // Package name matches the fixture's explicit target (`package: rg`) so facts
+        // resolves the manifest version for it.
+        "[package]\nname = \"rg\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
 
@@ -1341,15 +1346,7 @@ fn release_cut_refuses_a_draft_contract() {
     .unwrap();
 
     let out = ossctl()
-        .args([
-            "release",
-            "cut",
-            "--plan",
-            "deadbeef",
-            "--version",
-            "1.0.0",
-            "--repo-root",
-        ])
+        .args(["release", "cut", "--plan", "deadbeef", "--repo-root"])
         .arg(dir.path())
         .output()
         .unwrap();
@@ -1372,8 +1369,6 @@ fn release_cut_refuses_a_stale_plan_id() {
             "cut",
             "--plan",
             "0000000000000000",
-            "--version",
-            "1.0.0",
             "--repo-root",
         ])
         .arg(dir.path())
@@ -1389,31 +1384,27 @@ fn release_cut_refuses_a_stale_plan_id() {
     assert!(out.stdout.is_empty(), "a refused cut published nothing");
 }
 
-/// A correct-shape plan cut with the WRONG version is still drift: the version is
-/// part of the content address, so a different `--version` hashes to a different
-/// `plan_id` and the cut refuses rather than publishing an unapproved version.
+/// Editing the manifest version AFTER sealing a plan is drift: the version is part
+/// of the content address (derived from the manifest — the single source of truth,
+/// `release-drop-version-flag`), so a bumped manifest hashes to a different `plan_id`
+/// and the cut refuses rather than publishing an unapproved version. This replaces
+/// the old `--version`-differs-from-sealed check: there is no longer a version flag
+/// to differ, so drift now enters only through the manifest.
 #[test]
-fn release_cut_refuses_when_version_differs_from_the_sealed_plan() {
-    let dir = approved_git_repo();
+fn release_cut_refuses_when_the_manifest_version_changed_since_sealing() {
+    let dir = approved_git_repo(); // manifest at 1.0.0
     let journal = tempfile::tempdir().unwrap();
 
-    // Seal a real plan at version 1.0.0 and read its plan_id from the envelope.
+    // Seal a real plan at the manifest version (1.0.0) and read its plan_id.
     let planned = ossctl()
-        .args([
-            "release",
-            "plan",
-            "--json",
-            "--version",
-            "1.0.0",
-            "--repo-root",
-        ])
+        .args(["release", "plan", "--json", "--repo-root"])
         .arg(dir.path())
         .output()
         .unwrap();
     assert_eq!(
         planned.status.code(),
         Some(0),
-        "plan should succeed on an approved repo"
+        "plan should succeed on an approved repo: {planned:?}"
     );
     let pv: serde_json::Value =
         serde_json::from_slice(&planned.stdout).expect("plan stdout is JSON");
@@ -1422,23 +1413,23 @@ fn release_cut_refuses_when_version_differs_from_the_sealed_plan() {
         .expect("plan_id present")
         .to_string();
 
-    // Execute that exact plan_id but with a different version → drift refusal.
+    // Bump the manifest version in the working tree (a release bump after sealing).
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"rg\"\nversion = \"2.0.0\"\n",
+    )
+    .unwrap();
+
+    // Execute the sealed plan_id; the cut re-derives 2.0.0 from the manifest, hashes a
+    // different plan_id → drift refusal.
     let out = ossctl()
-        .args([
-            "release",
-            "cut",
-            "--plan",
-            &plan_id,
-            "--version",
-            "2.0.0",
-            "--repo-root",
-        ])
+        .args(["release", "cut", "--plan", &plan_id, "--repo-root"])
         .arg(dir.path())
         .arg("--journal-dir")
         .arg(journal.path())
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1), "wrong version → plan_stale");
+    assert_eq!(out.status.code(), Some(1), "changed version → plan_stale");
     let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr is JSON");
     assert_eq!(v["error"]["code"], "plan_stale");
     assert!(out.stdout.is_empty());
@@ -1577,6 +1568,16 @@ fn approved_python_repo() -> tempfile::TempDir {
             "ecosystems: [python]\ntargets:\n  - {ecosystem: python, package: mytool, registry: pypi, adapter: twine}",
         );
     std::fs::write(dir.path().join("OSS-RELEASE.md"), contract).unwrap();
+    // A pyproject carrying the package name + version — the manifest is the single
+    // source of truth for the release version (`release-drop-version-flag`), and
+    // pypi is a manifest-versioned registry, so a missing version would now fail the
+    // cut closed (`version-source-fail-closed-nonrust`) rather than be supplied by a
+    // flag.
+    std::fs::write(
+        dir.path().join("pyproject.toml"),
+        "[project]\nname = \"mytool\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
 
     let git = |args: &[&str]| {
         std::process::Command::new("git")
@@ -1602,14 +1603,7 @@ fn release_resume_refuses_an_unverifiable_target() {
 
     // Seal a real plan so the resume's drift check passes; reuse its id + version.
     let planned = ossctl()
-        .args([
-            "release",
-            "plan",
-            "--json",
-            "--version",
-            "1.0.0",
-            "--repo-root",
-        ])
+        .args(["release", "plan", "--json", "--repo-root"])
         .arg(repo.path())
         .output()
         .unwrap();
@@ -1657,17 +1651,18 @@ fn release_resume_refuses_an_unverifiable_target() {
 #[test]
 fn release_cut_rejects_a_git_ref_unsafe_version() {
     for bad in ["1.0..0", "1.0.0~1", "../evil", "1.0.0.lock"] {
+        // The version is derived from the manifest now (`release-drop-version-flag`),
+        // so a tag-unsafe version must be planted there, not passed as a flag. The cut
+        // re-derives it and validates its shape before any repo/journal work.
+        let dir = approved_git_repo();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            format!("[package]\nname = \"rg\"\nversion = \"{bad}\"\n"),
+        )
+        .unwrap();
         let out = ossctl()
-            .args([
-                "release",
-                "cut",
-                "--plan",
-                "x",
-                "--version",
-                bad,
-                "--repo-root",
-                ".",
-            ])
+            .args(["release", "cut", "--plan", "x", "--repo-root"])
+            .arg(dir.path())
             .output()
             .unwrap();
         assert_eq!(

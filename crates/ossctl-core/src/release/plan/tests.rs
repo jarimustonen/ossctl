@@ -475,148 +475,98 @@ fn build_preserves_multi_target_order() {
 }
 
 // ── version = projection of the manifest (single source of truth) ──────────
-// `--version` is an optional CONFIRMATION; these fold in the old drift guard
-// (release-cut-publish-noop) plus the derive-from-manifest behavior.
+// The release version is derived SOLELY from the workspace manifest — there is no
+// `--version` input (`release-drop-version-flag`). The version-source capability
+// model (`version-source-fail-closed-nonrust`) decides skip-vs-fail-closed per
+// target.
+
+/// Build a `Target` in one line — the tests below assemble a variety of target sets.
+fn target(ecosystem: Ecosystem, package: &str, registry: Registry, adapter: Adapter) -> Target {
+    Target {
+        ecosystem,
+        package: Some(package.to_string()),
+        registry,
+        adapter,
+    }
+}
+
+/// A detected `Package` fact in one line.
+fn package(ecosystem: Ecosystem, manifest: &str, name: &str, version: Option<&str>) -> Package {
+    Package {
+        ecosystem,
+        manifest: manifest.to_string(),
+        package: Some(name.to_string()),
+        version: version.map(str::to_string),
+    }
+}
 
 #[test]
-fn version_derived_from_the_manifest_when_no_flag() {
-    // Single source of truth: with no `--version`, the release version IS the
-    // manifest version. `rust_facts` declares `acme` at 0.1.0.
-    let v = resolve_release_version(&rust_contract(), &rust_facts(), None)
+fn version_derived_from_the_manifest() {
+    // Single source of truth: the release version IS the manifest version.
+    // `rust_facts` declares `acme` at 0.1.0.
+    let v = resolve_release_version(&rust_contract(), &rust_facts())
         .expect("the manifest version must resolve");
     assert_eq!(v, "0.1.0");
 }
 
 #[test]
-fn version_matching_the_manifest_passes_as_confirmation() {
-    // `--version 0.1.0` confirms the manifest version and resolves to it.
-    let v = resolve_release_version(&rust_contract(), &rust_facts(), Some("0.1.0"))
-        .expect("a matching --version must resolve");
-    assert_eq!(v, "0.1.0");
-}
-
-#[test]
-fn version_drifting_from_the_manifest_is_rejected() {
-    // The exact `release-cut-publish-noop` footgun, now a confirmation mismatch:
-    // `--version 0.2.0` while the tree manifest is still 0.1.0. `cargo publish` would
-    // upload 0.1.0, but the engine would wait for/record 0.2.0 — refuse before any
-    // publish.
-    let err = resolve_release_version(&rust_contract(), &rust_facts(), Some("0.2.0"))
-        .expect_err("a drifted --version must be rejected");
-    match err {
-        VersionResolveError::Mismatch {
-            requested,
-            mismatches,
-        } => {
-            assert_eq!(requested, "0.2.0");
-            assert_eq!(mismatches.len(), 1);
-            assert_eq!(mismatches[0].package, "acme");
-            assert_eq!(mismatches[0].ecosystem, Ecosystem::Rust);
-            assert_eq!(mismatches[0].manifest_version, "0.1.0");
-        }
-        other => panic!("expected a Mismatch, got {other:?}"),
-    }
-}
-
-#[test]
-fn mismatch_reports_every_workspace_member() {
-    // A two-crate workspace (the issuectl `core` + `cli` shape) both still at 0.1.0
-    // while cutting 0.2.0 — both members must be reported, sorted by package.
-    let mut c = rust_contract();
-    c.targets = vec![
-        Target {
-            ecosystem: Ecosystem::Rust,
-            package: Some("acme".to_string()),
-            registry: Registry::CratesIo,
-            adapter: Adapter::CargoPublish,
-        },
-        Target {
-            ecosystem: Ecosystem::Rust,
-            package: Some("acme-core".to_string()),
-            registry: Registry::CratesIo,
-            adapter: Adapter::CargoPublish,
-        },
-    ];
-    let mut f = rust_facts();
-    f.packages.push(Package {
-        ecosystem: Ecosystem::Rust,
-        manifest: "core/Cargo.toml".to_string(),
-        package: Some("acme-core".to_string()),
-        version: Some("0.1.0".to_string()),
-    });
-    let err = resolve_release_version(&c, &f, Some("0.2.0"))
-        .expect_err("both drifted members must be rejected");
-    match err {
-        VersionResolveError::Mismatch { mismatches, .. } => {
-            let packages: Vec<&str> = mismatches.iter().map(|m| m.package.as_str()).collect();
-            assert_eq!(
-                packages,
-                vec!["acme", "acme-core"],
-                "sorted, one row per package"
-            );
-        }
-        other => panic!("expected a Mismatch, got {other:?}"),
-    }
-}
-
-#[test]
 fn a_lockstep_two_crate_workspace_derives_the_shared_version() {
     // Both crates at 0.1.0 (lockstep) — the shared version is the single source of
-    // truth, derivable with no `--version`.
+    // truth.
     let mut c = rust_contract();
     c.targets = vec![
-        Target {
-            ecosystem: Ecosystem::Rust,
-            package: Some("acme".to_string()),
-            registry: Registry::CratesIo,
-            adapter: Adapter::CargoPublish,
-        },
-        Target {
-            ecosystem: Ecosystem::Rust,
-            package: Some("acme-core".to_string()),
-            registry: Registry::CratesIo,
-            adapter: Adapter::CargoPublish,
-        },
+        target(
+            Ecosystem::Rust,
+            "acme",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
+        target(
+            Ecosystem::Rust,
+            "acme-core",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
     ];
     let mut f = rust_facts();
-    f.packages.push(Package {
-        ecosystem: Ecosystem::Rust,
-        manifest: "core/Cargo.toml".to_string(),
-        package: Some("acme-core".to_string()),
-        version: Some("0.1.0".to_string()),
-    });
-    let v = resolve_release_version(&c, &f, None).expect("a lockstep workspace resolves");
+    f.packages.push(package(
+        Ecosystem::Rust,
+        "core/Cargo.toml",
+        "acme-core",
+        Some("0.1.0"),
+    ));
+    let v = resolve_release_version(&c, &f).expect("a lockstep workspace resolves");
     assert_eq!(v, "0.1.0");
 }
 
 #[test]
 fn an_inconsistent_tree_has_no_single_source_of_truth() {
     // Two crates at DIFFERENT versions (0.1.0 and 0.2.0) — there is no single version
-    // to project, so the tree is rejected as inconsistent even with no `--version`.
+    // to project, so the tree is rejected as inconsistent.
     let mut c = rust_contract();
     c.targets = vec![
-        Target {
-            ecosystem: Ecosystem::Rust,
-            package: Some("acme".to_string()),
-            registry: Registry::CratesIo,
-            adapter: Adapter::CargoPublish,
-        },
-        Target {
-            ecosystem: Ecosystem::Rust,
-            package: Some("acme-core".to_string()),
-            registry: Registry::CratesIo,
-            adapter: Adapter::CargoPublish,
-        },
+        target(
+            Ecosystem::Rust,
+            "acme",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
+        target(
+            Ecosystem::Rust,
+            "acme-core",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
     ];
     let mut f = rust_facts();
-    f.packages.push(Package {
-        ecosystem: Ecosystem::Rust,
-        manifest: "core/Cargo.toml".to_string(),
-        package: Some("acme-core".to_string()),
-        version: Some("0.2.0".to_string()),
-    });
-    let err = resolve_release_version(&c, &f, None)
-        .expect_err("a self-inconsistent tree must be rejected");
+    f.packages.push(package(
+        Ecosystem::Rust,
+        "core/Cargo.toml",
+        "acme-core",
+        Some("0.2.0"),
+    ));
+    let err =
+        resolve_release_version(&c, &f).expect_err("a self-inconsistent tree must be rejected");
     match err {
         VersionResolveError::InconsistentTree { versions } => {
             let pairs: Vec<(&str, &str)> = versions
@@ -630,23 +580,176 @@ fn an_inconsistent_tree_has_no_single_source_of_truth() {
 }
 
 #[test]
-fn no_checkable_target_falls_back_to_the_flag_else_undeterminable() {
-    // A target whose package has no detected manifest version (a distribution/binary
-    // target, or an undetected package) is not checkable. With nothing to derive from,
-    // `--version` is used verbatim; without it, the version is undeterminable.
+fn no_manifest_version_anywhere_is_undeterminable() {
+    // A single crates.io target whose package is absent from facts (no resolvable
+    // manifest version) is not checkable; with `--version` removed there is no
+    // fallback, so the version is undeterminable.
     let mut c = rust_contract();
+    // The package IS in facts but with NO version — that is a fail-closed case, so use
+    // a package that is absent from facts entirely (unresolved → not counted here).
     c.targets = vec![Target {
         ecosystem: Ecosystem::Rust,
-        package: Some("no-such-crate".to_string()),
+        package: None,
         registry: Registry::CratesIo,
         adapter: Adapter::CargoPublish,
     }];
-    // facts name a *different* package, so the target's package is absent from facts.
-    let v = resolve_release_version(&c, &rust_facts(), Some("9.9.9"))
-        .expect("with nothing to confirm against, --version is used verbatim");
-    assert_eq!(v, "9.9.9");
+    let mut f = rust_facts();
+    // Drop the named rust package so the `None`-package target resolves to nothing.
+    f.packages.clear();
     assert!(matches!(
-        resolve_release_version(&c, &rust_facts(), None),
+        resolve_release_version(&c, &f),
+        Err(VersionResolveError::Undeterminable)
+    ));
+}
+
+// ── version-source capability model (version-source-fail-closed-nonrust) ────
+
+#[test]
+fn version_source_classifies_every_registry() {
+    // Manifest-versioned registries publish from a version-carrying manifest.
+    for r in [
+        Registry::CratesIo,
+        Registry::Npm,
+        Registry::Pypi,
+        Registry::TestPypi,
+    ] {
+        assert_eq!(VersionSource::of(r), VersionSource::Manifest, "{r:?}");
+    }
+    // Distribution/repackaging registries have no manifest version by design.
+    for r in [
+        Registry::GhReleases,
+        Registry::Homebrew,
+        Registry::ProxyGolangOrg,
+    ] {
+        assert_eq!(VersionSource::of(r), VersionSource::Distribution, "{r:?}");
+    }
+}
+
+#[test]
+fn a_manifest_versioned_npm_target_without_a_detected_version_fails_closed() {
+    // THE non-Rust fail-OPEN gap this closes: an npm target (manifest-versioned) whose
+    // package.json version the detector did NOT read. The old guard silently skipped
+    // it (fail open); now it fails closed rather than publish an unchecked version.
+    let mut c = rust_contract();
+    c.ecosystems = vec![Ecosystem::Node];
+    c.targets = vec![target(
+        Ecosystem::Node,
+        "acme-js",
+        Registry::Npm,
+        Adapter::NpmPublish,
+    )];
+    let mut f = rust_facts();
+    f.packages = vec![package(Ecosystem::Node, "package.json", "acme-js", None)];
+    let err =
+        resolve_release_version(&c, &f).expect_err("a versionless npm target must fail closed");
+    match err {
+        VersionResolveError::MissingManifestVersion { targets } => {
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].package, "acme-js");
+            assert_eq!(targets[0].ecosystem, Ecosystem::Node);
+            assert_eq!(targets[0].registry, Registry::Npm);
+        }
+        other => panic!("expected MissingManifestVersion, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_versionless_pypi_target_fails_closed_even_beside_a_versioned_rust_target() {
+    // A mixed [rust, python] repo where the python package.json/pyproject version is
+    // missing: the readable rust version must NOT paper over the unreadable python one
+    // — the guard fails closed on the python target rather than derive from rust alone.
+    let mut c = rust_contract();
+    c.ecosystems = vec![Ecosystem::Rust, Ecosystem::Python];
+    c.targets = vec![
+        target(
+            Ecosystem::Rust,
+            "acme",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
+        target(
+            Ecosystem::Python,
+            "acme-py",
+            Registry::Pypi,
+            Adapter::GhActionPypiPublish,
+        ),
+    ];
+    let mut f = rust_facts(); // rust `acme` @ 0.1.0
+    f.packages.push(package(
+        Ecosystem::Python,
+        "pyproject.toml",
+        "acme-py",
+        None,
+    ));
+    let err = resolve_release_version(&c, &f)
+        .expect_err("the versionless python target must fail closed");
+    match err {
+        VersionResolveError::MissingManifestVersion { targets } => {
+            let pkgs: Vec<&str> = targets.iter().map(|t| t.package.as_str()).collect();
+            assert_eq!(
+                pkgs,
+                vec!["acme-py"],
+                "only the unreadable target is reported"
+            );
+        }
+        other => panic!("expected MissingManifestVersion, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_distribution_target_without_a_manifest_version_is_skipped_not_failed() {
+    // A homebrew and a gh-releases (cargo-dist) target carry NO manifest version by
+    // design — legitimately skipped. Beside a versioned rust crate the version still
+    // resolves from the crate; the distribution targets never demand a version.
+    let mut c = rust_contract();
+    c.targets = vec![
+        target(
+            Ecosystem::Rust,
+            "acme",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
+        // A rust crate repackaged for a Homebrew tap — registry Homebrew ⇒ Distribution.
+        target(
+            Ecosystem::Rust,
+            "acme",
+            Registry::Homebrew,
+            Adapter::HomebrewTap,
+        ),
+        // A binary distribution to gh-releases.
+        target(
+            Ecosystem::Binary,
+            "acme",
+            Registry::GhReleases,
+            Adapter::CargoDist,
+        ),
+    ];
+    let v = resolve_release_version(&c, &rust_facts())
+        .expect("distribution targets are skipped; the crate version resolves");
+    assert_eq!(v, "0.1.0");
+}
+
+#[test]
+fn an_all_distribution_repo_has_no_derivable_version() {
+    // Only distribution targets (no manifest-versioned publish): there is no manifest
+    // to derive a version from, and with `--version` removed there is no fallback.
+    let mut c = rust_contract();
+    c.targets = vec![
+        target(
+            Ecosystem::Binary,
+            "acme",
+            Registry::GhReleases,
+            Adapter::CargoDist,
+        ),
+        target(
+            Ecosystem::Rust,
+            "acme",
+            Registry::Homebrew,
+            Adapter::HomebrewTap,
+        ),
+    ];
+    assert!(matches!(
+        resolve_release_version(&c, &rust_facts()),
         Err(VersionResolveError::Undeterminable)
     ));
 }

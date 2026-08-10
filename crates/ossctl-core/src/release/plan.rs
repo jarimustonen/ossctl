@@ -68,7 +68,7 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 
-use crate::contract::schema::{Contract, Ecosystem};
+use crate::contract::schema::{Contract, Ecosystem, Registry};
 use crate::protocol::facts::Facts;
 use crate::protocol::plan::{PlanPhase, PlanTarget, ReleasePlan};
 
@@ -209,15 +209,65 @@ pub struct PlanDrift {
     pub reasons: Vec<String>,
 }
 
+/// Whether a publish target derives its release version from a package manifest
+/// the version guard can read, or has no manifest version by design — the capability
+/// the fail-closed guard keys on (`version-source-fail-closed-nonrust`).
+///
+/// The distinction is a function of the target's **publish destination**
+/// ([`Registry`]), not its ecosystem: a Rust crate repackaged for a Homebrew tap
+/// publishes to [`Registry::Homebrew`] and is [`Distribution`](VersionSource::Distribution)
+/// even though its ecosystem is `rust`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionSource {
+    /// The publish destination reads the version from a package manifest
+    /// (`crates.io`←`Cargo.toml`, `npm`←`package.json`, `PyPI`←`pyproject.toml`/`setup.py`).
+    /// A resolved target of this class **must** expose a detected manifest version in
+    /// `facts`; a resolved package with none is a *detector failure* that fails the
+    /// guard **closed** ([`VersionResolveError::MissingManifestVersion`]) rather than
+    /// silently skipping the version check (the fail-OPEN gap for manifest-versioned
+    /// non-Rust ecosystems this model closes).
+    Manifest,
+    /// No manifest version **by design**: a distribution/repackaging destination whose
+    /// version binds to the artifact it ships, not a manifest of its own — a
+    /// `gh-releases` binary set (cargo-dist), a Homebrew tap formula, or a
+    /// VCS-tag-versioned Go module (`proxy.golang.org`). Legitimately **skipped** by
+    /// the version guard: there is no manifest to read a version from and none is
+    /// expected.
+    Distribution,
+}
+
+impl VersionSource {
+    /// Classify a target by its publish [`Registry`] (the destination is the
+    /// authority on whether a manifest version is meaningful).
+    ///
+    /// Exhaustive over [`Registry`] on purpose — a new publish destination must make
+    /// a deliberate manifest-vs-distribution choice here rather than default to a
+    /// silent skip (which would re-open the fail-OPEN gap).
+    #[must_use]
+    pub fn of(registry: Registry) -> Self {
+        match registry {
+            // Registries that publish from a version-carrying package manifest.
+            Registry::CratesIo | Registry::Npm | Registry::Pypi | Registry::TestPypi => {
+                Self::Manifest
+            }
+            // Distribution/repackaging destinations with no manifest version of their
+            // own: binaries (gh-releases), a Homebrew formula, a VCS-tag-versioned Go
+            // module.
+            Registry::GhReleases | Registry::Homebrew | Registry::ProxyGolangOrg => {
+                Self::Distribution
+            }
+        }
+    }
+}
+
 /// One publishable target's resolved package paired with the version its **tree
 /// manifest** declares — the version the ecosystem's publish command (`cargo
 /// publish` reading `Cargo.toml`, …) would **actually** upload.
 ///
 /// The workspace manifest is the single source of truth for the release version
-/// ([`resolve_release_version`]); this is one row of that truth. Two failure modes
-/// carry a set of these: a caller `--version` that disagrees with the manifest
-/// ([`VersionResolveError::Mismatch`]), and a tree whose manifests disagree among
-/// themselves ([`VersionResolveError::InconsistentTree`]).
+/// ([`resolve_release_version`]); this is one row of that truth. A tree whose
+/// manifests disagree among themselves carries a set of these
+/// ([`VersionResolveError::InconsistentTree`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VersionMismatch {
     /// The resolved package this row describes.
@@ -230,21 +280,42 @@ pub struct VersionMismatch {
     pub manifest_version: String,
 }
 
-/// Why a single release version could not be resolved from the workspace manifest
-/// (the single source of truth) — the reconciled superset of the old `--version`
-/// drift guard.
+/// A manifest-versioned target ([`VersionSource::Manifest`]) whose resolved package
+/// has **no** detected manifest version in `facts` — the fail-closed row for
+/// `version-source-fail-closed-nonrust`.
+///
+/// Unlike a [`VersionSource::Distribution`] target (skipped by design), a manifest
+/// target with no readable version means the detector failed on an ecosystem that
+/// *is* manifest-versioned. The guard refuses rather than publish an unchecked
+/// version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnversionedTarget {
+    /// The resolved package whose manifest version could not be read.
+    pub package: String,
+    /// The package's ecosystem.
+    pub ecosystem: Ecosystem,
+    /// The publish destination — the registry whose manifest a version was expected
+    /// from (`npm`←`package.json`, `PyPI`←`pyproject.toml`, …).
+    pub registry: Registry,
+}
+
+/// Why a single release version could not be resolved from the workspace manifest —
+/// the **single source of truth** for the release version. `ossctl release cut`
+/// publishes the version already in the tree; there is no `--version` input to
+/// override it (`release-drop-version-flag`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VersionResolveError {
-    /// A caller-supplied `--version` disagreed with the version the manifest — and
-    /// therefore the cut — would actually publish (`release-cut-publish-noop`). The
-    /// old drift guard, folded in: `--version` is an optional *confirmation*, and a
-    /// wrong one is refused before any publish. Carries the requested version and the
-    /// checkable targets it disagrees with (sorted, one per package).
-    Mismatch {
-        /// The rejected `--version` the caller supplied.
-        requested: String,
-        /// Every checkable target whose manifest version differs from `requested`.
-        mismatches: Vec<VersionMismatch>,
+    /// One or more **manifest-versioned** targets ([`VersionSource::Manifest`]) have a
+    /// resolved package but **no** detected manifest version — the detector returned
+    /// nothing for an ecosystem that *is* manifest-versioned (npm/PyPI/…). Failing
+    /// **closed** here (rather than silently skipping the target) is the fix for
+    /// `version-source-fail-closed-nonrust`: a distribution target is skipped by
+    /// design, but a manifest target with no readable version is a bug that must not
+    /// publish an unchecked version. Carries each such target (sorted, one per
+    /// package).
+    MissingManifestVersion {
+        /// Every manifest-versioned target whose version could not be read.
+        targets: Vec<UnversionedTarget>,
     },
     /// The tree's publishable manifests declare **more than one distinct version**,
     /// so there is no single source of truth to derive the release version from —
@@ -254,113 +325,147 @@ pub enum VersionResolveError {
         /// Every checkable target and the version its manifest declares.
         versions: Vec<VersionMismatch>,
     },
-    /// No manifest version could be detected — every target is a distribution/binary
-    /// target or an undetected package — **and** no `--version` was supplied, so the
-    /// version can neither be derived nor confirmed. Supplying `--version` resolves
-    /// it (there is nothing to confirm against).
+    /// No manifest version could be detected — every target is a distribution target
+    /// with no manifest version by design (or has no resolved package) — so there is
+    /// no manifest to derive the release version from. With the `--version` input
+    /// removed, the release version can **only** come from a manifest; a repo with no
+    /// version-carrying manifest cannot be cut until one declares a version.
     Undeterminable,
 }
 
 /// Resolve the release version from the workspace manifest — the **single source of
-/// truth** — optionally confirming it against a caller-supplied `--version`.
+/// truth**.
 ///
 /// `ossctl release cut` does **not** bump the manifest: each ecosystem's publish
 /// command uploads the version already in the tree (`cargo publish` reads
 /// `Cargo.toml`), and the engine threads that version into every registry probe,
 /// index-wait, and receipt. So the version a cut publishes is a **projection of the
-/// tree**, not an independent input — deriving it here removes the two-masters
-/// footgun where a `--version` flag and the manifest could silently drift (the
-/// engine would publish the manifest version while waiting for/recording the flag's,
-/// which never lands — `release-cut-publish-noop`).
+/// tree**, not an independent input — there is no `--version` flag to override it
+/// (`release-drop-version-flag`), which removes the two-masters footgun at the root
+/// (a flag and the manifest could silently drift, the engine publishing the manifest
+/// version while waiting for/recording the flag's, which never lands —
+/// `release-cut-publish-noop`).
 ///
 /// The manifest version is the distinct version shared by every **checkable** target
-/// (a resolved package with a detected manifest version in `facts`). `requested` —
-/// the `--version` flag — is an **optional confirmation**, kept so the documented
-/// cut recipe (`release plan --version X.Y.Z`) and downstream skill wiring keep
-/// working: when present it must equal the derived version. Targets with no
-/// detectable manifest version (a homebrew/binary distribution target, an undetected
-/// package) are not checkable — their release version is bound to the crate they
-/// repackage, not a manifest of their own.
+/// (a [`VersionSource::Manifest`] target with a detected manifest version in
+/// `facts`). A [`VersionSource::Distribution`] target (a homebrew/binary/cargo-dist
+/// target) has no manifest version by design — its release version is bound to the
+/// crate it repackages — so it is skipped. A manifest-versioned target whose version
+/// the detector could not read is **not** skipped: it fails the guard closed
+/// (`version-source-fail-closed-nonrust`).
 ///
 /// # Errors
-/// - [`VersionResolveError::Mismatch`] — `requested` disagrees with the single
-///   manifest version (the subsumed drift guard).
+/// - [`VersionResolveError::MissingManifestVersion`] — a manifest-versioned target
+///   has a resolved package but no readable manifest version (fail closed).
 /// - [`VersionResolveError::InconsistentTree`] — the checkable targets declare more
 ///   than one distinct version, so no single source of truth exists.
-/// - [`VersionResolveError::Undeterminable`] — nothing to derive from and no
-///   `requested` to fall back to.
+/// - [`VersionResolveError::Undeterminable`] — no manifest version anywhere to derive
+///   from.
 pub fn resolve_release_version(
     contract: &Contract,
     facts: &Facts,
-    requested: Option<&str>,
 ) -> Result<String, VersionResolveError> {
-    let checkable = tree_manifest_versions(contract, facts);
-    let distinct: BTreeSet<&str> = checkable
+    let classified = classify_target_versions(contract, facts);
+
+    // Fail CLOSED first: a manifest-versioned target whose version the detector could
+    // not read is NOT silently skipped (that would fail OPEN — publishing a version no
+    // guard confirmed). This is the `version-source-fail-closed-nonrust` fix.
+    if !classified.missing.is_empty() {
+        return Err(VersionResolveError::MissingManifestVersion {
+            targets: classified.missing,
+        });
+    }
+
+    let distinct: BTreeSet<&str> = classified
+        .checkable
         .iter()
         .map(|m| m.manifest_version.as_str())
         .collect();
 
     match distinct.len() {
-        // Nothing to derive from: fall back to the caller's --version, else fail.
-        0 => match requested {
-            Some(v) => Ok(v.to_string()),
-            None => Err(VersionResolveError::Undeterminable),
-        },
-        // One source of truth. Confirm --version against it when supplied.
-        1 => {
-            // `distinct` is non-empty with exactly one element, and every row shares
-            // it, so any row's version is THE manifest version.
-            let manifest_version = checkable[0].manifest_version.clone();
-            match requested {
-                Some(v) if v != manifest_version => Err(VersionResolveError::Mismatch {
-                    requested: v.to_string(),
-                    // A single-version tree ⇒ every checkable target disagrees with a
-                    // differing `--version`; report them all.
-                    mismatches: checkable,
-                }),
-                _ => Ok(manifest_version),
-            }
-        }
+        // No manifest version anywhere to derive from (every target is a distribution
+        // target, or has no resolved package). With `--version` removed there is no
+        // fallback — a repo without a version-carrying manifest cannot be cut.
+        0 => Err(VersionResolveError::Undeterminable),
+        // One source of truth: every checkable row shares it, so any row's version is
+        // THE manifest version.
+        1 => Ok(classified.checkable[0].manifest_version.clone()),
         // The tree disagrees with itself — no single source of truth to project.
         _ => Err(VersionResolveError::InconsistentTree {
-            versions: checkable,
+            versions: classified.checkable,
         }),
     }
 }
 
-/// Every **checkable** target — a resolved package with a detected manifest version
-/// in `facts` — paired with that version, sorted and deduplicated one row per
-/// `(ecosystem, package)`. The raw material [`resolve_release_version`] projects the
-/// single release version from.
-fn tree_manifest_versions(contract: &Contract, facts: &Facts) -> Vec<VersionMismatch> {
-    let mut rows: Vec<VersionMismatch> = Vec::new();
+/// The version-source classification of a repo's resolved targets: the checkable
+/// rows the release version is projected from, and the manifest-versioned targets
+/// whose version could not be read (the fail-closed set).
+struct ClassifiedVersions {
+    /// [`VersionSource::Manifest`] targets **with** a detected manifest version — the
+    /// checkable set the single release version is derived from.
+    checkable: Vec<VersionMismatch>,
+    /// [`VersionSource::Manifest`] targets with a resolved package but **no** detected
+    /// manifest version — the fail-closed set (`version-source-fail-closed-nonrust`).
+    missing: Vec<UnversionedTarget>,
+}
+
+/// Classify every resolved target by its [`VersionSource`], separating the checkable
+/// manifest versions from the manifest-versioned targets whose version could not be
+/// read.
+///
+/// - A [`VersionSource::Distribution`] target is skipped regardless of version: it has
+///   no manifest version by design (its version binds to the crate it repackages).
+/// - A [`VersionSource::Manifest`] target with a detected version becomes a `checkable`
+///   row; one with a resolved package but **no** detected version becomes a `missing`
+///   row (fail closed).
+/// - A manifest target with **no resolved package** cannot be looked up here at all;
+///   it is left to the CLI's separate null-package plan refusal rather than
+///   double-reported as a version failure.
+fn classify_target_versions(contract: &Contract, facts: &Facts) -> ClassifiedVersions {
+    let mut checkable: Vec<VersionMismatch> = Vec::new();
+    let mut missing: Vec<UnversionedTarget> = Vec::new();
     for t in resolve_targets(contract, facts) {
+        // Distribution targets have no manifest version by design — skip them whether
+        // or not `facts` happens to carry a version for their package.
+        if VersionSource::of(t.registry) == VersionSource::Distribution {
+            continue;
+        }
+        // A manifest target with no resolved package cannot be version-checked here;
+        // the CLI's null-package refusal already rejects such a plan.
         let Some(package) = t.package else { continue };
-        // The tree manifest version for this resolved (ecosystem, package). Absent
-        // ⇒ not checkable (a distribution target, or an undetected manifest).
-        let Some(manifest_version) = facts
+        match facts
             .packages
             .iter()
             .find(|p| p.ecosystem == t.ecosystem && p.package.as_deref() == Some(package.as_str()))
             .and_then(|p| p.version.clone())
-        else {
-            continue;
-        };
-        rows.push(VersionMismatch {
-            package,
-            ecosystem: t.ecosystem,
-            manifest_version,
-        });
+        {
+            Some(manifest_version) => checkable.push(VersionMismatch {
+                package,
+                ecosystem: t.ecosystem,
+                manifest_version,
+            }),
+            // Manifest-versioned, resolved package, but the detector read no version:
+            // fail closed rather than skip (the non-Rust fail-OPEN gap).
+            None => missing.push(UnversionedTarget {
+                package,
+                ecosystem: t.ecosystem,
+                registry: t.registry,
+            }),
+        }
     }
     // Deterministic order, and one row per package even if a package backs several
     // targets (a crate published to crates.io AND repackaged for homebrew). Sort and
     // dedup on the SAME (ecosystem, package) key so equal keys are guaranteed adjacent
     // before the consecutive-only `dedup_by` runs.
-    rows.sort_by(|a, b| {
+    checkable.sort_by(|a, b| {
         (a.ecosystem.as_str(), &a.package).cmp(&(b.ecosystem.as_str(), &b.package))
     });
-    rows.dedup_by(|a, b| a.package == b.package && a.ecosystem == b.ecosystem);
-    rows
+    checkable.dedup_by(|a, b| a.package == b.package && a.ecosystem == b.ecosystem);
+    missing.sort_by(|a, b| {
+        (a.ecosystem.as_str(), &a.package).cmp(&(b.ecosystem.as_str(), &b.package))
+    });
+    missing.dedup_by(|a, b| a.package == b.package && a.ecosystem == b.ecosystem);
+    ClassifiedVersions { checkable, missing }
 }
 
 /// Overlay facts-derived package names onto the contract's target set, yielding

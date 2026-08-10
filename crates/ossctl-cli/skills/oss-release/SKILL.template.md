@@ -192,7 +192,10 @@ dirty tree also risks sweeping uncommitted work into the release. Have the user
 commit or stash first — do not stash or discard changes on their behalf.
 
 **2. Decide the version (this skill's judgment — design §3.4).** `release plan`
-takes the version as input and never derives it, so choosing it is your job.
+derives the version **solely from the workspace manifest** — there is no
+`--version` input (`release-drop-version-flag`). So choosing the number is still
+your job, but you apply it by **bumping the manifest** (and finalizing the
+CHANGELOG) in the release commit *before* planning; the plan then reads it back.
 Read the contract's `conventional_commits` and `versioning`. Find the last
 release tag from `ossctl facts --json`, then read the commits since it:
 
@@ -208,15 +211,21 @@ git log <LAST_TAG>..HEAD --oneline    # the commit set the bump is computed from
   releasable, say so rather than inventing a bump.
 - `conventional_commits: false` → **ask the user** for the exact version in plain
   text, offering that `git log` as a non-binding hint. Accept a concrete version
-  matching the contract's `versioning` scheme (not a bare `minor`/`patch`); if
-  `release plan` rejects it, relay the error and re-prompt.
+  matching the contract's `versioning` scheme (not a bare `minor`/`patch`).
 
-**3. Seal the plan.** Pass the chosen version; the binary computes a
-content-addressed plan and **exits at the approval boundary** rather than
+Then **bump the manifest to that version** (e.g. `workspace.package.version` and
+any internal `=X.Y.Z` dep in lockstep) and finalize the CHANGELOG, in the release
+commit. `release plan` reads the version from the manifest, so if the manifests
+disagree or carry no version it refuses (`version_inconsistent_tree` /
+`version_undeterminable` / `version_source_unreadable`) — relay the error and fix
+the manifest rather than re-passing a flag.
+
+**3. Seal the plan.** The binary derives the version from the manifest, computes a
+content-addressed plan, and **exits at the approval boundary** rather than
 prompting (ADR-0001 §3):
 
 ```bash
-ossctl release plan --version <VERSION> --json || exit
+ossctl release plan --json || exit
 ```
 
 **4. Render the approval boundary (the one human checkpoint).** Show the user the
@@ -226,13 +235,13 @@ publish destination — all from the `release plan --json` payload. Publishing i
 require an explicit confirmation of this exact plan + version before proceeding.
 This is the *only* approval prompt; step 2 merely settled the number.
 
-**5. Cut, only after human approval.** Re-invoke with the sealed plan and the
-same version; the cut refuses if the repo drifted from what the plan hashed, or
-if the version does not match what was sealed. **Capture the `run_id` from its
-output** — every reconciliation command below needs it:
+**5. Cut, only after human approval.** Re-invoke with the sealed plan; the cut
+re-derives the version from the manifest and refuses if the repo drifted from what
+the plan hashed (a manifest-version edit since sealing shows up here). **Capture
+the `run_id` from its output** — every reconciliation command below needs it:
 
 ```bash
-ossctl release cut --plan <PLAN_ID> --version <VERSION> --json || exit
+ossctl release cut --plan <PLAN_ID> --json || exit
 ```
 
 On a **drift refusal** the cut never started: have the user reconcile the working
