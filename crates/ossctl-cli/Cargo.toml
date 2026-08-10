@@ -29,7 +29,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-ossctl-core = { path = "../ossctl-core", version = "=0.2.4" }
+ossctl-core = { path = "../ossctl-core", version = "=0.2.5" }
 clap = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }

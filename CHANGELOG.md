@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 <!-- oss-changelog:unreleased-end -->
 
+## [0.2.5] - 2026-08-10
+
+### Fixed
+- **A `release cut` can no longer report success while publishing nothing.** After the irreversible
+  `cargo publish`, the cargo adapter now confirms the target's own `{name, version}` is actually
+  visible on the crates.io index (reusing the bounded index-wait, so normal sparse-index propagation
+  lag is tolerated) *before* journaling a publish receipt. A silent no-op upload now fails the cut
+  closed with no fabricated receipt; a registry outage fails closed distinctly from "reached the
+  registry, version absent". This closes the real-world failure mode where a downstream cut reported
+  `build ok → publish` yet the crate never reached crates.io (`cut-noop-self-visibility-check`,
+  surfaced by the first real downstream cut).
+
+### Changed
+- **The release version now has a single source of truth: the workspace manifest.** `ossctl release
+  cut` publishes the version already in the tree and derives it from `Cargo.toml`; `--version` is now
+  an *optional confirmation* that must equal the manifest version (a mismatch refuses the plan/cut),
+  subsuming the earlier drift guard. The documented recipe (`release plan --version X.Y.Z`) keeps
+  working unchanged (`release-version-single-source`, `release-cut-publish-noop`).
+
+### CI
+- **Generated/own `publish-crates.yml` is now idempotent.** Both `cargo publish` invocations in the
+  dep-order step tolerate cargo's exact per-package "already exists on crates.io index" diagnostic as
+  success (anchored match; genuine failures still fail), so a successful engine cut no longer produces
+  a spurious red CI run when the tag-push publish races the engine's own publish (`publish-crates-yml`).
+
 ## [0.2.4] - 2026-08-10
 
 ### Added
