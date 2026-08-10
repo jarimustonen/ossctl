@@ -2,11 +2,14 @@
 created: 2026-08-07
 updated: 2026-08-10
 type: improvement
-status: in-progress
+status: done
 priority: normal
 commits:
 - hash: 48440c1
   summary: homebrew contract-consistency floors (hard errors) + 8-row truth table
+- hash: e918692
+  summary: 'review-driven: lock omitted-adapter floor + plural-distributions test + aggregate rationale doc'
+closed: 2026-08-10
 ---
 
 # Homebrew contract-consistency floors: target-without-tap, double-publish, registry/adapter compat
