@@ -2230,3 +2230,238 @@ fn creating_over_an_already_delegated_release_is_refused() {
     let tag = journal.state().tags.get("v1.0.0").unwrap();
     assert!(tag.github_release_delegated && !tag.github_release);
 }
+
+// ── Integration: a cut actually UPLOADS to a (mock) registry ─────────────────
+//
+// The `release-cut-publish-noop` regression: a real cut reported `cargo` success
+// yet nothing reached crates.io. These tests wire the publish through a shared
+// mock registry — the publishing runner "uploads" by making the crate visible on
+// the same registry the RegistryQuery port reads — and assert on REGISTRY STATE,
+// not merely a green cut, so a publish that runs `cargo publish` but uploads
+// nothing is caught.
+
+/// A shared in-memory registry the publishing runner writes and the
+/// [`RegistryQuery`] port reads — the mock crates.io index the test asserts on.
+#[derive(Clone, Default)]
+struct SharedRegistry {
+    inner: Rc<RefCell<HashMap<String, Vec<String>>>>,
+}
+impl SharedRegistry {
+    fn versions(&self, package: &str) -> Vec<String> {
+        self.inner
+            .borrow()
+            .get(package)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+impl RegistryQuery for SharedRegistry {
+    fn published_versions(&self, _ecosystem: &str, package: &str) -> io::Result<Vec<String>> {
+        Ok(self.versions(package))
+    }
+}
+
+/// A command runner that models a real `cargo publish`: on `cargo publish … -p X`
+/// it records `X@publish_version` into the shared registry (as a real upload makes
+/// the crate index-visible), so the adapter's `is_published` / `wait_for_index`
+/// probes — reading the same registry — observe the landed version. Serves the
+/// injected workspace graph for `cargo metadata`; every other command succeeds.
+/// `publish_version = None` is the NO-OP variant: it runs the publish command but
+/// uploads nothing (the exact defect under test).
+struct PublishingCmd {
+    reg: SharedRegistry,
+    metadata: String,
+    publish_version: Option<String>,
+    calls: RefCell<Vec<String>>,
+}
+impl PublishingCmd {
+    fn new(reg: SharedRegistry, metadata: &str, publish_version: Option<&str>) -> Self {
+        Self {
+            reg,
+            metadata: metadata.to_string(),
+            publish_version: publish_version.map(str::to_string),
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+    fn calls(&self) -> Vec<String> {
+        self.calls.borrow().clone()
+    }
+}
+impl CommandRunner for PublishingCmd {
+    fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
+        self.calls
+            .borrow_mut()
+            .push(format!("{program} {}", args.join(" ")));
+        if program == "cargo" && args.contains(&"metadata") {
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: self.metadata.clone(),
+                stderr: String::new(),
+            });
+        }
+        if program == "cargo" && args.first() == Some(&"publish") {
+            if let Some(version) = &self.publish_version {
+                // The `-p <pkg>` that names the one crate this publish uploads.
+                if let Some(pos) = args.iter().position(|a| *a == "-p") {
+                    if let Some(pkg) = args.get(pos + 1) {
+                        self.reg
+                            .inner
+                            .borrow_mut()
+                            .entry((*pkg).to_string())
+                            .or_default()
+                            .push(version.clone());
+                    }
+                }
+            }
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        }
+        Ok(CommandOutput {
+            status: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    }
+}
+
+/// `acme-core` (leaf) + `acme` (depends on core), both at 1.2.3 — the multi-crate
+/// shape that broke in the issuectl repro (a dependent that index-waits on its
+/// workspace dependency).
+const TWO_CRATE_METADATA: &str = r#"{"packages":[
+  {"name":"acme-core","version":"1.2.3","id":"acme-core 1.2.3","dependencies":[],"publish":null},
+  {"name":"acme","version":"1.2.3","id":"acme 1.2.3","dependencies":[{"name":"acme-core","kind":null}],"publish":null}
+],"workspace_members":["acme-core 1.2.3","acme 1.2.3"]}"#;
+
+const ONE_CRATE_METADATA: &str = r#"{"packages":[
+  {"name":"acme-core","version":"1.2.3","id":"acme-core 1.2.3","dependencies":[],"publish":null}
+],"workspace_members":["acme-core 1.2.3"]}"#;
+
+fn rust_crate_plan(packages: &[&str]) -> ReleasePlan {
+    ReleasePlan {
+        plan_id: "plan-test".into(),
+        contract_schema_version: 1,
+        head_sha: "deadbeef".into(),
+        version: "1.2.3".into(),
+        targets: packages
+            .iter()
+            .map(|p| PlanTarget {
+                ecosystem: Ecosystem::Rust,
+                package: Some((*p).to_string()),
+                registry: Registry::CratesIo,
+                adapter: Adapter::CargoPublish,
+            })
+            .collect(),
+        phases: PlanPhase::SEQUENCE.to_vec(),
+        homebrew_tap: None,
+        license: None,
+    }
+}
+
+#[test]
+fn cut_actually_publishes_both_crates_to_the_mock_registry() {
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let reg = SharedRegistry::default();
+    let cmd = PublishingCmd::new(reg.clone(), TWO_CRATE_METADATA, Some("1.2.3"));
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = RecordingSink::default();
+    let plan = rust_crate_plan(&["acme-core", "acme"]);
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "plan-test".into(),
+        "1.2.3".into(),
+        ids.clone(),
+    )
+    .unwrap();
+
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+
+    // The crates ACTUALLY appear on the (mock) registry at the cut version — the
+    // check `cargo exited 0` alone would miss (`release-cut-publish-noop`).
+    assert_eq!(reg.versions("acme-core"), vec!["1.2.3".to_string()]);
+    assert_eq!(reg.versions("acme"), vec!["1.2.3".to_string()]);
+    // A real `cargo publish` ran for each crate (not skipped as already-published).
+    let calls = cmd.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("publish") && c.contains("-p acme-core")),
+        "expected a cargo publish of acme-core; calls: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("publish") && c.contains("-p acme")),
+        "expected a cargo publish of acme; calls: {calls:?}"
+    );
+    // And each landed target has a per-member receipt at the cut version.
+    let state = journal.state();
+    assert_eq!(state.published.len(), 2, "one receipt per crate");
+    for id in &ids {
+        assert_eq!(
+            state.published.get(id).expect("receipt present").version,
+            "1.2.3",
+            "receipt for {id}"
+        );
+    }
+}
+
+#[test]
+fn a_noop_publish_leaves_the_registry_empty_even_though_the_cut_succeeds() {
+    // A single leaf crate + a runner that runs `cargo publish` but uploads NOTHING.
+    // cargo "succeeds", the cut reports success and even records a receipt — yet the
+    // registry stays empty. This is the `release-cut-publish-noop` shape, and why
+    // the test above must assert on REGISTRY state, not merely a green cut.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let reg = SharedRegistry::default();
+    let cmd = PublishingCmd::new(reg.clone(), ONE_CRATE_METADATA, None);
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = RecordingSink::default();
+    let plan = rust_crate_plan(&["acme-core"]);
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "plan-test".into(),
+        "1.2.3".into(),
+        ids,
+    )
+    .unwrap();
+
+    // The cut succeeds and records a receipt …
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+    assert_eq!(journal.state().published.len(), 1);
+    // … yet nothing actually landed on the registry — the defect a green cut hides.
+    assert!(
+        reg.versions("acme-core").is_empty(),
+        "a no-op publish must leave the registry empty (that is the bug this asserts)"
+    );
+}

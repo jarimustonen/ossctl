@@ -66,7 +66,7 @@
 
 use serde::Serialize;
 
-use crate::contract::schema::Contract;
+use crate::contract::schema::{Contract, Ecosystem};
 use crate::protocol::facts::Facts;
 use crate::protocol::plan::{PlanPhase, PlanTarget, ReleasePlan};
 
@@ -205,6 +205,83 @@ pub struct PlanDrift {
     /// Human-readable specifics of what drifted (`HEAD` moved, the target set
     /// changed, …) — at least one entry.
     pub reasons: Vec<String>,
+}
+
+/// A publishable target whose **tree manifest** declares a version different
+/// from the version a cut would seal — the drift the `--version` guard rejects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VersionMismatch {
+    /// The resolved package whose manifest version disagrees with `--version`.
+    pub package: String,
+    /// The package's ecosystem.
+    pub ecosystem: Ecosystem,
+    /// The version declared in the tree manifest — what the ecosystem's publish
+    /// command (`cargo publish` reading `Cargo.toml`, …) would **actually**
+    /// upload, regardless of the chosen `--version`.
+    pub manifest_version: String,
+}
+
+/// Reject a chosen `version` that does not match the tree manifest version(s) a
+/// cut would actually publish.
+///
+/// `ossctl release cut` does **not** bump the manifest: each ecosystem's publish
+/// command uploads the version already in the tree (`cargo publish` reads
+/// `Cargo.toml`), while the engine threads the chosen `--version` into every
+/// registry probe, index-wait, and receipt (a plan target's
+/// [`version`](crate::protocol::plan::ReleasePlan::version) is the sealed
+/// `--version`, not the manifest's). When the two disagree the engine publishes
+/// the *manifest* version yet waits for — and records — the requested version,
+/// which never lands, so the cut fails obscurely (an index-visibility timeout on
+/// a dependency that was published at a different version) and nothing reaches
+/// the registry at `version` (`release-cut-publish-noop`).
+///
+/// This guard turns that silent footgun into a fast, pre-publish `plan`/`cut`
+/// refusal: for every target whose resolved package declares a version in
+/// `facts`, that version must equal `version`. Targets whose package has no
+/// detectable manifest version — a homebrew/binary distribution target, an
+/// undetected package — are not checked (there is no tree version to compare,
+/// and their release version is bound to the crate they repackage, not to a
+/// manifest of their own).
+///
+/// # Errors
+/// Returns every [`VersionMismatch`] found (sorted by package, one per package)
+/// when at least one checkable target's manifest version differs from `version`;
+/// `Ok(())` when all checkable targets agree.
+pub fn check_version_matches_tree(
+    contract: &Contract,
+    facts: &Facts,
+    version: &str,
+) -> Result<(), Vec<VersionMismatch>> {
+    let mut mismatches: Vec<VersionMismatch> = Vec::new();
+    for t in resolve_targets(contract, facts) {
+        let Some(package) = t.package else { continue };
+        // The tree manifest version for this resolved (ecosystem, package). Absent
+        // ⇒ nothing to compare (a distribution target, or an undetected manifest).
+        let Some(manifest_version) = facts
+            .packages
+            .iter()
+            .find(|p| p.ecosystem == t.ecosystem && p.package.as_deref() == Some(package.as_str()))
+            .and_then(|p| p.version.clone())
+        else {
+            continue;
+        };
+        if manifest_version != version {
+            mismatches.push(VersionMismatch {
+                package,
+                ecosystem: t.ecosystem,
+                manifest_version,
+            });
+        }
+    }
+    // Deterministic order, and one row per package even if a package backs several
+    // targets (a crate published to crates.io AND repackaged for homebrew).
+    mismatches.sort_by(|a, b| a.package.cmp(&b.package));
+    mismatches.dedup_by(|a, b| a.package == b.package && a.ecosystem == b.ecosystem);
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        Err(mismatches)
+    }
 }
 
 /// Overlay facts-derived package names onto the contract's target set, yielding

@@ -220,6 +220,18 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
 
     let facts = ossctl_core::facts::gather(&root, &RealFs, &git);
 
+    // A cut publishes the version already in the manifest — it does not bump it —
+    // so a `--version` that drifts from the tree would silently publish the manifest
+    // version while the engine waits for/records `--version` (`release-cut-publish-noop`).
+    // Refuse to seal a plan a cut could not faithfully execute.
+    if let Err(mismatches) = ossctl_core::release::plan::check_version_matches_tree(
+        &normalized.contract,
+        &facts,
+        version,
+    ) {
+        return Err(version_drift_error(version, &mismatches));
+    }
+
     let plan = ossctl_core::release::plan::build(&normalized.contract, &facts, &head_sha, version);
 
     let mut warnings = normalized.problems.warnings.clone();
@@ -1431,6 +1443,21 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     })?;
     let facts = ossctl_core::facts::gather(&root, &RealFs, &git);
 
+    // The cut publishes the version in the manifest, not `--version` — refuse a
+    // drifted `--version` BEFORE any publish so a mismatch can never silently
+    // publish the wrong version and then wait forever for the requested one
+    // (`release-cut-publish-noop`). Checked here as well as in `plan` because a
+    // manifest can change between plan and cut (the plan-drift hash below would
+    // also catch a manifest-version edit, but this yields the precise, actionable
+    // message rather than a generic `plan_stale`).
+    if let Err(mismatches) = ossctl_core::release::plan::check_version_matches_tree(
+        &normalized.contract,
+        &facts,
+        version,
+    ) {
+        return Err(version_drift_error(version, &mismatches));
+    }
+
     // Drift check: the current repo + supplied version must hash to the approved
     // plan_id, or we refuse rather than publish a different release (§3).
     let current =
@@ -1516,6 +1543,44 @@ fn plan_stale_error(approved: &str, current: &ReleasePlan) -> CliError {
     )
     .with_invalid_value(approved.to_string())
     .with_expected(serde_json::json!({ "current_plan_id": current.plan_id }))
+}
+
+/// Build the `version_mismatch` refusal for a `--version` that disagrees with the
+/// tree manifest version(s) the cut would actually publish
+/// (`release-cut-publish-noop`).
+///
+/// `ossctl release cut` publishes the version already in the manifest — it does
+/// not bump it — so a `--version` that differs would silently publish the manifest
+/// version while the engine waits for/records the requested one. Refuse before any
+/// publish and tell the operator the fix: bump the manifest (and CHANGELOG) in a
+/// release commit first, then plan/cut.
+fn version_drift_error(
+    version: &str,
+    mismatches: &[ossctl_core::release::plan::VersionMismatch],
+) -> CliError {
+    let detail = mismatches
+        .iter()
+        .map(|m| {
+            format!(
+                "{} ({}) is at {}",
+                m.package,
+                m.ecosystem.as_str(),
+                m.manifest_version
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    CliError::user(
+        "version_mismatch",
+        format!(
+            "--version {version} does not match the tree manifest version(s) a cut would \
+             publish: {detail}. `ossctl release cut` publishes the version already in the \
+             manifest — it does NOT bump it. Bump the manifest (and finalize the CHANGELOG) to \
+             {version} in a release commit before planning/cutting, or pass the manifest's \
+             current version as --version."
+        ),
+    )
+    .with_invalid_value(version.to_string())
 }
 
 /// Map a `Journal::create` failure to the error envelope: a held lock is the

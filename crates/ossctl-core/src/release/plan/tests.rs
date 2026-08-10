@@ -473,3 +473,75 @@ fn build_preserves_multi_target_order() {
     assert_eq!(seq, vec![Ecosystem::Rust, Ecosystem::Python]);
     assert_eq!(plan.targets[1].package.as_deref(), Some("acme-py"));
 }
+
+// ── `--version` drift guard (release-cut-publish-noop) ─────────────────────
+
+#[test]
+fn version_matching_the_manifest_passes_the_drift_guard() {
+    // `rust_facts` declares `acme` at 0.1.0; a cut at 0.1.0 publishes exactly that.
+    assert!(check_version_matches_tree(&rust_contract(), &rust_facts(), "0.1.0").is_ok());
+}
+
+#[test]
+fn version_drifting_from_the_manifest_is_rejected() {
+    // The exact `release-cut-publish-noop` footgun: `--version 0.2.0` while the tree
+    // manifest is still 0.1.0. `cargo publish` would upload 0.1.0, but the engine
+    // would wait for/record 0.2.0 — refuse before any publish.
+    let err = check_version_matches_tree(&rust_contract(), &rust_facts(), "0.2.0")
+        .expect_err("a drifted --version must be rejected");
+    assert_eq!(err.len(), 1);
+    assert_eq!(err[0].package, "acme");
+    assert_eq!(err[0].ecosystem, Ecosystem::Rust);
+    assert_eq!(err[0].manifest_version, "0.1.0");
+}
+
+#[test]
+fn drift_guard_reports_every_mismatched_workspace_member() {
+    // A two-crate workspace (the issuectl `core` + `cli` shape) both still at 0.1.0
+    // while cutting 0.2.0 — both members must be reported, sorted by package.
+    let mut c = rust_contract();
+    c.targets = vec![
+        Target {
+            ecosystem: Ecosystem::Rust,
+            package: Some("acme".to_string()),
+            registry: Registry::CratesIo,
+            adapter: Adapter::CargoPublish,
+        },
+        Target {
+            ecosystem: Ecosystem::Rust,
+            package: Some("acme-core".to_string()),
+            registry: Registry::CratesIo,
+            adapter: Adapter::CargoPublish,
+        },
+    ];
+    let mut f = rust_facts();
+    f.packages.push(Package {
+        ecosystem: Ecosystem::Rust,
+        manifest: "core/Cargo.toml".to_string(),
+        package: Some("acme-core".to_string()),
+        version: Some("0.1.0".to_string()),
+    });
+    let err = check_version_matches_tree(&c, &f, "0.2.0")
+        .expect_err("both drifted members must be rejected");
+    let packages: Vec<&str> = err.iter().map(|m| m.package.as_str()).collect();
+    assert_eq!(
+        packages,
+        vec!["acme", "acme-core"],
+        "sorted, one row per package"
+    );
+}
+
+#[test]
+fn drift_guard_skips_targets_with_no_manifest_version() {
+    // A distribution/binary target whose package has no detected manifest version
+    // has no tree version to compare — it must not false-fail the guard.
+    let mut c = rust_contract();
+    c.targets = vec![Target {
+        ecosystem: Ecosystem::Rust,
+        package: Some("no-such-crate".to_string()),
+        registry: Registry::CratesIo,
+        adapter: Adapter::CargoPublish,
+    }];
+    // facts name a *different* package, so the target's package is absent from facts.
+    assert!(check_version_matches_tree(&c, &rust_facts(), "9.9.9").is_ok());
+}
