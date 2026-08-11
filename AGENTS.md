@@ -74,7 +74,7 @@ app beyond what the ADRs already fix.
   run. Still: green gate first, dry-run/plan first, never publish red, report each phase.
   - **Shipped: 0.1.0 (2026-08-04), 0.1.1 (2026-08-05), 0.1.2 (2026-08-05), 0.2.0 (2026-08-06),
     0.2.1 (2026-08-06), 0.2.2 (2026-08-06), 0.2.3 (2026-08-07), 0.2.4 (2026-08-10), 0.2.5 (2026-08-10),
-    0.3.0 (2026-08-11).**
+    0.3.0 (2026-08-11), 0.4.0 (2026-08-11).**
     All on crates.io (`ossctl` + `ossctl-core`), GitHub Releases (cross-platform: macOS aarch64,
     Linux musl x86_64+aarch64, Windows, `.sh`+`.ps1` installers), and the Homebrew tap
     `jarimustonen/homebrew-ossctl`. Repo is **public**. 0.1.2 added `ossctl dist generate`. 0.2.0
@@ -95,7 +95,10 @@ app beyond what the ADRs already fix.
     now a hard error — see recipe) + made the version guards **fail-closed for manifest-versioned non-Rust**
     ecosystems (was fail-open for node/python) + made `cut`/`resume` publish from a **clean checkout of the
     sealed `head_sha`** (reproducible, immune to mid-cut edits) + **digest-authenticated** the resume
-    idempotency skip (checksum-match the on-registry crate before trusting a skip, else fail closed).
+    idempotency skip (checksum-match the on-registry crate before trusting a skip, else fail closed). 0.4.0
+    made `ossctl skill install` **dual-home into pi.dev**: a new `pi` runtime writes each SKILL.md into
+    `~/.pi/agent/skills/<name>/` and — with `--agent` omitted — the installer now writes BOTH Claude and
+    pi.dev by DEFAULT (`--agent claude` restores single-home; `pi`/`codex` narrow; `all` = every runtime).
   - **🎉 THE DOGFOOD IS COMPLETE (stint #14).** `ossctl release cut` now cuts ossctl ITSELF
     end-to-end, fully autonomously, with zero manual publish steps — proven by the **0.2.3 cut
     (2026-08-07)**: dry-run-all → build-all → publish-all (both crates → crates.io) → tag → dist,
