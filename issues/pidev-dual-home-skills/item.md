@@ -2,11 +2,14 @@
 created: 2026-08-11
 updated: 2026-08-11
 type: feature
-status: in-progress
+status: done
 priority: high
 commits:
 - hash: 6e39326
   summary: dual-home skill install into ~/.pi/agent/skills
+- hash: 27b14db
+  summary: review fixes — preserve per-runtime rows, doc/changelog accuracy
+closed: 2026-08-11
 ---
 
 # Dual-home skills into pi.dev's skill dir (~/.pi/agent/skills)
