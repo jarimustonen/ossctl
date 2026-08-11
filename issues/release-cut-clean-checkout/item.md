@@ -2,13 +2,16 @@
 created: 2026-08-10
 updated: 2026-08-11
 type: improvement
-status: in-progress
+status: done
 priority: normal
 epic: ossctl-phase4-build
 related: ['@release-drop-version-flag']
 commits:
 - hash: 1040f06
   summary: cut/resume publish from a clean checkout of the sealed HEAD
+- hash: ea99db9
+  summary: apply clean-checkout llm-review fixes (slug-from-real-root, prune, docs)
+closed: 2026-08-11
 ---
 
 # run release cut/resume from a clean checkout of the sealed HEAD (dirty-tree/TOCTOU)
