@@ -85,7 +85,9 @@ use serde::Deserialize;
 use crate::contract::schema::{Adapter, Ecosystem, Registry};
 use crate::protocol::release::{BuildArtifacts, DryRunReport, PlannedCommand, PublishReceipt};
 
-use super::{make_receipt, run_all, AdapterError, AdapterTarget, EffectCtx, ReleaseAdapter};
+use super::{
+    hash_file, make_receipt, run_all, AdapterError, AdapterTarget, EffectCtx, ReleaseAdapter,
+};
 
 /// Wall-clock ceiling for a single crate's crates.io index-wait, in seconds.
 ///
@@ -343,9 +345,18 @@ impl ReleaseAdapter for CargoAdapter {
         // duplicate upload of a crate that in fact landed. It fails the publish
         // closed ([`AdapterError::RegistryUnavailable`]), mirroring the reconcile
         // layer's outage ⇒ `Unknown` ⇒ never-`Missing` discipline.
+        //
+        // DIGEST-AUTHENTICATE THE SKIP (`is-published-digest-authenticate`). "Already
+        // published" by name + version is NOT proof the crate on the registry is the
+        // one this cut intended — a *different* artifact could occupy the version. So
+        // before trusting the skip, [`authenticate_skip`] proves the registry's crate
+        // is byte-identical to what this cut would upload (its `.crate` sha256 vs the
+        // sparse-index `cksum`); only a match skips, a mismatch fails CLOSED, and an
+        // outage keeps the same never-guess discipline. This closes the last
+        // "receipt without a fresh upload" path (the self-visibility no-op's mirror).
         let ecosystem = t.ecosystem();
         if is_published(ctx, ecosystem, &t.package, &t.version)? {
-            return Ok(make_receipt(ctx, t, None, Some(remote_url(t))));
+            return authenticate_skip(ctx, registry, ecosystem, t);
         }
         // crates.io rejects a crate whose sibling dependency is not yet indexed, so
         // wait for this package's own publishable workspace dependencies to be
@@ -606,6 +617,95 @@ fn is_published(
             source: e.to_string(),
         }),
     }
+}
+
+/// Authenticate an idempotency skip: `t.package@t.version` is already on the
+/// registry, so prove the crate published there is **byte-identical** to what this
+/// cut would upload before trusting the skip (`is-published-digest-authenticate`).
+///
+/// Name + version existence alone is not enough — a *different* artifact could
+/// occupy the version (a re-used version from another source, or a supply-chain
+/// substitution). So this compares two digests:
+///
+/// - the **intended** digest: the sha256 of the `.crate` this cut would upload,
+///   (re)produced deterministically by [`intended_crate_digest`] (the target's
+///   published dependencies are on the index, so it packages cleanly);
+/// - the **published** digest: the registry-recorded checksum (crates.io
+///   sparse-index `cksum`) from [`RegistryQuery::published_checksum`].
+///
+/// Only a match trusts the skip and journals a receipt carrying the verified
+/// digest (no `cargo publish` runs — the crate is already there). A **mismatch**
+/// fails **closed** with [`AdapterError::DigestMismatch`] (the registry holds a
+/// different artifact than intended). An **outage** — the checksum cannot be read
+/// — fails closed with [`AdapterError::RegistryUnavailable`], never trusting a skip
+/// it cannot authenticate (the same never-guess discipline as the idempotency
+/// probe and self-visibility confirm).
+fn authenticate_skip(
+    ctx: &EffectCtx<'_>,
+    registry: &str,
+    ecosystem: Ecosystem,
+    t: &AdapterTarget,
+) -> Result<PublishReceipt, AdapterError> {
+    let local = intended_crate_digest(ctx, registry, &t.package, &t.version)?;
+    let remote = ctx
+        .registry
+        .published_checksum(ecosystem.as_str(), &t.package, &t.version)
+        .map_err(|e| AdapterError::RegistryUnavailable {
+            package: t.package.clone(),
+            version: t.version.clone(),
+            source: e.to_string(),
+        })?;
+    // Both digests are lowercase hex; compare case-insensitively for robustness.
+    if !local.eq_ignore_ascii_case(&remote) {
+        return Err(AdapterError::DigestMismatch {
+            package: t.package.clone(),
+            version: t.version.clone(),
+            local,
+            remote,
+        });
+    }
+    // Authenticated: the registry's crate matches what this cut intended, so the
+    // publish is safely skipped and the receipt records the verified digest.
+    Ok(make_receipt(ctx, t, Some(local), Some(remote_url(t))))
+}
+
+/// The sha256 (lowercase hex) of the `.crate` this cut would upload for
+/// `package@version` — the *intended* digest an idempotency skip is authenticated
+/// against.
+///
+/// (Re)produces the `.crate` with `cargo package --no-verify` (local, idempotent,
+/// self-overwriting — the same artifact build-all produces) so the digest is of the
+/// exact bytes `cargo publish` would upload, independent of whether an earlier build
+/// phase left the file on disk. The target is already published, so its `=`-pinned
+/// workspace dependencies are on the crates.io index and packaging resolves them.
+/// The `.crate` lands at the standard `target/package/<pkg>-<version>.crate` (the
+/// runner's cwd is the repo root), which [`hash_file`] then hashes cross-platform.
+fn intended_crate_digest(
+    ctx: &EffectCtx<'_>,
+    registry: &str,
+    package: &str,
+    version: &str,
+) -> Result<String, AdapterError> {
+    run_all(
+        ctx,
+        &[PlannedCommand::new(
+            "cargo",
+            &[
+                "package",
+                "--registry",
+                registry,
+                "-p",
+                package,
+                "--no-verify",
+            ],
+        )],
+    )?;
+    let crate_path = format!("target/package/{package}-{version}.crate");
+    hash_file(ctx, &crate_path).map_err(|source| AdapterError::Command {
+        command: format!("sha256 of {crate_path}"),
+        code: None,
+        stderr: source,
+    })
 }
 
 /// Why a bounded index-wait gave up without ever observing `package@version` — the

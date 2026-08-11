@@ -122,8 +122,8 @@ use crate::protocol::plan::ReleasePlan;
 use crate::protocol::release::PublishReceipt as AdapterReceipt;
 
 use super::adapters::{
-    resolve, AdapterTarget, EcosystemAdapter, EffectCtx, HomebrewFormula, ReleaseAdapter,
-    ReleaseArtifacts, SourceTarball,
+    hash_file, resolve, AdapterTarget, EcosystemAdapter, EffectCtx, HomebrewFormula,
+    ReleaseAdapter, ReleaseArtifacts, SourceTarball,
 };
 use super::journal::Journal;
 use super::journal_target_ids;
@@ -1171,54 +1171,6 @@ fn fetch_tag_archive(ctx: &EffectCtx<'_>, url: &str, tmp: &str) -> Result<(), St
         "`curl` could not fetch the source tarball `{url}` after {TAG_ARCHIVE_FETCH_ATTEMPTS} \
          attempts ({last}); the tag archive may not be published yet"
     ))
-}
-
-/// Hash the file at `tmp` with a SHA-256 CLI, returning the lowercase 64-hex digest.
-///
-/// Cross-platform: tries `sha256sum` (GNU coreutils — the Linux default) then
-/// `shasum -a 256` (Perl — the macOS default), so a homebrew cut works on both
-/// (`shasum` alone is absent on many Linux hosts — the portability landmine every
-/// reviewer flagged). Both print the digest as the first whitespace token, which
-/// [`parse_sha256_hex`] extracts; a missing tool (spawn error) or non-zero exit
-/// falls through to the next candidate.
-fn hash_file(ctx: &EffectCtx<'_>, tmp: &str) -> Result<String, String> {
-    let candidates: [(&str, Vec<&str>); 2] =
-        [("sha256sum", vec![tmp]), ("shasum", vec!["-a", "256", tmp])];
-    let mut last = String::from("no SHA-256 tool succeeded");
-    for (program, args) in &candidates {
-        match ctx.runner.run(program, args, ctx.repo_root) {
-            Ok(out) if out.status == Some(0) => match parse_sha256_hex(&out.stdout) {
-                Some(digest) => return Ok(digest),
-                None => {
-                    last = format!(
-                        "`{program}` produced no parseable sha256: {:?}",
-                        out.stdout.trim()
-                    );
-                }
-            },
-            Ok(out) => {
-                last = format!(
-                    "`{program}` exited {}",
-                    out.status
-                        .map_or_else(|| "signal".to_string(), |c| c.to_string())
-                );
-            }
-            Err(e) => last = format!("cannot run `{program}`: {e}"),
-        }
-    }
-    Err(format!(
-        "could not compute the source tarball sha256 (tried sha256sum, shasum): {last}"
-    ))
-}
-
-/// Extract the first whitespace-delimited 64-hex token from a SHA-256 CLI's stdout,
-/// lowercased — the digest `sha256sum`/`shasum` both print first (`<hex>  <file>`).
-/// `None` when no such token is present (an unexpected output shape).
-fn parse_sha256_hex(stdout: &str) -> Option<String> {
-    stdout
-        .split_whitespace()
-        .find(|tok| tok.len() == 64 && tok.bytes().all(|b| b.is_ascii_hexdigit()))
-        .map(str::to_ascii_lowercase)
 }
 
 /// A fresh, unpredictable temp path for the downloaded source tarball — unique per

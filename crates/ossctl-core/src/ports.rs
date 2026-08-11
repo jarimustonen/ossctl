@@ -97,6 +97,38 @@ pub trait Fs {
 pub trait RegistryQuery {
     /// Versions of `package` already published to `ecosystem`'s registry.
     fn published_versions(&self, ecosystem: &str, package: &str) -> io::Result<Vec<String>>;
+
+    /// The registry-recorded content digest of `package@version` — for crates.io
+    /// the sparse-index `cksum`, the lowercase-hex SHA-256 of the published
+    /// `.crate` tarball.
+    ///
+    /// Used to **authenticate an idempotency skip**: a resumed publish that finds
+    /// the version already on the registry trusts that "already published" answer
+    /// only when this digest matches the digest of the artifact the cut would
+    /// upload, so the registry's crate is proven byte-identical to the intended
+    /// one before the publish is skipped (see
+    /// [`crate::release::adapters::cargo`]). Name + version existence alone is not
+    /// enough — a *different* artifact could occupy the version.
+    ///
+    /// **Fail-closed, like [`Self::published_versions`].** `Ok(<hex>)` is the
+    /// recorded digest; an outage, a version that is not on the index, or a
+    /// registry that exposes no digest for the version is an `Err` — never a
+    /// fabricated value that could mask a mismatch as a match. The default
+    /// implementation errors ([`io::ErrorKind::Unsupported`]): a backend wires this
+    /// only for the ecosystems whose skip path is digest-authenticated (crates.io
+    /// today), and the sole caller is the cargo adapter's resume skip.
+    fn published_checksum(
+        &self,
+        ecosystem: &str,
+        package: &str,
+        version: &str,
+    ) -> io::Result<String> {
+        let _ = (ecosystem, package, version);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this registry query does not expose published checksums",
+        ))
+    }
 }
 
 /// Read-only view of the git repository under audit/release. The detector and

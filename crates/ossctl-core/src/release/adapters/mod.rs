@@ -347,6 +347,31 @@ pub enum AdapterError {
         /// How long the confirm waited before giving up, in seconds.
         waited_secs: u64,
     },
+    /// The resume idempotency skip was **refused**: `package@version` is already on
+    /// the registry, but the artifact this cut would upload is **not** byte-identical
+    /// to the crate already published there — the registry holds a *different*
+    /// artifact at this version than this cut intended.
+    ///
+    /// The pre-fix skip trusted name + version existence alone and journaled a receipt
+    /// without re-uploading (the last "receipt without a fresh upload" path, the same
+    /// shape as the `cut-noop-self-visibility-check` no-op). This variant is the
+    /// digest-authenticated refusal: the cut fails **closed** rather than skip and
+    /// fabricate a receipt for a crate it did not put there. A benign cause is the
+    /// version having been packaged by a different toolchain (a non-reproducible
+    /// `.crate`); a malign one is a supply-chain substitution — either way the operator
+    /// must investigate before the cut can proceed. Distinct from
+    /// [`Self::RegistryUnavailable`] (the digest could not be read at all — an outage):
+    /// here the registry answered with a concrete, *conflicting* digest.
+    DigestMismatch {
+        /// The already-published package whose registry artifact did not match.
+        package: String,
+        /// The version whose on-registry crate conflicts with the intended one.
+        version: String,
+        /// The sha256 (lowercase hex) of the `.crate` this cut would upload.
+        local: String,
+        /// The registry-recorded checksum (crates.io sparse-index `cksum`).
+        remote: String,
+    },
     /// An adapter was handed a target whose declared [`registry`](Target::registry)
     /// it does not support, so it refuses the target **before any external action**
     /// rather than risk publishing to an unexpected destination. Raised by the
@@ -418,6 +443,21 @@ impl std::fmt::Display for AdapterError {
                  was a silent no-op: check the registry credentials/config and that `{package}` is \
                  a correctly-declared crates.io target. The cut fails here rather than record a \
                  receipt for a publish it cannot confirm"
+            ),
+            Self::DigestMismatch {
+                package,
+                version,
+                local,
+                remote,
+            } => write!(
+                f,
+                "refusing to skip the publish of `{package}@{version}`: it is already on the \
+                 registry, but the crate published there (sha256 {remote}) is NOT byte-identical \
+                 to the artifact this cut would upload (sha256 {local}). The registry holds a \
+                 different artifact at this version than this cut intended — investigate (a \
+                 non-reproducible build/toolchain, or a supply-chain substitution) before \
+                 proceeding. The cut fails here rather than skip and record a receipt for a crate \
+                 it did not publish"
             ),
             Self::UnsupportedRegistry { adapter, registry } => write!(
                 f,
@@ -743,6 +783,58 @@ pub(crate) fn run_all(
         outputs.push(out);
     }
     Ok(outputs)
+}
+
+/// Hash the file at `path` (relative to the run's repo root, the runner's cwd)
+/// with a SHA-256 CLI, returning the lowercase 64-hex digest.
+///
+/// Cross-platform: tries `sha256sum` (GNU coreutils — the Linux default) then
+/// `shasum -a 256` (Perl — the macOS default), so a cut works on both (`shasum`
+/// alone is absent on many Linux hosts). Both print the digest as the first
+/// whitespace token, which [`parse_sha256_hex`] extracts; a missing tool (spawn
+/// error) or non-zero exit falls through to the next candidate. Shared by the
+/// coordinator's source-tarball hash and the cargo adapter's resume-skip
+/// digest-authentication.
+pub(crate) fn hash_file(ctx: &EffectCtx<'_>, path: &str) -> Result<String, String> {
+    let candidates: [(&str, Vec<&str>); 2] = [
+        ("sha256sum", vec![path]),
+        ("shasum", vec!["-a", "256", path]),
+    ];
+    let mut last = String::from("no SHA-256 tool succeeded");
+    for (program, args) in &candidates {
+        match ctx.runner.run(program, args, ctx.repo_root) {
+            Ok(out) if out.status == Some(0) => match parse_sha256_hex(&out.stdout) {
+                Some(digest) => return Ok(digest),
+                None => {
+                    last = format!(
+                        "`{program}` produced no parseable sha256: {:?}",
+                        out.stdout.trim()
+                    );
+                }
+            },
+            Ok(out) => {
+                last = format!(
+                    "`{program}` exited {}",
+                    out.status
+                        .map_or_else(|| "signal".to_string(), |c| c.to_string())
+                );
+            }
+            Err(e) => last = format!("cannot run `{program}`: {e}"),
+        }
+    }
+    Err(format!(
+        "could not compute the sha256 of `{path}` (tried sha256sum, shasum): {last}"
+    ))
+}
+
+/// Extract the first whitespace-delimited 64-hex token from a SHA-256 CLI's stdout,
+/// lowercased — the digest `sha256sum`/`shasum` both print first (`<hex>  <file>`).
+/// `None` when no such token is present (an unexpected output shape).
+pub(crate) fn parse_sha256_hex(stdout: &str) -> Option<String> {
+    stdout
+        .split_whitespace()
+        .find(|tok| tok.len() == 64 && tok.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
 }
 
 /// Build a [`PublishReceipt`] for `target`, stamping the time from the injected

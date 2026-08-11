@@ -373,6 +373,40 @@ impl RegistryQuery for FakeRegistry {
     }
 }
 
+/// A registry for the resume-skip digest-authentication path: reports the target
+/// version present (so the idempotency probe short-circuits to the skip) and serves
+/// a configurable checksum for it — or errors, to model an outage. The skip path
+/// calls `published_versions` (probe) then `published_checksum` (authenticate).
+struct SkipAuthRegistry {
+    version: String,
+    /// The checksum `published_checksum` returns; `None` makes it error (an outage,
+    /// so the skip cannot be authenticated).
+    checksum: Option<String>,
+}
+impl SkipAuthRegistry {
+    fn new(version: &str, checksum: Option<&str>) -> Self {
+        Self {
+            version: version.to_string(),
+            checksum: checksum.map(str::to_string),
+        }
+    }
+}
+impl RegistryQuery for SkipAuthRegistry {
+    fn published_versions(&self, _ecosystem: &str, _package: &str) -> io::Result<Vec<String>> {
+        Ok(vec![self.version.clone()])
+    }
+    fn published_checksum(
+        &self,
+        _ecosystem: &str,
+        _package: &str,
+        _version: &str,
+    ) -> io::Result<String> {
+        self.checksum
+            .clone()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))
+    }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 fn ctx<'a>(
@@ -1410,15 +1444,18 @@ fn two_targets_never_double_publish_the_shared_dependency() {
 fn target_skips_its_own_publish_when_already_published_on_resume() {
     // Idempotent re-entry: `bin`'s version is already on the index (a prior attempt
     // landed it), so the adapter must NOT re-run `cargo publish -p bin` — that would
-    // hard-fail on crates.io and wedge the resume. The pre-publish probe short-
-    // circuits before any command runs.
-    let cmd = FakeCmd::new().with_metadata(&metadata_two_crate("lib", "bin", "1.0.0"));
-    let clock = AdvancingClock::new();
-    let reg = FakeRegistry::new()
-        .with("rust", "lib", &["1.0.0"])
-        .with("rust", "bin", &["1.0.0"]);
+    // hard-fail on crates.io and wedge the resume. It DIGEST-AUTHENTICATES the skip
+    // (the registry's crate matches the artifact this cut would upload) and records a
+    // receipt without publishing — never a bare name+version skip.
+    let digest = "c".repeat(64);
+    let cmd = FakeCmd::new().stdout_calls_containing(
+        "sha256sum",
+        &format!("{digest}  target/package/bin-1.0.0.crate"),
+    );
+    let clock = FakeClock(1);
+    let reg = SkipAuthRegistry::new("1.0.0", Some(&digest));
     let root = Path::new("/repo");
-    let c = ctx_advancing(&cmd, &clock, &reg, root);
+    let c = ctx_dyn(&cmd, &clock, &reg, root);
 
     let t = target_named(
         Ecosystem::Rust,
@@ -1427,13 +1464,156 @@ fn target_skips_its_own_publish_when_already_published_on_resume() {
         "bin",
         "1.0.0",
     );
-    resolve(Adapter::CargoPublish).publish(&c, &t).unwrap();
+    let r = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap();
 
-    // Already published ⇒ no command ran at all (not even the metadata probe — the
-    // registry probe answered first).
+    // Already published ⇒ the skip re-packaged + hashed to authenticate, but ran NO
+    // `cargo publish` (which would hard-fail on the duplicate and wedge the resume).
     assert!(
-        cmd.calls().is_empty(),
-        "an already-published target must run no command: {:?}",
+        !cmd.calls().iter().any(|call| call.contains("publish")),
+        "an already-published target must not re-publish: {:?}",
+        cmd.calls()
+    );
+    // The receipt carries the verified digest — the proof the skip was authenticated.
+    assert_eq!(r.digest.as_deref(), Some(digest.as_str()));
+    assert_eq!(
+        r.remote_url.as_deref(),
+        Some("https://crates.io/crates/bin/1.0.0")
+    );
+}
+
+// ── Resume-skip digest authentication (is-published-digest-authenticate) ─────
+
+#[test]
+fn resume_skip_is_trusted_when_the_registry_digest_matches() {
+    // The version is already on the registry AND its recorded checksum matches the
+    // sha256 of the `.crate` this cut would upload — so the skip is authenticated:
+    // the intended `.crate` is (re)packaged and hashed, NO `cargo publish` runs, and
+    // the receipt records the verified digest.
+    let digest = "a".repeat(64);
+    let cmd = FakeCmd::new().stdout_calls_containing(
+        "sha256sum",
+        &format!("{digest}  target/package/tool-1.0.0.crate"),
+    );
+    let clock = FakeClock(9);
+    let reg = SkipAuthRegistry::new("1.0.0", Some(&digest));
+    let root = Path::new("/repo");
+    let c = ctx_dyn(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.0.0",
+    );
+    let r = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap();
+
+    // Exactly: (re)package the `.crate`, then hash it — no publish.
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "cargo package --registry crates-io -p tool --no-verify".to_string(),
+            "sha256sum target/package/tool-1.0.0.crate".to_string(),
+        ]
+    );
+    assert_eq!(r.digest.as_deref(), Some(digest.as_str()));
+    assert_eq!(
+        r.remote_url.as_deref(),
+        Some("https://crates.io/crates/tool/1.0.0")
+    );
+    assert_eq!(r.timestamp, 9, "receipt stamps the injected clock");
+}
+
+#[test]
+fn resume_skip_is_refused_when_the_registry_digest_differs() {
+    // The version is on the registry but its recorded checksum does NOT match the
+    // artifact this cut would upload — the registry holds a DIFFERENT crate at this
+    // version. The skip is refused: fail CLOSED with `DigestMismatch`, run NO publish,
+    // and never fabricate a receipt for a crate this cut did not put there.
+    let intended = "a".repeat(64);
+    let published = "b".repeat(64);
+    let cmd = FakeCmd::new().stdout_calls_containing(
+        "sha256sum",
+        &format!("{intended}  target/package/tool-1.0.0.crate"),
+    );
+    let clock = FakeClock(1);
+    let reg = SkipAuthRegistry::new("1.0.0", Some(&published));
+    let root = Path::new("/repo");
+    let c = ctx_dyn(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.0.0",
+    );
+    let err = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap_err();
+
+    let msg = err.to_string();
+    match err {
+        AdapterError::DigestMismatch {
+            package,
+            version,
+            local,
+            remote,
+        } => {
+            assert_eq!(package, "tool");
+            assert_eq!(version, "1.0.0");
+            assert_eq!(local, intended);
+            assert_eq!(remote, published);
+        }
+        other => panic!("expected DigestMismatch on a differing registry digest, got {other:?}"),
+    }
+    // A mismatch fails closed BEFORE any upload.
+    assert!(
+        !cmd.calls().iter().any(|call| call.contains("publish")),
+        "a digest mismatch must not publish: {:?}",
+        cmd.calls()
+    );
+    // The message names both digests and warns of a different on-registry artifact.
+    assert!(msg.contains("tool@1.0.0"), "message: {msg}");
+    assert!(
+        msg.contains(&intended) && msg.contains(&published),
+        "message: {msg}"
+    );
+    assert!(msg.contains("different artifact"), "message: {msg}");
+}
+
+#[test]
+fn resume_skip_fails_closed_when_the_registry_checksum_is_unavailable() {
+    // OUTAGE ≠ SAFE-TO-SKIP. The version is present (idempotency probe), but the
+    // registry cannot return its checksum (an outage) — the skip cannot be
+    // authenticated, so it fails CLOSED with `RegistryUnavailable` rather than trust
+    // an unverified skip. No `cargo publish` runs (and no receipt is fabricated).
+    let intended = "a".repeat(64);
+    let cmd = FakeCmd::new().stdout_calls_containing(
+        "sha256sum",
+        &format!("{intended}  target/package/tool-1.0.0.crate"),
+    );
+    let clock = FakeClock(1);
+    let reg = SkipAuthRegistry::new("1.0.0", None); // checksum lookup errors
+    let root = Path::new("/repo");
+    let c = ctx_dyn(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.0.0",
+    );
+    let err = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap_err();
+
+    match err {
+        AdapterError::RegistryUnavailable {
+            package, version, ..
+        } => {
+            assert_eq!(package, "tool");
+            assert_eq!(version, "1.0.0");
+        }
+        other => panic!("expected RegistryUnavailable on a checksum outage, got {other:?}"),
+    }
+    assert!(
+        !cmd.calls().iter().any(|call| call.contains("publish")),
+        "an unauthenticatable skip must not publish: {:?}",
         cmd.calls()
     );
 }

@@ -722,6 +722,105 @@ impl RealRegistryQuery {
         let (status, body) = Self::http_get(&url)?;
         Self::classify_sparse_response(status, &body, crate_name)
     }
+
+    /// The crates.io sparse-index **checksum** (`cksum`) recorded for
+    /// `crate_name@version` — the lowercase-hex SHA-256 of the published `.crate`
+    /// tarball, used to digest-authenticate a resume skip.
+    ///
+    /// Runs the same single HTTP seam as [`Self::crates_io_versions`] and finds the
+    /// release record whose `vers` equals `version`. **Fail-closed**: a transport
+    /// failure is already an `Err` from [`Self::http_get`]; a `200` whose body does
+    /// not carry the requested version, a `404` (the version this is called for was
+    /// just observed present, so its sudden absence is anomalous, not "missing"),
+    /// and any other status are all `Err` — never a fabricated digest that could
+    /// mask a mismatch. A record whose `cksum` is not a well-formed hex SHA-256 is
+    /// likewise refused.
+    fn crates_io_checksum(crate_name: &str, version: &str) -> io::Result<String> {
+        Self::validate_crate_name(crate_name)?;
+        let url = format!(
+            "https://index.crates.io/{}",
+            Self::sparse_index_path(crate_name)
+        );
+        let (status, body) = Self::http_get(&url)?;
+        Self::classify_sparse_checksum(status, &body, crate_name, version)
+    }
+
+    /// Classify a sparse-index transaction for the [`Self::crates_io_checksum`]
+    /// lookup: on `200`, parse the body and return the `cksum` of the record
+    /// matching `version`; every other outcome fails closed with `Err`.
+    fn classify_sparse_checksum(
+        status: u16,
+        body: &[u8],
+        expected_name: &str,
+        version: &str,
+    ) -> io::Result<String> {
+        match status {
+            200 => {
+                let body = std::str::from_utf8(body).map_err(|e| {
+                    io::Error::other(format!(
+                        "crates.io sparse index returned a non-UTF-8 body: {e}"
+                    ))
+                })?;
+                Self::parse_sparse_checksum(body, expected_name, version)
+            }
+            other => Err(io::Error::other(format!(
+                "crates.io sparse index returned HTTP {other} while looking up the checksum of \
+                 {expected_name}@{version}; treating as unknown rather than a usable digest"
+            ))),
+        }
+    }
+
+    /// Parse a crates.io sparse-index body for the `cksum` of the record whose
+    /// `vers` equals `version`, cross-checking each record's crate `name` against
+    /// `expected_name` (the same misroute guard as [`Self::parse_sparse_index`]).
+    ///
+    /// Returns `Err` when the version is not present, when a matching record's
+    /// `cksum` is not a 64-char hex SHA-256, or when a line is malformed — never a
+    /// silent fallback, so a digest-authenticated skip can only proceed on a real,
+    /// well-formed registry digest.
+    fn parse_sparse_checksum(body: &str, expected_name: &str, version: &str) -> io::Result<String> {
+        /// The subset of a sparse-index release record the checksum lookup reads.
+        #[derive(serde::Deserialize)]
+        struct SparseCksumEntry {
+            name: String,
+            vers: String,
+            cksum: String,
+        }
+
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let entry: SparseCksumEntry = serde_json::from_str(line).map_err(|e| {
+                io::Error::other(format!(
+                    "crates.io sparse-index line was not valid JSON: {e}"
+                ))
+            })?;
+            if !entry.name.eq_ignore_ascii_case(expected_name) {
+                return Err(io::Error::other(format!(
+                    "crates.io sparse-index body was for crate {:?}, not the requested \
+                     {expected_name:?}",
+                    entry.name
+                )));
+            }
+            if entry.vers == version {
+                let cksum = entry.cksum.to_ascii_lowercase();
+                if cksum.len() != 64 || !cksum.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(io::Error::other(format!(
+                        "crates.io sparse index recorded a malformed checksum for \
+                         {expected_name}@{version}: {:?}",
+                        entry.cksum
+                    )));
+                }
+                return Ok(cksum);
+            }
+        }
+        Err(io::Error::other(format!(
+            "crates.io sparse index carries no record for {expected_name}@{version}, so its \
+             checksum could not be read"
+        )))
+    }
 }
 
 impl RegistryQuery for RealRegistryQuery {
@@ -731,6 +830,23 @@ impl RegistryQuery for RealRegistryQuery {
             "rust" => Self::crates_io_versions(package),
             other => Err(io::Error::other(format!(
                 "no registry query wired for ecosystem '{other}' yet"
+            ))),
+        }
+    }
+
+    fn published_checksum(
+        &self,
+        ecosystem: &str,
+        package: &str,
+        version: &str,
+    ) -> io::Result<String> {
+        match ecosystem {
+            // Only crates.io's skip path is digest-authenticated today (the cargo
+            // resume skip). Other ecosystems fall through to the trait default
+            // (Unsupported) — no caller reaches them.
+            "rust" => Self::crates_io_checksum(package, version),
+            other => Err(io::Error::other(format!(
+                "no registry checksum query wired for ecosystem '{other}' yet"
             ))),
         }
     }
@@ -1127,6 +1243,55 @@ mod tests {
         assert!(RealRegistryQuery::parse_sparse_index(body, "tool").is_err());
         // Non-JSON garbage likewise fails closed.
         assert!(RealRegistryQuery::parse_sparse_index("not json", "tool").is_err());
+    }
+
+    #[test]
+    fn parse_sparse_checksum_returns_the_matching_versions_cksum() {
+        let sha = "a".repeat(64);
+        let other = "b".repeat(64);
+        let body = format!(
+            "{}\n{}\n",
+            format_args!(r#"{{"name":"tool","vers":"0.9.0","cksum":"{other}","yanked":false}}"#),
+            format_args!(r#"{{"name":"tool","vers":"1.0.0","cksum":"{sha}","yanked":false}}"#),
+        );
+        assert_eq!(
+            RealRegistryQuery::parse_sparse_checksum(&body, "tool", "1.0.0").unwrap(),
+            sha
+        );
+    }
+
+    #[test]
+    fn parse_sparse_checksum_fails_closed_when_the_version_is_absent() {
+        // The version this is called for was just observed present; if the body does
+        // not carry it, that is anomalous, not a usable digest — fail closed.
+        let sha = "a".repeat(64);
+        let body = format!(r#"{{"name":"tool","vers":"1.0.0","cksum":"{sha}","yanked":false}}"#);
+        assert!(RealRegistryQuery::parse_sparse_checksum(&body, "tool", "2.0.0").is_err());
+    }
+
+    #[test]
+    fn parse_sparse_checksum_rejects_a_malformed_cksum() {
+        // A record whose cksum is not a 64-hex sha256 cannot authenticate a skip.
+        let body = r#"{"name":"tool","vers":"1.0.0","cksum":"nothex","yanked":false}"#;
+        assert!(RealRegistryQuery::parse_sparse_checksum(body, "tool", "1.0.0").is_err());
+        // A missing `cksum` field fails to deserialize and so fails closed.
+        let body = r#"{"name":"tool","vers":"1.0.0","yanked":false}"#;
+        assert!(RealRegistryQuery::parse_sparse_checksum(body, "tool", "1.0.0").is_err());
+    }
+
+    #[test]
+    fn parse_sparse_checksum_rejects_a_wrong_crate_body() {
+        let sha = "a".repeat(64);
+        let body = format!(r#"{{"name":"other","vers":"1.0.0","cksum":"{sha}","yanked":false}}"#);
+        assert!(RealRegistryQuery::parse_sparse_checksum(&body, "tool", "1.0.0").is_err());
+    }
+
+    #[test]
+    fn classify_sparse_checksum_non_200_fails_closed() {
+        // A 404 for a version just observed present, and any other status, are unknown
+        // — never a fabricated digest.
+        assert!(RealRegistryQuery::classify_sparse_checksum(404, b"", "tool", "1.0.0").is_err());
+        assert!(RealRegistryQuery::classify_sparse_checksum(503, b"", "tool", "1.0.0").is_err());
     }
 
     #[test]
