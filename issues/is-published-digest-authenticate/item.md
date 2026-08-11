@@ -9,6 +9,8 @@ related: ['@cargo-publish-receipt-provenance-resume-safety']
 commits:
 - hash: '3871174'
   summary: digest-authenticate the cargo resume idempotency skip
+- hash: 8ed5059
+  summary: apply llm-review fixes (target-dir resolution, flag terminator, digest boundary validation)
 ---
 
 # is_published idempotency short-circuit records a receipt without digest-authenticating the already-published crate

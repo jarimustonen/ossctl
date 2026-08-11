@@ -46,3 +46,52 @@ real version list from the sparse index, so the **version-existence** half of po
   not address it (out of scope).
 
 Refs-Issue: release-publish-registry-query-not-wired
+
+## Update 2026-08-11 — `published_checksum` port + skip digest-check landed; journaled-digest rework still open (partial progress on #1/#4)
+
+`is-published-digest-authenticate` (commits 3871174/8ed5059) added
+`RegistryQuery::published_checksum` (crates.io sparse-index `cksum`, fail-closed on
+absent/malformed) and made the cargo resume **skip** digest-authenticate before
+trusting it: it (re)packages the target's `.crate` (path resolved from `cargo
+metadata` `target_directory`), hashes it, and compares against the registry `cksum`
+— match trusts the skip and records the digest; mismatch fails closed
+(`AdapterError::DigestMismatch`); outage/malformed fails closed
+(`RegistryUnavailable`). This closes the *presence-only-blesses-a-conflicting-crate*
+gap (#1) **for the skip path**, and adds the checksum-returning capability #4 asked
+for (read from the same sparse-index body).
+
+**Still open here (a 4-model `/llm-review`, 2026-08-11, was unanimous CRITICAL):**
+
+- **The intended digest is re-DERIVED on resume, not journaled — a cross-toolchain
+  false-mismatch regression.** `cargo package` is deterministic only under a fixed
+  toolchain + source + index state; a resume under a different/upgraded cargo can
+  produce different `.crate` bytes for the same sealed commit → spurious
+  `DigestMismatch` → the cut fails CLOSED and wedges a *legitimate* resume. Safe for a
+  same-session same-toolchain resume (the common dogfood case), regressive for the
+  generic `/oss-*` cross-toolchain / resume-days-later case. **Fix:** journal the
+  digest of the exact `.crate` bytes at build/original-publish time (a pre-publish
+  `artifact_prepared` fact — a receipt-after-upload alone misses the crash window),
+  and on resume compare the JOURNALED digest against the registry `cksum`. Then
+  `intended_crate_digest`/the resume re-package goes away entirely.
+- **Fresh (non-resume) publish still records `digest: None`**, and
+  `verify_via_registry` never populates `RemoteObservation.remote_digest`, so
+  `classify_receipt`'s `Conflicts` branch stays undetectable for fresh receipts
+  (#1/#4 for the *non-skip* path). Fix: after `confirm_self_published`, read
+  `published_checksum` and record it on the receipt; populate `remote_digest` in
+  `verify`.
+- **`cargo package` in `publish()` needs index/network resolution and can fail on a
+  yanked sibling** — turning a benign "already published" resume into a hard failure,
+  and a phase-purity wrinkle (packaging inside publish-all). Subsumed by moving the
+  digest to a journaled build-phase fact.
+- **Classification third bucket:** a `cargo package`/hash failure in the skip path
+  surfaces as a raw `AdapterError::Command`, neither `RegistryUnavailable` nor
+  `DigestMismatch` ("cannot self-authenticate" — the crate IS published but local
+  re-derivation failed). Needs its own variant + operator guidance.
+- **Consolidate the two sparse-index fetches** (`published_versions` +
+  `published_checksum`) into one `published_release(...) -> {present, cksum}` — one
+  round trip, fewer transient-failure modes. Pairs with the port reshape above.
+- **Minor:** `entry.vers == version` is string- not SemVer-equality (build-metadata);
+  `parse_sparse_checksum` first-match (no duplicate-record detection). Both low-impact
+  for crates.io.
+
+Refs-Issue: is-published-digest-authenticate
