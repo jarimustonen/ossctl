@@ -131,15 +131,20 @@ pub const CATALOG: &[BundledSkill] = &[
 /// Which agent runtime(s) `skill install` targets. Each selects a well-known
 /// skills directory under `$HOME` *and* the on-disk file shape that runtime
 /// expects; `--dest` overrides the directory (not the shape).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+///
+/// When `--agent` is **omitted**, install **dual-homes** into Claude Code *and*
+/// pi.dev (see [`selected_runtimes`]) — the migration default. An explicit value
+/// narrows to one runtime, or, with `all`, widens to every known runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
 pub enum Agent {
-    /// `~/.claude/skills/<name>/SKILL.md` — Claude Code (the default).
-    #[default]
+    /// `~/.claude/skills/<name>/SKILL.md` — Claude Code.
     Claude,
+    /// `~/.pi/agent/skills/<name>/SKILL.md` — pi.dev.
+    Pi,
     /// `~/.codex/prompts/<name>.md` — Codex.
     Codex,
-    /// Install into every known runtime.
+    /// Install into every known runtime (Claude + pi.dev + Codex).
     All,
 }
 
@@ -148,9 +153,23 @@ impl Agent {
     fn runtimes(self) -> &'static [Runtime] {
         match self {
             Agent::Claude => &[Runtime::Claude],
+            Agent::Pi => &[Runtime::Pi],
             Agent::Codex => &[Runtime::Codex],
-            Agent::All => &[Runtime::Claude, Runtime::Codex],
+            Agent::All => &[Runtime::Claude, Runtime::Pi, Runtime::Codex],
         }
+    }
+}
+
+/// The runtimes an `--agent` selection expands to. When **unset** (the common
+/// case), install **dual-home** into Claude Code *and* pi.dev — the migration
+/// default: an agent stack moving from Claude Code to pi.dev needs each skill
+/// discoverable under both `~/.claude/skills` and `~/.pi/agent/skills`. An
+/// explicit `--agent` narrows to a single runtime (or, with `all`, widens to
+/// every known runtime, Codex included).
+fn selected_runtimes(agent: Option<Agent>) -> &'static [Runtime] {
+    match agent {
+        None => &[Runtime::Claude, Runtime::Pi],
+        Some(a) => a.runtimes(),
     }
 }
 
@@ -158,6 +177,7 @@ impl Agent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Runtime {
     Claude,
+    Pi,
     Codex,
 }
 
@@ -166,6 +186,7 @@ impl Runtime {
     fn label(self) -> &'static str {
         match self {
             Runtime::Claude => "claude",
+            Runtime::Pi => "pi",
             Runtime::Codex => "codex",
         }
     }
@@ -174,8 +195,10 @@ impl Runtime {
     /// `root` (the runtime's `$HOME` dir, or a `--dest` override).
     fn path_under(self, root: &Path, name: &str) -> PathBuf {
         match self {
-            // Claude: a directory per skill, canonical `SKILL.md` inside.
-            Runtime::Claude => root.join(name).join("SKILL.md"),
+            // Claude and pi.dev share the shape: a directory per skill with the
+            // canonical `SKILL.md` inside. pi.dev discovers `SKILL.md` from
+            // `~/.pi/agent/skills/<name>/` and invokes it as `/skill:name`.
+            Runtime::Claude | Runtime::Pi => root.join(name).join("SKILL.md"),
             // Codex: a flat `<name>.md` prompt file.
             Runtime::Codex => root.join(format!("{name}.md")),
         }
@@ -185,6 +208,7 @@ impl Runtime {
     fn default_root(self, home: &Path) -> PathBuf {
         match self {
             Runtime::Claude => home.join(".claude/skills"),
+            Runtime::Pi => home.join(".pi/agent/skills"),
             Runtime::Codex => home.join(".codex/prompts"),
         }
     }
@@ -196,11 +220,15 @@ pub struct InstallArgs {
     /// Skill name (see `skill list`). Omit to install every bundled skill.
     #[arg(value_name = "NAME")]
     pub name: Option<String>,
-    /// Agent runtime to install into (default: `claude`).
-    #[arg(long, value_enum, default_value_t = Agent::Claude)]
-    pub agent: Agent,
-    /// Override the destination directory (the runtime's file shape still
-    /// applies under it). Incompatible with `--agent all`.
+    /// Agent runtime to install into. Omit to **dual-home** into Claude Code and
+    /// pi.dev (`~/.claude/skills` + `~/.pi/agent/skills`); pass `claude`, `pi`,
+    /// or `codex` to narrow to one, or `all` for every known runtime.
+    #[arg(long, value_enum)]
+    pub agent: Option<Agent>,
+    /// Override the destination directory (the runtime's file shape still applies
+    /// under it). When several selected runtimes share a shape *and* a `--dest`
+    /// root — Claude and pi.dev both write `<name>/SKILL.md` — they resolve to the
+    /// same file and collapse to a single write.
     #[arg(long, value_name = "PATH")]
     pub dest: Option<PathBuf>,
     /// Overwrite an existing skill even when the on-disk copy is newer than the
@@ -333,7 +361,7 @@ fn print(args: &PrintArgs, format: OutputFormat) -> Result<(), CliError> {
 #[derive(Serialize)]
 struct InstalledEntry {
     name: String,
-    /// The runtime this copy was written for (`claude` / `codex`).
+    /// The runtime this copy was written for (`claude` / `pi` / `codex`).
     agent: &'static str,
     dest_path: String,
     cli_version: String,
@@ -364,7 +392,7 @@ fn install(args: &InstallArgs, format: OutputFormat) -> Result<(), CliError> {
 
     // Build the full plan before touching disk.
     let mut plan = Vec::new();
-    for &runtime in args.agent.runtimes() {
+    for &runtime in selected_runtimes(args.agent) {
         let root = match &args.dest {
             Some(dest) => dest.clone(),
             None => runtime.default_root(home.as_deref().ok_or_else(home_error)?),
@@ -377,6 +405,14 @@ fn install(args: &InstallArgs, format: OutputFormat) -> Result<(), CliError> {
             });
         }
     }
+
+    // Collapse targets that resolve to the identical file. This only happens when
+    // shape-sharing runtimes (Claude + pi.dev, both `<name>/SKILL.md`) are rooted
+    // at the same `--dest`: the "two" writes are literally one file, so keep the
+    // first and drop the duplicate rather than write it — and journal — twice. The
+    // dual-home default (distinct roots) never collides, so both rows survive.
+    let mut seen = std::collections::HashSet::new();
+    plan.retain(|e| seen.insert(e.path.clone()));
 
     // Preflight: classify every target's drift up front so a §17 refusal fails
     // the whole command *before* any partial write.

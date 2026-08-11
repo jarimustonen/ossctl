@@ -63,6 +63,42 @@ Release [`v0.1.0`](https://github.com/jarimustonen/ossctl/releases/tag/v0.1.0), 
 the `jarimustonen/ossctl` Homebrew tap. See [`CHANGELOG.md`](CHANGELOG.md) for the
 release history.
 
+## Companion skills
+
+The `/oss-*` skills ship inside the binary and pin to its version (§17). Manage them
+with `ossctl skill`:
+
+```sh
+ossctl skill list            # enumerate the bundled catalog
+ossctl skill print oss-init  # stream one rendered SKILL.md to stdout
+ossctl skill install         # install the whole catalog (add a NAME to scope to one)
+```
+
+`skill install` **dual-homes** each skill by default — the same `SKILL.md` is written
+into **both** agent-runtime homes so it is discoverable whether you drive `ossctl`
+from Claude Code or from pi.dev:
+
+- `~/.claude/skills/<name>/SKILL.md` — Claude Code
+- `~/.pi/agent/skills/<name>/SKILL.md` — pi.dev (discovered as `/skill:<name>`)
+
+Narrow the target with `--agent`:
+
+| `--agent` | Writes to |
+| --- | --- |
+| *(omitted)* | Claude Code **and** pi.dev (dual-home — the default) |
+| `claude` | `~/.claude/skills` only |
+| `pi` | `~/.pi/agent/skills` only |
+| `codex` | `~/.codex/prompts/<name>.md` (flat prompt file) |
+| `all` | every known runtime (Claude + pi.dev + Codex) |
+
+Installs are idempotent and version-guarded: a re-install of the same version is a
+no-op, and an on-disk copy newer than the running binary is refused unless you pass
+`--force` (§17). `--dest <PATH>` overrides the root directory (the per-runtime file
+shape still applies); when several selected runtimes share a shape *and* that root —
+Claude and pi.dev both write `<name>/SKILL.md` — they resolve to the same file and
+collapse to a single write. The `--json` envelope reports one `installed[]` row per
+target written (`{name, agent, dest_path, cli_version, schema_version}`).
+
 ## License
 
 [MIT](LICENSE) — see the [`LICENSE`](LICENSE) file.

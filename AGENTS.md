@@ -212,6 +212,27 @@ app beyond what the ADRs already fix.
   contract (§10). Preserve it; bump `schema_version` on a breaking change, never silently.
 - **Test-account reset:** n/a (no external test accounts).
 
+## Companion-skill installer (`ossctl skill install`)
+
+The bundled `/oss-*` skills install into a per-runtime skills home. `skill install`
+**dual-homes** by default — with **no** `--agent`, each `SKILL.md` is written into
+**both** `~/.claude/skills/<name>/` (Claude Code) **and** `~/.pi/agent/skills/<name>/`
+(pi.dev), so a skill is discoverable under either harness (pi.dev resolves it as
+`/skill:<name>`; bare `/name` cross-references also resolve via pi's injected
+available-skills list, so only the install *target* changes — no cross-reference
+rewrite). This is the migration default (agents moving Claude Code → pi.dev).
+
+`--agent` narrows it: `claude` → `~/.claude/skills` only, `pi` → `~/.pi/agent/skills`
+only, `codex` → `~/.codex/prompts/<name>.md` (flat), `all` → every known runtime
+(Claude + pi.dev + Codex). Claude and pi.dev share the directory-per-skill shape
+(`<name>/SKILL.md`); Codex uses a flat prompt file. Only `SKILL.md` is ever mirrored
+(ossctl's bundled skills are single-file), so the vendored-filtering is inherent. The
+install is idempotent and §17 version-guarded, the write is atomic (a `rename`
+replaces a final-component symlink rather than following it), and the `--json`
+envelope reports one `installed[]` row per target written — additive, unchanged shape.
+`--dest <PATH>` overrides the root; shape-sharing runtimes rooted at the same `--dest`
+(Claude + pi.dev) resolve to one file and collapse to a single write.
+
 ## Gitignored directories
 
 - `history/` — agent scratchpad and ephemeral planning docs (not tracked)
