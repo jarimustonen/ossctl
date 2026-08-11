@@ -4,6 +4,9 @@ updated: 2026-08-11
 type: feature
 status: in-progress
 priority: high
+commits:
+- hash: 6e39326
+  summary: dual-home skill install into ~/.pi/agent/skills
 ---
 
 # Dual-home skills into pi.dev's skill dir (~/.pi/agent/skills)

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
+
+### Added
+- **`ossctl skill install` dual-homes into pi.dev.** A new `pi` runtime writes each bundled
+  `SKILL.md` into `~/.pi/agent/skills/<name>/` (discovered by the pi.dev harness as `/skill:<name>`),
+  and `--agent` gains `pi` (narrow to pi.dev only) and folds pi.dev into `all`
+  (`pidev-dual-home-skills`).
+
+### Changed
+- **BEHAVIOR: `ossctl skill install` now dual-homes by default.** With `--agent` omitted the installer
+  writes each skill into **both** `~/.claude/skills` (Claude Code) **and** `~/.pi/agent/skills`
+  (pi.dev) — previously it wrote Claude only. Pass `--agent claude` to restore the old single-home
+  behavior; `--agent pi`/`codex` narrow to one runtime; `--agent all` targets every known runtime. The
+  `--json` `installed[]` object shape is unchanged (additive), but the default now emits two rows and
+  writes two targets where it emitted/wrote one — automation that assumed Claude-only or a fixed row
+  count should pin `--agent claude` (`pidev-dual-home-skills`).
 <!-- oss-changelog:unreleased-end -->
 
 ## [0.3.0] - 2026-08-11

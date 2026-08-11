@@ -91,13 +91,17 @@ Narrow the target with `--agent`:
 | `codex` | `~/.codex/prompts/<name>.md` (flat prompt file) |
 | `all` | every known runtime (Claude + pi.dev + Codex) |
 
-Installs are idempotent and version-guarded: a re-install of the same version is a
-no-op, and an on-disk copy newer than the running binary is refused unless you pass
-`--force` (§17). `--dest <PATH>` overrides the root directory (the per-runtime file
-shape still applies); when several selected runtimes share a shape *and* that root —
-Claude and pi.dev both write `<name>/SKILL.md` — they resolve to the same file and
-collapse to a single write. The `--json` envelope reports one `installed[]` row per
-target written (`{name, agent, dest_path, cli_version, schema_version}`).
+Installs are idempotent and version-guarded: a re-install of the same version
+re-writes byte-identical content and emits no drift warning, and an on-disk copy
+newer than the running binary is refused unless you pass `--force` (§17). `--dest
+<PATH>` overrides the root directory (the per-runtime file shape still applies); when
+several selected runtimes share a shape *and* that root — Claude and pi.dev both write
+`<name>/SKILL.md` — they resolve to the same file, so the *write* collapses to one
+file while the report still lists each requested runtime. The `--json` envelope
+reports one `installed[]` row per requested target
+(`{name, agent, dest_path, cli_version, schema_version}`) — the same field shape as
+before; dual-home is additive to that shape, though note the **default now writes two
+targets** (Claude + pi.dev) where it previously wrote one.
 
 ## License
 

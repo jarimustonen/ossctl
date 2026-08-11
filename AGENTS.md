@@ -228,10 +228,14 @@ only, `codex` → `~/.codex/prompts/<name>.md` (flat), `all` → every known run
 (`<name>/SKILL.md`); Codex uses a flat prompt file. Only `SKILL.md` is ever mirrored
 (ossctl's bundled skills are single-file), so the vendored-filtering is inherent. The
 install is idempotent and §17 version-guarded, the write is atomic (a `rename`
-replaces a final-component symlink rather than following it), and the `--json`
-envelope reports one `installed[]` row per target written — additive, unchanged shape.
-`--dest <PATH>` overrides the root; shape-sharing runtimes rooted at the same `--dest`
-(Claude + pi.dev) resolve to one file and collapse to a single write.
+replaces a *final-component* symlink rather than following it — POSIX; ancestor dirs
+are not no-follow), and the `--json` envelope reports one `installed[]` row per
+requested target — the object shape is unchanged (additive), though the omitted-flag
+**default changed** from Claude-only to Claude + pi.dev, so it now writes two targets
+and emits two rows where it wrote one. `--dest <PATH>` overrides the root;
+shape-sharing runtimes rooted at the same `--dest` (Claude + pi.dev) resolve to one
+file, so the *write* collapses to a single file while both runtimes still get their
+report row.
 
 ## Gitignored directories
 

@@ -176,8 +176,11 @@ fn selected_runtimes(agent: Option<Agent>) -> &'static [Runtime] {
 /// A single concrete runtime (never `All`) — carries the per-runtime path shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Runtime {
+    /// Claude Code — `~/.claude/skills/<name>/SKILL.md`.
     Claude,
+    /// pi.dev — `~/.pi/agent/skills/<name>/SKILL.md` (same shape as Claude).
     Pi,
+    /// Codex — `~/.codex/prompts/<name>.md` (flat prompt file).
     Codex,
 }
 
@@ -406,28 +409,35 @@ fn install(args: &InstallArgs, format: OutputFormat) -> Result<(), CliError> {
         }
     }
 
-    // Collapse targets that resolve to the identical file. This only happens when
-    // shape-sharing runtimes (Claude + pi.dev, both `<name>/SKILL.md`) are rooted
-    // at the same `--dest`: the "two" writes are literally one file, so keep the
-    // first and drop the duplicate rather than write it — and journal — twice. The
-    // dual-home default (distinct roots) never collides, so both rows survive.
-    let mut seen = std::collections::HashSet::new();
-    plan.retain(|e| seen.insert(e.path.clone()));
-
     // Preflight: classify every target's drift up front so a §17 refusal fails
-    // the whole command *before* any partial write.
+    // the whole command *before* any partial write. Distinct *logical* targets can
+    // resolve to one *physical* file — shape-sharing runtimes (Claude + pi.dev,
+    // both `<name>/SKILL.md`) rooted at the same `--dest` — so check each unique
+    // path once, both to avoid a duplicate warning and because the second "check"
+    // would race the first's write. (Lexical dedup only: `--dest a/../a` and
+    // symlinked roots are not canonicalized, but a missed collision only costs a
+    // redundant write of byte-identical content, which is harmless.)
     let mut warnings = Vec::new();
+    let mut checked = std::collections::HashSet::new();
     for entry in &plan {
-        if let Some(w) = check_drift(&entry.path, args.force)? {
-            warnings.push(w);
+        if checked.insert(entry.path.clone()) {
+            if let Some(w) = check_drift(&entry.path, args.force)? {
+                warnings.push(w);
+            }
         }
     }
 
-    // All clear — write every target.
+    // All clear — write each unique file once, but report **every** logical target.
+    // A user who asked for `--agent all` still sees a `pi` row even when its file
+    // coincides with Claude's under a shared `--dest`: the write collapses, the
+    // reporting does not (so automation greping `agent == "pi"` still matches).
     let mut installed = Vec::new();
+    let mut written = std::collections::HashSet::new();
     for (idx, entry) in plan.iter().enumerate() {
-        let content = render(entry.skill);
-        write_atomic(&entry.path, &content, idx)?;
+        if written.insert(entry.path.clone()) {
+            let content = render(entry.skill);
+            write_atomic(&entry.path, &content, idx)?;
+        }
         installed.push(InstalledEntry {
             name: entry.skill.name.to_string(),
             agent: entry.runtime.label(),

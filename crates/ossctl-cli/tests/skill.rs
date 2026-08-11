@@ -199,12 +199,22 @@ fn skill_install_oss_init_matches_print() {
 
 // ── skill install ────────────────────────────────────────────────────────────
 
-/// A clean install writes the canonical file and reports it in the envelope.
+/// A clean single-runtime install writes the canonical file and reports it in the
+/// envelope. (`--agent claude` keeps this focused on one target; the dual-home
+/// default + shared `--dest` collapse is covered separately below.)
 #[test]
 fn skill_install_writes_file() {
     let dir = tempfile::tempdir().unwrap();
     let out = ossctl()
-        .args(["skill", "install", "oss-release", "--json", "--dest"])
+        .args([
+            "skill",
+            "install",
+            "oss-release",
+            "--agent",
+            "claude",
+            "--json",
+            "--dest",
+        ])
         .arg(dir.path())
         .output()
         .unwrap();
@@ -438,16 +448,21 @@ fn skill_install_agent_claude_only() {
     );
 }
 
-/// `--agent pi` writes **only** the pi.dev home — Claude Code is untouched.
+/// `--agent pi` writes **only** the pi.dev home — Claude Code is untouched — and
+/// the envelope reports exactly one target, labeled `pi`.
 #[test]
 fn skill_install_agent_pi_only() {
     let home = tempfile::tempdir().unwrap();
-    ossctl()
+    let out = ossctl()
         .args(["skill", "install", "oss-release", "--agent", "pi", "--json"])
         .env("HOME", home.path())
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("pi"));
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let installed = v["data"]["installed"].as_array().unwrap();
+    assert_eq!(installed.len(), 1, "exactly one target: {v}");
+    assert_eq!(installed[0]["agent"], "pi");
     assert!(
         home.path()
             .join(".pi/agent/skills/oss-release/SKILL.md")
@@ -460,11 +475,14 @@ fn skill_install_agent_pi_only() {
     );
 }
 
-/// The pi.dev target is idempotent: a second dual-home install re-writes the same
-/// bytes with no drift warning and exit 0.
+/// The dual-home install is idempotent: a second run re-writes byte-identical
+/// content into both homes with no drift warning and exit 0.
 #[test]
 fn skill_install_dual_home_is_idempotent() {
     let home = tempfile::tempdir().unwrap();
+    let claude = home.path().join(".claude/skills/oss-release/SKILL.md");
+    let pi = home.path().join(".pi/agent/skills/oss-release/SKILL.md");
+    let mut first: Option<Vec<u8>> = None;
     for _ in 0..2 {
         let out = ossctl()
             .args(["skill", "install", "oss-release", "--json"])
@@ -478,11 +496,15 @@ fn skill_install_dual_home_is_idempotent() {
             serde_json::json!([]),
             "no drift on re-install"
         );
+        // Both homes present and byte-identical to each other and across runs.
+        let cbytes = std::fs::read(&claude).unwrap();
+        let pbytes = std::fs::read(&pi).unwrap();
+        assert_eq!(cbytes, pbytes, "same bytes in both homes");
+        match &first {
+            None => first = Some(cbytes),
+            Some(prev) => assert_eq!(prev, &cbytes, "stable across re-install"),
+        }
     }
-    assert!(home
-        .path()
-        .join(".pi/agent/skills/oss-release/SKILL.md")
-        .exists());
 }
 
 /// Vendored/bundled filtering: only `SKILL.md` is mirrored into the pi.dev home —
@@ -507,12 +529,14 @@ fn skill_install_pi_mirrors_only_skill_md() {
     );
 }
 
-/// A `--dest` shared root collapses the shape-sharing Claude + pi.dev writes into
-/// a single file (`--agent all` selects both) instead of writing — and
-/// journaling — the same path twice.
+/// A `--dest` shared root makes the shape-sharing Claude + pi.dev targets resolve
+/// to one file. The physical *write* collapses (one file on disk), but the
+/// *reporting* does not: `--agent all` still yields a `claude` **and** a `pi` row,
+/// so a consumer that greps `agent == "pi"` isn't silently dropped.
 #[test]
 fn skill_install_dest_collapses_shape_sharing_runtimes() {
     let dir = tempfile::tempdir().unwrap();
+    let shared = dir.path().join("oss-release").join("SKILL.md");
     let out = ossctl()
         .args([
             "skill",
@@ -529,17 +553,21 @@ fn skill_install_dest_collapses_shape_sharing_runtimes() {
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let installed = v["data"]["installed"].as_array().unwrap();
-    // The shared `<dest>/oss-release/SKILL.md` path appears once, not twice.
-    let dir_shape: Vec<&serde_json::Value> = installed
+
+    // Both shape-sharing runtimes are reported at the one shared path…
+    let shared_str = shared.to_string_lossy();
+    let at_shared: Vec<&str> = installed
         .iter()
-        .filter(|e| {
-            e["dest_path"]
-                .as_str()
-                .unwrap()
-                .ends_with("oss-release/SKILL.md")
-        })
+        .filter(|e| e["dest_path"].as_str().unwrap() == shared_str)
+        .map(|e| e["agent"].as_str().unwrap())
         .collect();
-    assert_eq!(dir_shape.len(), 1, "collapsed to one write: {v}");
+    assert_eq!(
+        at_shared,
+        vec!["claude", "pi"],
+        "both logical targets reported at the shared file: {v}"
+    );
+    // …but the file was written only once (it exists; a single physical target).
+    assert!(shared.exists(), "shared SKILL.md written");
     // Codex's flat shape is distinct and still present.
     assert!(
         dir.path().join("oss-release.md").exists(),
