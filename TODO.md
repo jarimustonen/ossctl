@@ -5,13 +5,24 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-08-10 (stint #16). New agent: read this, then continue with a fresh
-`/stint-start`. Main is clean, all pushed. Live: **0.2.5** on all four channels._
+_Handoff written 2026-08-11 (stint #16, incl. round-2). New agent: read this, then continue with a
+fresh `/stint-start`. Main is clean, all pushed. Live: **0.3.0** on all four channels._
 
-_🎉 **STINT #16 — 0.2.5 SHIPPED. The engine's real-cut publish is now TRUSTWORTHY.** This stint fixed
-the two HIGH bugs that the first real downstream cut (issuectl 0.8.1) exposed, then — on Jari's call —
-built the REAL no-op fix + single-source version and cut 0.2.5 carrying all of it. Fully-autonomous
-engine self-cut, exit 0, all four channels verified live._
+_🎉 **STINT #16 — 0.2.5 THEN 0.3.0 SHIPPED. The engine's real-cut publish is now TRUSTWORTHY and
+HARDENED.** Round-1 fixed the two HIGH bugs the first real downstream cut (issuectl 0.8.1) exposed and
+shipped 0.2.5 (self-visibility confirm + single-source version). Round-2 (Jari approved doing ALL 4
+cut-noop review follow-ups) shipped 0.3.0 — a BREAKING release removing --version + 3 more hardenings.
+Both were fully-autonomous engine self-cuts, exit 0, all four channels verified live._
+
+_**0.3.0 (2026-08-11, BREAKING)** — 4 cut-noop review follow-ups, 3 sequenced LANE A workers:
+`release-drop-version-flag` (HARD-removed --version — version derives solely from the manifest; stray
+flag = unknown_flag error; all callers + recipe + oss-release skill updated), `version-source-fail-
+closed-nonrust` (VersionSource capability model — manifest-versioned non-Rust now fails CLOSED, was
+open), `release-cut-clean-checkout` (cut/resume publish from a fresh checkout of the sealed head_sha —
+reproducible, immune to mid-cut edits; proven on the 0.3.0 self-cut), `is-published-digest-authenticate`
+(checksum-match the resume idempotency skip before trusting it; mismatch/outage fail closed). Plan
+`7a38b4ee…`, head `da9850e`. ⚠️ Worker B (clean-checkout) HUNG on the first spawn (agent alive, 0
+commits/events for 6h) → cancelled (nothing to harvest) + re-spawned fresh, landed clean 2nd try._
 
 _**0.2.5 (2026-08-10)** — `ossctl release cut` self-cut: dry-run-all → build-all → publish-all
 (ossctl-core + ossctl → crates.io) → tag v0.2.5 → dist (homebrew direct tap-write). GH Release + 14
@@ -89,11 +100,8 @@ is retired for ossctl's own cut — only `release-macos-hauis-coupling` survives
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: stint #16 round-2 — Jari APPROVED doing ALL 4 cut-noop review follow-ups (2026-08-10). NO HIGH blocker remains; these are MED hardening. All 4 are LANE A engine-core → SEQUENCE strictly, run as 3 sequenced workers:
-  Worker A ▶ release-drop-version-flag + version-source-fail-closed-nonrust (same version-resolution path). ⚠️ release-drop-version-flag is a BREAKING CLI change → its release is 0.3.0, not 0.2.6.
-  Worker B → release-cut-clean-checkout (after A).
-  Worker C → is-published-digest-authenticate (after B; may fold into the receipt-provenance cluster).
-  Then CUT 0.3.0 (breaking: --version removed). After: per-distribution-release, release-verify-delegated-github-release, release-cut-stale-binary-guard, the rest of the deferred list. FEATURE (approved, own stint): oss-dist-channel-generator via /worktree-make-skill.
+GLOBAL HEAD-OF-LINE: ✅ 0.3.0 SHIPPED (2026-08-11, stint #16 round-2) — all four channels live (crates.io ossctl-core+ossctl@0.3.0 via sparse index; GitHub Release v0.3.0, 14 assets, hauis clean; Homebrew tap v0.3.0). Carried all 4 cut-noop review follow-ups: BREAKING --version removal (manifest single source), fail-closed non-Rust version-source, clean-checkout cut, digest-authenticated resume skip. The clean-checkout path was PROVEN on ossctl's own self-cut. NO HIGH blocker remains.
+  Next: all DEFERRED/optional — per-distribution-release, release-verify-delegated-github-release, release-cut-stale-binary-guard, release-ci-publish-mode (glasspad friction — needs Jari triage), the cargo receipt-provenance cluster (now carries the digest-journaling definitive fix), the LANE B additive hardening. FEATURE (approved, own stint): oss-dist-channel-generator via /worktree-make-skill.
 LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly)
   [DONE stint #15] resume-publish-phase-never-reached      (fixed — resume no longer demands --allow-unverified when the publish phase was never reached; unsafe rows unchanged)
   [DONE stint #15] release-abandon-reason-leading-dashes   (fixed — `release abandon --reason` accepts values starting with `--` via allow_hyphen_values)
@@ -101,11 +109,11 @@ LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly)
   [DONE stint #16] release-cut-publish-noop (fixed — landed a --version-vs-tree-manifest drift guard on plan/cut/resume + a mock-registry cut integration test asserting versions actually land with a per-member receipt + root-cause analysis. NOT a reproduced source no-op: worker judged the issuectl timeout most consistent with an env/registry-token difference OR issuectl-core not declared as its own target — not reproducible locally w/o crates.io creds. REAL fix (post-publish self-visibility check) deferred to cut-noop-self-visibility-check as a maintainer decision (behavior change on the irreversible phase))
   [DONE stint #16] cut-noop-self-visibility-check (fixed — after cargo publish the adapter confirms the target's OWN {name,version} reached the crates.io index (bounded index-wait) before journaling a receipt; a silent no-op fails the cut closed, an outage fails closed distinctly. Proven live on the 0.2.5 self-cut. 4-model /llm-review applied)
   [DONE stint #16] release-version-single-source (done — release version derived from the workspace manifest (single source of truth); --version is now an optional must-match confirmation that subsumes the stint #16 drift guard. plan.rs/release.rs)
-  --- ACTIVE stint #16 round-2 (Jari approved all 4 cut-noop review follow-ups; SEQUENCE strictly, 3 workers) ---
-  ▶ release-drop-version-flag            (improvement — Worker A part 1. Drop --version as a version INPUT; manifest is the ONLY source. BREAKING CLI change: update the AGENTS.md recipe + /oss-* skill templates + tests. Finishes release-version-single-source. → its release is 0.3.0)
-    version-source-fail-closed-nonrust   (improvement — Worker A part 2. Version-drift + self-visibility guards fail OPEN for manifest-versioned non-Rust (node/python); add an ecosystem version-source capability model that fails CLOSED for a manifest-versioned ecosystem whose version can't be read, vs legitimately skips homebrew/binary/cargo-dist. Same version path as release-drop-version-flag → same worker)
-    release-cut-clean-checkout           (improvement — Worker B, after A. Run cut/resume from a clean checkout of plan.head_sha instead of the live mutable tree; closes the mid-cut TOCTOU. LOW urgency)
-    is-published-digest-authenticate     (improvement — Worker C, after B. Digest-authenticate the is_published resume skip (checksum-match the on-registry crate before trusting the skip); the last receipt-without-fresh-upload path. May fold into cargo-publish-receipt-provenance-resume-safety)
+  --- DONE stint #16 round-2 (all 4 cut-noop review follow-ups; shipped in 0.3.0, 2026-08-11) ---
+  [DONE stint #16r2] release-drop-version-flag            (done — HARD-removed --version from release plan/cut; version derives solely from the manifest, a stray flag is an unknown_flag error. All in-repo callers + AGENTS.md recipe + oss-release skill updated. BREAKING → 0.3.0)
+  [DONE stint #16r2] version-source-fail-closed-nonrust   (done — VersionSource capability model keyed on Ecosystem: rust/node/python=Manifest fail-closed on missing version; go/binary=Distribution skip. No longer fails OPEN for manifest-versioned non-Rust)
+  [DONE stint #16r2] release-cut-clean-checkout           (done — cut/resume publish from a fresh git-worktree checkout of the sealed plan.head_sha; fail-closed if the commit is absent; journal+tag stay on the real repo. Proven on the 0.3.0 self-cut)
+  [DONE stint #16r2] is-published-digest-authenticate     (done — digest-authenticate the resume idempotency skip: RegistryQuery exposes published_checksum (sparse-index cksum), repackage+hash the target .crate, compare — match trusts+records, mismatch=DigestMismatch fail-closed, outage=RegistryUnavailable fail-closed. 4-model review: the DEFINITIVE cross-toolchain-safe form = journal the intended digest at publish time → folded into cargo-publish-receipt-provenance-resume-safety)
   --- DEFERRED hardening + review follow-ups (none blocks anything) ---
     release-ci-publish-mode              (feature — filed by ANOTHER session cutting glasspad 0.4.0 (2026-08-10). Engine only does a LOCAL cargo publish in publish-all, but some repos (glasspad) forbid it — publish is CI-triggered by the tag push (publish-crates.yml + release.yml); local ~/.cargo creds may be stale → 403. Needs a contract field + a 'tag-only cut' mode that SKIPS local publish and delegates to CI. Spans LANE B (schema field) + LANE A (engine). collision: contract/schema.rs. NOT in the round-2 scope — surfaced from real glasspad friction; triage with Jari)
     release-cut-stale-binary-guard       (improvement — filed stint #16 wrap. plan/cut run stale ENGINE code silently when the binary wasn't built from the current tree (the drift guard checks --version vs manifest, NOT binary provenance; since 0.2.5 the tree-read version masks a stale binary). Warn/error when compiled commit != HEAD. Hit by hand during the 0.2.5 cut. NOT urgent — only bites a mis-built binary)
