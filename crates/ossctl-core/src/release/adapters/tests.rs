@@ -534,6 +534,16 @@ fn metadata_two_crate(lib: &str, bin: &str, version: &str) -> String {
     )
 }
 
+/// `cargo metadata` JSON for a single-crate workspace with an explicit
+/// `target_directory` — the resume-skip digest path resolves the packaged `.crate`
+/// under `<target_directory>/package/`, so its tests must supply one.
+fn metadata_single_with_target(name: &str, version: &str, target_dir: &str) -> String {
+    let id = format!("{name} {version}");
+    format!(
+        r#"{{"packages":[{{"name":"{name}","version":"{version}","id":"{id}","dependencies":[],"publish":null}}],"workspace_members":["{id}"],"target_directory":"{target_dir}"}}"#
+    )
+}
+
 fn receipt(ecosystem: Ecosystem, version: &str, digest: Option<&str>) -> PublishReceipt {
     PublishReceipt {
         adapter: Adapter::CargoPublish,
@@ -1448,10 +1458,12 @@ fn target_skips_its_own_publish_when_already_published_on_resume() {
     // (the registry's crate matches the artifact this cut would upload) and records a
     // receipt without publishing — never a bare name+version skip.
     let digest = "c".repeat(64);
-    let cmd = FakeCmd::new().stdout_calls_containing(
-        "sha256sum",
-        &format!("{digest}  target/package/bin-1.0.0.crate"),
-    );
+    let cmd = FakeCmd::new()
+        .with_metadata(&metadata_single_with_target("bin", "1.0.0", "/repo/target"))
+        .stdout_calls_containing(
+            "sha256sum",
+            &format!("{digest}  /repo/target/package/bin-1.0.0.crate"),
+        );
     let clock = FakeClock(1);
     let reg = SkipAuthRegistry::new("1.0.0", Some(&digest));
     let root = Path::new("/repo");
@@ -1490,10 +1502,19 @@ fn resume_skip_is_trusted_when_the_registry_digest_matches() {
     // the intended `.crate` is (re)packaged and hashed, NO `cargo publish` runs, and
     // the receipt records the verified digest.
     let digest = "a".repeat(64);
-    let cmd = FakeCmd::new().stdout_calls_containing(
-        "sha256sum",
-        &format!("{digest}  target/package/tool-1.0.0.crate"),
-    );
+    // A deliberately NON-default target dir (as `CARGO_TARGET_DIR`/`[build] target-dir`
+    // would set) so the assertion proves the `.crate` path is resolved from `cargo
+    // metadata`, never hard-coded to `<repo>/target`.
+    let cmd = FakeCmd::new()
+        .with_metadata(&metadata_single_with_target(
+            "tool",
+            "1.0.0",
+            "/custom/tdir",
+        ))
+        .stdout_calls_containing(
+            "sha256sum",
+            &format!("{digest}  /custom/tdir/package/tool-1.0.0.crate"),
+        );
     let clock = FakeClock(9);
     let reg = SkipAuthRegistry::new("1.0.0", Some(&digest));
     let root = Path::new("/repo");
@@ -1507,12 +1528,15 @@ fn resume_skip_is_trusted_when_the_registry_digest_matches() {
     );
     let r = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap();
 
-    // Exactly: (re)package the `.crate`, then hash it — no publish.
+    // Exactly: resolve the target dir (metadata), (re)package the `.crate`, then hash
+    // the file cargo wrote under the RESOLVED `<target_directory>/package/` (the custom
+    // dir, not `<repo>/target`) — no publish.
     assert_eq!(
         cmd.calls(),
         vec![
+            "cargo metadata --no-deps --format-version 1".to_string(),
             "cargo package --registry crates-io -p tool --no-verify".to_string(),
-            "sha256sum target/package/tool-1.0.0.crate".to_string(),
+            "sha256sum -- /custom/tdir/package/tool-1.0.0.crate".to_string(),
         ]
     );
     assert_eq!(r.digest.as_deref(), Some(digest.as_str()));
@@ -1531,10 +1555,16 @@ fn resume_skip_is_refused_when_the_registry_digest_differs() {
     // and never fabricate a receipt for a crate this cut did not put there.
     let intended = "a".repeat(64);
     let published = "b".repeat(64);
-    let cmd = FakeCmd::new().stdout_calls_containing(
-        "sha256sum",
-        &format!("{intended}  target/package/tool-1.0.0.crate"),
-    );
+    let cmd = FakeCmd::new()
+        .with_metadata(&metadata_single_with_target(
+            "tool",
+            "1.0.0",
+            "/repo/target",
+        ))
+        .stdout_calls_containing(
+            "sha256sum",
+            &format!("{intended}  /repo/target/package/tool-1.0.0.crate"),
+        );
     let clock = FakeClock(1);
     let reg = SkipAuthRegistry::new("1.0.0", Some(&published));
     let root = Path::new("/repo");
@@ -1585,10 +1615,16 @@ fn resume_skip_fails_closed_when_the_registry_checksum_is_unavailable() {
     // authenticated, so it fails CLOSED with `RegistryUnavailable` rather than trust
     // an unverified skip. No `cargo publish` runs (and no receipt is fabricated).
     let intended = "a".repeat(64);
-    let cmd = FakeCmd::new().stdout_calls_containing(
-        "sha256sum",
-        &format!("{intended}  target/package/tool-1.0.0.crate"),
-    );
+    let cmd = FakeCmd::new()
+        .with_metadata(&metadata_single_with_target(
+            "tool",
+            "1.0.0",
+            "/repo/target",
+        ))
+        .stdout_calls_containing(
+            "sha256sum",
+            &format!("{intended}  /repo/target/package/tool-1.0.0.crate"),
+        );
     let clock = FakeClock(1);
     let reg = SkipAuthRegistry::new("1.0.0", None); // checksum lookup errors
     let root = Path::new("/repo");
@@ -1616,6 +1652,42 @@ fn resume_skip_fails_closed_when_the_registry_checksum_is_unavailable() {
         "an unauthenticatable skip must not publish: {:?}",
         cmd.calls()
     );
+}
+
+#[test]
+fn resume_skip_fails_closed_when_the_registry_digest_is_malformed() {
+    // A `RegistryQuery` that returns a non-hex checksum (a faulty/future backend, or
+    // a fake) must NOT be reported as a `DigestMismatch` — that would misattribute a
+    // backend bug to a conflicting artifact. The boundary re-validation rejects it as
+    // `RegistryUnavailable` (fail closed), and no publish runs.
+    let intended = "a".repeat(64);
+    let cmd = FakeCmd::new()
+        .with_metadata(&metadata_single_with_target(
+            "tool",
+            "1.0.0",
+            "/repo/target",
+        ))
+        .stdout_calls_containing(
+            "sha256sum",
+            &format!("{intended}  /repo/target/package/tool-1.0.0.crate"),
+        );
+    let clock = FakeClock(1);
+    let reg = SkipAuthRegistry::new("1.0.0", Some("not-a-valid-sha256")); // malformed
+    let root = Path::new("/repo");
+    let c = ctx_dyn(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.0.0",
+    );
+    let err = resolve(Adapter::CargoPublish).publish(&c, &t).unwrap_err();
+    assert!(
+        matches!(err, AdapterError::RegistryUnavailable { .. }),
+        "a malformed registry digest must fail closed as unavailable, got {err:?}"
+    );
+    assert!(!cmd.calls().iter().any(|call| call.contains("publish")));
 }
 
 #[test]

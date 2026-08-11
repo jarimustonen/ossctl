@@ -6,6 +6,9 @@ status: in-progress
 priority: normal
 epic: ossctl-phase4-build
 related: ['@cargo-publish-receipt-provenance-resume-safety']
+commits:
+- hash: '3871174'
+  summary: digest-authenticate the cargo resume idempotency skip
 ---
 
 # is_published idempotency short-circuit records a receipt without digest-authenticating the already-published crate

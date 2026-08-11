@@ -655,6 +655,18 @@ fn authenticate_skip(
             version: t.version.clone(),
             source: e.to_string(),
         })?;
+    // Re-validate the registry digest at this domain boundary rather than trusting
+    // the [`RegistryQuery`] contract blindly: a faulty/future backend returning a
+    // non-hex `Ok(..)` must fail CLOSED as unavailable, never be reported as a
+    // `DigestMismatch` (which would misattribute a backend bug to a conflicting
+    // artifact). The real crates.io impl already validates; this guards the port.
+    if !is_sha256_hex(&remote) {
+        return Err(AdapterError::RegistryUnavailable {
+            package: t.package.clone(),
+            version: t.version.clone(),
+            source: format!("registry returned a malformed checksum: {remote:?}"),
+        });
+    }
     // Both digests are lowercase hex; compare case-insensitively for robustness.
     if !local.eq_ignore_ascii_case(&remote) {
         return Err(AdapterError::DigestMismatch {
@@ -678,14 +690,28 @@ fn authenticate_skip(
 /// exact bytes `cargo publish` would upload, independent of whether an earlier build
 /// phase left the file on disk. The target is already published, so its `=`-pinned
 /// workspace dependencies are on the crates.io index and packaging resolves them.
-/// The `.crate` lands at the standard `target/package/<pkg>-<version>.crate` (the
-/// runner's cwd is the repo root), which [`hash_file`] then hashes cross-platform.
+///
+/// The packaged `.crate` lands at `<target_directory>/package/<pkg>-<version>.crate`,
+/// where `target_directory` is read from `cargo metadata` (honoring
+/// `CARGO_TARGET_DIR` / `[build] target-dir` / workspace config — never a hard-coded
+/// `<repo>/target`); [`hash_file`] then hashes it cross-platform.
+///
+/// **Caveat (tracked for the receipt-provenance cluster).** `cargo package` is
+/// deterministic only under a fixed toolchain + source tree + index state; a resume
+/// under a *different* cargo version can produce different `.crate` bytes for the same
+/// sealed commit, so the digest is a faithful "what this toolchain would upload now",
+/// not a durable record of the original upload. The regression-free source of the
+/// intended digest is a value journaled at the original publish — see
+/// `cargo-publish-receipt-provenance-resume-safety`.
 fn intended_crate_digest(
     ctx: &EffectCtx<'_>,
     registry: &str,
     package: &str,
     version: &str,
 ) -> Result<String, AdapterError> {
+    // Resolve the real target directory BEFORE packaging so the hash reads the file
+    // cargo actually writes, not a hard-coded path a custom target-dir would miss.
+    let target_dir = load_metadata(ctx)?.target_directory;
     run_all(
         ctx,
         &[PlannedCommand::new(
@@ -700,12 +726,19 @@ fn intended_crate_digest(
             ],
         )],
     )?;
-    let crate_path = format!("target/package/{package}-{version}.crate");
+    let crate_path = format!("{target_dir}/package/{package}-{version}.crate");
     hash_file(ctx, &crate_path).map_err(|source| AdapterError::Command {
         command: format!("sha256 of {crate_path}"),
         code: None,
         stderr: source,
     })
+}
+
+/// Whether `s` is a well-formed lowercase-or-mixed-case 64-char hex SHA-256 — the
+/// shape both a crates.io `cksum` and a local `.crate` hash must have. Used to
+/// validate a registry-supplied digest at the [`authenticate_skip`] boundary.
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Why a bounded index-wait gave up without ever observing `package@version` — the
@@ -878,6 +911,14 @@ struct CargoMetadata {
     /// The package ids that are workspace members (matched against
     /// [`MetaPackage::id`] to be exact regardless of the id string format).
     workspace_members: Vec<String>,
+    /// The absolute build target directory cargo resolved for this invocation —
+    /// honoring `CARGO_TARGET_DIR`, `[build] target-dir`, and workspace config, so a
+    /// consumer never hard-codes `<repo>/target`. `cargo metadata` always emits it;
+    /// defaulted only so the many callers that read only [`Self::packages`] /
+    /// [`Self::workspace_members`] can deserialize fixtures without it. The
+    /// packaged `.crate` lands under `<target_directory>/package/`.
+    #[serde(default)]
+    target_directory: String,
 }
 
 /// One package entry from `cargo metadata`.

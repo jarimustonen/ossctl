@@ -785,8 +785,8 @@ pub(crate) fn run_all(
     Ok(outputs)
 }
 
-/// Hash the file at `path` (relative to the run's repo root, the runner's cwd)
-/// with a SHA-256 CLI, returning the lowercase 64-hex digest.
+/// Hash the file at `path` (absolute, or relative to the runner's cwd — the repo
+/// root) with a SHA-256 CLI, returning the lowercase 64-hex digest.
 ///
 /// Cross-platform: tries `sha256sum` (GNU coreutils — the Linux default) then
 /// `shasum -a 256` (Perl — the macOS default), so a cut works on both (`shasum`
@@ -795,10 +795,13 @@ pub(crate) fn run_all(
 /// error) or non-zero exit falls through to the next candidate. Shared by the
 /// coordinator's source-tarball hash and the cargo adapter's resume-skip
 /// digest-authentication.
+///
+/// `--` terminates option parsing so a `path` beginning with `-` can never be read
+/// as a flag (both tools honor it), keeping this shared utility safe for any caller.
 pub(crate) fn hash_file(ctx: &EffectCtx<'_>, path: &str) -> Result<String, String> {
     let candidates: [(&str, Vec<&str>); 2] = [
-        ("sha256sum", vec![path]),
-        ("shasum", vec!["-a", "256", path]),
+        ("sha256sum", vec!["--", path]),
+        ("shasum", vec!["-a", "256", "--", path]),
     ];
     let mut last = String::from("no SHA-256 tool succeeded");
     for (program, args) in &candidates {
