@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 <!-- oss-changelog:unreleased-end -->
 
+## [0.3.0] - 2026-08-11
+
+### Removed
+- **BREAKING (CLI): `--version` is removed from `ossctl release plan` / `release cut`.** The release
+  version now derives *solely* from the workspace manifest (`Cargo.toml`) — the single source of
+  truth. A stray `--version` is a hard `unexpected argument` error rather than a silently-ignored (or
+  drift-guarded) flag. To release a new version, bump the manifest (and finalize the CHANGELOG) in a
+  release commit first, then `plan`/`cut` (`release-drop-version-flag`; completes the 0.2.5
+  single-source work).
+
+### Added
+- **Version-source capability model — non-Rust ecosystems no longer fail open.** The version-drift and
+  self-visibility guards now key on a per-ecosystem version-source: manifest-versioned ecosystems
+  (rust/node/python) fail **closed** when a target's version can't be read, while distribution-only
+  targets (homebrew / raw binary / cargo-dist) are legitimately skipped. Previously any target without
+  a readable manifest version was silently skipped, so the guards were no-ops for npm/PyPI packages
+  (`version-source-fail-closed-nonrust`).
+
+### Changed
+- **`release cut`/`resume` publish from a clean checkout of the sealed commit.** The engine now
+  materializes a fresh git-worktree checkout of the sealed plan's `head_sha` and runs build/publish/dist
+  from there, instead of the live (mutable) working tree — a cut is reproducible and immune to mid-cut
+  edits. It fails closed if the sealed commit isn't available locally; the journal and tag still land in
+  the real repository (`release-cut-clean-checkout`).
+- **The resume idempotency skip is digest-authenticated.** When a resumed cut finds a crate already
+  published, it now repackages the target `.crate`, hashes it, and compares against the registry's
+  published checksum (crates.io sparse-index `cksum`) before trusting the skip: a match records the
+  digest, a mismatch fails closed (`DigestMismatch`), and an outage/malformed response fails closed
+  (`RegistryUnavailable`) — closing the last "receipt without a verified artifact" path. (The definitive
+  cross-toolchain-safe form — journaling the intended digest at original-publish time — is tracked in
+  `cargo-publish-receipt-provenance-resume-safety`.) (`is-published-digest-authenticate`)
+
 ## [0.2.5] - 2026-08-10
 
 ### Fixed
