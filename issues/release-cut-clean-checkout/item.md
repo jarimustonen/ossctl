@@ -6,6 +6,9 @@ status: in-progress
 priority: normal
 epic: ossctl-phase4-build
 related: ['@release-drop-version-flag']
+commits:
+- hash: 1040f06
+  summary: cut/resume publish from a clean checkout of the sealed HEAD
 ---
 
 # run release cut/resume from a clean checkout of the sealed HEAD (dirty-tree/TOCTOU)

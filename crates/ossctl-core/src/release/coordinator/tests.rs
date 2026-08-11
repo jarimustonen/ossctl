@@ -1076,6 +1076,17 @@ fn threads_repo_slug_into_binary_receipt() {
         "hashed a source archive for a cut with no homebrew target: {:?}",
         cmd.calls()
     );
+    // The `origin` slug is resolved from the REAL repo root, not the throwaway
+    // checkout cwd (`release-cut-clean-checkout` llm-review): reading git config from
+    // a `$TMPDIR` worktree risks a silent slug-downgrade under conditional-include /
+    // `safe.directory` configs.
+    assert!(
+        cmd.calls_with_cwd()
+            .iter()
+            .any(|(line, cwd)| line == "git remote get-url origin" && cwd == &root),
+        "the origin slug lookup did not run against the real repo root: {:?}",
+        cmd.calls_with_cwd()
+    );
 }
 
 #[test]

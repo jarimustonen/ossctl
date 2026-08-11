@@ -253,6 +253,23 @@ struct TargetPlan {
 /// object store, so the tag it creates against `plan.head_sha` is visible
 /// everywhere). Only the adapter effect commands are re-rooted.
 ///
+/// ## Caveats of the fresh checkout
+///
+/// - **Cold builds.** A fresh worktree has no `target/` (or `node_modules/`, …), so a
+///   cargo cut recompiles from scratch every time — reproducibility bought at a
+///   per-cut build-time cost. A shared `CARGO_TARGET_DIR` cache keyed by the sealed
+///   commit is a possible future optimization (tracked as a follow-up).
+/// - **Tracked-only bytes.** The checkout is the commit's *tracked* tree: untracked
+///   / git-ignored files the operator built against are absent. This is the intended
+///   reproducibility property (the published bytes are exactly the sealed commit),
+///   but a workspace that git-ignores its `Cargo.lock` publishes without it, and a
+///   build-input a CI step generates-but-never-commits will be missing — such inputs
+///   must be committed to be part of a cut.
+/// - **The common case is fine.** Cutting when `HEAD == plan.head_sha` (the operator
+///   committed the release commit, then ran `release cut`) works: git permits a
+///   detached worktree at an already-checked-out commit (only a *branch* checked out
+///   twice is refused).
+///
 /// # Errors
 /// Returns [`CutError`] on a missing/uncheckout-able sealed commit
 /// ([`CutError::Checkout`], fail-closed before any phase), the first phase failure
@@ -268,6 +285,16 @@ pub fn execute(
 ) -> Result<(), CutError> {
     let targets = resolve_target_plans(plan)?;
 
+    // Resolve the GitHub `origin` slug from the REAL repo root, BEFORE re-rooting to
+    // the checkout. `git remote get-url origin` reads git *config*, not checkout
+    // *contents*, so it must run against the real repo: reading it from the throwaway
+    // worktree cwd (under `$TMPDIR`) could silently miss the slug under a
+    // conditional-include (`includeIf gitdir:`) config or a strict `safe.directory`
+    // guard — the exact silent-downgrade (homebrew/binary lose their tarball/URL)
+    // this feature exists to prevent (llm-review). The slug depends only on the plan
+    // + `origin`, never on build output, so resolving it once up front is correct.
+    let repo_slug = resolve_repo_slug(ctx, &targets);
+
     // Publish from a CLEAN CHECKOUT of the sealed commit, not the live tree
     // (`release-cut-clean-checkout`). Materialize a throwaway detached `git
     // worktree` at `plan.head_sha` (fail-closed if that commit is absent locally),
@@ -278,13 +305,12 @@ pub fn execute(
     let checkout_ctx = ctx.with_repo_root(checkout.path());
     let ctx = &checkout_ctx;
 
-    // Resolve the GitHub slug, source-tarball URL, and homebrew formula inputs up
-    // front — they depend only on the plan + `origin` remote, never on any build
-    // output — so the dry-run and build phases preview the *real*, fully
-    // parameterized commands (the homebrew adapter needs the tap to even decide
-    // create-vs-bump). Only `assets` (the binary upload set) is build-produced, so
-    // it is empty for these pre-build phases and accumulated during build-all.
-    let repo_slug = resolve_repo_slug(ctx, &targets);
+    // The source-tarball URL + homebrew formula inputs depend only on the plan + the
+    // already-resolved slug, never on any build output, so the dry-run/build phases
+    // preview the *real*, fully parameterized commands (the homebrew adapter needs
+    // the tap to even decide create-vs-bump). Only `assets` (the binary upload set)
+    // is build-produced, so it is empty for these pre-build phases and accumulated
+    // during build-all.
     let source_tarball = repo_slug
         .as_deref()
         .and_then(|slug| source_tarball(slug, plan, &targets));
@@ -435,9 +461,12 @@ fn resolve_target_plans(plan: &ReleasePlan) -> Result<Vec<TargetPlan>, CutError>
 /// [`CommandRunner`](crate::ports::CommandRunner) (no direct process effect in
 /// `ossctl-core`) after **failing closed** if the sealed commit is not present
 /// locally, so a cut can never publish from an unavailable or ambiguous tree. The
-/// `Drop` impl removes the worktree on **every** exit path (success, phase failure,
-/// or an unwinding panic), routed through the same runner; a failed removal only
-/// leaves a `git worktree prune`-able stale entry, never wrong published output.
+/// `Drop` impl removes the worktree on every *normal* exit path (success, phase
+/// failure, or an unwinding panic), routed through the same runner, and follows the
+/// removal with a best-effort `git worktree prune` to sweep any admin entry a
+/// hard-killed prior run leaked. A hard kill (`SIGKILL`/`SIGTERM`, power loss,
+/// `panic=abort`) skips `Drop` and leaves a `prune`-able stale entry at a unique
+/// path — never wrong published output, and swept by the next cut's `prune`.
 struct SealedCheckout<'a> {
     /// The runner the worktree add/remove shell out through (the effect seam).
     runner: &'a dyn CommandRunner,
@@ -520,17 +549,26 @@ impl<'a> SealedCheckout<'a> {
 
 impl Drop for SealedCheckout<'_> {
     fn drop(&mut self) {
-        // Best-effort teardown on every exit path (success, phase failure, panic).
-        // Routed through the runner so the coordinator performs no direct process
-        // effect; `--force` also drops the worktree even if a leg dirtied it (e.g. a
-        // build wrote target/). A failed removal only leaves a prunable stale
-        // worktree — never affects what was published.
+        // Best-effort teardown on every normal exit path (success, phase failure,
+        // unwinding panic). Routed through the runner so the coordinator performs no
+        // direct process effect; `--force` also drops the worktree even if a leg
+        // dirtied it (e.g. a build wrote target/). A failed removal only leaves a
+        // prunable stale worktree — never affects what was published.
         let path_str = self.path.to_string_lossy().to_string();
         let _ = self.runner.run(
             "git",
             &["worktree", "remove", "--force", &path_str],
             self.repo_root,
         );
+        // Sweep any admin entry left dangling — both this removal's (if `remove`
+        // failed because the OS/tmp-reaper already deleted the directory) and any a
+        // hard-killed PRIOR cut leaked (whose `Drop` never ran). `prune` only drops
+        // entries whose worktree directory is gone and unlocked, so it can never
+        // touch a valid user worktree; the single-active-cut flock means at most one
+        // ossctl cut worktree is live at a time.
+        let _ = self
+            .runner
+            .run("git", &["worktree", "prune"], self.repo_root);
     }
 }
 
