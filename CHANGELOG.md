@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
+<!-- oss-changelog:unreleased-end -->
+
+## [0.4.0] - 2026-08-11
 
 ### Added
 - **`ossctl skill install` dual-homes into pi.dev.** A new `pi` runtime writes each bundled
@@ -22,7 +25,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--json` `installed[]` object shape is unchanged (additive), but the default now emits two rows and
   writes two targets where it emitted/wrote one — automation that assumed Claude-only or a fixed row
   count should pin `--agent claude` (`pidev-dual-home-skills`).
-<!-- oss-changelog:unreleased-end -->
 
 ## [0.3.0] - 2026-08-11
 
