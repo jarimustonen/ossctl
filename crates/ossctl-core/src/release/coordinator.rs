@@ -7,6 +7,17 @@
 //! This is the one stateful,
 //! partially-irreversible operation in `ossctl`; the guarantees it enforces are:
 //!
+//! - **Publish from a clean checkout of the sealed commit
+//!   (`release-cut-clean-checkout`).** Before any effect phase, [`execute`]
+//!   materializes a throwaway detached `git worktree` at
+//!   [`plan.head_sha`](crate::protocol::plan::ReleasePlan::head_sha) and re-roots the
+//!   effect context there ([`EffectCtx::with_repo_root`]), so every dry-run / build /
+//!   publish / dist command runs against the **approved bytes**, never the operator's
+//!   live, mutable working tree. A cut is therefore reproducible and immune to a
+//!   mid-cut edit of the tree; it **fails closed** ([`CutError::Checkout`]) if the
+//!   sealed commit is not present locally, and the checkout is torn down on every
+//!   exit path. The journal (git-common-dir, ADR-0003) and the coordinator-owned tag
+//!   stay on the **real** repo — only the adapter commands move.
 //! - **Strict barriers.** Every target must clear a phase before *any* target
 //!   enters the next. A publish can never precede an all-targets build; a tag can
 //!   never precede an all-targets publish. A failure in phase *K* blocks entry to
@@ -102,7 +113,7 @@
 //! wave-3's `reconcile`; this layer provides the journal-driven skip it builds
 //! on.)
 
-use crate::ports::Tagger;
+use crate::ports::{CommandRunner, Tagger};
 use crate::protocol::journal::{
     EventKind, JournalEvent, Phase, PhaseOutcome, PublishReceipt as JournalReceipt, RunState,
     JOURNAL_SCHEMA_VERSION,
@@ -163,6 +174,14 @@ pub enum CutError {
     /// unresolved package name, or two targets that collide on one ecosystem id.
     /// Caught before any external action.
     Plan(String),
+    /// The sealed commit ([`ReleasePlan::head_sha`]) could not be materialized as a
+    /// clean checkout to publish from — it is not present locally (never committed,
+    /// not fetched, or garbage-collected) or the throwaway worktree could not be
+    /// created. **Fail-closed**, before any effect phase: a cut publishes from a
+    /// fresh checkout of the sealed HEAD (not the live working tree), so if that
+    /// commit is unavailable there is nothing safe to publish from
+    /// (`release-cut-clean-checkout`). Nothing external has happened.
+    Checkout(String),
 }
 
 impl std::fmt::Display for CutError {
@@ -182,6 +201,12 @@ impl std::fmt::Display for CutError {
             },
             Self::Journal(e) => write!(f, "could not write the release journal: {e}"),
             Self::Plan(m) => write!(f, "the sealed plan is not executable: {m}"),
+            Self::Checkout(m) => {
+                write!(
+                    f,
+                    "could not check out the sealed commit to publish from: {m}"
+                )
+            }
         }
     }
 }
@@ -209,10 +234,31 @@ struct TargetPlan {
 /// executes the plan it is handed. `ctx` supplies the injected effect ports each
 /// adapter shells out through; `tagger` owns the shared tag.
 ///
+/// # Reproducible cut: publish from a clean checkout of the sealed commit
+///
+/// Before any effect phase runs, this materializes a fresh, detached checkout of
+/// [`plan.head_sha`](ReleasePlan::head_sha) (a temporary `git worktree`) and
+/// re-roots `ctx` at it via [`EffectCtx::with_repo_root`], so **every** `dry_run` /
+/// `build` / `publish` / dist command runs against the approved bytes — never the
+/// operator's live, mutable working tree. This makes a cut reproducible and immune
+/// to a mid-cut edit of the tree (the version / self-visibility guards become a
+/// property of the sealed commit, not a point-in-time snapshot). The checkout is
+/// torn down on **every** exit path (success, phase failure, or panic) by the
+/// `SealedCheckout` guard's `Drop`. If the sealed commit is not present locally,
+/// the cut **fails closed** with [`CutError::Checkout`] before touching anything.
+///
+/// The **journal** and the **tag** deliberately do *not* move: the journal stays
+/// rooted under the real repo's git-common-dir (ADR-0003; `journal` already carries
+/// that path) and `tagger` operates on the real repo (a linked worktree shares the
+/// object store, so the tag it creates against `plan.head_sha` is visible
+/// everywhere). Only the adapter effect commands are re-rooted.
+///
 /// # Errors
-/// Returns [`CutError`] on the first phase failure (barrier blocked), a journal
-/// write failure, or an unexecutable plan. On a [`CutError::PhaseFailed`] the
-/// partial state is already durably journalled — **nothing is rolled back**.
+/// Returns [`CutError`] on a missing/uncheckout-able sealed commit
+/// ([`CutError::Checkout`], fail-closed before any phase), the first phase failure
+/// (barrier blocked), a journal write failure, or an unexecutable plan. On a
+/// [`CutError::PhaseFailed`] the partial state is already durably journalled —
+/// **nothing is rolled back**.
 pub fn execute(
     journal: &mut Journal<'_>,
     plan: &ReleasePlan,
@@ -221,6 +267,16 @@ pub fn execute(
     sink: &mut dyn ProgressSink,
 ) -> Result<(), CutError> {
     let targets = resolve_target_plans(plan)?;
+
+    // Publish from a CLEAN CHECKOUT of the sealed commit, not the live tree
+    // (`release-cut-clean-checkout`). Materialize a throwaway detached `git
+    // worktree` at `plan.head_sha` (fail-closed if that commit is absent locally),
+    // then re-root the effect context there so every adapter command below runs
+    // against the approved bytes. The guard tears the worktree down on every exit
+    // path (Drop). The journal + tagger are unaffected — they stay on the real repo.
+    let checkout = SealedCheckout::materialize(ctx, &plan.head_sha)?;
+    let checkout_ctx = ctx.with_repo_root(checkout.path());
+    let ctx = &checkout_ctx;
 
     // Resolve the GitHub slug, source-tarball URL, and homebrew formula inputs up
     // front — they depend only on the plan + `origin` remote, never on any build
@@ -370,6 +426,125 @@ fn resolve_target_plans(plan: &ReleasePlan) -> Result<Vec<TargetPlan>, CutError>
         });
     }
     Ok(out)
+}
+
+/// A throwaway, detached `git worktree` checked out at the plan's sealed commit —
+/// the reproducible root every effect phase runs from (`release-cut-clean-checkout`).
+///
+/// [`materialize`](Self::materialize) creates it through the injected
+/// [`CommandRunner`](crate::ports::CommandRunner) (no direct process effect in
+/// `ossctl-core`) after **failing closed** if the sealed commit is not present
+/// locally, so a cut can never publish from an unavailable or ambiguous tree. The
+/// `Drop` impl removes the worktree on **every** exit path (success, phase failure,
+/// or an unwinding panic), routed through the same runner; a failed removal only
+/// leaves a `git worktree prune`-able stale entry, never wrong published output.
+struct SealedCheckout<'a> {
+    /// The runner the worktree add/remove shell out through (the effect seam).
+    runner: &'a dyn CommandRunner,
+    /// The **real** repository root — where the `git worktree add`/`remove` commands
+    /// run (the worktree admin lives with the real repo, not inside the checkout).
+    repo_root: &'a std::path::Path,
+    /// The materialized checkout's path — the working directory every effect phase
+    /// re-roots to, and the worktree `Drop` removes.
+    path: std::path::PathBuf,
+}
+
+impl<'a> SealedCheckout<'a> {
+    /// Materialize a clean detached checkout of `head_sha`, failing closed if that
+    /// commit is not present in the local object store.
+    ///
+    /// Uses `ctx.repo_root` (the real repo) as the working directory for the git
+    /// commands; the returned guard's [`path`](Self::path) is the checkout root the
+    /// caller re-roots the effect context to.
+    fn materialize(ctx: &EffectCtx<'a>, head_sha: &str) -> Result<SealedCheckout<'a>, CutError> {
+        // Fail closed unless the sealed commit is present locally: `git cat-file -e
+        // <sha>^{commit}` exits 0 only for a commit object that exists. A cut
+        // publishes from THIS commit's bytes, so an absent/rewritten/gc'd commit is a
+        // hard stop, not a fall-back-to-live-tree.
+        let commitish = format!("{head_sha}^{{commit}}");
+        let probe = ctx
+            .runner
+            .run("git", &["cat-file", "-e", &commitish], ctx.repo_root)
+            .map_err(|e| {
+                CutError::Checkout(format!(
+                    "cannot probe the sealed commit `{head_sha}` (`git cat-file` failed to run: {e})"
+                ))
+            })?;
+        if probe.status != Some(0) {
+            return Err(CutError::Checkout(format!(
+                "the sealed commit `{head_sha}` is not present in this repository (never \
+                 committed, not fetched, or garbage-collected). Commit and push the release \
+                 commit, then re-plan/cut — a cut publishes from a clean checkout of the sealed \
+                 HEAD, never the live working tree"
+            )));
+        }
+
+        let path = checkout_path(head_sha);
+        let path_str = path.to_string_lossy().to_string();
+        // `--detach` avoids creating a branch; the destination path is fresh (unique
+        // per pid + nanos) so `git worktree add` never collides with a prior cut.
+        let out = ctx
+            .runner
+            .run(
+                "git",
+                &["worktree", "add", "--detach", &path_str, head_sha],
+                ctx.repo_root,
+            )
+            .map_err(|e| {
+                CutError::Checkout(format!(
+                    "cannot create a clean checkout worktree for `{head_sha}` \
+                     (`git worktree add` failed to run: {e})"
+                ))
+            })?;
+        if out.status != Some(0) {
+            return Err(CutError::Checkout(format!(
+                "`git worktree add` could not check out the sealed commit `{head_sha}` into a \
+                 clean worktree at `{path_str}`: {}",
+                out.stderr.trim()
+            )));
+        }
+
+        Ok(SealedCheckout {
+            runner: ctx.runner,
+            repo_root: ctx.repo_root,
+            path,
+        })
+    }
+
+    /// The checkout root — the working directory the coordinator re-roots the effect
+    /// context to for every phase.
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for SealedCheckout<'_> {
+    fn drop(&mut self) {
+        // Best-effort teardown on every exit path (success, phase failure, panic).
+        // Routed through the runner so the coordinator performs no direct process
+        // effect; `--force` also drops the worktree even if a leg dirtied it (e.g. a
+        // build wrote target/). A failed removal only leaves a prunable stale
+        // worktree — never affects what was published.
+        let path_str = self.path.to_string_lossy().to_string();
+        let _ = self.runner.run(
+            "git",
+            &["worktree", "remove", "--force", &path_str],
+            self.repo_root,
+        );
+    }
+}
+
+/// A fresh, unpredictable path for the sealed-commit checkout worktree — unique per
+/// cut (pid + a nanosecond stamp + a short sha prefix) so concurrent cuts/tests
+/// never collide and a crashed prior cut's leftover never blocks `git worktree add`.
+/// Computing the path is not a filesystem effect; `git worktree add` (through the
+/// runner) is what creates the directory.
+fn checkout_path(head_sha: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let short: String = head_sha.chars().take(12).collect();
+    std::env::temp_dir().join(format!("ossctl-cut-{}-{short}-{nanos}", std::process::id()))
 }
 
 /// The adapter identity of the target whose tag-triggered CI **owns the shared

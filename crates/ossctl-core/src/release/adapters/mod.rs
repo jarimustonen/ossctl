@@ -91,6 +91,33 @@ impl<'a> EffectCtx<'a> {
     pub fn with_artifacts(&self, artifacts: &'a ReleaseArtifacts) -> EffectCtx<'a> {
         EffectCtx { artifacts, ..*self }
     }
+
+    /// The same effect context with [`repo_root`](Self::repo_root) swapped in — how
+    /// the coordinator makes every adapter effect run against a **clean checkout of
+    /// the sealed commit** instead of the live working tree, without `cd`-ing
+    /// globally or re-threading every port. Each port reference is a `&'a`, so it is
+    /// freely re-borrowed for the shorter lifetime `'b` of the (temporary) checkout
+    /// path (`'a: 'b`).
+    ///
+    /// This is the single seam behind the reproducible-cut guarantee
+    /// (`release-cut-clean-checkout`): all `dry_run` / `build` / `publish` / dist
+    /// commands run in the swapped-in root, so a mid-cut edit of the operator's live
+    /// tree can never change what is published. Cannot reuse the `..*self` struct
+    /// update `with_artifacts` uses — that would tie the result to `'a`, but the
+    /// checkout path outlives only the enclosing call.
+    #[must_use]
+    pub fn with_repo_root<'b>(&self, repo_root: &'b std::path::Path) -> EffectCtx<'b>
+    where
+        'a: 'b,
+    {
+        EffectCtx {
+            runner: self.runner,
+            clock: self.clock,
+            registry: self.registry,
+            repo_root,
+            artifacts: self.artifacts,
+        }
+    }
 }
 
 /// The concrete release artifacts the coordinator threads from the build phase

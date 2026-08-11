@@ -1720,6 +1720,12 @@ fn cut_error_to_cli(run_id: &str, err: CutError) -> CliError {
             // Caught before any external action — a plan the executor cannot run.
             CliError::user("invalid_plan", message)
         }
+        CutError::Checkout(_) => {
+            // Fail-closed before any effect: the sealed commit could not be checked
+            // out to publish from (typically not committed/pushed). Caller-fixable —
+            // nothing external happened. `err`'s Display carries the full guidance.
+            CliError::user("sealed_commit_unavailable", format!("run {run_id}: {err}"))
+        }
         CutError::Journal(io) => CliError::system(
             "journal_error",
             format!("run {run_id}: could not write the release journal: {io} — the run may be in an unknown state"),

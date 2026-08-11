@@ -103,6 +103,13 @@ impl JournalStore for FakeStore {
 /// while the same program's *publish* fails).
 struct FakeCmd {
     calls: RefCell<Vec<String>>,
+    /// The `cwd` each recorded call ran in — parallel to [`Self::calls`] (same
+    /// index). Lets the clean-checkout tests assert an effect command ran against the
+    /// sealed-commit worktree, not the live repo root (`release-cut-clean-checkout`).
+    cwds: RefCell<Vec<PathBuf>>,
+    /// When set, `git cat-file -e <sha>^{commit}` exits non-zero — modelling a sealed
+    /// commit that is not present locally, so the clean checkout fails closed.
+    cat_file_missing: bool,
     fail_contains: Option<String>,
     /// Canned `git remote get-url origin` stdout — lets a cut resolve a source
     /// tarball URL. `None` means "no origin" (empty stdout, as a bare repo).
@@ -123,10 +130,20 @@ impl FakeCmd {
     fn new() -> Self {
         Self {
             calls: RefCell::new(Vec::new()),
+            cwds: RefCell::new(Vec::new()),
+            cat_file_missing: false,
             fail_contains: None,
             origin: None,
             published: Rc::new(RefCell::new(HashMap::new())),
             publish_version: "1.2.3".to_string(),
+        }
+    }
+    /// A runner whose `git cat-file` reports the sealed commit absent — the
+    /// clean-checkout fail-closed path (`release-cut-clean-checkout`).
+    fn missing_sealed_commit() -> Self {
+        Self {
+            cat_file_missing: true,
+            ..Self::new()
         }
     }
     fn failing_on(substr: &str) -> Self {
@@ -164,11 +181,36 @@ impl FakeCmd {
     fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
     }
+    /// The recorded `(rendered line, cwd)` pairs — for asserting *where* a command
+    /// ran (the sealed-checkout tests).
+    fn calls_with_cwd(&self) -> Vec<(String, PathBuf)> {
+        self.calls
+            .borrow()
+            .iter()
+            .cloned()
+            .zip(self.cwds.borrow().iter().cloned())
+            .collect()
+    }
 }
 impl CommandRunner for FakeCmd {
-    fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
+    fn run(&self, program: &str, args: &[&str], cwd: &Path) -> io::Result<CommandOutput> {
         let line = format!("{program} {}", args.join(" "));
         self.calls.borrow_mut().push(line.clone());
+        self.cwds.borrow_mut().push(cwd.to_path_buf());
+        // The clean-checkout probe: `git cat-file -e <sha>^{commit}` gates whether the
+        // sealed commit is present locally. Exit non-zero only when the test asked for
+        // an absent commit; otherwise succeed so the checkout proceeds.
+        if program == "git" && args.first() == Some(&"cat-file") {
+            return Ok(CommandOutput {
+                status: Some(i32::from(self.cat_file_missing)),
+                stdout: String::new(),
+                stderr: if self.cat_file_missing {
+                    "fatal: git cat-file: could not get object info".into()
+                } else {
+                    String::new()
+                },
+            });
+        }
         // Serve the origin remote so `resolve_repo_slug` can parse a GitHub slug.
         if let Some(origin) = &self.origin {
             if program == "git" && args == ["remote", "get-url", "origin"] {
@@ -2616,4 +2658,191 @@ fn a_real_publish_journals_a_receipt_and_lands_on_the_registry() {
     );
     // … and the crate is genuinely on the (mock) registry.
     assert_eq!(reg.versions("acme-core"), vec!["1.2.3".to_string()]);
+}
+
+// ── Clean checkout of the sealed commit (release-cut-clean-checkout) ──────────
+
+/// The path `git worktree add --detach <path> <sha>` created — the sealed-commit
+/// checkout every effect command must run from. Panics if the checkout was never
+/// materialized (a test that expected it to be).
+fn sealed_checkout_path(cmd: &FakeCmd) -> PathBuf {
+    for (line, _) in cmd.calls_with_cwd() {
+        // `git worktree add --detach <path> <sha>`
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        if toks.first() == Some(&"git")
+            && toks.get(1) == Some(&"worktree")
+            && toks.get(2) == Some(&"add")
+            && toks.get(3) == Some(&"--detach")
+        {
+            return PathBuf::from(toks[4]);
+        }
+    }
+    panic!(
+        "no `git worktree add --detach` call was recorded: {:?}",
+        cmd.calls()
+    );
+}
+
+#[test]
+fn effect_commands_run_from_the_sealed_commit_checkout() {
+    // A cut materializes a clean checkout of `plan.head_sha` and runs every effect
+    // command (build/publish/dist) from THERE, not the live repo root — so a mid-cut
+    // edit of the operator's tree can never change what is published.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::new();
+    let reg = cmd.registry();
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = NullSink;
+    let mut journal = new_journal(&store, &clock, &idgen);
+
+    // `two_target_plan` seals `head_sha: "deadbeef"`.
+    execute(&mut journal, &two_target_plan(), &ctx, &tagger, &mut sink).unwrap();
+
+    let checkout = sealed_checkout_path(&cmd);
+    assert_ne!(
+        checkout, root,
+        "the checkout must not be the live repo root"
+    );
+
+    let calls = cmd.calls_with_cwd();
+    // The worktree was checked out at the SEALED commit (not whatever HEAD is now).
+    assert!(
+        calls.iter().any(|(line, cwd)| line
+            == &format!("git worktree add --detach {} deadbeef", checkout.display())
+            && cwd == &root),
+        "worktree add did not check out the sealed commit from the real root: {calls:?}"
+    );
+    // The worktree admin commands (add / probe / remove) run against the REAL repo;
+    // the checkout only hosts the effect commands.
+    assert!(
+        calls
+            .iter()
+            .any(|(line, cwd)| line == "git cat-file -e deadbeef^{commit}" && cwd == &root),
+        "the sealed-commit presence probe did not run against the real root: {calls:?}"
+    );
+
+    // Every cargo/npm effect command ran from the checkout — and NONE from the live
+    // repo root (the immunity-to-a-dirty-live-tree property).
+    let mut saw_effect = false;
+    for (line, cwd) in &calls {
+        if line.starts_with("cargo ") || line.starts_with("npm ") {
+            saw_effect = true;
+            assert_eq!(
+                cwd, &checkout,
+                "an effect command ran outside the sealed checkout: `{line}` in {cwd:?}"
+            );
+        }
+    }
+    assert!(
+        saw_effect,
+        "no cargo/npm effect command ran at all: {calls:?}"
+    );
+
+    // The checkout is torn down afterwards (Drop), against the real repo root.
+    assert!(
+        calls.iter().any(|(line, cwd)| line
+            == &format!("git worktree remove --force {}", checkout.display())
+            && cwd == &root),
+        "the checkout worktree was not torn down against the real root: {calls:?}"
+    );
+}
+
+#[test]
+fn missing_sealed_commit_fails_closed_before_any_effect() {
+    // If the sealed commit is not present locally, a cut refuses BEFORE any phase —
+    // no dry-run, no build, no publish, no tag — rather than fall back to the live tree.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::missing_sealed_commit();
+    let reg = cmd.registry();
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = NullSink;
+    let mut journal = new_journal(&store, &clock, &idgen);
+
+    let err = execute(&mut journal, &two_target_plan(), &ctx, &tagger, &mut sink).unwrap_err();
+    assert!(
+        matches!(err, CutError::Checkout(_)),
+        "expected a fail-closed CutError::Checkout, got {err:?}"
+    );
+
+    let calls = cmd.calls();
+    // The presence probe ran; nothing else did.
+    assert!(
+        calls
+            .iter()
+            .any(|c| c == "git cat-file -e deadbeef^{commit}"),
+        "the sealed-commit probe should have run: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.starts_with("git worktree add")),
+        "no worktree should be created when the commit is absent: {calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.starts_with("cargo ") || c.starts_with("npm ")),
+        "no effect command may run when the sealed commit is absent: {calls:?}"
+    );
+    assert!(tagger.calls().is_empty(), "a fail-closed cut must not tag");
+    // No phase was even entered.
+    assert!(
+        journal.state().phases.is_empty(),
+        "no phase should be recorded on a fail-closed checkout"
+    );
+}
+
+#[test]
+fn checkout_is_torn_down_even_when_a_phase_fails() {
+    // A phase failure still tears the checkout worktree down (Drop runs on the error
+    // path), so a failed cut never leaks a throwaway worktree.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::failing_on("npm publish");
+    let reg = cmd.registry();
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = NullSink;
+    let mut journal = new_journal(&store, &clock, &idgen);
+
+    let err = execute(&mut journal, &two_target_plan(), &ctx, &tagger, &mut sink).unwrap_err();
+    assert!(
+        matches!(err, CutError::PhaseFailed { .. }),
+        "expected a publish-phase failure, got {err:?}"
+    );
+
+    let checkout = sealed_checkout_path(&cmd);
+    assert!(
+        cmd.calls()
+            .iter()
+            .any(|c| c == &format!("git worktree remove --force {}", checkout.display())),
+        "the checkout must be torn down even on a phase failure: {:?}",
+        cmd.calls()
+    );
 }
