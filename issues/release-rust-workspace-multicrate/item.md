@@ -2,7 +2,7 @@
 created: 2026-08-12
 updated: 2026-08-12
 type: feature
-status: in-progress
+status: open
 priority: high
 labels: [release, rust]
 commits:
