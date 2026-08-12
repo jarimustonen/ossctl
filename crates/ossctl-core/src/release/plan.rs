@@ -469,10 +469,19 @@ fn classify_target_versions(contract: &Contract, facts: &Facts) -> ClassifiedVer
 }
 
 /// Overlay facts-derived package names onto the contract's target set, yielding
-/// the concrete targets a cut would execute. Order follows the contract's
-/// `targets` (already canonicalized by the normalizer).
+/// the concrete targets a cut would execute, then **expand a multi-crate Rust
+/// workspace** into its full dependency-ordered publish set.
+///
+/// Base resolution is 1:1 with the contract's (normalizer-canonical) `targets`,
+/// resolving a `null` package from facts. Then [`expand_rust_workspace_members`]
+/// derives the complete crates.io publish set for a Cargo workspace from
+/// [`Facts::rust_workspace`]: a downstream repo that declares only its bin crate
+/// still gets its lib crate planned, lib-before-bin, so a cut never `cargo publish`es
+/// a crate whose `=`-pinned workspace sibling is not yet on the index
+/// (`release-rust-workspace-multicrate`). A repo that already declares every member
+/// (ossctl itself) is unchanged: the derived set equals what it declared.
 fn resolve_targets(contract: &Contract, facts: &Facts) -> Vec<PlanTarget> {
-    contract
+    let base: Vec<PlanTarget> = contract
         .targets
         .iter()
         .map(|t| {
@@ -487,7 +496,154 @@ fn resolve_targets(contract: &Contract, facts: &Facts) -> Vec<PlanTarget> {
                 adapter: t.adapter,
             }
         })
-        .collect()
+        .collect();
+    expand_rust_workspace_members(base, facts)
+}
+
+/// Whether a resolved target is a Rust crate published to crates.io via
+/// `cargo-publish` — the target class the workspace-member derivation expands (a
+/// `cargo-dist` binary distribution or a non-crates.io registry is left untouched).
+fn is_rust_crates_io_publish(t: &PlanTarget) -> bool {
+    t.ecosystem == Ecosystem::Rust
+        && t.registry == Registry::CratesIo
+        && t.adapter == crate::contract::schema::Adapter::CargoPublish
+}
+
+/// Expand the crates.io `cargo-publish` Rust targets of `base` into the workspace's
+/// full, dependency-ordered publishable member set (lib before bin), leaving every
+/// other target in place.
+///
+/// The gap this closes (`release-rust-workspace-multicrate`): a two-crate workspace
+/// (a lib + a bin pinning `lib = "=X"`) whose contract declares **only** the bin as a
+/// target would plan a single `cargo publish <bin>` — which fails, because `lib@X` is
+/// not yet on crates.io. Deriving the member set from [`Facts::rust_workspace`] adds
+/// the lib as its own ordered target so the coordinator publishes lib → bin (ADR-0004,
+/// one target = one publish unit; the coordinator walks plan order and the adapter
+/// index-waits on each crate's own deps).
+///
+/// The derivation is a **strict superset**: the ordered member set is the union of the
+/// workspace's publishable members and any Rust crates.io package the contract already
+/// declared (an explicit `package` never in the graph is still planned, never dropped).
+/// The derived targets are spliced in at the position of the **first** Rust crates.io
+/// target; the contract's other targets (cargo-dist, homebrew, a non-crates.io
+/// registry) keep their relative order. When there is no Rust crates.io target, or the
+/// repo is not a multi-crate workspace ([`Facts::rust_workspace`] is `None`), `base` is
+/// returned unchanged — so a single-crate repo and every non-Rust plan are untouched.
+fn expand_rust_workspace_members(base: Vec<PlanTarget>, facts: &Facts) -> Vec<PlanTarget> {
+    let Some(workspace) = facts.rust_workspace.as_ref() else {
+        return base;
+    };
+    // Only expand when the contract actually publishes a Rust crate to crates.io.
+    let first_rust = base.iter().position(is_rust_crates_io_publish);
+    let Some(first_rust_idx) = first_rust else {
+        return base;
+    };
+    // The (uniform) registry+adapter every derived member target carries — taken from
+    // the representative target so the derived crates match how the contract publishes
+    // Rust (crates.io / cargo-publish, by construction of `is_rust_crates_io_publish`).
+    let representative = base[first_rust_idx].clone();
+
+    // The ordered publish set: the workspace's publishable members topologically
+    // sorted (a dependency before its dependents), then any contract-declared Rust
+    // crates.io package not present in the graph appended (superset guarantee).
+    let mut ordered_packages = topo_order_members(&workspace.members);
+    for t in base.iter().filter(|t| is_rust_crates_io_publish(t)) {
+        if let Some(pkg) = t.package.as_ref() {
+            if !ordered_packages.iter().any(|p| p == pkg) {
+                ordered_packages.push(pkg.clone());
+            }
+        }
+    }
+    // A degenerate workspace whose members all resolved out (none publishable / named)
+    // leaves nothing to splice — keep `base` rather than drop the declared targets.
+    if ordered_packages.is_empty() {
+        return base;
+    }
+    let derived: Vec<PlanTarget> = ordered_packages
+        .into_iter()
+        .map(|package| PlanTarget {
+            ecosystem: Ecosystem::Rust,
+            package: Some(package),
+            registry: representative.registry,
+            adapter: representative.adapter,
+        })
+        .collect();
+
+    // Splice: derived member set at the first Rust crates.io position; all other
+    // (non-Rust-crates.io) targets keep their relative order around it.
+    let mut out: Vec<PlanTarget> = Vec::with_capacity(base.len() + derived.len());
+    let mut spliced = false;
+    for t in base {
+        if is_rust_crates_io_publish(&t) {
+            if !spliced {
+                out.extend(derived.iter().cloned());
+                spliced = true;
+            }
+            // Drop the original Rust crates.io target — it is represented in `derived`.
+            continue;
+        }
+        out.push(t);
+    }
+    out
+}
+
+/// Topologically order a workspace's publishable members so a dependency precedes
+/// its dependents (lib before bin) — the publish order the coordinator walks.
+///
+/// Kahn's algorithm with a **deterministic** tie-break: among members whose
+/// intra-workspace dependencies are all already emitted, the one earliest in
+/// declaration order is chosen next, so the output is stable and reproducible (a
+/// requirement of the content-addressed plan). Only edges to *other listed members*
+/// gate order (an edge to a filtered-out member cannot, and does not, block). A
+/// dependency **cycle** (unexpected among normal/build deps of publishable crates —
+/// a broken workspace) cannot be ordered; the remaining members are appended in
+/// declaration order rather than dropped, so the plan stays a faithful superset and
+/// the cut fails later with a concrete registry error rather than the planner
+/// silently omitting a crate.
+fn topo_order_members(members: &[crate::protocol::facts::WorkspaceMember]) -> Vec<String> {
+    let names: BTreeSet<&str> = members.iter().map(|m| m.package.as_str()).collect();
+    // Remaining dependency count per member, counting only edges to other members.
+    let mut pending: Vec<usize> = members
+        .iter()
+        .map(|m| {
+            m.workspace_deps
+                .iter()
+                .filter(|d| names.contains(d.as_str()) && d.as_str() != m.package)
+                .count()
+        })
+        .collect();
+    let mut emitted: BTreeSet<&str> = BTreeSet::new();
+    let mut order: Vec<String> = Vec::with_capacity(members.len());
+    // Each round emits the earliest-declared member whose deps are all emitted.
+    while order.len() < members.len() {
+        let next = members
+            .iter()
+            .enumerate()
+            .find(|(i, m)| pending[*i] == 0 && !emitted.contains(m.package.as_str()));
+        let Some((_, member)) = next else {
+            // A cycle blocks every remaining member: append them in declaration order
+            // (deterministic) rather than loop forever or drop them.
+            for m in members {
+                if !emitted.contains(m.package.as_str()) {
+                    emitted.insert(m.package.as_str());
+                    order.push(m.package.clone());
+                }
+            }
+            break;
+        };
+        emitted.insert(member.package.as_str());
+        order.push(member.package.clone());
+        // Decrement dependents that depended on the just-emitted member.
+        for (i, m) in members.iter().enumerate() {
+            if pending[i] > 0
+                && m.workspace_deps.iter().any(|d| d == &member.package)
+                && !emitted.contains(m.package.as_str())
+            {
+                pending[i] -= 1;
+            }
+        }
+    }
+    order
 }
 
 /// The detected package name for `ecosystem`, resolved **only when

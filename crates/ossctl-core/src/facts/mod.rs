@@ -37,7 +37,7 @@ use std::path::Path;
 
 use crate::contract::schema::{Ecosystem, Maturity};
 use crate::ports::{Fs, GitRepo};
-use crate::protocol::facts::{Facts, MaturitySignals, Package};
+use crate::protocol::facts::{Facts, MaturitySignals, Package, RustWorkspace, WorkspaceMember};
 
 /// Root-level manifests, in the canonical probe order. The ecosystem order here
 /// also fixes the order `ecosystems` and `packages` are emitted in.
@@ -100,6 +100,13 @@ pub fn gather(repo_root: &Path, fs: &dyn Fs, git: &dyn GitRepo) -> Facts {
     let has_commits = is_git && git.head_commit().is_ok();
 
     let (ecosystems, packages) = detect_manifests(repo_root, fs);
+    // The Rust workspace's publishable member graph — off-wire plumbing the release
+    // planner derives a dependency-ordered publish set from (`None` for a repo with
+    // no multi-crate Cargo workspace). Derived from the same manifests as `packages`
+    // but carrying the publish flags + intra-workspace dependency edges `packages`
+    // omits, so a downstream repo that declares only its bin crate still gets its lib
+    // crate planned, lib-before-bin (`release-rust-workspace-multicrate`).
+    let rust_workspace = detect_rust_workspace(repo_root, fs);
 
     // ── committers (mailmap-aware, whole `--all` history) ──
     let (committers_total, committers_recent_year) = if has_commits {
@@ -232,6 +239,7 @@ pub fn gather(repo_root: &Path, fs: &dyn Fs, git: &dyn GitRepo) -> Facts {
         description,
         maturity_signals: MaturitySignals { production, spike },
         inferred_maturity,
+        rust_workspace,
     }
 }
 
@@ -308,28 +316,55 @@ fn push_workspace_members(
     eco: Ecosystem,
     packages: &mut Vec<Package>,
 ) -> bool {
-    let ws_block = match toml_section(root_text, "workspace") {
-        Some(block) => block,
-        None => return false,
+    let ws_pkg = toml_section(root_text, "workspace.package");
+    let dirs = workspace_member_dirs(repo_root, fs, root_text);
+    let before = packages.len();
+    for rel in &dirs {
+        let manifest_path = repo_root.join(rel).join("Cargo.toml");
+        let Some(member_text) = read_text(fs, &manifest_path, MANIFEST_LIMIT) else {
+            continue;
+        };
+        let (package, version) = resolve_member_name_version(&member_text, ws_pkg.as_deref());
+        packages.push(Package {
+            ecosystem: eco,
+            manifest: format!("{rel}/Cargo.toml"),
+            package,
+            version,
+        });
+    }
+    packages.len() > before
+}
+
+/// Resolve a Cargo virtual-workspace root's `[workspace].members` to the ordered,
+/// de-duplicated, **existing** member directories (manifest-relative, no trailing
+/// slash) — the single member-enumeration used by both the `packages` emission and
+/// the release-planner workspace graph, so the two never drift.
+///
+/// Applies the rules the fact detector has always used: escape-proof (an absolute
+/// or `..`-bearing member is rejected — with a real `Fs` those would read manifests
+/// outside `repo_root` and taint the facts), trailing single-level glob (`crates/*`,
+/// bare `*`) expansion via the `Fs` port with sorted entries (deterministic
+/// regardless of read-dir order), `[workspace].exclude` removal, first-seen dedup,
+/// and dropping any member whose `Cargo.toml` does not resolve. Empty when the root
+/// declares no `[workspace].members` array (not a members-bearing virtual workspace)
+/// or none resolve.
+fn workspace_member_dirs(repo_root: &Path, fs: &dyn Fs, root_text: &str) -> Vec<String> {
+    let Some(ws_block) = toml_section(root_text, "workspace") else {
+        return Vec::new();
     };
     let members = match toml_str_array(&ws_block, "members") {
         Some(members) if !members.is_empty() => members,
-        _ => return false,
+        _ => return Vec::new(),
     };
     let exclude: Vec<String> = toml_str_array(&ws_block, "exclude")
         .unwrap_or_default()
         .iter()
         .map(|e| e.trim_end_matches('/').to_string())
         .collect();
-    let ws_pkg = toml_section(root_text, "workspace.package");
-    let before = packages.len();
-    // Manifest-relative paths already emitted — dedup preserving first-seen order.
-    let mut seen: Vec<String> = Vec::new();
+    // Manifest-relative dirs already collected — dedup preserving first-seen order.
+    let mut out: Vec<String> = Vec::new();
     for member in members {
         let member = member.trim_end_matches('/');
-        // A fact detector reports the repo's OWN packages: reject a member that
-        // escapes the tree (absolute, or a `..` component) — with a real `Fs`
-        // those would read manifests outside `repo_root` and taint the facts.
         if member.is_empty() || member.starts_with('/') || member.split('/').any(|c| c == "..") {
             continue;
         }
@@ -348,16 +383,7 @@ fn push_workspace_members(
                 } else {
                     format!("{prefix}/{name}")
                 };
-                push_one_member(
-                    repo_root,
-                    fs,
-                    &rel,
-                    ws_pkg.as_deref(),
-                    eco,
-                    &exclude,
-                    &mut seen,
-                    packages,
-                );
+                push_member_dir(repo_root, fs, &rel, &exclude, &mut out);
             }
             continue;
         }
@@ -366,53 +392,268 @@ fn push_workspace_members(
         if member.contains(['*', '?']) {
             continue;
         }
-        push_one_member(
-            repo_root,
-            fs,
-            member,
-            ws_pkg.as_deref(),
-            eco,
-            &exclude,
-            &mut seen,
-            packages,
-        );
+        push_member_dir(repo_root, fs, member, &exclude, &mut out);
     }
-    packages.len() > before
+    out
 }
 
-/// Emit one workspace member at manifest-relative `rel` (no trailing slash needed)
-/// into `packages`, unless it is `exclude`d, already `seen`, or its `Cargo.toml`
-/// does not resolve through `fs`. Records emitted members in `seen` for dedup.
-#[allow(clippy::too_many_arguments)]
-fn push_one_member(
+/// Add member dir `rel` to `out` unless it is `exclude`d, already collected, or its
+/// `Cargo.toml` does not resolve through `fs`.
+fn push_member_dir(
     repo_root: &Path,
     fs: &dyn Fs,
     rel: &str,
-    ws_pkg: Option<&str>,
-    eco: Ecosystem,
     exclude: &[String],
-    seen: &mut Vec<String>,
-    packages: &mut Vec<Package>,
+    out: &mut Vec<String>,
 ) {
     let rel = rel.trim_end_matches('/');
-    if exclude.iter().any(|e| e == rel) || seen.iter().any(|s| s == rel) {
+    if exclude.iter().any(|e| e == rel) || out.iter().any(|s| s == rel) {
         return;
     }
-    let manifest_path = repo_root.join(rel).join("Cargo.toml");
-    if !fs.is_file(&manifest_path) {
+    if !fs.is_file(&repo_root.join(rel).join("Cargo.toml")) {
         return;
     }
-    let Some(member_text) = read_text(fs, &manifest_path, MANIFEST_LIMIT) else {
-        return;
+    out.push(rel.to_string());
+}
+
+/// Detect the Rust workspace's crates.io-**publishable** member graph — the
+/// off-wire plumbing [`Facts::rust_workspace`] carries for the release planner.
+///
+/// `None` unless the repo root is a members-bearing Cargo *virtual workspace* (the
+/// shape that expresses a lib+bin split): reads each member manifest for its
+/// `[package].name`, version (honoring `version.workspace = true` inheritance),
+/// `publish` allow-list, and intra-workspace dependency edges, then keeps only the
+/// crates.io-publishable members (matching the cargo adapter's cut-time `cargo
+/// metadata` filter — a `publish = false` member, or one restricted to a
+/// non-crates.io registry, is dropped) with their edges restricted to other
+/// publishable members. Members are returned in workspace declaration order; the
+/// planner applies the topological publish ordering. `None` when no publishable
+/// named member resolves (nothing for the planner to expand).
+///
+/// **Best-effort edges (ordering aid, not the cut-time authority).** Dependency
+/// names come from a line-oriented scan of `[dependencies]` / `[build-dependencies]`
+/// (and their `[dependencies.<name>]` sub-tables), honoring an inline `package = "…"`
+/// rename — the exact `dep = { path = "…", version = "=X" }` shape `/oss-init` emits.
+/// A member whose intra-workspace dep is renamed via a *sub-table* `package` key is a
+/// tolerated blind spot: the cargo adapter re-derives the true graph from `cargo
+/// metadata` at cut time and index-waits on the real deps, so a mis-ordered edge here
+/// only costs a planner ordering hint, never a wrong publish.
+/// One parsed workspace member before the publishability filter — the intermediate
+/// [`detect_rust_workspace`] reduces to the published [`WorkspaceMember`] set.
+struct RawMember {
+    package: String,
+    version: Option<String>,
+    publishable: bool,
+    deps: Vec<String>,
+}
+
+fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace> {
+    let root_path = repo_root.join("Cargo.toml");
+    if !fs.is_file(&root_path) {
+        return None;
+    }
+    let root_text = read_text(fs, &root_path, MANIFEST_LIMIT)?;
+    let dirs = workspace_member_dirs(repo_root, fs, &root_text);
+    if dirs.is_empty() {
+        return None;
+    }
+    let ws_pkg = toml_section(&root_text, "workspace.package");
+
+    // First pass: parse every named member (name, version, publishability, edges).
+    let mut raw: Vec<RawMember> = Vec::new();
+    for rel in &dirs {
+        let Some(text) = read_text(fs, &repo_root.join(rel).join("Cargo.toml"), MANIFEST_LIMIT)
+        else {
+            continue;
+        };
+        let (package, version) = resolve_member_name_version(&text, ws_pkg.as_deref());
+        // A member with no `[package].name` cannot be a publish target — skip it (a
+        // nested virtual workspace, or a malformed manifest).
+        let Some(package) = package else { continue };
+        raw.push(RawMember {
+            package,
+            version,
+            publishable: member_publishable_to_crates_io(&text),
+            deps: member_dependency_names(&text),
+        });
+    }
+
+    // Keep only crates.io-publishable members; restrict each member's edges to the
+    // OTHER publishable members (a dep on a non-publishable member does not gate the
+    // publish order, and a self-edge is meaningless).
+    let publishable_names: std::collections::BTreeSet<&str> = raw
+        .iter()
+        .filter(|m| m.publishable)
+        .map(|m| m.package.as_str())
+        .collect();
+    let members: Vec<WorkspaceMember> = raw
+        .iter()
+        .filter(|m| m.publishable)
+        .map(|m| {
+            let mut workspace_deps: Vec<String> = m
+                .deps
+                .iter()
+                .filter(|d| d.as_str() != m.package && publishable_names.contains(d.as_str()))
+                .cloned()
+                .collect();
+            workspace_deps.sort();
+            workspace_deps.dedup();
+            WorkspaceMember {
+                package: m.package.clone(),
+                version: m.version.clone(),
+                workspace_deps,
+            }
+        })
+        .collect();
+    if members.is_empty() {
+        return None;
+    }
+    Some(RustWorkspace { members })
+}
+
+/// Whether a Cargo member manifest permits publishing to crates.io — the same
+/// predicate the cargo adapter applies at cut time (`publishable_to_crates_io`), but
+/// read from raw manifest text rather than `cargo metadata`.
+///
+/// `publish` absent ⇒ any registry (yes). `publish = false` ⇒ no. `publish = true`
+/// ⇒ yes. `publish = ["crates-io", …]` ⇒ only if the list names `crates-io`
+/// (`publish = []` therefore reads as no, matching `cargo metadata`'s `Some([])`).
+fn member_publishable_to_crates_io(text: &str) -> bool {
+    let Some(block) = toml_section(text, "package") else {
+        // No `[package]` at all — not a normal member; treat as publishable (the
+        // name pass will have dropped it if unnamed).
+        return true;
     };
-    seen.push(rel.to_string());
-    let (package, version) = resolve_member_name_version(&member_text, ws_pkg);
-    packages.push(Package {
-        ecosystem: eco,
-        manifest: format!("{rel}/Cargo.toml"),
-        package,
-        version,
-    });
+    // Array form first: `publish = ["crates-io"]`.
+    if let Some(regs) = toml_str_array(&block, "publish") {
+        return regs.iter().any(|r| r == CRATES_IO_REGISTRY_ALIAS);
+    }
+    // Bool form: `publish = false` / `publish = true`; absent ⇒ publishable.
+    !matches!(toml_bool_value(&block, "publish"), Some(false))
+}
+
+/// Cargo's registry alias for crates.io — the token a member manifest's `publish`
+/// allow-list must contain to be crates.io-publishable (mirrors the cargo adapter's
+/// `CRATES_IO_ALIAS`).
+const CRATES_IO_REGISTRY_ALIAS: &str = "crates-io";
+
+/// Read a boolean TOML value (`key = true` / `key = false`) from a section body,
+/// stripping a trailing `#` comment. `None` when the key is absent or its value is
+/// not a bare bool literal (an array or table form is the caller's concern).
+fn toml_bool_value(block: &str, key: &str) -> Option<bool> {
+    for line in block.lines() {
+        let rest = line.trim_start();
+        let Some(rest) = rest.strip_prefix(key) else {
+            continue;
+        };
+        // Whole-token match (else `publisher` would match `publish`).
+        if !rest.starts_with(|c: char| c.is_whitespace() || c == '=') {
+            continue;
+        }
+        let Some(rest) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        match strip_toml_comment(rest).trim() {
+            "true" => return Some(true),
+            "false" => return Some(false),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// The dependency crate names declared by a Cargo member manifest's `[dependencies]`
+/// and `[build-dependencies]` tables (including their `[dependencies.<name>]`
+/// sub-tables), de-duplicated and sorted — the raw edge set [`detect_rust_workspace`]
+/// intersects with the publishable member names.
+///
+/// Line-oriented (no TOML dep — matching this module's parsing style): a `key = …`
+/// line under a dependency table contributes `key`, resolved through a dotted-key
+/// (`foo.workspace = true` → `foo`) and an inline-table rename (`foo = { package =
+/// "bar" }` → `bar`). Dev-dependencies are excluded (they never gate publish order
+/// and can legitimately cycle). A sub-table `[dependencies.foo]` contributes `foo`.
+fn member_dependency_names(text: &str) -> Vec<String> {
+    /// Which dependency table (if any) the scanner is currently inside.
+    enum Table {
+        /// Inside a `[dependencies]` / `[build-dependencies]` table body.
+        Deps,
+        /// Not inside an order-gating dependency table.
+        Other,
+    }
+    let mut table = Table::Other;
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let l = strip_toml_comment(line);
+        let t = l.trim();
+        if let Some(header) = t.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+            let header = header.trim();
+            if header == "dependencies" || header == "build-dependencies" {
+                table = Table::Deps;
+            } else if let Some(sub) = header
+                .strip_prefix("dependencies.")
+                .or_else(|| header.strip_prefix("build-dependencies."))
+            {
+                // `[dependencies.foo]` sub-table: the crate is `foo` (the sub-table's
+                // own `package = "…"` rename is the tolerated blind spot documented on
+                // `detect_rust_workspace`).
+                table = Table::Other;
+                let name = sub.trim().trim_matches(['"', '\'']);
+                if !name.is_empty() {
+                    out.push(name.to_string());
+                }
+            } else {
+                // Any other table (`[dev-dependencies]`, `[features]`, `[package]`, a
+                // target-specific `[target.'cfg(…)'.dependencies]`) does not gate order.
+                table = Table::Other;
+            }
+            continue;
+        }
+        if matches!(table, Table::Deps) {
+            if let Some(name) = dep_name_from_line(t) {
+                out.push(name);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The dependency crate name a single `key = value` line under a `[dependencies]`
+/// table declares: the bare key, reduced past a dotted suffix (`foo.workspace`
+/// → `foo`) and overridden by an inline-table `package = "…"` rename. `None` for a
+/// line with no `=` or an empty key (a blank or continuation line).
+fn dep_name_from_line(line: &str) -> Option<String> {
+    let eq = line.find('=')?;
+    let (key_part, val_part) = line.split_at(eq);
+    // Dotted key (`foo.workspace = true`) → the crate is the first segment.
+    let key = key_part
+        .trim()
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_matches(['"', '\'']);
+    if key.is_empty() {
+        return None;
+    }
+    // Inline-table rename: `foo = { package = "bar", … }` depends on crate `bar`.
+    let val = val_part.trim_start_matches('=').trim();
+    if val.starts_with('{') {
+        if let Some(renamed) = inline_table_package(val) {
+            return Some(renamed);
+        }
+    }
+    Some(key.to_string())
+}
+
+/// The `package = "…"` value inside an inline dependency table (`{ package = "bar",
+/// version = "1" }`), or `None` when the table declares no rename. A best-effort
+/// single-line scan (inline tables are single-line in practice).
+fn inline_table_package(inline: &str) -> Option<String> {
+    let after = &inline[inline.find("package")? + "package".len()..];
+    let after = after.trim_start().strip_prefix('=')?.trim_start();
+    extract_quoted(after)
 }
 
 /// The literal parent directory of a trailing single-level glob member — `crates/*`
@@ -1108,6 +1349,138 @@ mod tests {
         assert_eq!(cli_pkg.version.as_deref(), Some("2.3.4"));
         // The description pass re-reads the first member manifest by its path.
         assert_eq!(facts.description.as_deref(), Some("the core lib"));
+    }
+
+    // ── rust_workspace graph (release-planner plumbing) ────────────────────────
+
+    #[test]
+    fn rust_workspace_graph_captures_lib_bin_edge() {
+        // The canonical lib+bin shape: the bin pins the lib by exact version, the
+        // exact `dep = { path, version = "=X" }` form `/oss-init` emits.
+        let root = "[workspace]\nmembers = [\"crates/core\", \"crates/cli\"]\n\n\
+                    [workspace.package]\nversion = \"0.1.6\"\n";
+        let core = "[package]\nname = \"octl-core\"\nversion.workspace = true\n\
+                    publish = true\n";
+        let cli = "[package]\nname = \"orchestratectl\"\nversion.workspace = true\n\
+                   publish = true\n\n[dependencies]\n\
+                   octl-core = { path = \"../core\", version = \"=0.1.6\" }\n\
+                   serde = \"1\"\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/crates/core/Cargo.toml", core)
+            .file("/repo/crates/cli/Cargo.toml", cli);
+        let ws = detect_rust_workspace(repo(), &fs).expect("a members-bearing workspace");
+        // Both members, in declaration order (planner applies the topo order).
+        let names: Vec<_> = ws.members.iter().map(|m| m.package.as_str()).collect();
+        assert_eq!(names, vec!["octl-core", "orchestratectl"]);
+        // The lib has no intra-workspace deps; the bin depends on the lib only
+        // (`serde` is an external crate, not a member, so it is not an edge).
+        assert!(ws.members[0].workspace_deps.is_empty());
+        assert_eq!(ws.members[1].workspace_deps, vec!["octl-core".to_string()]);
+        assert_eq!(ws.members[0].version.as_deref(), Some("0.1.6"));
+    }
+
+    #[test]
+    fn rust_workspace_graph_drops_unpublishable_members() {
+        // `publish = false` and a non-crates.io registry restriction both exclude a
+        // member from the publish set (matching the cargo adapter's metadata filter);
+        // an edge to an excluded member is not an ordering edge.
+        let root = "[workspace]\nmembers = [\"a\", \"b\", \"c\"]\n";
+        let a = "[package]\nname = \"a\"\nversion = \"1.0.0\"\n"; // publishable (absent)
+        let b = "[package]\nname = \"b\"\nversion = \"1.0.0\"\npublish = false\n";
+        let c = "[package]\nname = \"c\"\nversion = \"1.0.0\"\n\
+                 publish = [\"my-registry\"]\n\n[dependencies]\n\
+                 b = { path = \"../b\" }\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/a/Cargo.toml", a)
+            .file("/repo/b/Cargo.toml", b)
+            .file("/repo/c/Cargo.toml", c);
+        let ws = detect_rust_workspace(repo(), &fs).expect("at least `a` is publishable");
+        let names: Vec<_> = ws.members.iter().map(|m| m.package.as_str()).collect();
+        assert_eq!(names, vec!["a"], "only the publishable member survives");
+    }
+
+    #[test]
+    fn rust_workspace_graph_honors_crates_io_allow_list() {
+        // `publish = ["crates-io"]` is publishable; the array form is not `publish = false`.
+        let root = "[workspace]\nmembers = [\"a\"]\n";
+        let a = "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\
+                 publish = [\"crates-io\"]\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/a/Cargo.toml", a);
+        let ws = detect_rust_workspace(repo(), &fs).expect("crates-io allow-listed");
+        assert_eq!(ws.members.len(), 1);
+    }
+
+    #[test]
+    fn rust_workspace_graph_none_for_single_crate_repo() {
+        // A single root crate (no `[workspace].members`) is not a multi-crate
+        // workspace — the planner has nothing to expand.
+        let cargo = "[package]\nname = \"solo\"\nversion = \"0.1.0\"\n";
+        let fs = FakeFs::default().file("/repo/Cargo.toml", cargo);
+        assert!(detect_rust_workspace(repo(), &fs).is_none());
+    }
+
+    #[test]
+    fn rust_workspace_graph_dep_rename_via_inline_package_key() {
+        // A renamed dependency (`alias = { package = "real-core" }`) resolves to the
+        // real crate name, so the edge to the workspace member is still detected.
+        let root = "[workspace]\nmembers = [\"core\", \"cli\"]\n";
+        let core = "[package]\nname = \"real-core\"\nversion = \"1.0.0\"\n";
+        let cli = "[package]\nname = \"cli\"\nversion = \"1.0.0\"\n\n[dependencies]\n\
+                   alias = { package = \"real-core\", path = \"../core\" }\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/core/Cargo.toml", core)
+            .file("/repo/cli/Cargo.toml", cli);
+        let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
+        let cli = ws
+            .members
+            .iter()
+            .find(|m| m.package == "cli")
+            .expect("cli member");
+        assert_eq!(cli.workspace_deps, vec!["real-core".to_string()]);
+    }
+
+    #[test]
+    fn rust_workspace_graph_reads_build_dependency_edges() {
+        // A build-dependency on a workspace member gates publish order too.
+        let root = "[workspace]\nmembers = [\"gen\", \"app\"]\n";
+        let gen = "[package]\nname = \"gen\"\nversion = \"1.0.0\"\n";
+        let app = "[package]\nname = \"app\"\nversion = \"1.0.0\"\n\n\
+                   [build-dependencies]\ngen = { path = \"../gen\" }\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/gen/Cargo.toml", gen)
+            .file("/repo/app/Cargo.toml", app);
+        let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
+        let app = ws.members.iter().find(|m| m.package == "app").unwrap();
+        assert_eq!(app.workspace_deps, vec!["gen".to_string()]);
+    }
+
+    #[test]
+    fn rust_workspace_graph_excludes_dev_dependency_edges() {
+        // A dev-dependency never gates publish order (and can legitimately cycle:
+        // a lib that dev-depends on the CLI for integration tests).
+        let root = "[workspace]\nmembers = [\"lib\", \"cli\"]\n";
+        let lib = "[package]\nname = \"lib\"\nversion = \"1.0.0\"\n\n\
+                   [dev-dependencies]\ncli = { path = \"../cli\" }\n";
+        let cli = "[package]\nname = \"cli\"\nversion = \"1.0.0\"\n\n[dependencies]\n\
+                   lib = { path = \"../lib\" }\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/lib/Cargo.toml", lib)
+            .file("/repo/cli/Cargo.toml", cli);
+        let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
+        let lib = ws.members.iter().find(|m| m.package == "lib").unwrap();
+        let cli = ws.members.iter().find(|m| m.package == "cli").unwrap();
+        assert!(
+            lib.workspace_deps.is_empty(),
+            "dev-dependency edge is not an ordering edge"
+        );
+        assert_eq!(cli.workspace_deps, vec!["lib".to_string()]);
     }
 
     #[test]

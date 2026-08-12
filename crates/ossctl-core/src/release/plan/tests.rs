@@ -10,7 +10,7 @@ use crate::contract::schema::{
     ProvenanceLevel, Registry, Release, ReleaseLayout, ReleaseModel, Status, Target,
     VersioningBase,
 };
-use crate::protocol::facts::{Facts, MaturitySignals, Package};
+use crate::protocol::facts::{Facts, MaturitySignals, Package, RustWorkspace, WorkspaceMember};
 use crate::protocol::plan::PlanPhase;
 
 // ── SHA-256 known-answer vectors (FIPS 180-4 / RFC 6234) ───────────────────
@@ -138,6 +138,7 @@ fn rust_facts() -> Facts {
             spike: false,
         },
         inferred_maturity: Maturity::Mvp,
+        rust_workspace: None,
     }
 }
 
@@ -766,4 +767,340 @@ fn an_all_distribution_ecosystem_repo_has_no_derivable_version() {
         resolve_release_version(&c, &rust_facts()),
         Err(VersionResolveError::Undeterminable)
     ));
+}
+
+// ── multi-crate workspace derivation (release-rust-workspace-multicrate) ─────
+
+/// A `WorkspaceMember` in one line (deps are intra-workspace crate names).
+fn member(name: &str, version: &str, deps: &[&str]) -> WorkspaceMember {
+    WorkspaceMember {
+        package: name.to_string(),
+        version: Some(version.to_string()),
+        workspace_deps: deps.iter().map(|d| (*d).to_string()).collect(),
+    }
+}
+
+/// Facts carrying a lib+bin Rust workspace graph (`lib` ← `bin` depends on it),
+/// both crates.io-publishable — the orchestratectl shape.
+fn lib_bin_workspace_facts(lib: &str, bin: &str) -> Facts {
+    let mut f = rust_facts();
+    f.rust_workspace = Some(RustWorkspace {
+        members: vec![member(lib, "0.1.6", &[]), member(bin, "0.1.6", &[lib])],
+    });
+    f
+}
+
+/// The resolved package names of a plan's targets, in plan order.
+fn target_packages(plan: &ReleasePlan) -> Vec<Option<&str>> {
+    plan.targets.iter().map(|t| t.package.as_deref()).collect()
+}
+
+#[test]
+fn two_crate_workspace_declaring_only_the_bin_derives_both_members_lib_first() {
+    // THE headline gap: a contract that declares ONLY the bin crate as a target must
+    // now plan BOTH crates as ordered publish units (lib before bin), where before it
+    // planned only the bin — which would `cargo publish <bin>` while the `=`-pinned
+    // lib is not yet on crates.io (the orchestratectl failure).
+    let mut c = rust_contract();
+    c.targets = vec![target(
+        Ecosystem::Rust,
+        "orchestratectl",
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+    )];
+    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+
+    let plan = build(&c, &f, HEAD, "0.1.6");
+    assert_eq!(
+        target_packages(&plan),
+        vec![Some("octl-core"), Some("orchestratectl")],
+        "the lib is derived as its own target and ordered before the bin"
+    );
+    // Both are crates.io / cargo-publish Rust targets.
+    for t in &plan.targets {
+        assert_eq!(t.ecosystem, Ecosystem::Rust);
+        assert_eq!(t.registry, Registry::CratesIo);
+        assert_eq!(t.adapter, Adapter::CargoPublish);
+    }
+}
+
+#[test]
+fn a_contract_declaring_only_the_bin_yields_the_same_target_set_as_declaring_both() {
+    // The derivation is behavior-equivalent to a fully-declared contract: whether the
+    // repo declares only the bin or both crates (ossctl's shape), the RESOLVED,
+    // dependency-ordered publish set is identical. (The `plan_id` still differs — the
+    // seal hashes the full contract text, which differs by one declared target — but
+    // what a cut EXECUTES, the target set, is the same.)
+    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+
+    let mut only_bin = rust_contract();
+    only_bin.targets = vec![target(
+        Ecosystem::Rust,
+        "orchestratectl",
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+    )];
+
+    let mut both = rust_contract();
+    both.targets = vec![
+        target(
+            Ecosystem::Rust,
+            "octl-core",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
+        target(
+            Ecosystem::Rust,
+            "orchestratectl",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
+    ];
+
+    let derived = build(&only_bin, &f, HEAD, "0.1.6");
+    let declared = build(&both, &f, HEAD, "0.1.6");
+    assert_eq!(
+        target_packages(&derived),
+        target_packages(&declared),
+        "derived and fully-declared target sets match"
+    );
+    assert_eq!(
+        derived.targets, declared.targets,
+        "the derivation is a strict superset — the executed target set is identical"
+    );
+}
+
+#[test]
+fn ossctl_own_plan_is_unchanged_by_the_derivation() {
+    // GUARD: ossctl declares BOTH members in dep order already. The derivation must be
+    // a strict superset that produces the SAME plan (same targets, same order) — the
+    // graph-ordered set equals the declared set, so nothing about ossctl's own cut
+    // changes.
+    let mut c = rust_contract();
+    c.targets = vec![
+        target(
+            Ecosystem::Rust,
+            "ossctl-core",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
+        target(
+            Ecosystem::Rust,
+            "ossctl",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
+    ];
+    let mut f = rust_facts();
+    f.rust_workspace = Some(RustWorkspace {
+        members: vec![
+            member("ossctl-core", "0.4.0", &[]),
+            member("ossctl", "0.4.0", &["ossctl-core"]),
+        ],
+    });
+
+    // The plan built WITHOUT the graph (graph = None) and WITH it must be identical.
+    let mut f_no_graph = f.clone();
+    f_no_graph.rust_workspace = None;
+    let with_graph = build(&c, &f, HEAD, "0.4.0");
+    let without_graph = build(&c, &f_no_graph, HEAD, "0.4.0");
+    assert_eq!(with_graph.plan_id, without_graph.plan_id);
+    assert_eq!(
+        target_packages(&with_graph),
+        vec![Some("ossctl-core"), Some("ossctl")]
+    );
+}
+
+#[test]
+fn derivation_reorders_a_bin_first_declaration_into_dependency_order() {
+    // Even if the contract lists the bin BEFORE the lib, the derived plan orders the
+    // dependency first (the graph is the ordering authority, not the contract order).
+    let mut c = rust_contract();
+    c.targets = vec![
+        target(
+            Ecosystem::Rust,
+            "orchestratectl",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
+        target(
+            Ecosystem::Rust,
+            "octl-core",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
+    ];
+    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let plan = build(&c, &f, HEAD, "0.1.6");
+    assert_eq!(
+        target_packages(&plan),
+        vec![Some("octl-core"), Some("orchestratectl")]
+    );
+}
+
+#[test]
+fn derived_members_are_spliced_before_dist_and_homebrew_targets() {
+    // A full cargo-dist contract: crates.io publish (bin only, in the contract) +
+    // cargo-dist + homebrew. The derived lib+bin land where the crates.io target was;
+    // the cargo-dist and homebrew targets keep their trailing position.
+    let mut c = rust_contract();
+    c.targets = vec![
+        target(
+            Ecosystem::Rust,
+            "orchestratectl",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
+        target(
+            Ecosystem::Rust,
+            "orchestratectl",
+            Registry::GhReleases,
+            Adapter::CargoDist,
+        ),
+        target(
+            Ecosystem::Rust,
+            "orchestratectl",
+            Registry::Homebrew,
+            Adapter::HomebrewTap,
+        ),
+    ];
+    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let plan = build(&c, &f, HEAD, "0.1.6");
+    let shape: Vec<(&str, Registry)> = plan
+        .targets
+        .iter()
+        .map(|t| (t.package.as_deref().unwrap(), t.registry))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            ("octl-core", Registry::CratesIo),
+            ("orchestratectl", Registry::CratesIo),
+            ("orchestratectl", Registry::GhReleases),
+            ("orchestratectl", Registry::Homebrew),
+        ]
+    );
+}
+
+#[test]
+fn derivation_is_a_superset_keeping_a_declared_package_absent_from_the_graph() {
+    // Robustness: a contract-declared crates.io crate that the parsed graph did not
+    // capture (an odd manifest the detector missed) is still planned — never dropped.
+    let mut c = rust_contract();
+    c.targets = vec![target(
+        Ecosystem::Rust,
+        "extra-crate",
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+    )];
+    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let plan = build(&c, &f, HEAD, "0.1.6");
+    let names = target_packages(&plan);
+    assert!(names.contains(&Some("extra-crate")), "declared crate kept");
+    assert!(names.contains(&Some("octl-core")), "graph lib added");
+    assert!(names.contains(&Some("orchestratectl")), "graph bin added");
+}
+
+#[test]
+fn a_single_crate_repo_is_unaffected_by_the_derivation() {
+    // No workspace graph (a single root crate) ⇒ the plan is exactly the 1:1
+    // contract-resolved target set.
+    let c = rust_contract();
+    let plan = build(&c, &rust_facts(), HEAD, "0.1.0");
+    assert_eq!(target_packages(&plan), vec![Some("acme")]);
+}
+
+#[test]
+fn homebrew_tap_carries_into_a_multi_crate_plan() {
+    // Facet 4: the per-tool tap from the distribution block threads onto the plan
+    // (non-null) even for a derived multi-crate workspace.
+    let mut c = rust_contract();
+    c.targets = vec![
+        target(
+            Ecosystem::Rust,
+            "orchestratectl",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
+        target(
+            Ecosystem::Rust,
+            "orchestratectl",
+            Registry::Homebrew,
+            Adapter::HomebrewTap,
+        ),
+    ];
+    c.distributions = vec![Distribution {
+        package: None,
+        adapter: DistributionAdapter::CargoDist,
+        gh_releases: true,
+        installers: vec![Installer::Homebrew],
+        homebrew_tap: Some("jarimustonen/orchestratectl".to_string()),
+        platforms: vec!["aarch64-apple-darwin".to_string()],
+        extra_fields: serde_json::Map::new(),
+    }];
+    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let plan = build(&c, &f, HEAD, "0.1.6");
+    assert_eq!(
+        plan.homebrew_tap.as_deref(),
+        Some("jarimustonen/orchestratectl")
+    );
+    // And the derivation still produced both crates.io members.
+    assert_eq!(
+        plan.targets
+            .iter()
+            .filter(|t| t.registry == Registry::CratesIo)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn orchestratectl_plan_id_differs_once_the_lib_target_is_derived() {
+    // The resolved target set grew (bin-only → lib+bin), so the sealed plan_id
+    // changes — a stale single-target plan re-derives to a different id and `verify`
+    // reports drift, exactly as intended (the plan genuinely changed).
+    let mut c = rust_contract();
+    c.targets = vec![target(
+        Ecosystem::Rust,
+        "orchestratectl",
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+    )];
+    let mut f_no_graph = rust_facts();
+    f_no_graph.rust_workspace = None;
+    let f_graph = lib_bin_workspace_facts("octl-core", "orchestratectl");
+
+    let before = build(&c, &f_no_graph, HEAD, "0.1.6");
+    let after = build(&c, &f_graph, HEAD, "0.1.6");
+    assert_eq!(target_packages(&before), vec![Some("orchestratectl")]);
+    assert_ne!(before.plan_id, after.plan_id);
+}
+
+// ── topological member ordering ──────────────────────────────────────────────
+
+#[test]
+fn topo_order_puts_dependencies_before_dependents() {
+    // A three-crate chain: core ← mid ← app (app depends on mid, mid on core).
+    let members = vec![
+        member("app", "1.0.0", &["mid"]),
+        member("mid", "1.0.0", &["core"]),
+        member("core", "1.0.0", &[]),
+    ];
+    assert_eq!(topo_order_members(&members), vec!["core", "mid", "app"]);
+}
+
+#[test]
+fn topo_order_is_deterministic_for_independent_members() {
+    // Independent members keep declaration order (a stable, reproducible tie-break —
+    // a requirement of the content-addressed plan).
+    let members = vec![member("zeta", "1.0.0", &[]), member("alpha", "1.0.0", &[])];
+    assert_eq!(topo_order_members(&members), vec!["zeta", "alpha"]);
+}
+
+#[test]
+fn topo_order_appends_a_cycle_deterministically_without_looping() {
+    // A pathological cycle (a ← b ← a) cannot be ordered; the members are still all
+    // emitted (declaration order), never dropped or hung on.
+    let members = vec![member("a", "1.0.0", &["b"]), member("b", "1.0.0", &["a"])];
+    assert_eq!(topo_order_members(&members), vec!["a", "b"]);
 }

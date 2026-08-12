@@ -246,6 +246,7 @@ fn facts_with(maturity: Maturity, has_ci: bool, bot: Option<&str>) -> Facts {
             spike: false,
         },
         inferred_maturity: maturity,
+        rust_workspace: None,
     }
 }
 

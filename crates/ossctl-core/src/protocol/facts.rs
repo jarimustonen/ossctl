@@ -76,6 +76,53 @@ pub struct Facts {
     pub maturity_signals: MaturitySignals,
     /// The inferred maturity (SCHEMA.md §4 truth table, tie → `mvp`).
     pub inferred_maturity: Maturity,
+    /// The Rust workspace's publishable member graph — derived plumbing the
+    /// release planner needs, deliberately kept **off the JSON wire**
+    /// (`#[serde(skip)]`), `None` for a repo with no multi-crate Cargo workspace.
+    ///
+    /// It lets [`crate::release::plan`] derive the full, dependency-ordered publish
+    /// set for a multi-crate workspace: a downstream repo that declares only its bin
+    /// crate as a release target still gets its lib crate planned, lib-before-bin, so
+    /// `cargo publish` never hits an unindexed `=`-pinned sibling (the
+    /// `release-rust-workspace-multicrate` gap). Exposing it on the wire would perturb
+    /// the shared facts schema `/oss-init` and `audit` read; the plan content-addresses
+    /// the resolved *targets* it produces from this graph, so the graph itself need not
+    /// travel on the wire. Skipped fields still participate in [`PartialEq`], so it is a
+    /// faithful part of the in-process fact value.
+    #[serde(skip)]
+    pub rust_workspace: Option<RustWorkspace>,
+}
+
+/// A Rust Cargo workspace's crates.io-**publishable** members and the
+/// intra-workspace dependency edges among them — the graph the release planner
+/// derives a dependency-ordered publish set from (`release-rust-workspace-multicrate`).
+///
+/// Off-wire plumbing carried on [`Facts::rust_workspace`]; see that field for why it
+/// is not serialized. Members are listed in workspace declaration order (the planner
+/// applies the topological ordering — a dependency before its dependents); only
+/// members publishable to crates.io are included (a `publish = false` member, or one
+/// restricted to a non-crates.io registry, is dropped, matching the cargo adapter's
+/// cut-time `cargo metadata` filter).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustWorkspace {
+    /// The publishable workspace members, in declaration order.
+    pub members: Vec<WorkspaceMember>,
+}
+
+/// One crates.io-publishable Cargo workspace member and its intra-workspace
+/// (publishable) dependency crate names — a node in [`RustWorkspace`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceMember {
+    /// The crate/package name (`[package].name`).
+    pub package: String,
+    /// The member's declared/inherited version, or `None` when unresolved.
+    pub version: Option<String>,
+    /// The names of this member's dependencies that are themselves publishable
+    /// members of the same workspace — the edges that order the publish (each of
+    /// these must be crates.io-index-visible before this member can publish). Only
+    /// normal + build dependencies gate order; dev-dependencies are excluded (they
+    /// never gate publish order and can legitimately cycle).
+    pub workspace_deps: Vec<String>,
 }
 
 /// One detected package manifest and the name/version parsed from it.
