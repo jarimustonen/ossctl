@@ -5,9 +5,19 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-08-12 (stints #16 + #17). New agent: read this, then continue with a
-fresh `/stint-start`. Main is clean, all pushed. Live: **0.4.0** on all four channels. **Nothing
-urgent is queued** — the DAG head-of-line is all DEFERRED/optional; pick anything or ask Jari._
+_Handoff written 2026-08-12 (stint #18). New agent: read this, then continue with a fresh
+`/stint-start`. Main is clean; the DAG commit is committed (push it with the next round's
+pull-rebase-push, per policy). Live: **0.4.0** on all four channels. **⚠️ ONE HIGH item is now
+queued as the head-of-line: `release-rust-workspace-multicrate`** (feature — filed 2026-08-12 by the
+orchestratectl session). Start there, or ask Jari._
+
+_**Stint #18 (2026-08-12) — a short LISTING / DAG-maintenance round, no release, no code.** Jari asked
+for a glasspad list of all open issues; while building it a NEW HIGH issue appeared mid-stint
+(`release-rust-workspace-multicrate`, committed `a170409` by the orchestratectl session). Reconciled it
+into the DAG as LANE A's head-of-line and refreshed the now-stale "no HIGH blocker" prose. All 27 open
+issues are covered by the DAG (drift check clean). No worktrees spawned, nothing deployed. The glasspad
+issue list is published at glasspad.maalla.dev (hosted, single-page `publish`; that server's whole-space
+`publish-space` endpoint 404s — use single-page publish or static `build`)._
 
 _🎉 **THREE RELEASES THIS SESSION — 0.2.5, 0.3.0, 0.4.0.** Stint #16 made the engine's real-cut publish
 TRUSTWORTHY (0.2.5) then HARDENED it (0.3.0, BREAKING). Stint #17 shipped 0.4.0 — pi.dev skill dual-homing._
@@ -66,11 +76,18 @@ _✅ **`pidev-dual-home-skills` is DONE (shipped in 0.4.0)** — no longer the h
 earlier PENDING runs named `pidev-dual-home-skills` / `dual-home-skills` turned out to be **glasspad's**
 worker, not ossctl's; ossctl's was implemented fresh this stint.)_
 
-_⚠️ **NO HIGH blocker remains** — nothing urgent queued. The engine cut path is trustworthy + hardened;
-all 4 cut-noop follow-ups shipped in 0.3.0; pi.dev dual-homing shipped in 0.4.0. Everything left in the
-DAG is DEFERRED/optional. The one item that wants a HUMAN CALL: `release-ci-publish-mode` (glasspad
-friction — a 'publish-in-CI / tag-only cut' mode for repos that forbid a local `cargo publish`) still
-needs Jari's triage before it's picked up._
+_⚠️ **ONE HIGH blocker is now queued: `release-rust-workspace-multicrate`** (feature, LANE A head-of-line,
+filed 2026-08-12 by the orchestratectl session). The engine produces an INCOMPLETE plan for a DOWNSTREAM
+two-crate Rust workspace: (1) only the bin crate is a target → a cut fails on the `=<ver>` pin because
+the lib isn't published (must DERIVE dep-ordered member publish from the workspace graph); (2) no
+version-bump phase (the engine must OWN the bump — workspace version + `=<ver>` pins + Cargo.lock +
+CHANGELOG finalize + regenerate version-embedding insta snapshots — as a content-addressed plan phase);
+(3) `homebrew_tap` null despite the contract's distribution declaring the tap (carry it into the plan).
+DONE = a real orchestratectl cut succeeds end-to-end. RELATED downstream-cut gaps (all still DEFERRED):
+`release-ci-publish-mode` (glasspad friction — 'publish-in-CI / tag-only cut' mode; still wants Jari's
+triage) and `per-distribution-release`. ossctl's OWN cut path stays trustworthy + hardened (0.2.5/0.3.0),
+so Track B is unaffected; this is purely a downstream-consumer gap. Everything else in the DAG is
+DEFERRED/optional._
 
 _**Housekeeping:** no lingering worktrees (all three round workers settled + torn down). A Dependabot
 `clap-4.6.5` PR is open on the remote — adjacent, not triaged this stint._
@@ -90,9 +107,10 @@ adapters, #9–11 shipped 0.1.0/0.1.1/0.1.2, #12 multi-target cut, #13 interleav
 the DOGFOOD (0.2.2/0.2.3 via engine) — `ossctl release cut` cuts ossctl itself end-to-end. #15 shipped
 0.2.4 + cleared all decisions. #16 shipped 0.2.5 (real-cut publish trustworthy) THEN 0.3.0 (BREAKING:
 --version removed + non-Rust fail-closed + clean-checkout cut + digest-authenticated resume skip). #17
-shipped 0.4.0 (skill install dual-homes into pi.dev). Epic `ossctl-phase4-build` stays OPEN. Cross-repo standardisation +
-hauis infra remain HOMEBASE concerns (homebase issue `cross-repo-release-standardisation`), NOT ossctl
-work. ---_
+shipped 0.4.0 (skill install dual-homes into pi.dev). #18 was a short listing/DAG-maintenance round (no
+release, no code) that reconciled the new HIGH `release-rust-workspace-multicrate` into the DAG. Epic
+`ossctl-phase4-build` stays OPEN. Cross-repo standardisation + hauis infra remain HOMEBASE concerns
+(homebase issue `cross-repo-release-standardisation`), NOT ossctl work. ---_
 
 **Read first (the spec):** `docs/adr/000{1,2,3,4}-*.md` (CLI taxonomy, release engine, config+journal, one-target-one-publish-unit).
 
