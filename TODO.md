@@ -5,8 +5,19 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-08-11 (stint #16, incl. round-2). New agent: read this, then continue with a
-fresh `/stint-start`. Main is clean, all pushed. Live: **0.3.0** on all four channels._
+_Handoff written 2026-08-12 (stints #16 + #17). New agent: read this, then continue with a
+fresh `/stint-start`. Main is clean, all pushed. Live: **0.4.0** on all four channels. **Nothing
+urgent is queued** — the DAG head-of-line is all DEFERRED/optional; pick anything or ask Jari._
+
+_🎉 **THREE RELEASES THIS SESSION — 0.2.5, 0.3.0, 0.4.0.** Stint #16 made the engine's real-cut publish
+TRUSTWORTHY (0.2.5) then HARDENED it (0.3.0, BREAKING). Stint #17 shipped 0.4.0 — pi.dev skill dual-homing._
+
+_**0.4.0 (2026-08-11, stint #17)** — `pidev-dual-home-skills` DONE: `ossctl skill install` now dual-homes
+each `SKILL.md` into `~/.pi/agent/skills/<name>/` (pi.dev harness) — with `--agent` omitted it writes
+BOTH Claude + pi.dev by DEFAULT (`--agent claude`=single-home, `pi`/`codex`=narrow, `all`=every runtime).
+New `Runtime::Pi`; `--json installed[]` shape unchanged (additive). Part of the Claude Code→pi.dev
+migration (homebase `pidev-migration`/WS4). Minor bump (new feature + default-behavior change). Fully-
+autonomous engine self-cut, exit 0, all four channels live. Plan `b77d521c…`, head `f5b31dc`._
 
 _🎉 **STINT #16 — 0.2.5 THEN 0.3.0 SHIPPED. The engine's real-cut publish is now TRUSTWORTHY and
 HARDENED.** Round-1 fixed the two HIGH bugs the first real downstream cut (issuectl 0.8.1) exposed and
@@ -51,19 +62,15 @@ structural defense: whatever the cause, a cut that doesn't actually upload now f
 faking success. If a real downstream cut still no-ops after this, capture the exact emitted `cargo
 publish` line, the target manifest versions, and whether every publishable crate is a declared target._
 
-_🔴 **URGENT NEXT ITEM (Jari, 2026-08-11): `pidev-dual-home-skills` (HIGH) — the DAG head-of-line.**
-Teach `ossctl skill install` (+ `--force`/`--agent`) to DUAL-HOME each skill: also write `SKILL.md`
-into `~/.pi/agent/skills/<name>/` (pi.dev harness) alongside `~/.claude/skills/<name>/`, idempotent +
-vendored-filtering-aware; Claude path unchanged. Touches `crates/ossctl-cli/src/skill.rs` (NOT a
-release hot file). Part of the Claude Code→pi.dev migration (homebase epic `pidev-migration`/WS4).
-⚠️ **Before spawning, CHECK for an in-flight worker:** at handoff time `orchestratectl run list` showed
-PENDING runs named `pidev-dual-home-skills` / `dual-home-skills` that THIS session did NOT spawn — another
-session may already be on it (or they're stale/hung like this round's Worker B). Verify status/landing
-before starting a fresh worker._
+_✅ **`pidev-dual-home-skills` is DONE (shipped in 0.4.0)** — no longer the head-of-line. (Note: the
+earlier PENDING runs named `pidev-dual-home-skills` / `dual-home-skills` turned out to be **glasspad's**
+worker, not ossctl's; ossctl's was implemented fresh this stint.)_
 
-_⚠️ **NO HIGH release blocker remains** — the engine cut path is trustworthy + hardened. All 4 cut-noop
-review follow-ups were FILED AND SHIPPED in 0.3.0 (round-2). Everything else in the DAG is
-DEFERRED/optional; `release-ci-publish-mode` (glasspad friction) still needs Jari triage._
+_⚠️ **NO HIGH blocker remains** — nothing urgent queued. The engine cut path is trustworthy + hardened;
+all 4 cut-noop follow-ups shipped in 0.3.0; pi.dev dual-homing shipped in 0.4.0. Everything left in the
+DAG is DEFERRED/optional. The one item that wants a HUMAN CALL: `release-ci-publish-mode` (glasspad
+friction — a 'publish-in-CI / tag-only cut' mode for repos that forbid a local `cargo publish`) still
+needs Jari's triage before it's picked up._
 
 _**Housekeeping:** no lingering worktrees (all three round workers settled + torn down). A Dependabot
 `clap-4.6.5` PR is open on the remote — adjacent, not triaged this stint._
@@ -82,14 +89,14 @@ _--- older history in git: stints #1–7 built the `/oss-*` deterministic core, 
 adapters, #9–11 shipped 0.1.0/0.1.1/0.1.2, #12 multi-target cut, #13 interleave + 0.2.1, #14 completed
 the DOGFOOD (0.2.2/0.2.3 via engine) — `ossctl release cut` cuts ossctl itself end-to-end. #15 shipped
 0.2.4 + cleared all decisions. #16 shipped 0.2.5 (real-cut publish trustworthy) THEN 0.3.0 (BREAKING:
---version removed + non-Rust fail-closed + clean-checkout cut + digest-authenticated resume skip). Epic
-`ossctl-phase4-build` stays OPEN. Cross-repo standardisation +
+--version removed + non-Rust fail-closed + clean-checkout cut + digest-authenticated resume skip). #17
+shipped 0.4.0 (skill install dual-homes into pi.dev). Epic `ossctl-phase4-build` stays OPEN. Cross-repo standardisation +
 hauis infra remain HOMEBASE concerns (homebase issue `cross-repo-release-standardisation`), NOT ossctl
 work. ---_
 
 **Read first (the spec):** `docs/adr/000{1,2,3,4}-*.md` (CLI taxonomy, release engine, config+journal, one-target-one-publish-unit).
 
-## Execution DAG (2026-08-11, stint #16 round-2 handoff)
+## Execution DAG (2026-08-12, stint #17 handoff)
 
 Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
 (never copied here). Merge at Phase 0/handoff (drop landed, add active, keep existing order).
@@ -102,7 +109,7 @@ personal environment), NOT ossctl work — moved to homebase issue `cross-repo-r
 Do not re-add them here.
 
 **Track B — "ossctl cuts ITSELF through the engine" — ✅ COMPLETE (stint #14) and now ROUTINE (stints
-#15/#16 shipped 0.2.4/0.2.5/0.3.0 the same way; #16 made the real-cut publish trustworthy + hardened).**
+#15/#16/#17 shipped 0.2.4/0.2.5/0.3.0/0.4.0 the same way; #16 made the real-cut publish trustworthy + hardened).**
 No HIGH release blocker remains. Every release node below is DEFERRED hardening,
 review follow-ups, or the one approved future feature (`oss-dist-channel-generator`, UNLANED). LANE C
 is retired for ossctl's own cut — only `release-macos-hauis-coupling` survives (homebase-adjacent).
@@ -172,4 +179,4 @@ UNLANED — skill-installer + /oss-* family (skill/template work; no release-eng
 
 Post-release hardening + Track B are children/followups under
 [`ossctl-phase4-build`](issues/ossctl-phase4-build/item.md) (still OPEN). `issuectl list` for the
-live view. 0.3.0 is shipped; the epic stays open for its tails (see handoff) and the lanes above.
+live view. 0.4.0 is shipped; the epic stays open for its tails (see handoff) and the lanes above.
