@@ -986,6 +986,8 @@ fn derived_members_are_spliced_before_dist_and_homebrew_targets() {
 fn derivation_is_a_superset_keeping_a_declared_package_absent_from_the_graph() {
     // Robustness: a contract-declared crates.io crate that the parsed graph did not
     // capture (an odd manifest the detector missed) is still planned — never dropped.
+    // It has no graph edges, so its closure is just itself: the UNRELATED workspace
+    // members are NOT pulled in.
     let mut c = rust_contract();
     c.targets = vec![target(
         Ecosystem::Rust,
@@ -995,10 +997,101 @@ fn derivation_is_a_superset_keeping_a_declared_package_absent_from_the_graph() {
     )];
     let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
     let plan = build(&c, &f, HEAD, "0.1.6");
-    let names = target_packages(&plan);
-    assert!(names.contains(&Some("extra-crate")), "declared crate kept");
-    assert!(names.contains(&Some("octl-core")), "graph lib added");
-    assert!(names.contains(&Some("orchestratectl")), "graph bin added");
+    assert_eq!(
+        target_packages(&plan),
+        vec![Some("extra-crate")],
+        "a declared crate absent from the graph is planned alone — no unrelated members"
+    );
+}
+
+#[test]
+fn derivation_publishes_the_closure_not_every_member() {
+    // SAFETY (the over-publish fix): a workspace with an UNRELATED publishable member
+    // the contract deliberately omitted (e.g. a not-yet-release-ready crate) must NOT
+    // be published. The plan is the declared bin + its dependency closure (the lib) —
+    // never the unrelated `experimental` crate.
+    let mut c = rust_contract();
+    c.targets = vec![target(
+        Ecosystem::Rust,
+        "orchestratectl",
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+    )];
+    let mut f = rust_facts();
+    f.rust_workspace = Some(RustWorkspace {
+        members: vec![
+            member("octl-core", "0.1.6", &[]),
+            member("orchestratectl", "0.1.6", &["octl-core"]),
+            member("experimental", "0.1.6", &[]), // publishable but unrelated + undeclared
+        ],
+    });
+    let plan = build(&c, &f, HEAD, "0.1.6");
+    assert_eq!(
+        target_packages(&plan),
+        vec![Some("octl-core"), Some("orchestratectl")],
+        "only the declared crate and its dependency closure are published"
+    );
+    assert!(
+        !target_packages(&plan).contains(&Some("experimental")),
+        "an unrelated undeclared member must never be pulled into an irreversible publish"
+    );
+}
+
+#[test]
+fn derivation_pulls_a_transitive_dependency_closure() {
+    // A three-crate chain declared only by the top: app → mid → core. The closure adds
+    // both mid and core, ordered core → mid → app.
+    let mut c = rust_contract();
+    c.targets = vec![target(
+        Ecosystem::Rust,
+        "app",
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+    )];
+    let mut f = rust_facts();
+    f.rust_workspace = Some(RustWorkspace {
+        members: vec![
+            member("app", "1.0.0", &["mid"]),
+            member("mid", "1.0.0", &["core"]),
+            member("core", "1.0.0", &[]),
+            member("unrelated", "1.0.0", &[]),
+        ],
+    });
+    let plan = build(&c, &f, HEAD, "1.0.0");
+    assert_eq!(
+        target_packages(&plan),
+        vec![Some("core"), Some("mid"), Some("app")]
+    );
+}
+
+#[test]
+fn an_ambiguous_null_rust_target_is_never_expanded_to_publish_everything() {
+    // A monorepo the facts could not disambiguate leaves the crates.io target
+    // `package: None`. The derivation must NOT turn that into a workspace-wide publish
+    // — it leaves the plan untouched so the downstream null-package guard refuses it.
+    let mut c = rust_contract();
+    c.targets = vec![Target {
+        ecosystem: Ecosystem::Rust,
+        package: None,
+        registry: Registry::CratesIo,
+        adapter: Adapter::CargoPublish,
+    }];
+    let mut f = rust_facts();
+    // Facts cannot resolve a single package name (several rust packages), so the
+    // target stays null; a workspace graph is nonetheless present.
+    f.packages = vec![
+        package(Ecosystem::Rust, "crates/a/Cargo.toml", "a", Some("1.0.0")),
+        package(Ecosystem::Rust, "crates/b/Cargo.toml", "b", Some("1.0.0")),
+    ];
+    f.rust_workspace = Some(RustWorkspace {
+        members: vec![member("a", "1.0.0", &[]), member("b", "1.0.0", &["a"])],
+    });
+    let plan = build(&c, &f, HEAD, "1.0.0");
+    assert_eq!(
+        target_packages(&plan),
+        vec![None],
+        "an unresolved rust target is preserved, never expanded into publish-everything"
+    );
 }
 
 #[test]

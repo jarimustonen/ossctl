@@ -430,14 +430,20 @@ fn push_member_dir(
 /// planner applies the topological publish ordering. `None` when no publishable
 /// named member resolves (nothing for the planner to expand).
 ///
-/// **Best-effort edges (ordering aid, not the cut-time authority).** Dependency
-/// names come from a line-oriented scan of `[dependencies]` / `[build-dependencies]`
-/// (and their `[dependencies.<name>]` sub-tables), honoring an inline `package = "…"`
-/// rename — the exact `dep = { path = "…", version = "=X" }` shape `/oss-init` emits.
-/// A member whose intra-workspace dep is renamed via a *sub-table* `package` key is a
-/// tolerated blind spot: the cargo adapter re-derives the true graph from `cargo
-/// metadata` at cut time and index-waits on the real deps, so a mis-ordered edge here
-/// only costs a planner ordering hint, never a wrong publish.
+/// **Edges gate publish ORDER, and a missed edge fails a cut CLOSED — it is not a
+/// free "hint".** The coordinator walks the plan's target order; the cargo adapter
+/// re-derives the graph from `cargo metadata` and index-waits on each crate's real
+/// deps, but it does **not** re-order the plan. So a missed ordering edge that puts a
+/// dependent before its dependency makes the dependent's `cargo publish` fail on the
+/// not-yet-indexed sibling — a safe, no-mis-publish failure, but a *failed release for
+/// a valid workspace*. The edge parse is therefore precise where it counts:
+/// [`member_dependency_names`] treats only `path`/`workspace` dependencies as edges
+/// (a registry dep sharing a member's name is not an edge, so no false constraint /
+/// false cycle), and reads the plain, target-specific, sub-table, and dotted-key
+/// dependency forms plus inline `package = "…"` renames. Its two documented blind
+/// spots (a rename inherited through the root `[workspace.dependencies]`, and a
+/// multi-line inline table) each fail closed the same way.
+///
 /// One parsed workspace member before the publishability filter — the intermediate
 /// [`detect_rust_workspace`] reduces to the published [`WorkspaceMember`] set.
 struct RawMember {
@@ -520,9 +526,11 @@ fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace>
 /// (`publish = []` therefore reads as no, matching `cargo metadata`'s `Some([])`).
 fn member_publishable_to_crates_io(text: &str) -> bool {
     let Some(block) = toml_section(text, "package") else {
-        // No `[package]` at all — not a normal member; treat as publishable (the
-        // name pass will have dropped it if unnamed).
-        return true;
+        // No `[package]` at all — not a publishable crate. (`detect_rust_workspace`
+        // already drops an unnamed member before this runs; failing closed here is a
+        // defensive guard so a future name-fabrication path can never leak a
+        // package-less manifest into the crates.io publish set.)
+        return false;
     };
     // Array form first: `publish = ["crates-io"]`.
     if let Some(regs) = toml_str_array(&block, "publish") {
@@ -562,98 +570,273 @@ fn toml_bool_value(block: &str, key: &str) -> Option<bool> {
     None
 }
 
-/// The dependency crate names declared by a Cargo member manifest's `[dependencies]`
-/// and `[build-dependencies]` tables (including their `[dependencies.<name>]`
-/// sub-tables), de-duplicated and sorted — the raw edge set [`detect_rust_workspace`]
-/// intersects with the publishable member names.
+/// One table the dependency-edge scanner is inside while walking a member manifest.
+enum DepTable {
+    /// A `[dependencies]` / `[build-dependencies]` body — including a target-specific
+    /// `[target.<cfg>.dependencies]` / `[target.<cfg>.build-dependencies]`, which
+    /// gate publish order exactly like the unconditional tables (crates.io validates
+    /// them at `cargo publish`).
+    Table,
+    /// A `[dependencies.<name>]` sub-table body (plain or target-specific),
+    /// accumulating whether it is a **local** dep (a `path`/`workspace` key) and its
+    /// `package = "…"` rename, so the edge is emitted with the real crate name on flush.
+    Sub {
+        /// The sub-table key (the crate name, unless overridden by `package`).
+        key: String,
+        /// The `package = "…"` rename value, if the body declares one.
+        package: Option<String>,
+        /// Whether the body marks this an intra-workspace dep (`path`/`workspace`).
+        local: bool,
+    },
+    /// A non-order-gating table (`[dev-dependencies]`, `[features]`, `[package]`, …).
+    Other,
+}
+
+/// The intra-workspace dependency crate names a Cargo member manifest declares — the
+/// raw edge set [`detect_rust_workspace`] intersects with the publishable member
+/// names, de-duplicated and sorted.
 ///
-/// Line-oriented (no TOML dep — matching this module's parsing style): a `key = …`
-/// line under a dependency table contributes `key`, resolved through a dotted-key
-/// (`foo.workspace = true` → `foo`) and an inline-table rename (`foo = { package =
-/// "bar" }` → `bar`). Dev-dependencies are excluded (they never gate publish order
-/// and can legitimately cycle). A sub-table `[dependencies.foo]` contributes `foo`.
+/// **Only `path` / `workspace` dependencies are edges.** A registry dependency
+/// (`serde = "1"`, or an inline table with only `version`) is NOT an intra-workspace
+/// edge even when a workspace member happens to share its name — Cargo resolves
+/// `serde = "1"` to crates.io, never to the local member, so treating a name
+/// collision as an edge would invent a false ordering constraint (and a false cycle).
+/// This mirrors Cargo's own model: a member edge exists iff the dependency resolves
+/// to a `path`/`workspace` source.
+///
+/// Line-oriented (no TOML dependency — matching this module's parsing style). It reads:
+/// `[dependencies]` / `[build-dependencies]` and their target-specific
+/// (`[target.<cfg>.dependencies]`) and sub-table (`[dependencies.<name>]`) forms;
+/// inline tables (`dep = { path = "…", package = "real" }`), dotted keys
+/// (`dep.path = "…"`, `dep.workspace = true`), and the `package = "…"` rename in each.
+/// Dev-dependencies are excluded (they never gate publish order and can legitimately
+/// cycle).
+///
+/// **Known blind spots (each fails a cut CLOSED, never mis-publishes — see
+/// `detect_rust_workspace`):** a dependency inheriting a *rename* through the root
+/// `[workspace.dependencies]` (`alias.workspace = true` where the root maps `alias`
+/// to a differently-named crate) resolves to `alias`, missing the edge; a *multi-line*
+/// inline table is read only by its first physical line.
 fn member_dependency_names(text: &str) -> Vec<String> {
-    /// Which dependency table (if any) the scanner is currently inside.
-    enum Table {
-        /// Inside a `[dependencies]` / `[build-dependencies]` table body.
-        Deps,
-        /// Not inside an order-gating dependency table.
-        Other,
-    }
-    let mut table = Table::Other;
+    let mut state = DepTable::Other;
     let mut out: Vec<String> = Vec::new();
+
     for line in text.lines() {
-        let l = strip_toml_comment(line);
-        let t = l.trim();
+        let t = strip_toml_comment(line).trim();
         if let Some(header) = t.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
-            let header = header.trim();
-            if header == "dependencies" || header == "build-dependencies" {
-                table = Table::Deps;
-            } else if let Some(sub) = header
-                .strip_prefix("dependencies.")
-                .or_else(|| header.strip_prefix("build-dependencies."))
-            {
-                // `[dependencies.foo]` sub-table: the crate is `foo` (the sub-table's
-                // own `package = "…"` rename is the tolerated blind spot documented on
-                // `detect_rust_workspace`).
-                table = Table::Other;
-                let name = sub.trim().trim_matches(['"', '\'']);
-                if !name.is_empty() {
-                    out.push(name.to_string());
-                }
-            } else {
-                // Any other table (`[dev-dependencies]`, `[features]`, `[package]`, a
-                // target-specific `[target.'cfg(…)'.dependencies]`) does not gate order.
-                table = Table::Other;
-            }
+            // Leaving a table: flush a completed sub-table's edge before switching.
+            flush_dep_subtable(&mut state, &mut out);
+            state = classify_dep_table(header.trim());
             continue;
         }
-        if matches!(table, Table::Deps) {
-            if let Some(name) = dep_name_from_line(t) {
-                out.push(name);
+        match &mut state {
+            DepTable::Table => {
+                if let Some(name) = dep_edge_from_line(t) {
+                    out.push(name);
+                }
             }
+            DepTable::Sub { package, local, .. } => {
+                // Accumulate the sub-table body: a `package` rename and the
+                // `path`/`workspace` markers that make it a local edge.
+                if let Some((k, v)) = split_key_value(t) {
+                    match k {
+                        "package" if package.is_none() => *package = extract_quoted(v),
+                        "path" => *local = true,
+                        "workspace" if v.trim_start().starts_with("true") => *local = true,
+                        _ => {}
+                    }
+                }
+            }
+            DepTable::Other => {}
         }
     }
+    flush_dep_subtable(&mut state, &mut out);
+
     out.sort();
     out.dedup();
     out
 }
 
-/// The dependency crate name a single `key = value` line under a `[dependencies]`
-/// table declares: the bare key, reduced past a dotted suffix (`foo.workspace`
-/// → `foo`) and overridden by an inline-table `package = "…"` rename. `None` for a
-/// line with no `=` or an empty key (a blank or continuation line).
-fn dep_name_from_line(line: &str) -> Option<String> {
+/// Classify a table header into the dependency-edge scanner's [`DepTable`] state.
+///
+/// Recognizes the sub-table forms (`[dependencies.<name>]`,
+/// `[target.<cfg>.dependencies.<name>]`) and the plain/target-specific table forms
+/// (`[dependencies]`, `[target.<cfg>.build-dependencies]`), while excluding every
+/// `dev-dependencies` variant. The `<cfg>` in a target header may contain dots and
+/// quotes; classification keys on the unquoted `.dependencies` / `.build-dependencies`
+/// suffix (and the `.dependencies.` / `.build-dependencies.` infix for sub-tables),
+/// which is robust regardless of the cfg contents.
+fn classify_dep_table(header: &str) -> DepTable {
+    if let Some(name) = dep_subtable_name(header) {
+        return DepTable::Sub {
+            key: name.trim().trim_matches(['"', '\'']).to_string(),
+            package: None,
+            local: false,
+        };
+    }
+    // dev-dependencies (plain or target-specific) never gate publish order.
+    if !header.contains("dev-dependencies")
+        && (header == "dependencies"
+            || header == "build-dependencies"
+            || header.ends_with(".dependencies")
+            || header.ends_with(".build-dependencies"))
+    {
+        return DepTable::Table;
+    }
+    DepTable::Other
+}
+
+/// The `<name>` of a dependency sub-table header (`[dependencies.<name>]`,
+/// `[build-dependencies.<name>]`, or their target-specific
+/// `[target.<cfg>.dependencies.<name>]` forms), or `None` when the header is not a
+/// dependency sub-table. Every `dev-dependencies` form yields `None`.
+fn dep_subtable_name(header: &str) -> Option<&str> {
+    if header.contains("dev-dependencies") {
+        return None;
+    }
+    if let Some(name) = header
+        .strip_prefix("dependencies.")
+        .or_else(|| header.strip_prefix("build-dependencies."))
+    {
+        return Some(name);
+    }
+    // Target-specific: split on the LAST `.dependencies.` / `.build-dependencies.`
+    // (the cfg expression precedes it and may itself contain dots).
+    for infix in [".dependencies.", ".build-dependencies."] {
+        if let Some(idx) = header.rfind(infix) {
+            return Some(&header[idx + infix.len()..]);
+        }
+    }
+    None
+}
+
+/// The intra-workspace edge crate name a `key = value` line under a `[dependencies]`
+/// table declares, or `None` when the line is not a local (`path`/`workspace`) dep.
+///
+/// A registry dep (`foo = "1"`, or `foo = { version = "1" }` with no `path`) yields
+/// `None` — it is not a workspace edge. A local dep yields its crate name: an inline
+/// `package = "…"` rename when present, else the bare key. Dotted forms
+/// (`foo.path = "…"`, `foo.workspace = true`) are recognized; a lone `foo.version` /
+/// `foo.package` is not a local marker.
+fn dep_edge_from_line(line: &str) -> Option<String> {
+    let (key_full, val) = split_key_value(line)?;
+    let mut segs = key_full.split('.');
+    let crate_key = segs.next().unwrap_or("").trim().trim_matches(['"', '\'']);
+    if crate_key.is_empty() {
+        return None;
+    }
+    match segs.next().map(str::trim) {
+        // Dotted local markers: `foo.path = "…"` / `foo.workspace = true`.
+        Some("path") => Some(crate_key.to_string()),
+        Some("workspace") if val.trim_start().starts_with("true") => Some(crate_key.to_string()),
+        // `foo.version`, `foo.package`, `foo.features`, `foo.optional`, … alone do not
+        // mark a local dep.
+        Some(_) => None,
+        // Simple key: only an inline table with a `path`/`workspace = true` is local.
+        None => {
+            if !val.starts_with('{') || !inline_table_is_local(val) {
+                return None;
+            }
+            Some(inline_table_package(val).unwrap_or_else(|| crate_key.to_string()))
+        }
+    }
+}
+
+/// Emit a completed dependency sub-table's edge into `out` when the body marked it a
+/// local dep — its `package` rename if any, else the sub-table key. A registry
+/// sub-table (no `path`/`workspace`) emits nothing. Resets `state` to [`DepTable::Other`].
+fn flush_dep_subtable(state: &mut DepTable, out: &mut Vec<String>) {
+    if let DepTable::Sub {
+        key,
+        package,
+        local: true,
+    } = state
+    {
+        out.push(package.clone().unwrap_or_else(|| key.clone()));
+    }
+    *state = DepTable::Other;
+}
+
+/// Split a TOML `key = value` line into its trimmed, unquoted key and its trimmed
+/// value text, or `None` when the line has no `=` or an empty key (a blank or
+/// continuation line).
+fn split_key_value(line: &str) -> Option<(&str, &str)> {
     let eq = line.find('=')?;
-    let (key_part, val_part) = line.split_at(eq);
-    // Dotted key (`foo.workspace = true`) → the crate is the first segment.
-    let key = key_part
-        .trim()
-        .split('.')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .trim_matches(['"', '\'']);
+    let key = line[..eq].trim().trim_matches(['"', '\'']);
     if key.is_empty() {
         return None;
     }
-    // Inline-table rename: `foo = { package = "bar", … }` depends on crate `bar`.
-    let val = val_part.trim_start_matches('=').trim();
-    if val.starts_with('{') {
-        if let Some(renamed) = inline_table_package(val) {
-            return Some(renamed);
+    Some((key, line[eq + 1..].trim()))
+}
+
+/// Whether an inline dependency table (`{ … }`) resolves to an intra-workspace member
+/// — it declares a whole-token `path` key or `workspace = true`. A table with only a
+/// `version` (a plain crates.io dep) is not local.
+fn inline_table_is_local(inline: &str) -> bool {
+    contains_toml_key(inline, "path") || toml_key_is_true(inline, "workspace")
+}
+
+/// Whether `s` contains `key` as a whole TOML key immediately followed (past spaces)
+/// by `=` — so `path = "…"` matches but a `path` substring inside another value, or a
+/// longer key like `no-default-features`, does not.
+fn contains_toml_key(s: &str, key: &str) -> bool {
+    scan_toml_key(s, key, |_after| true)
+}
+
+/// Whether `s` assigns `true` to a whole TOML key `key` (`workspace = true`).
+fn toml_key_is_true(s: &str, key: &str) -> bool {
+    scan_toml_key(s, key, |after| after.trim_start().starts_with("true"))
+}
+
+/// Scan `s` for a whole-token TOML `key` immediately followed (past spaces) by `=`,
+/// and test the post-`=` remainder with `accept`. "Whole token" = the char before
+/// `key` is not an identifier char (alphanumeric / `_` / `-`), so a substring inside a
+/// value or a longer key never matches. Returns `true` on the first accepted match.
+fn scan_toml_key(s: &str, key: &str, accept: impl Fn(&str) -> bool) -> bool {
+    let mut rest = s;
+    while let Some(pos) = rest.find(key) {
+        let prev_is_ident = rest[..pos]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-');
+        let after = rest[pos + key.len()..].trim_start();
+        if !prev_is_ident {
+            if let Some(value) = after.strip_prefix('=') {
+                if accept(value) {
+                    return true;
+                }
+            }
         }
+        rest = &rest[pos + key.len()..];
     }
-    Some(key.to_string())
+    false
 }
 
 /// The `package = "…"` value inside an inline dependency table (`{ package = "bar",
 /// version = "1" }`), or `None` when the table declares no rename. A best-effort
 /// single-line scan (inline tables are single-line in practice).
+///
+/// Matches `package` as a **whole key** (the preceding char is not an identifier
+/// char and the next non-space char is `=`), so a substring inside another value —
+/// e.g. a `path = "../my-package-dir"` — is never misread as a rename key.
 fn inline_table_package(inline: &str) -> Option<String> {
-    let after = &inline[inline.find("package")? + "package".len()..];
-    let after = after.trim_start().strip_prefix('=')?.trim_start();
-    extract_quoted(after)
+    let mut rest = inline;
+    while let Some(pos) = rest.find("package") {
+        let prev_is_ident = rest[..pos]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-');
+        let after = rest[pos + "package".len()..].trim_start();
+        if !prev_is_ident {
+            if let Some(value) = after.strip_prefix('=') {
+                return extract_quoted(value.trim_start());
+            }
+        }
+        // Not the rename key (a substring, or `package` not followed by `=`): keep
+        // scanning past this occurrence.
+        rest = &rest[pos + "package".len()..];
+    }
+    None
 }
 
 /// The literal parent directory of a trailing single-level glob member — `crates/*`
@@ -1442,6 +1625,131 @@ mod tests {
             .find(|m| m.package == "cli")
             .expect("cli member");
         assert_eq!(cli.workspace_deps, vec!["real-core".to_string()]);
+    }
+
+    #[test]
+    fn rust_workspace_graph_ignores_registry_dep_sharing_a_member_name() {
+        // A registry dependency (`shared = "1"`) is NEVER an intra-workspace edge, even
+        // when a workspace member happens to be named `shared` — Cargo resolves it to
+        // crates.io. Treating the name collision as an edge would invent a false
+        // ordering constraint (and here a false cycle: cli↔shared).
+        let root = "[workspace]\nmembers = [\"shared\", \"cli\"]\n";
+        let shared = "[package]\nname = \"shared\"\nversion = \"1.0.0\"\n\n[dependencies]\n\
+                      cli = { path = \"../cli\" }\n"; // shared really depends on cli
+        let cli = "[package]\nname = \"cli\"\nversion = \"1.0.0\"\n\n[dependencies]\n\
+                   shared = \"1\"\n"; // a crates.io `shared`, NOT the workspace member
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/shared/Cargo.toml", shared)
+            .file("/repo/cli/Cargo.toml", cli);
+        let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
+        let cli = ws.members.iter().find(|m| m.package == "cli").unwrap();
+        let shared = ws.members.iter().find(|m| m.package == "shared").unwrap();
+        assert!(
+            cli.workspace_deps.is_empty(),
+            "a registry dep sharing a member name is not an edge"
+        );
+        assert_eq!(
+            shared.workspace_deps,
+            vec!["cli".to_string()],
+            "the real path edge is still detected"
+        );
+    }
+
+    #[test]
+    fn rust_workspace_graph_ignores_registry_inline_table_without_path() {
+        // An inline table with only `version` is a crates.io dep, not a workspace edge.
+        let root = "[workspace]\nmembers = [\"a\", \"b\"]\n";
+        let a = "[package]\nname = \"a\"\nversion = \"1.0.0\"\n";
+        let b = "[package]\nname = \"b\"\nversion = \"1.0.0\"\n\n[dependencies]\n\
+                 a = { version = \"1\", features = [\"x\"] }\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/a/Cargo.toml", a)
+            .file("/repo/b/Cargo.toml", b);
+        let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
+        let b = ws.members.iter().find(|m| m.package == "b").unwrap();
+        assert!(
+            b.workspace_deps.is_empty(),
+            "an inline registry dep (no path/workspace) is not an edge"
+        );
+    }
+
+    #[test]
+    fn rust_workspace_graph_reads_target_specific_dependency_edges() {
+        // A `[target.'cfg(...)'.dependencies]` normal dep gates publish order too —
+        // crates.io validates it at `cargo publish`.
+        let root = "[workspace]\nmembers = [\"core\", \"cli\"]\n";
+        let core = "[package]\nname = \"octl-core\"\nversion = \"1.0.0\"\n";
+        let cli = "[package]\nname = \"cli\"\nversion = \"1.0.0\"\n\n\
+                   [target.'cfg(unix)'.dependencies]\n\
+                   octl-core = { path = \"../core\", version = \"=1.0.0\" }\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/core/Cargo.toml", core)
+            .file("/repo/cli/Cargo.toml", cli);
+        let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
+        let cli = ws.members.iter().find(|m| m.package == "cli").unwrap();
+        assert_eq!(cli.workspace_deps, vec!["octl-core".to_string()]);
+    }
+
+    #[test]
+    fn rust_workspace_graph_reads_subtable_path_edge_and_rename() {
+        // `[dependencies.<name>]` sub-table with a `path` is a local edge; a `package`
+        // key inside renames it. A version-only sub-table is NOT an edge.
+        let root = "[workspace]\nmembers = [\"core\", \"cli\"]\n";
+        let core = "[package]\nname = \"real-core\"\nversion = \"1.0.0\"\n";
+        let cli = "[package]\nname = \"cli\"\nversion = \"1.0.0\"\n\n\
+                   [dependencies.alias]\npackage = \"real-core\"\npath = \"../core\"\n\
+                   version = \"=1.0.0\"\n\n\
+                   [dependencies.serde]\nversion = \"1\"\n"; // registry sub-table, not an edge
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/core/Cargo.toml", core)
+            .file("/repo/cli/Cargo.toml", cli);
+        let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
+        let cli = ws.members.iter().find(|m| m.package == "cli").unwrap();
+        assert_eq!(
+            cli.workspace_deps,
+            vec!["real-core".to_string()],
+            "the renamed path sub-table is the only edge; the version-only one is not"
+        );
+    }
+
+    #[test]
+    fn rust_workspace_graph_reads_dotted_key_path_edge() {
+        // Dotted-key form: `dep.path = "..."` (and `dep.workspace = true`) are local
+        // edges; a lone `dep.version` is not.
+        let root = "[workspace]\nmembers = [\"core\", \"cli\"]\n";
+        let core = "[package]\nname = \"core\"\nversion = \"1.0.0\"\n";
+        let cli = "[package]\nname = \"cli\"\nversion = \"1.0.0\"\n\n[dependencies]\n\
+                   core.path = \"../core\"\ncore.version = \"=1.0.0\"\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/core/Cargo.toml", core)
+            .file("/repo/cli/Cargo.toml", cli);
+        let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
+        let cli = ws.members.iter().find(|m| m.package == "cli").unwrap();
+        assert_eq!(cli.workspace_deps, vec!["core".to_string()]);
+    }
+
+    #[test]
+    fn rust_workspace_graph_dep_rename_ignores_package_substring_in_a_path() {
+        // A path value that literally contains "package" must NOT be misread as a
+        // `package = ` rename key: the edge stays on the bare key `octl-core`.
+        let root = "[workspace]\nmembers = [\"core\", \"cli\"]\n";
+        let core = "[package]\nname = \"octl-core\"\nversion = \"1.0.0\"\n";
+        let cli = "[package]\nname = \"cli\"\nversion = \"1.0.0\"\n\n[dependencies]\n\
+                   octl-core = { path = \"../my-package-core\", version = \"1\" }\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/core/Cargo.toml", core)
+            .file("/repo/cli/Cargo.toml", cli);
+        // `octl-core` is not a member name here (the lib is named `octl-core`, the dep
+        // key is `octl-core`) — assert the key resolves, not a spurious path substring.
+        let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
+        let cli = ws.members.iter().find(|m| m.package == "cli").unwrap();
+        assert_eq!(cli.workspace_deps, vec!["octl-core".to_string()]);
     }
 
     #[test]

@@ -5,6 +5,9 @@ type: feature
 status: in-progress
 priority: high
 labels: [release, rust]
+commits:
+- hash: 8a0b319
+  summary: derive dep-ordered multi-crate workspace publish set in the plan (facet 1+4)
 ---
 
 # release engine: support dependency-ordered multi-crate Rust workspace publish + version bump (retire hand-cut releases)
