@@ -8,6 +8,8 @@ labels: [release, rust]
 commits:
 - hash: 8a0b319
   summary: derive dep-ordered multi-crate workspace publish set in the plan (facet 1+4)
+- hash: '604e092'
+  summary: publish dependency closure + precise workspace edges (llm-review fixes)
 ---
 
 # release engine: support dependency-ordered multi-crate Rust workspace publish + version bump (retire hand-cut releases)
@@ -33,3 +35,63 @@ GOAL: make `ossctl release plan/cut` able to cut orchestratectl's releases so we
 
 ## Done
 `ossctl release cut` produces a correct, coherent orchestratectl release end-to-end (both crates published in order at the bumped version, snapshots green, tag pushed, tap updated) — verified on a real cut — so the repo's AGENTS.md 'the /oss-release skill orchestrates the whole thing' becomes true and hand-cutting is retired.
+
+---
+
+## Progress — spinoff (2026-08-12): facets 1 + 4 landed; 2 + 3 need a maintainer decision
+
+**Landed (green, multi-model reviewed):**
+
+- **Facet 1 — dependency-ordered member derivation. DONE.** `ossctl release plan`
+  now derives the full, dependency-ordered publish set for a multi-crate Cargo
+  workspace from the workspace graph, so a contract that declares ONLY the bin crate
+  yields BOTH crates as ordered publish units (lib before bin). Implemented as an
+  off-wire `Facts::rust_workspace` graph (`detect_rust_workspace`, precise
+  path/workspace edge parsing) + `expand_rust_workspace_members` in the plan.
+  **Publishes the declared targets' TRANSITIVE dependency CLOSURE, not every
+  publishable member** (an unrelated, deliberately-undeclared crate is never swept in
+  — an llm-review safety fix). ossctl's own plan is unchanged (strict superset). Proven
+  end-to-end: `release plan --json` on a two-crate fixture declaring only the bin
+  yields `[octl-core, orchestratectl]` (crates.io) and excludes an `experimental` crate.
+- **Facet 4 — homebrew_tap carry. DONE (was already carried; now tested).** The plan
+  threads the per-tool tap from the contract's distribution block; verified non-null for
+  the orchestratectl fixture (`jarimustonen/orchestratectl`).
+
+**NOT landed — need a maintainer design decision (left open deliberately):**
+
+- **Facet 2 — engine-owned version bump.** As specified ("plan at the PRE-bump commit;
+  engine sets `[workspace.package] version`, rewrites `=X` pins, refreshes Cargo.lock,
+  finalizes CHANGELOG"), this CONTRADICTS the current single-source-version model:
+  since `--version` was removed in 0.3.0, the release version derives SOLELY from the
+  manifest. There is no channel to tell the engine "bump to 0.1.6" when planning at the
+  pre-bump commit — the manifest still reads the old version. Owning the bump therefore
+  requires re-introducing a version INPUT (a `--version`/`--bump major|minor|patch`
+  flag, or reading an intended version from CHANGELOG `[Unreleased]`), which re-opens a
+  settled architecture decision. **Decision needed:** where does the new version come
+  from when the engine owns the bump? Once decided, the derived edits (pin rewrites +
+  lockfile refresh + CHANGELOG finalize) are a tractable content-addressed plan phase.
+- **Facet 3 — snapshot regeneration.** Depends on facet 2 (a bump is what restales the
+  snapshots). Open design choice: an in-engine regen step (run the repo's test-update
+  command, strip insta's volatile `assertion_line:` header) vs. a contract-declared
+  `bump_hook` the repo runs. Recommend the contract-declared hook (keeps the engine out
+  of arbitrary test-harness specifics); defer until facet 2's shape is fixed.
+
+**Ultimate acceptance (a real orchestratectl cut) is the maintainer's step** — it needs
+crates.io creds + an irreversible publish and was explicitly out of this spinoff's scope.
+
+### llm-review follow-ups (parser hardening; each fails a cut CLOSED today, never mis-publishes)
+
+From the 4-model review (report: `history/review-release-rust-workspace-multicrate.md`).
+Deferred as they are exotic for the target lib+bin shape and fail-safe:
+
+- workspace-inherited dependency RENAMES (`alias.workspace = true` where root
+  `[workspace.dependencies]` maps `alias` → a differently-named crate) drop the edge;
+- `publish` field workspace inheritance (`publish.workspace = true`) not resolved;
+- a NON-virtual workspace root (a root `[package]` that is also a member) is not graphed;
+- multi-line inline dependency tables read only their first physical line;
+- recursive/patterned member globs (`crates/**`, patterned `exclude`) unsupported
+  (pre-existing facts limitation);
+- Windows absolute-path / backslash member confinement (pre-existing);
+- `MANIFEST_LIMIT` truncation is treated as authoritative for release parsing;
+- a cut-time cross-check of the sealed plan ORDER against `cargo metadata` topology
+  (the plan hash covers the target SET + order, but nothing re-validates order at cut).
