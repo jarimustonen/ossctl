@@ -16,6 +16,8 @@ commits:
   summary: apply llm-review consensus fixes (build_with_bump owns arithmetic, preview warning, hook security note, changelog match)
 - hash: ce33e25
   summary: cut-time bump executor (facets 2/3 executor half); green + tested; issue stays open pending live acceptance cut
+- hash: 7590c2a
+  summary: apply llm-review consensus fixes (resume checkout-at-bump-commit, set_workspace_version from-verify, skip-lock-when-absent, remove premature branch push, refuse bump resume); deferred items folded into issue
 ---
 
 # release engine: support dependency-ordered multi-crate Rust workspace publish + version bump (retire hand-cut releases)
