@@ -2985,6 +2985,11 @@ fn seed_workspace() -> PathBuf {
         "# Changelog\n\n## [Unreleased]\n### Added\n- a feature\n",
     )
     .unwrap();
+    std::fs::write(
+        dir.join("Cargo.lock"),
+        "# auto\n[[package]]\nname = \"acme-core\"\nversion = \"0.4.0\"\n",
+    )
+    .unwrap();
     dir
 }
 
@@ -3157,5 +3162,15 @@ fn a_resumed_bump_run_does_not_double_bump() {
         .calls()
         .iter()
         .any(|c| c == "create:v0.5.0@priorbump"));
+    // CRITICAL (llm-review): the clean checkout was materialized AT the recorded bump
+    // commit, so dry-run/build/publish operate on the BUMPED tree — never the pre-bump
+    // sealed head (which would publish the OLD version under a bumped tag).
+    assert!(
+        cmd.calls()
+            .iter()
+            .any(|c| c.starts_with("git worktree add --detach") && c.ends_with("priorbump")),
+        "resume must check out the bump commit, not the sealed head: {:?}",
+        cmd.calls()
+    );
     let _ = std::fs::remove_dir_all(&seed);
 }

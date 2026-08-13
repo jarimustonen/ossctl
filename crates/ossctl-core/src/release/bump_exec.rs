@@ -156,8 +156,14 @@ impl From<BumpEditError> for BumpExecError {
 /// Apply the sealed `bump` inside `ctx.repo_root` (the coordinator's clean checkout),
 /// committing the edits and returning the [`BumpOutcome`]. `effective_date` is the
 /// `YYYY-MM-DD` CHANGELOG date (freshly computed on a first run, or the journalled date
-/// on resume so it never re-dates). `real_repo_root`/`branch` drive the best-effort push
-/// of the bump commit back to the real repo's branch (best-effort `push_bump_commit`).
+/// on resume so it never re-dates).
+///
+/// The bump commit is created on the checkout's detached HEAD; its object lives in the
+/// shared store, so the coordinator's tagger (running against the real repo) can point
+/// the release tag at it within the same cut. Advancing the real repo's *branch* to the
+/// bump commit is deliberately **not** done here (a best-effort pre-publish push would be
+/// an externally-visible effect before the build barrier, and a failed one leaves a
+/// split-brain remote) — it is a documented follow-up (`release-rust-workspace-multicrate`).
 ///
 /// # Errors
 /// [`BumpExecError`] on any failed edit, lockfile refresh, hook, post-hook validation,
@@ -166,15 +172,13 @@ pub fn apply_bump(
     ctx: &EffectCtx<'_>,
     bump: &BumpPlan,
     effective_date: &str,
-    real_repo_root: &Path,
-    branch: Option<&str>,
 ) -> Result<BumpOutcome, BumpExecError> {
     let root = ctx.repo_root;
 
-    // 1. Set the workspace version in the root manifest.
+    // 1. Set the workspace version in the root manifest (verified against `from_version`).
     let root_manifest = root.join("Cargo.toml");
     let text = read(&root_manifest)?;
-    let bumped = bump::set_workspace_version(&text, &bump.to_version)?;
+    let bumped = bump::set_workspace_version(&text, &bump.from_version, &bump.to_version)?;
     write(&root_manifest, &bumped)?;
 
     // 2. Rewrite each sealed intra-workspace pin in its dependent crate's manifest,
@@ -193,9 +197,15 @@ pub fn apply_bump(
         }
     }
 
-    // 3. Refresh Cargo.lock so the lockfile's own workspace-member entries carry the new
-    //    version (only the workspace packages; dependencies are left as-is).
-    refresh_lockfile(ctx)?;
+    // 3. Refresh Cargo.lock so its workspace-member entries carry the new version — but
+    //    only when the repo tracks a lockfile (a library workspace that intentionally
+    //    git-ignores Cargo.lock must not have one introduced by the cut). NOTE: this runs
+    //    `cargo update --workspace`, which re-resolves within the manifests' semver ranges;
+    //    for a version-only bump the third-party graph is unchanged in practice, but
+    //    pinning the resolution deterministically is a documented follow-up.
+    if root.join("Cargo.lock").exists() {
+        refresh_lockfile(ctx)?;
+    }
 
     // 4. Finalize the CHANGELOG when the contract's mode asked for it and a CHANGELOG
     //    exists. A declared-but-missing `## [Unreleased]` fails closed (via the transform).
@@ -224,11 +234,6 @@ pub fn apply_bump(
 
     // 6. Commit the edits in the checkout and read back the bump commit sha.
     let commit = commit_bump(ctx, &bump.to_version)?;
-
-    // Best-effort: advance the real repo's branch to the bump commit on the remote, so
-    // collaborators (and a later `git pull`) see the release commit. Never fatal —
-    // the tag push carries the commit objects regardless.
-    push_bump_commit(ctx, real_repo_root, branch);
 
     Ok(BumpOutcome {
         commit,
@@ -313,22 +318,6 @@ fn commit_bump(ctx: &EffectCtx<'_>, version: &str) -> Result<String, BumpExecErr
         ));
     }
     Ok(sha)
-}
-
-/// Best-effort push of the bump commit to the real repo's `branch` on `origin`
-/// (`HEAD:refs/heads/<branch>` from the checkout). Never fatal: a non-GitHub repo, a
-/// detached real HEAD (`branch` is `None`), or a push failure is tolerated — the
-/// coordinator's tag push carries the commit objects to the remote regardless, so the
-/// tag (and any tag-triggered CI) sees the bumped tree even if the branch was not
-/// advanced. The advance is a convenience so the tracking branch reflects the release.
-fn push_bump_commit(ctx: &EffectCtx<'_>, _real_repo_root: &Path, branch: Option<&str>) {
-    let Some(branch) = branch else { return };
-    let refspec = format!("HEAD:refs/heads/{branch}");
-    // Pushed from the checkout (whose detached HEAD is the bump commit); objects are
-    // shared with the real repo, so this updates the remote branch directly.
-    let _ = ctx
-        .runner
-        .run("git", &["push", "origin", &refspec], ctx.repo_root);
 }
 
 /// Run a `git` subcommand in `cwd`, failing closed on a non-zero exit.

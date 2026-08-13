@@ -1277,13 +1277,27 @@ fn derive_resume_plan(
     })?;
     let facts = ossctl_core::facts::gather(root, &RealFs, git);
 
-    // A `--bump` run reconstructs its plan differently: the bump commit moved HEAD past
-    // the sealed pre-bump commit, so re-deriving against live HEAD (and the bumped tree
-    // version) would never match `plan_id`. Instead rebuild the exact sealed plan via
-    // `build_with_bump` against the persisted sealed head + bump inputs, then apply the
-    // same `plan_id` drift + executability gates. (`release-rust-workspace-multicrate`.)
-    if let Some(inputs) = &state.bump_inputs {
-        return derive_resume_bump_plan(&normalized.contract, &facts, state, inputs, run_id);
+    // `release resume` of an interrupted `--bump` run is not yet supported. Reconstructing
+    // the exact sealed plan requires the contract + facts as they were at the SEALED
+    // pre-bump commit, but the bump commit has moved HEAD (and possibly the pins) past it,
+    // so re-deriving from the live tree would either mismatch `plan_id` or reconstruct a
+    // wrong plan. Rather than risk a mis-resume on the irreversible cut path, refuse with a
+    // clear, actionable message — the operator abandons and re-plans (a fresh cut
+    // re-materializes a clean checkout and re-applies the bump). Full bump-run resume is a
+    // documented follow-up gated behind the live acceptance cut
+    // (`release-rust-workspace-multicrate`).
+    if state.bump_inputs.is_some() {
+        return Err(CliError::user(
+            "resume_bump_unsupported",
+            format!(
+                "run {run_id} is an engine `--bump` run; resuming an interrupted bump cut is not \
+                 yet supported (the bump commit moved HEAD past the sealed commit, so the sealed \
+                 plan cannot be safely reconstructed from the live tree). Abandon it \
+                 (`ossctl release abandon {run_id}`) and plan + cut a fresh release — a new cut \
+                 re-applies the bump from a clean checkout."
+            ),
+        )
+        .with_invalid_value(run_id.to_string()));
     }
 
     // Confirm the journal's sealed version still matches the CURRENT tree manifest
@@ -1310,56 +1324,6 @@ fn derive_resume_plan(
         return Err(resume_drift_error(state, &plan));
     }
     // Defense in depth: the same executability preflight `cut` runs.
-    coordinator::validate_plan(&plan).map_err(|e| cut_error_to_cli(run_id, e))?;
-    Ok(plan)
-}
-
-/// Reconstruct a `--bump` run's approved plan for resume: rebuild the exact sealed plan
-/// via `build_with_bump` against the **persisted sealed head + bump inputs** (not live
-/// HEAD, which the bump commit moved), then apply the same `plan_id` drift +
-/// executability gates as the no-bump path (`release-rust-workspace-multicrate`).
-///
-/// The bump phase is idempotent on resume (the coordinator skips a re-apply when the
-/// journal already carries `BumpApplied`), so reconstructing the pre-bump plan is safe
-/// even after the bump landed and HEAD advanced.
-fn derive_resume_bump_plan(
-    contract: &Contract,
-    facts: &ossctl_core::protocol::facts::Facts,
-    state: &RunState,
-    inputs: &ossctl_core::protocol::journal::BumpInputs,
-    run_id: &str,
-) -> Result<ReleasePlan, CliError> {
-    let sealed_head = state.head_sha.as_deref().ok_or_else(|| {
-        CliError::system(
-            "resume_bump_head_missing",
-            format!(
-                "run {run_id} is a --bump run but its journal recorded no sealed head_sha to \
-                 reconstruct the plan against — the journal predates the bump-executor and cannot \
-                 be resumed; plan and cut a fresh release"
-            ),
-        )
-    })?;
-    let level = ossctl_core::protocol::plan::BumpLevel::parse(&inputs.level).ok_or_else(|| {
-        CliError::system(
-            "resume_bump_level_invalid",
-            format!(
-                "run {run_id}'s journal recorded an unrecognized bump level `{}`",
-                inputs.level
-            ),
-        )
-    })?;
-    let plan = ossctl_core::release::plan::build_with_bump(
-        contract,
-        facts,
-        sealed_head,
-        &inputs.from_version,
-        level,
-    )
-    .map_err(|e| bump_error_to_cli(level, e))?;
-    validate_version(&plan.version)?;
-    if plan.plan_id != state.plan_id {
-        return Err(resume_drift_error(state, &plan));
-    }
     coordinator::validate_plan(&plan).map_err(|e| cut_error_to_cli(run_id, e))?;
     Ok(plan)
 }

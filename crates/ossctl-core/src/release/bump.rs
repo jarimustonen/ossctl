@@ -216,18 +216,29 @@ pub fn workspace_version(manifest: &str) -> Option<String> {
     None
 }
 
-/// Rewrite the `[workspace.package]` `version = "…"` line to `to`, returning the new
-/// manifest text.
+/// Rewrite the `[workspace.package]` `version = "<from>"` line to `to`, returning the
+/// new manifest text.
 ///
 /// Scoped to the `[workspace.package]` section (the single source of truth for the
 /// release version) so a `version` key in any other table — `[package]`,
 /// `[dependencies.foo]`, `[workspace.dependencies]` — is never touched. Preserves the
 /// line's exact indentation and quote style; only the value between the quotes changes.
 ///
+/// **Verified against `from`** (llm-review defense-in-depth): the line is rewritten only
+/// when its current value is exactly `from` (the sealed pre-bump version). This makes the
+/// edit fail closed on a tree that does not match the plan, and — since the whole-key scan
+/// is line-oriented — it also sidesteps a `version = "…"` occurrence *inside a quoted
+/// string value* (e.g. a `description` that mentions a version) unless that string
+/// happens to equal `from`, in which case a following real `version` line still matches.
+///
 /// # Errors
-/// [`BumpEditError::WorkspaceVersionNotFound`] when the section or its `version` line
-/// is absent (fail closed rather than write a manifest with no version bump).
-pub fn set_workspace_version(manifest: &str, to: &str) -> Result<String, BumpEditError> {
+/// [`BumpEditError::WorkspaceVersionNotFound`] when the section, or a `version = "<from>"`
+/// line within it, is absent (fail closed rather than write a manifest with no bump).
+pub fn set_workspace_version(
+    manifest: &str,
+    from: &str,
+    to: &str,
+) -> Result<String, BumpEditError> {
     let mut out = String::with_capacity(manifest.len() + to.len());
     let mut in_section = false;
     let mut replaced = false;
@@ -238,7 +249,7 @@ pub fn set_workspace_version(manifest: &str, to: &str) -> Result<String, BumpEdi
         if let Some(header) = section_header(trimmed) {
             in_section = header == "workspace.package";
         } else if in_section && !replaced {
-            if let Some(rewritten) = replace_string_value(line, "version", to) {
+            if let Some(rewritten) = replace_exact_string_value(line, "version", from, to) {
                 out.push_str(&rewritten);
                 push_line_ending(&mut out, lines.peek().is_some(), ends_with_newline);
                 replaced = true;
@@ -610,7 +621,7 @@ mod tests {
     #[test]
     fn sets_the_workspace_package_version_only() {
         let manifest = "[workspace]\nmembers = [\"a\"]\n\n[workspace.package]\nversion = \"0.4.0\"\nedition = \"2021\"\n";
-        let out = set_workspace_version(manifest, "0.5.0").unwrap();
+        let out = set_workspace_version(manifest, "0.4.0", "0.5.0").unwrap();
         assert!(out.contains("version = \"0.5.0\""));
         assert!(!out.contains("0.4.0"));
         // Everything else preserved.
@@ -622,16 +633,42 @@ mod tests {
     fn does_not_touch_a_version_in_another_section() {
         let manifest =
             "[package]\nversion = \"9.9.9\"\n\n[workspace.package]\nversion = \"0.4.0\"\n";
-        let out = set_workspace_version(manifest, "0.5.0").unwrap();
+        let out = set_workspace_version(manifest, "0.4.0", "0.5.0").unwrap();
         assert!(out.contains("[package]\nversion = \"9.9.9\""));
         assert!(out.contains("[workspace.package]\nversion = \"0.5.0\""));
+    }
+
+    #[test]
+    fn does_not_match_a_version_inside_a_description_string() {
+        // A `version = "…"` inside a quoted string value (≠ `from`) is not rewritten; the
+        // real version line still is.
+        let manifest =
+            "[workspace.package]\ndescription = \"needs version = 1.0\"\nversion = \"0.4.0\"\n";
+        let out = set_workspace_version(manifest, "0.4.0", "0.5.0").unwrap();
+        assert!(
+            out.contains("needs version = 1.0"),
+            "description untouched: {out}"
+        );
+        assert!(
+            out.contains("version = \"0.5.0\""),
+            "real version bumped: {out}"
+        );
+    }
+
+    #[test]
+    fn fails_closed_when_the_current_version_does_not_match_from() {
+        let manifest = "[workspace.package]\nversion = \"1.2.3\"\n";
+        assert_eq!(
+            set_workspace_version(manifest, "0.4.0", "0.5.0"),
+            Err(BumpEditError::WorkspaceVersionNotFound)
+        );
     }
 
     #[test]
     fn fails_closed_when_no_workspace_package_version() {
         let manifest = "[package]\nversion = \"1.0.0\"\n";
         assert_eq!(
-            set_workspace_version(manifest, "2.0.0"),
+            set_workspace_version(manifest, "1.0.0", "2.0.0"),
             Err(BumpEditError::WorkspaceVersionNotFound)
         );
     }

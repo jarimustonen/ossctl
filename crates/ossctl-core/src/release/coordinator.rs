@@ -295,30 +295,36 @@ pub fn execute(
     // + `origin`, never on build output, so resolving it once up front is correct.
     let repo_slug = resolve_repo_slug(ctx, &targets);
 
-    // The REAL repo root + current branch, captured BEFORE re-rooting to the checkout:
-    // the engine-owned bump commit is advanced on the real repo's branch (best-effort),
-    // which needs the branch name read from the real repo's git config, not the
-    // throwaway detached checkout.
-    let real_repo_root = ctx.repo_root;
-    let branch = resolve_current_branch(ctx);
+    // The commit every effect phase builds/publishes from. For a fresh cut this is the
+    // sealed pre-bump `head_sha` (the bump phase below commits ON TOP of it and moves the
+    // checkout to the bump commit). For a RESUME of a --bump run whose bump already landed
+    // (`state.bump` recorded), it is the recorded bump commit — so the resumed
+    // dry-run/build/publish operate on the BUMPED tree, never the pre-bump one (which
+    // would publish the OLD version while the tag points at the bump commit; llm-review
+    // consensus critical fix). A no-bump run always uses `head_sha`.
+    let checkout_commit = journal
+        .state()
+        .bump
+        .as_ref()
+        .map_or_else(|| plan.head_sha.clone(), |b| b.commit.clone());
 
-    // Publish from a CLEAN CHECKOUT of the sealed commit, not the live tree
-    // (`release-cut-clean-checkout`). Materialize a throwaway detached `git
-    // worktree` at `plan.head_sha` (fail-closed if that commit is absent locally),
-    // then re-root the effect context there so every adapter command below runs
-    // against the approved bytes. The guard tears the worktree down on every exit
-    // path (Drop). The journal + tagger are unaffected — they stay on the real repo.
-    let checkout = SealedCheckout::materialize(ctx, &plan.head_sha)?;
+    // Publish from a CLEAN CHECKOUT of that commit, not the live tree
+    // (`release-cut-clean-checkout`). Materialize a throwaway detached `git worktree`
+    // (fail-closed if the commit is absent locally), then re-root the effect context there
+    // so every adapter command below runs against the approved bytes. The guard tears the
+    // worktree down on every exit path (Drop). The journal + tagger stay on the real repo.
+    let checkout = SealedCheckout::materialize(ctx, &checkout_commit)?;
     let checkout_ctx = ctx.with_repo_root(checkout.path());
     let ctx = &checkout_ctx;
 
     // Engine-owned version bump (--bump plans only) — FIRST, before any build/publish,
-    // so every later phase builds and publishes the BUMPED tree. Applies the sealed
-    // edits in the checkout, runs any bump_hook, commits, and journals the bump commit
-    // (idempotent on resume — never double-bumps). A no-bump plan is a clean no-op here.
-    bump_phase(journal, sink, ctx, plan, real_repo_root, branch.as_deref())?;
-    // The commit the tag must point at: the bump commit for a --bump run (the bump
-    // moved HEAD past the sealed pre-bump commit), else the sealed head_sha.
+    // so every later phase builds and publishes the BUMPED tree. On a fresh run it applies
+    // the sealed edits in the checkout, runs any bump_hook, commits, and journals the bump
+    // commit; on resume (bump already recorded) it is a no-op (the checkout was already
+    // materialized AT the bump commit above, so no re-apply and never a double-bump). A
+    // no-bump plan is a clean no-op here.
+    bump_phase(journal, sink, ctx, plan)?;
+    // The commit the tag must point at: the bump commit for a --bump run, else head_sha.
     let tag_commit = journal
         .state()
         .bump
@@ -890,8 +896,6 @@ fn bump_phase(
     sink: &mut dyn ProgressSink,
     ctx: &EffectCtx<'_>,
     plan: &ReleasePlan,
-    real_repo_root: &std::path::Path,
-    branch: Option<&str>,
 ) -> Result<(), CutError> {
     let Some(bump) = plan.bump.as_ref() else {
         return Ok(());
@@ -904,17 +908,12 @@ fn bump_phase(
 
     // Idempotent re-entry: if a prior attempt already applied + journalled the bump (an
     // interruption between `BumpApplied` and `phase_completed`), do NOT re-apply — the
-    // commit already exists and re-running the edits/hook would be a double-bump. Only
-    // complete the barrier. Otherwise apply the bump against the pristine checkout.
+    // commit already exists (the caller materialized the checkout AT it) and re-running the
+    // edits/hook would be a double-bump. Only complete the barrier. Otherwise apply the
+    // bump against the pristine checkout.
     if journal.state().bump.is_none() {
         let effective_date = crate::release::bump_exec::civil_date(ctx.clock.now_unix());
-        match crate::release::bump_exec::apply_bump(
-            ctx,
-            bump,
-            &effective_date,
-            real_repo_root,
-            branch,
-        ) {
+        match crate::release::bump_exec::apply_bump(ctx, bump, &effective_date) {
             Ok(outcome) => {
                 record(
                     journal,
@@ -938,25 +937,6 @@ fn bump_phase(
         },
     )?;
     Ok(())
-}
-
-/// The real repo's current branch (`git rev-parse --abbrev-ref HEAD`), or `None` when
-/// HEAD is detached (`"HEAD"`) or git fails — the target the engine-owned bump commit is
-/// best-effort advanced to on `origin`. Read from the REAL repo (not the detached
-/// checkout), before re-rooting.
-fn resolve_current_branch(ctx: &EffectCtx<'_>) -> Option<String> {
-    let out = ctx
-        .runner
-        .run("git", &["rev-parse", "--abbrev-ref", "HEAD"], ctx.repo_root)
-        .ok()?;
-    if out.status != Some(0) {
-        return None;
-    }
-    let branch = out.stdout.trim();
-    if branch.is_empty() || branch == "HEAD" {
-        return None;
-    }
-    Some(branch.to_string())
 }
 
 /// Run the tag-once barrier — coordinator-owned, reached only after every publish

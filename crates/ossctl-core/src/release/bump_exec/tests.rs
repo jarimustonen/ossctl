@@ -127,6 +127,12 @@ fn temp_workspace() -> PathBuf {
         "# Changelog\n\n## [Unreleased]\n### Added\n- a feature\n",
     )
     .unwrap();
+    // A tracked lockfile, so the lockfile-refresh step runs (it is skipped when absent).
+    std::fs::write(
+        dir.join("Cargo.lock"),
+        "# auto\n[[package]]\nname = \"acme-core\"\nversion = \"0.4.0\"\n",
+    )
+    .unwrap();
     dir
 }
 
@@ -168,7 +174,7 @@ fn applies_version_pin_changelog_and_commits() {
     let (clock, reg) = (FakeClock, NoRegistry);
     let ctx = ctx(&runner, &clock, &reg, &dir);
 
-    let outcome = apply_bump(&ctx, &bump_plan(), "2026-08-13", &dir, Some("main")).unwrap();
+    let outcome = apply_bump(&ctx, &bump_plan(), "2026-08-13").unwrap();
     assert_eq!(outcome.commit, "abc123def456");
     assert_eq!(outcome.effective_date, "2026-08-13");
 
@@ -191,10 +197,32 @@ fn applies_version_pin_changelog_and_commits() {
     assert!(calls
         .iter()
         .any(|c| c.starts_with("git commit -m release: v0.5.0")));
-    assert!(calls
-        .iter()
-        .any(|c| c == "git push origin HEAD:refs/heads/main"));
+    // The executor does NOT advance the branch (no pre-publish push).
+    assert!(
+        !calls.iter().any(|c| c.starts_with("git push")),
+        "the executor must not push the branch: {calls:?}"
+    );
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn skips_the_lockfile_refresh_when_no_lockfile_is_tracked() {
+    let dir = temp_workspace();
+    std::fs::remove_file(dir.join("Cargo.lock")).unwrap();
+    let runner = FakeRunner::new("abc");
+    let (clock, reg) = (FakeClock, NoRegistry);
+    let ctx = ctx(&runner, &clock, &reg, &dir);
+    apply_bump(&ctx, &bump_plan(), "2026-08-13").unwrap();
+    assert!(
+        !runner
+            .calls
+            .borrow()
+            .iter()
+            .any(|c| c == "cargo update --workspace"),
+        "no lockfile ⇒ no refresh: {:?}",
+        runner.calls.borrow()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -211,7 +239,7 @@ fn fails_closed_on_a_missing_pin() {
     let (clock, reg) = (FakeClock, NoRegistry);
     let ctx = ctx(&runner, &clock, &reg, &dir);
 
-    let err = apply_bump(&ctx, &bump_plan(), "2026-08-13", &dir, None).unwrap_err();
+    let err = apply_bump(&ctx, &bump_plan(), "2026-08-13").unwrap_err();
     assert!(matches!(
         err,
         BumpExecError::Edit(BumpEditError::PinNotFound { .. })
@@ -235,7 +263,7 @@ fn fails_closed_when_the_hook_fails() {
     let mut plan = bump_plan();
     plan.bump_hook = Some("cargo insta test --accept".into());
 
-    let err = apply_bump(&ctx, &plan, "2026-08-13", &dir, None).unwrap_err();
+    let err = apply_bump(&ctx, &plan, "2026-08-13").unwrap_err();
     assert!(matches!(err, BumpExecError::Hook { .. }));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -258,7 +286,7 @@ fn fails_closed_when_the_hook_reverts_the_version() {
     plan.pin_rewrites.clear();
     plan.bump_hook = Some("evil".into());
 
-    let err = apply_bump(&ctx, &plan, "2026-08-13", &dir, None).unwrap_err();
+    let err = apply_bump(&ctx, &plan, "2026-08-13").unwrap_err();
     assert!(
         matches!(err, BumpExecError::HookViolatedVersion { .. }),
         "expected a hook-version violation, got {err}"
@@ -284,7 +312,7 @@ fn fails_closed_when_lockfile_refresh_fails() {
     let (clock, reg) = (FakeClock, NoRegistry);
     let ctx = ctx(&runner, &clock, &reg, &dir);
 
-    let err = apply_bump(&ctx, &bump_plan(), "2026-08-13", &dir, None).unwrap_err();
+    let err = apply_bump(&ctx, &bump_plan(), "2026-08-13").unwrap_err();
     assert!(matches!(err, BumpExecError::LockRefresh(_)));
     let _ = std::fs::remove_dir_all(&dir);
 }
