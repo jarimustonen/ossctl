@@ -97,6 +97,7 @@ fn rust_contract() -> Contract {
         release: Release {
             model: ReleaseModel::Gated,
             layout: ReleaseLayout::Single,
+            bump_hook: None,
         },
         contribution_provenance: ContributionProvenance::None,
         provenance_level: ProvenanceLevel::None,
@@ -1196,4 +1197,187 @@ fn topo_order_appends_a_cycle_deterministically_without_looping() {
     // emitted (declaration order), never dropped or hung on.
     let members = vec![member("a", "1.0.0", &["b"]), member("b", "1.0.0", &["a"])];
     assert_eq!(topo_order_members(&members), vec!["a", "b"]);
+}
+
+// ── engine-owned version-bump plan (`release-rust-workspace-multicrate` f2/f3) ─
+
+/// Build a `--bump` plan on the lib+bin workspace fixture (both members at
+/// `0.1.6`), bumping to `to`.
+fn bump_plan(level: BumpLevel, to: &str) -> ReleasePlan {
+    let mut c = rust_contract();
+    c.targets = vec![target(
+        Ecosystem::Rust,
+        "orchestratectl",
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+    )];
+    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    build_with_bump(&c, &f, HEAD, "0.1.6", to, level)
+}
+
+#[test]
+fn the_no_bump_path_is_unchanged_and_opt_in() {
+    // `build` (no `--bump`) carries no bump plan, no `bump` phase, and the version is
+    // the manifest version verbatim — a strict superset guarantee: opting out is the
+    // old behavior byte-for-byte (its plan_id is asserted stable by the golden vector).
+    let (c, f) = (rust_contract(), rust_facts());
+    let plan = build(&c, &f, HEAD, "0.1.0");
+    assert!(plan.bump.is_none(), "no --bump ⇒ no bump plan");
+    assert_eq!(
+        plan.phases,
+        PlanPhase::SEQUENCE.to_vec(),
+        "no leading bump phase"
+    );
+    assert!(!plan.phases.contains(&PlanPhase::Bump));
+}
+
+#[test]
+fn a_bump_plan_prepends_the_bump_phase_and_carries_the_computed_version() {
+    let plan = bump_plan(BumpLevel::Minor, "0.2.0");
+    assert_eq!(
+        plan.phases[0],
+        PlanPhase::Bump,
+        "bump runs before every barrier"
+    );
+    assert_eq!(
+        &plan.phases[1..],
+        PlanPhase::SEQUENCE.as_slice(),
+        "the rest of the pipeline is unchanged after the bump phase"
+    );
+    // The release version threaded into every publish/tag is the COMPUTED new version.
+    assert_eq!(plan.version, "0.2.0");
+    let bump = plan.bump.as_ref().expect("a --bump plan carries a bump");
+    assert_eq!(bump.level, BumpLevel::Minor);
+    assert_eq!(bump.from_version, "0.1.6");
+    assert_eq!(bump.to_version, "0.2.0");
+}
+
+#[test]
+fn the_bump_derives_the_intra_workspace_pin_rewrite() {
+    // THE lockstep pin: the bin's `octl-core = "=0.1.6"` must become `= "=0.2.0"`.
+    let plan = bump_plan(BumpLevel::Minor, "0.2.0");
+    let bump = plan.bump.unwrap();
+    assert_eq!(
+        bump.pin_rewrites.len(),
+        1,
+        "one lib←bin edge ⇒ one pin rewrite"
+    );
+    let r = &bump.pin_rewrites[0];
+    assert_eq!(r.in_package, "orchestratectl");
+    assert_eq!(r.dependency, "octl-core");
+    assert_eq!(r.from, "=0.1.6");
+    assert_eq!(r.to, "=0.2.0");
+}
+
+#[test]
+fn a_single_crate_workspace_has_no_pin_rewrites() {
+    // No intra-workspace edges ⇒ nothing to rewrite (ossctl's own two crates DO pin,
+    // but a lone crate does not).
+    let c = rust_contract();
+    let f = rust_facts(); // rust_workspace: None
+    let plan = build_with_bump(&c, &f, HEAD, "0.1.0", "0.1.1", BumpLevel::Patch);
+    assert!(plan.bump.unwrap().pin_rewrites.is_empty());
+}
+
+#[test]
+fn the_bump_finalizes_a_curated_changelog_but_not_an_automated_one() {
+    // curated/fragment: the engine promotes `[Unreleased]`. automated: a release bot
+    // owns the CHANGELOG, so the engine must not also rewrite it.
+    let curated = bump_plan(BumpLevel::Patch, "0.1.7");
+    assert!(curated.bump.unwrap().changelog_finalize);
+
+    let mut c = rust_contract();
+    c.changelog.mode = ChangelogMode::Automated;
+    c.targets = vec![target(
+        Ecosystem::Rust,
+        "orchestratectl",
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+    )];
+    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let auto = build_with_bump(&c, &f, HEAD, "0.1.6", "0.1.7", BumpLevel::Patch);
+    assert!(!auto.bump.unwrap().changelog_finalize);
+}
+
+#[test]
+fn a_declared_bump_hook_rides_on_the_bump_plan() {
+    // facet 3: the contract's `release.bump_hook` is carried into the bump plan so the
+    // executor runs it (e.g. regenerating version-embedding snapshots).
+    let mut c = rust_contract();
+    c.release.bump_hook = Some("cargo insta test --accept".to_string());
+    c.targets = vec![target(
+        Ecosystem::Rust,
+        "orchestratectl",
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+    )];
+    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let plan = build_with_bump(&c, &f, HEAD, "0.1.6", "0.2.0", BumpLevel::Minor);
+    assert_eq!(
+        plan.bump.unwrap().bump_hook.as_deref(),
+        Some("cargo insta test --accept")
+    );
+}
+
+#[test]
+fn an_absent_bump_hook_is_none_on_the_bump_plan() {
+    let plan = bump_plan(BumpLevel::Patch, "0.1.7");
+    assert!(plan.bump.unwrap().bump_hook.is_none());
+}
+
+// ── content addressing: the bump is sealed ─────────────────────────────────
+
+#[test]
+fn a_bump_plan_has_a_different_id_than_the_no_bump_plan() {
+    // The bump phase + the computed version are part of the content address: a plan
+    // that owns a bump can never collide with one that publishes the tree version.
+    let no_bump = {
+        let mut c = rust_contract();
+        c.targets = vec![target(
+            Ecosystem::Rust,
+            "orchestratectl",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        )];
+        let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+        build(&c, &f, HEAD, "0.1.6")
+    };
+    let bumped = bump_plan(BumpLevel::Patch, "0.1.7");
+    assert_ne!(no_bump.plan_id, bumped.plan_id);
+}
+
+#[test]
+fn different_bump_levels_seal_different_ids() {
+    // Sealing the level (not just the resulting version) means approving `--bump minor`
+    // and cutting `--bump major` is drift even if, pathologically, the versions matched.
+    let minor = bump_plan(BumpLevel::Minor, "0.2.0");
+    let patch = bump_plan(BumpLevel::Patch, "0.1.7");
+    assert_ne!(minor.plan_id, patch.plan_id);
+}
+
+#[test]
+fn a_bump_plan_is_stable_for_identical_inputs() {
+    let a = bump_plan(BumpLevel::Minor, "0.2.0");
+    let b = bump_plan(BumpLevel::Minor, "0.2.0");
+    assert_eq!(a.plan_id, b.plan_id, "determinism: same inputs ⇒ same id");
+}
+
+#[test]
+fn a_declared_bump_hook_changes_the_bump_plan_id() {
+    // The hook rides in the pre-image (via the hashed contract AND the bump plan), so
+    // adding one is drift — a cut can't silently drop a declared regen step.
+    let without = bump_plan(BumpLevel::Minor, "0.2.0");
+    let with = {
+        let mut c = rust_contract();
+        c.release.bump_hook = Some("cargo insta test --accept".to_string());
+        c.targets = vec![target(
+            Ecosystem::Rust,
+            "orchestratectl",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        )];
+        let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+        build_with_bump(&c, &f, HEAD, "0.1.6", "0.2.0", BumpLevel::Minor)
+    };
+    assert_ne!(without.plan_id, with.plan_id);
 }

@@ -274,16 +274,17 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
     // versioning — split the base enum from the calver pattern.
     let (versioning, versioning_pattern) = parse_versioning(map.get("versioning"), p);
 
-    // release (model + layout).
-    let (model, layout) = match map.get("release") {
-        None | Some(Value::Null) => (ReleaseModel::Gated, ReleaseLayout::Single),
+    // release (model + layout + optional bump_hook).
+    let (model, layout, bump_hook) = match map.get("release") {
+        None | Some(Value::Null) => (ReleaseModel::Gated, ReleaseLayout::Single, None),
         Some(Value::Mapping(m)) => (
             enum_field!(m, "model", ReleaseModel, ReleaseModel::Gated, p),
             enum_field!(m, "layout", ReleaseLayout, ReleaseLayout::Single, p),
+            parse_bump_hook(m, p),
         ),
         Some(_) => {
             p.err("release must be a mapping with model/layout".to_string());
-            (ReleaseModel::Gated, ReleaseLayout::Single)
+            (ReleaseModel::Gated, ReleaseLayout::Single, None)
         }
     };
 
@@ -506,7 +507,11 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
         versioning_pattern,
         changelog,
         conventional_commits,
-        release: Release { model, layout },
+        release: Release {
+            model,
+            layout,
+            bump_hook,
+        },
         contribution_provenance,
         provenance_level,
         dependency_bot,
@@ -515,6 +520,33 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
         docs_site,
         extra_fields,
         warnings,
+    }
+}
+
+/// Parse the optional `release.bump_hook` command string.
+///
+/// Absent/`null` → `None` (the default, no hook). A present value must be a
+/// **non-empty** string (the engine runs it verbatim in the clean checkout during
+/// the bump phase); an empty string or a non-string is a fatal error, substituting
+/// `None` so the built contract never carries a malformed hook (the "placeholders
+/// keep the strong type" error-path rule the rest of the normalizer follows).
+fn parse_bump_hook(m: &Mapping, p: &mut Problems) -> Option<String> {
+    match m.get("bump_hook") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_str() {
+            Some(s) if !s.trim().is_empty() => Some(s.to_string()),
+            Some(_) => {
+                p.err(
+                    "release.bump_hook must be a non-empty command string (or omit it for no hook)"
+                        .to_string(),
+                );
+                None
+            }
+            None => {
+                p.err("release.bump_hook must be a command string".to_string());
+                None
+            }
+        },
     }
 }
 
@@ -1712,6 +1744,7 @@ mod tests {
         assert!(!c.conventional_commits);
         assert_eq!(c.release.model, ReleaseModel::Gated);
         assert_eq!(c.release.layout, ReleaseLayout::Single);
+        assert_eq!(c.release.bump_hook, None); // optional, absent by default
         assert_eq!(c.contribution_provenance, ContributionProvenance::None);
         assert_eq!(c.provenance_level, ProvenanceLevel::None);
         assert_eq!(c.dependency_bot, DependencyBot::Dependabot); // mvp default
@@ -1720,6 +1753,64 @@ mod tests {
         // mvp, no publishable target → [ci, license].
         assert_eq!(c.health_badges, vec![HealthBadge::Ci, HealthBadge::License]);
         assert!(c.extra_fields.is_empty());
+    }
+
+    #[test]
+    fn parses_a_declared_bump_hook() {
+        // `release.bump_hook` (facet 3) — the command the engine runs during the bump
+        // phase to regenerate version-embedding artifacts (e.g. insta snapshots).
+        let c = norm(
+            "---\nstatus: approved\nmaturity: mvp\n\
+             release:\n  model: gated\n  bump_hook: \"cargo insta test --accept\"\n---\n",
+        )
+        .contract;
+        assert_eq!(
+            c.release.bump_hook.as_deref(),
+            Some("cargo insta test --accept")
+        );
+        // Additive: it round-trips through the canonical JSON when present.
+        let json = serde_json::to_value(&c).unwrap();
+        assert_eq!(
+            json["release"]["bump_hook"],
+            serde_json::json!("cargo insta test --accept")
+        );
+    }
+
+    #[test]
+    fn an_absent_bump_hook_is_omitted_from_canonical_json() {
+        // The additive superset guarantee: a contract with no hook serializes exactly
+        // as before — no `bump_hook` key in the release block.
+        let c = norm(MINIMAL).contract;
+        let json = serde_json::to_value(&c).unwrap();
+        assert!(
+            json["release"].get("bump_hook").is_none(),
+            "an absent hook must not appear in canonical JSON, got {:?}",
+            json["release"]
+        );
+    }
+
+    #[test]
+    fn an_empty_bump_hook_is_rejected() {
+        // A present-but-empty command is a configuration error (fail closed), not a
+        // silently-ignored no-op.
+        assert_error_contains(
+            &norm(
+                "---\nstatus: approved\nmaturity: mvp\n\
+                 release:\n  model: gated\n  bump_hook: \"   \"\n---\n",
+            ),
+            "release.bump_hook must be a non-empty",
+        );
+    }
+
+    #[test]
+    fn a_non_string_bump_hook_is_rejected() {
+        assert_error_contains(
+            &norm(
+                "---\nstatus: approved\nmaturity: mvp\n\
+                 release:\n  model: gated\n  bump_hook: [not, a, string]\n---\n",
+            ),
+            "release.bump_hook must be a command string",
+        );
     }
 
     #[test]

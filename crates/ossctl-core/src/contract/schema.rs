@@ -381,6 +381,24 @@ pub struct Release {
     pub model: ReleaseModel,
     /// Repository release layout.
     pub layout: ReleaseLayout,
+    /// An optional repo-provided command the engine runs in the clean checkout during
+    /// the engine-owned version-bump phase, **after** the version edits and **before**
+    /// the bump commit (`release-rust-workspace-multicrate` facet 3). Its purpose is to
+    /// regenerate version-embedding artifacts — the canonical case is a repo whose test
+    /// snapshots embed the version (insta `envelope_snapshots__version_*`), which go
+    /// stale on a bump and red CI unless regenerated against the new version. Keeping it
+    /// a declared command keeps the engine out of per-repo test-harness specifics: the
+    /// engine folds the hook's file changes into the bump commit and **fails closed** if
+    /// the hook exits non-zero. `null` (absent) = no hook, the default.
+    ///
+    /// A **purely additive** optional field: it is omitted from the canonical JSON when
+    /// absent (`skip_serializing_if`), so a contract that declares no hook serializes
+    /// byte-for-byte as before and its `plan_id` is unchanged. By the migration rule an
+    /// additive optional field does not bump `schema_version` (the forward-compat
+    /// mechanism absorbs it for older readers, which in any case lack `--bump` and so
+    /// never act on the hook).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bump_hook: Option<String>,
 }
 
 /// The canonical, fully-defaulted, `targets`-expanded `OSS-RELEASE.md` contract.

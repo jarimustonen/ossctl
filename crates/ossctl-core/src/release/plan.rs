@@ -28,9 +28,18 @@
 //!    facts-derived package names onto the contract's (which may be `null`), so
 //!    a manifest rename is detectable drift even though the contract text is
 //!    unchanged;
-//! 7. the phase sequence (constant per ADR-0002 §2, so it never *causes* drift
-//!    within a binary, but binding it authenticates the execution shape the
-//!    approver saw and makes a future phase-model change a `SEAL_VERSION` event).
+//! 7. the phase sequence (constant per ADR-0002 §2 for a `--bump`-less plan, so it
+//!    never *causes* drift within a binary, but binding it authenticates the
+//!    execution shape the approver saw and makes a future phase-model change a
+//!    `SEAL_VERSION` event). A `--bump` plan prepends a `bump` phase, which this
+//!    field binds;
+//! 8. the engine-owned **bump plan** (`release-rust-workspace-multicrate` facet 2/3),
+//!    or absent. `--bump <level>` computes a new version from the current manifest
+//!    version + the level and seals the deterministic edit set (computed version,
+//!    intra-workspace pin rewrites, CHANGELOG-finalize intent, any declared
+//!    `bump_hook`). Omitted from the pre-image when absent (`skip_serializing_if`),
+//!    so a `--bump`-less plan hashes byte-for-byte as it did before this field
+//!    existed — the additive superset that made a `SEAL_VERSION` bump unnecessary.
 //!
 //! ## Coordinator seam (what the sibling consumes)
 //!
@@ -68,9 +77,9 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 
-use crate::contract::schema::{Contract, Ecosystem, Registry};
+use crate::contract::schema::{ChangelogMode, Contract, Ecosystem, Registry};
 use crate::protocol::facts::Facts;
-use crate::protocol::plan::{PlanPhase, PlanTarget, ReleasePlan};
+use crate::protocol::plan::{BumpLevel, BumpPlan, PinRewrite, PlanPhase, PlanTarget, ReleasePlan};
 
 /// Build and seal a [`ReleasePlan`] from an already-normalized `contract` and
 /// detected `facts`, at git `head_sha`, for the chosen `version`.
@@ -84,15 +93,69 @@ use crate::protocol::plan::{PlanPhase, PlanTarget, ReleasePlan};
 /// contract's/skill's job, not the plan's).
 #[must_use]
 pub fn build(contract: &Contract, facts: &Facts, head_sha: &str, version: &str) -> ReleasePlan {
+    build_inner(contract, facts, head_sha, version, None)
+}
+
+/// Build and seal a `--bump` [`ReleasePlan`]: an engine-owned version-bump plan
+/// that computes a new version from the current manifest version + a semantic
+/// `level` and owns the deterministic edit set (`release-rust-workspace-multicrate`
+/// facet 2).
+///
+/// `from_version` is the current `[workspace.package] version` (the tree's single
+/// source of truth); `to_version` is the caller-computed new version
+/// ([`crate::release::bump::bump_version`] applied to `from_version` — the CLI
+/// computes it so the version arithmetic is validated once, at the input boundary).
+/// The returned plan carries a [`PlanPhase::Bump`] at the front of its phase
+/// sequence and a [`BumpPlan`] describing the edits (pin rewrites, CHANGELOG
+/// finalize, any declared `bump_hook`), all folded into the content address. Its
+/// [`ReleasePlan::version`] is `to_version` — every publish/tag threads the *new*
+/// version.
+///
+/// A `--bump`-less plan is [`build`]; the two share every non-bump derivation, so
+/// the bump path is a strict additive superset.
+#[must_use]
+pub fn build_with_bump(
+    contract: &Contract,
+    facts: &Facts,
+    head_sha: &str,
+    from_version: &str,
+    to_version: &str,
+    level: BumpLevel,
+) -> ReleasePlan {
+    let bump = derive_bump_plan(contract, facts, level, from_version, to_version);
+    build_inner(contract, facts, head_sha, to_version, Some(bump))
+}
+
+/// The shared core of [`build`] / [`build_with_bump`]: resolve targets, assemble the
+/// (bump-aware) phase sequence, seal, and construct the [`ReleasePlan`]. `bump` is
+/// `None` for the default path (identical output and `plan_id` to before this field
+/// existed) and `Some` for a `--bump` plan.
+#[must_use]
+fn build_inner(
+    contract: &Contract,
+    facts: &Facts,
+    head_sha: &str,
+    version: &str,
+    bump: Option<BumpPlan>,
+) -> ReleasePlan {
     let targets = resolve_targets(contract, facts);
-    let plan_id = seal(contract, &targets, head_sha, version);
+    let phases = bump_aware_phases(bump.is_some());
+    let plan_id = seal(
+        contract,
+        &targets,
+        head_sha,
+        version,
+        &phases,
+        bump.as_ref(),
+    );
     ReleasePlan {
         plan_id,
         contract_schema_version: contract.schema_version,
         head_sha: head_sha.to_string(),
         version: version.to_string(),
         targets,
-        phases: PlanPhase::SEQUENCE.to_vec(),
+        phases,
+        bump,
         // Carried from the (already-hashed) contract so the coordinator can hand
         // the Homebrew adapter its tap + license without re-reading the contract.
         // The first distribution that declares a tap — identical to the old
@@ -125,7 +188,14 @@ pub fn compute_plan_id(
     version: &str,
 ) -> String {
     let targets = resolve_targets(contract, facts);
-    seal(contract, &targets, head_sha, version)
+    seal(
+        contract,
+        &targets,
+        head_sha,
+        version,
+        &PlanPhase::SEQUENCE,
+        None,
+    )
 }
 
 /// Check whether an `approved` plan still matches the **current** repo state.
@@ -156,7 +226,19 @@ pub fn verify(
     head_sha: &str,
 ) -> Result<(), PlanDrift> {
     let current_targets = resolve_targets(contract, facts);
-    let current_id = seal(contract, &current_targets, head_sha, &approved.version);
+    // Hold the sealed *shape* — the approved plan's phase sequence and bump plan —
+    // fixed while re-deriving targets from the current contract/facts: verify checks
+    // for contract/head/target drift, not a re-computation of the bump itself (a cut
+    // recomputes the bump from `--bump` + the current manifest via `build_with_bump`
+    // and compares `plan_id` directly; verify is the read-only reconcile seam).
+    let current_id = seal(
+        contract,
+        &current_targets,
+        head_sha,
+        &approved.version,
+        &approved.phases,
+        approved.bump.as_ref(),
+    );
     if current_id == approved.plan_id {
         return Ok(());
     }
@@ -480,6 +562,95 @@ fn classify_target_versions(contract: &Contract, facts: &Facts) -> ClassifiedVer
 /// a crate whose `=`-pinned workspace sibling is not yet on the index
 /// (`release-rust-workspace-multicrate`). A repo that already declares every member
 /// (ossctl itself) is unchanged: the derived set equals what it declared.
+/// The coordinator phase sequence for a plan, prepending [`PlanPhase::Bump`] when
+/// the plan owns a version bump. A `--bump`-less plan yields exactly
+/// [`PlanPhase::SEQUENCE`], so its sealed `phases` (and `plan_id`) are unchanged.
+fn bump_aware_phases(has_bump: bool) -> Vec<PlanPhase> {
+    if has_bump {
+        let mut phases = Vec::with_capacity(PlanPhase::SEQUENCE.len() + 1);
+        phases.push(PlanPhase::Bump);
+        phases.extend_from_slice(&PlanPhase::SEQUENCE);
+        phases
+    } else {
+        PlanPhase::SEQUENCE.to_vec()
+    }
+}
+
+/// Assemble the [`BumpPlan`] — the deterministic edit set the bump phase applies —
+/// from the contract + workspace facts and the caller-computed `from`/`to` versions.
+fn derive_bump_plan(
+    contract: &Contract,
+    facts: &Facts,
+    level: BumpLevel,
+    from_version: &str,
+    to_version: &str,
+) -> BumpPlan {
+    BumpPlan {
+        level,
+        from_version: from_version.to_string(),
+        to_version: to_version.to_string(),
+        pin_rewrites: derive_pin_rewrites(facts, from_version, to_version),
+        changelog_finalize: changelog_is_finalizable(contract),
+        // Copied from the (already-hashed) contract so the executor need not re-read it;
+        // being a copy of a hashed value it adds no new content to the address beyond
+        // its presence on the bump plan.
+        bump_hook: contract.release.bump_hook.clone(),
+    }
+}
+
+/// Whether the bump phase finalizes the CHANGELOG (`[Unreleased]` → a dated
+/// `[to_version]` section).
+///
+/// True for the human/fragment-authored modes (`curated`, `fragment`) whose
+/// `[Unreleased]` section the engine promotes on release. False for `automated`,
+/// where a release bot (release-please/changesets) owns the CHANGELOG and the engine
+/// must not also rewrite it (a double-writer would clash). The concrete date is a
+/// cut-time value and is deliberately not part of the plan (see [`BumpPlan::changelog_finalize`]).
+fn changelog_is_finalizable(contract: &Contract) -> bool {
+    !matches!(contract.changelog.mode, ChangelogMode::Automated)
+}
+
+/// Derive the intra-workspace `=`-version pin rewrites the bump applies in lockstep
+/// with the workspace version.
+///
+/// For each publishable workspace member and each of its intra-workspace dependency
+/// edges (`M` depends on `D`, both members), the workspace's `=`-pinning convention
+/// (the bin's `lib = "=<workspace version>"`, `release-rust-workspace-multicrate`)
+/// means `M`'s manifest carries a `D = "=<from_version>"` pin that must become
+/// `D = "=<to_version>"`. Emitted deterministically (sorted by dependent then
+/// dependency), one per edge; empty for a single-crate workspace or a repo with no
+/// detected workspace graph. Assumes the lockstep `=<version>` convention this
+/// feature targets — a caret/range dep would not literally match `=<from>` at cut
+/// time, which the executor tolerates (a rewrite whose `from` is absent is a no-op).
+fn derive_pin_rewrites(facts: &Facts, from_version: &str, to_version: &str) -> Vec<PinRewrite> {
+    let Some(workspace) = facts.rust_workspace.as_ref() else {
+        return Vec::new();
+    };
+    let is_member: BTreeSet<&str> = workspace
+        .members
+        .iter()
+        .map(|m| m.package.as_str())
+        .collect();
+    let mut rewrites: Vec<PinRewrite> = Vec::new();
+    for member in &workspace.members {
+        for dep in &member.workspace_deps {
+            // Only edges to another publishable member carry an intra-workspace pin.
+            if !is_member.contains(dep.as_str()) {
+                continue;
+            }
+            rewrites.push(PinRewrite {
+                in_package: member.package.clone(),
+                dependency: dep.clone(),
+                from: format!("={from_version}"),
+                to: format!("={to_version}"),
+            });
+        }
+    }
+    rewrites.sort_by(|a, b| (&a.in_package, &a.dependency).cmp(&(&b.in_package, &b.dependency)));
+    rewrites.dedup_by(|a, b| a.in_package == b.in_package && a.dependency == b.dependency);
+    rewrites
+}
+
 fn resolve_targets(contract: &Contract, facts: &Facts) -> Vec<PlanTarget> {
     let base: Vec<PlanTarget> = contract
         .targets
@@ -769,10 +940,25 @@ struct SealInput<'a> {
     version: &'a str,
     targets: &'a [PlanTarget],
     phases: &'a [PlanPhase],
+    /// The engine-owned bump plan, or absent. Omitted from the pre-image when `None`
+    /// (`skip_serializing_if`), so a `--bump`-less plan hashes byte-for-byte as it did
+    /// before this field existed — the additive superset guarantee, and why the field
+    /// did not require a [`SEAL_VERSION`] bump (an absent field changes no existing
+    /// pre-image). A `--bump` plan's `phases` also differ (a leading `bump`), which the
+    /// already-hashed `phases` field independently binds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bump: Option<&'a BumpPlan>,
 }
 
 /// Serialize the pre-image to canonical JSON and return its SHA-256 hex digest.
-fn seal(contract: &Contract, targets: &[PlanTarget], head_sha: &str, version: &str) -> String {
+fn seal(
+    contract: &Contract,
+    targets: &[PlanTarget],
+    head_sha: &str,
+    version: &str,
+    phases: &[PlanPhase],
+    bump: Option<&BumpPlan>,
+) -> String {
     let input = SealInput {
         domain: SEAL_DOMAIN,
         seal_version: SEAL_VERSION,
@@ -781,7 +967,8 @@ fn seal(contract: &Contract, targets: &[PlanTarget], head_sha: &str, version: &s
         head_sha,
         version,
         targets,
-        phases: &PlanPhase::SEQUENCE,
+        phases,
+        bump,
     };
     // `to_vec` on a struct of only structs/Vecs/BTreeMaps (contract's
     // `extra_fields` is a `serde_json::Map` = `BTreeMap` without the

@@ -1435,6 +1435,135 @@ fn release_cut_refuses_when_the_manifest_version_changed_since_sealing() {
     assert!(out.stdout.is_empty());
 }
 
+/// `release plan --bump minor` (opt-in, `release-rust-workspace-multicrate` f2):
+/// the engine COMPUTES the new version from the manifest (1.0.0) + the level and
+/// seals a bump phase — proving the plan side end-to-end through the real binary.
+#[test]
+fn release_plan_bump_computes_the_version_and_seals_a_bump_phase() {
+    let dir = approved_git_repo(); // manifest at 1.0.0
+    let out = ossctl()
+        .args([
+            "release",
+            "plan",
+            "--json",
+            "--bump",
+            "minor",
+            "--repo-root",
+        ])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "bump plan should succeed: {out:?}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("plan stdout JSON");
+    let data = &v["data"];
+    // The COMPUTED version (1.0.0 + minor = 1.1.0) is the sealed release version.
+    assert_eq!(data["version"], "1.1.0");
+    assert_eq!(data["bump"]["level"], "minor");
+    assert_eq!(data["bump"]["from_version"], "1.0.0");
+    assert_eq!(data["bump"]["to_version"], "1.1.0");
+    assert_eq!(data["bump"]["changelog_finalize"], true);
+    // The bump phase leads the pipeline.
+    assert_eq!(data["phases"][0], "bump");
+}
+
+/// A `--bump`-less plan carries NO `bump` key (the additive-superset guarantee holds
+/// through the wire envelope, not only in-memory).
+#[test]
+fn release_plan_without_bump_omits_the_bump_field() {
+    let dir = approved_git_repo();
+    let out = ossctl()
+        .args(["release", "plan", "--json", "--repo-root"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("plan stdout JSON");
+    assert!(v["data"].get("bump").is_none(), "no --bump ⇒ no bump key");
+    assert_eq!(v["data"]["phases"][0], "dry-run-all");
+}
+
+/// `release plan --bump bogus` is a strict, informative rejection (AI-first CLI:
+/// closed-enum validation), never a silent fallback.
+#[test]
+fn release_plan_bump_rejects_a_bad_level() {
+    let dir = approved_git_repo();
+    let out = ossctl()
+        .args([
+            "release",
+            "plan",
+            "--json",
+            "--bump",
+            "bugfix",
+            "--repo-root",
+        ])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "invalid_bump");
+    assert_eq!(v["error"]["invalid_value"], "bugfix");
+}
+
+/// `release cut` on a sealed bump plan fails CLOSED (`bump_execution_unimplemented`):
+/// the plan side has landed but cut-time execution of the bump phase is a follow-up
+/// validated by a real cut. Refusing here prevents building/publishing the un-bumped
+/// manifest version — the exact partial-publish footgun the feature exists to prevent.
+#[test]
+fn release_cut_of_a_bump_plan_fails_closed() {
+    let dir = approved_git_repo(); // manifest at 1.0.0
+    let journal = tempfile::tempdir().unwrap();
+
+    // Seal a --bump plan and read its computed plan_id.
+    let planned = ossctl()
+        .args([
+            "release",
+            "plan",
+            "--json",
+            "--bump",
+            "patch",
+            "--repo-root",
+        ])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        planned.status.code(),
+        Some(0),
+        "bump plan should seal: {planned:?}"
+    );
+    let pv: serde_json::Value = serde_json::from_slice(&planned.stdout).expect("plan JSON");
+    let plan_id = pv["data"]["plan_id"].as_str().expect("plan_id").to_string();
+
+    // Cut it with the SAME --bump (so the drift check passes) → fail closed on execution.
+    let out = ossctl()
+        .args([
+            "release",
+            "cut",
+            "--plan",
+            &plan_id,
+            "--bump",
+            "patch",
+            "--repo-root",
+        ])
+        .arg(dir.path())
+        .arg("--journal-dir")
+        .arg(journal.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "bump cut must refuse: {out:?}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
+    assert_eq!(v["error"]["code"], "bump_execution_unimplemented");
+    assert!(
+        out.stdout.is_empty(),
+        "no journal events emitted on a closed refusal"
+    );
+}
+
 // ── release resume: reconcile decisions that refuse/short-circuit offline ─────
 
 /// A resume against a run with no journal is a caller-fixable (exit 1) error.

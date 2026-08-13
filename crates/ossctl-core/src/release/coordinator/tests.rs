@@ -412,6 +412,7 @@ fn two_target_plan() -> ReleasePlan {
             plan_target(Ecosystem::Node, Registry::Npm, Adapter::NpmPublish),
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     }
@@ -668,6 +669,7 @@ fn a_failed_package_preflight_stops_at_dry_run_before_publish_or_tag() {
             Adapter::CargoPublish,
         )],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     };
@@ -868,6 +870,7 @@ fn threads_build_assets_into_binary_publish() {
             plan_target(Ecosystem::Binary, Registry::GhReleases, Adapter::Manual),
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     };
@@ -917,6 +920,7 @@ fn threads_source_tarball_url_into_homebrew_publish() {
             plan_target(Ecosystem::Binary, Registry::Homebrew, Adapter::HomebrewTap),
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     };
@@ -1003,6 +1007,7 @@ fn no_slug_lookup_without_a_github_distribution_target() {
             plan_target(Ecosystem::Python, Registry::Pypi, Adapter::Twine),
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     };
@@ -1047,6 +1052,7 @@ fn threads_repo_slug_into_binary_receipt() {
             plan_target(Ecosystem::Binary, Registry::GhReleases, Adapter::Manual),
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     };
@@ -1115,6 +1121,7 @@ fn threads_no_assets_when_build_phase_is_resumed() {
             plan_target(Ecosystem::Binary, Registry::GhReleases, Adapter::Manual),
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     };
@@ -1339,6 +1346,7 @@ fn two_crates_io_targets_in_one_ecosystem_cut_in_dependency_order() {
         version: "1.2.3".into(),
         targets: vec![crates_target("ossctl-core"), crates_target("ossctl")],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     };
@@ -1471,6 +1479,7 @@ fn two_targets_do_not_double_publish_a_shared_dependency_under_index_lag() {
         version: "1.2.3".into(),
         targets: vec![crates_target("ossctl-core"), crates_target("ossctl")],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     };
@@ -1560,6 +1569,7 @@ fn dependent_packaging_interleaves_into_publish_not_build_all() {
         version: "1.2.3".into(),
         targets: vec![crates_target("ossctl-core"), crates_target("ossctl")],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     };
@@ -1644,6 +1654,7 @@ fn resume_after_core_publish_completes_the_dependent_without_republishing_core()
         version: "1.2.3".into(),
         targets: vec![crates_target("ossctl-core"), crates_target("ossctl")],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     };
@@ -1766,6 +1777,7 @@ fn refuses_a_target_with_no_resolved_package() {
             adapter: Adapter::CargoPublish,
         }],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     };
@@ -1816,6 +1828,7 @@ fn ci_delegated_target_is_skipped_journaled_not_failed() {
             },
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     };
@@ -1919,6 +1932,7 @@ fn ossctl_like_contract_cuts_end_to_end_across_target_classes() {
             ossctl_target(Registry::Homebrew, Adapter::HomebrewTap),
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: Some("jarimustonen/homebrew-ossctl".into()),
         license: Some("MIT".into()),
     };
@@ -2061,6 +2075,7 @@ fn delegated_plan() -> ReleasePlan {
             },
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     }
@@ -2495,6 +2510,7 @@ fn rust_crate_plan(packages: &[&str]) -> ReleasePlan {
             })
             .collect(),
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     }

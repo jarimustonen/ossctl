@@ -116,6 +116,7 @@ fn rust_plan() -> ReleasePlan {
             Adapter::CargoPublish,
         )],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     }
@@ -133,6 +134,7 @@ fn two_target_plan() -> ReleasePlan {
             plan_target(Ecosystem::Node, Registry::Npm, Adapter::NpmPublish),
         ],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     }
@@ -622,6 +624,7 @@ fn cargo_dist_plan() -> ReleasePlan {
             Adapter::CargoDist,
         )],
         phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
         homebrew_tap: None,
         license: None,
     }

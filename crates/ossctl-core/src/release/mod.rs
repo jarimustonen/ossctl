@@ -10,6 +10,7 @@
 //! `release-engine` unit.
 
 pub mod adapters;
+pub mod bump;
 pub mod coordinator;
 pub mod journal;
 pub mod plan;

@@ -198,6 +198,7 @@ fn contract_at(maturity: Maturity) -> Contract {
         release: Release {
             model: ReleaseModel::Gated,
             layout: ReleaseLayout::Single,
+            bump_hook: None,
         },
         contribution_provenance: ContributionProvenance::None,
         provenance_level: ProvenanceLevel::None,
