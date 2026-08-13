@@ -269,25 +269,27 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
             t.ecosystem.as_str()
         ));
     }
-    // A `--bump` plan is a PREVIEW: the plan side (computed version + sealed edit set) has
-    // landed, but the engine cannot yet EXECUTE the bump at cut time, so `release cut`
-    // refuses it (fail closed) rather than publish the un-bumped version. Say so up front
-    // so an approver does not mistake a sealed bump plan for a cuttable one.
+    // A `--bump` plan owns an engine version bump the cut EXECUTES (edit the version +
+    // pins + Cargo.lock + CHANGELOG in the clean checkout, run any bump_hook, commit, and
+    // tag the bump commit). Say what will change so an approver reviews the whole effect.
     if let Some(bump) = &plan.bump {
         warnings.push(format!(
-            "this is a --bump PREVIEW ({} → {}): the sealed plan is complete but engine-owned \
-             bump execution is not yet wired, so `release cut` will REFUSE it \
-             (bump_execution_unimplemented). It proves the computed version + edit set; it is not \
-             yet cuttable",
-            bump.from_version, bump.to_version
+            "this plan owns an engine version bump ({} → {}): `release cut` will set the workspace \
+             version, rewrite {} intra-workspace `=`-pin(s), refresh Cargo.lock, finalize the \
+             CHANGELOG, run any bump_hook, commit, and tag that bump commit — all in a clean \
+             checkout of the sealed commit, before any publish",
+            bump.from_version,
+            bump.to_version,
+            bump.pin_rewrites.len(),
         ));
-        // Surface any declared bump_hook VERBATIM: it is arbitrary code the eventual
-        // executor runs during the release, so an approver must see exactly what will run
-        // (a supply-chain eyes-on gate). Quoted to prevent output-spoofing via the value.
+        // Surface any declared bump_hook VERBATIM: it is arbitrary code the cut runs during
+        // the release (a supply-chain surface), so an approver must see exactly what will
+        // run. Quoted to prevent output-spoofing via the value.
         if let Some(hook) = &bump.bump_hook {
             warnings.push(format!(
-                "this bump declares a bump_hook the engine will run during the release — review it \
-                 as trusted code: {hook:?}"
+                "this bump declares a bump_hook the engine WILL RUN during the release (as `sh -c` \
+                 in the clean checkout, with the cut's environment) — review it as trusted code: \
+                 {hook:?}"
             ));
         }
     }
@@ -1274,6 +1276,16 @@ fn derive_resume_plan(
         )
     })?;
     let facts = ossctl_core::facts::gather(root, &RealFs, git);
+
+    // A `--bump` run reconstructs its plan differently: the bump commit moved HEAD past
+    // the sealed pre-bump commit, so re-deriving against live HEAD (and the bumped tree
+    // version) would never match `plan_id`. Instead rebuild the exact sealed plan via
+    // `build_with_bump` against the persisted sealed head + bump inputs, then apply the
+    // same `plan_id` drift + executability gates. (`release-rust-workspace-multicrate`.)
+    if let Some(inputs) = &state.bump_inputs {
+        return derive_resume_bump_plan(&normalized.contract, &facts, state, inputs, run_id);
+    }
+
     // Confirm the journal's sealed version still matches the CURRENT tree manifest
     // (single source of truth), exactly as `cut` derives it. A resume re-derives the
     // plan from live repo state, and a manifest-version edit between the failed cut
@@ -1298,6 +1310,56 @@ fn derive_resume_plan(
         return Err(resume_drift_error(state, &plan));
     }
     // Defense in depth: the same executability preflight `cut` runs.
+    coordinator::validate_plan(&plan).map_err(|e| cut_error_to_cli(run_id, e))?;
+    Ok(plan)
+}
+
+/// Reconstruct a `--bump` run's approved plan for resume: rebuild the exact sealed plan
+/// via `build_with_bump` against the **persisted sealed head + bump inputs** (not live
+/// HEAD, which the bump commit moved), then apply the same `plan_id` drift +
+/// executability gates as the no-bump path (`release-rust-workspace-multicrate`).
+///
+/// The bump phase is idempotent on resume (the coordinator skips a re-apply when the
+/// journal already carries `BumpApplied`), so reconstructing the pre-bump plan is safe
+/// even after the bump landed and HEAD advanced.
+fn derive_resume_bump_plan(
+    contract: &Contract,
+    facts: &ossctl_core::protocol::facts::Facts,
+    state: &RunState,
+    inputs: &ossctl_core::protocol::journal::BumpInputs,
+    run_id: &str,
+) -> Result<ReleasePlan, CliError> {
+    let sealed_head = state.head_sha.as_deref().ok_or_else(|| {
+        CliError::system(
+            "resume_bump_head_missing",
+            format!(
+                "run {run_id} is a --bump run but its journal recorded no sealed head_sha to \
+                 reconstruct the plan against — the journal predates the bump-executor and cannot \
+                 be resumed; plan and cut a fresh release"
+            ),
+        )
+    })?;
+    let level = ossctl_core::protocol::plan::BumpLevel::parse(&inputs.level).ok_or_else(|| {
+        CliError::system(
+            "resume_bump_level_invalid",
+            format!(
+                "run {run_id}'s journal recorded an unrecognized bump level `{}`",
+                inputs.level
+            ),
+        )
+    })?;
+    let plan = ossctl_core::release::plan::build_with_bump(
+        contract,
+        facts,
+        sealed_head,
+        &inputs.from_version,
+        level,
+    )
+    .map_err(|e| bump_error_to_cli(level, e))?;
+    validate_version(&plan.version)?;
+    if plan.plan_id != state.plan_id {
+        return Err(resume_drift_error(state, &plan));
+    }
     coordinator::validate_plan(&plan).map_err(|e| cut_error_to_cli(run_id, e))?;
     Ok(plan)
 }
@@ -1513,19 +1575,6 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
         return Err(plan_stale_error(&args.plan, &current));
     }
 
-    // Fail CLOSED on an engine-owned bump plan: the plan side (compute + seal) has
-    // landed, but the cut-time EXECUTION of the bump phase — mutating the clean
-    // checkout (version + pin + lockfile + CHANGELOG edits), running the declared
-    // `bump_hook`, committing, and pointing the tag at the bump commit — is a separate
-    // change that can only be validated by a real cut (the maintainer's acceptance
-    // step, out of scope here). Executing the rest of the pipeline now would build and
-    // publish the OLD manifest version (the bump never applied) — the exact
-    // partial-publish footgun `release-rust-workspace-multicrate` exists to prevent —
-    // so we refuse rather than mis-publish. The sealed plan is complete and ready.
-    if let Some(bump) = &current.bump {
-        return Err(bump_execution_unimplemented_error(&current.plan_id, bump));
-    }
-
     // Preflight the plan *before* creating a run, so an unexecutable plan (an
     // unresolved package, a duplicate-ecosystem target) is refused up front rather
     // than leaving an orphaned `run_created` run behind.
@@ -1553,16 +1602,7 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     // targets (two crates.io crates, or a crate plus its gh-releases/homebrew
     // channels — all under `rust`).
     let target_ids = ossctl_core::release::journal_target_ids(&current.targets);
-    let mut journal = Journal::create(
-        &store,
-        &clock,
-        &idgen,
-        paths,
-        current.plan_id.clone(),
-        current.version.clone(),
-        target_ids,
-    )
-    .map_err(create_journal_error)?;
+    let mut journal = create_run_journal(&store, &clock, &idgen, paths, &current, target_ids)?;
     let run_id = journal.run_id().to_string();
 
     let mut sink = StreamSink::new(std::io::stdout(), matches!(format, OutputFormat::Json));
@@ -1586,6 +1626,46 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
         }
         Err(e) => Err(cut_error_to_cli(&run_id, e)),
     }
+}
+
+/// Create the run journal for a cut: a `--bump` run persists the sealed `head_sha` + bump
+/// inputs (`Journal::create_bump`) so `release resume` can reconstruct the exact sealed
+/// plan against the pre-bump commit after the bump commit moves HEAD
+/// (`release-rust-workspace-multicrate`); a no-bump run uses plain `Journal::create`.
+fn create_run_journal<'a>(
+    store: &'a RealJournalStore,
+    clock: &'a RealClock,
+    idgen: &'a RealIdGen,
+    paths: JournalPaths,
+    current: &ReleasePlan,
+    target_ids: Vec<String>,
+) -> Result<Journal<'a>, CliError> {
+    match &current.bump {
+        Some(bump) => Journal::create_bump(
+            store,
+            clock,
+            idgen,
+            paths,
+            current.plan_id.clone(),
+            current.version.clone(),
+            target_ids,
+            current.head_sha.clone(),
+            ossctl_core::protocol::journal::BumpInputs {
+                level: bump.level.as_str().to_string(),
+                from_version: bump.from_version.clone(),
+            },
+        ),
+        None => Journal::create(
+            store,
+            clock,
+            idgen,
+            paths,
+            current.plan_id.clone(),
+            current.version.clone(),
+            target_ids,
+        ),
+    }
+    .map_err(create_journal_error)
 }
 
 /// The §10 `plan_stale` refusal: the current repo no longer hashes to the
@@ -1908,6 +1988,8 @@ fn stream_run_created(sink: &mut dyn ProgressSink, journal: &Journal<'_>, plan: 
             plan_id: plan.plan_id.clone(),
             version: plan.version.clone(),
             targets: state.targets.clone(),
+            head_sha: state.head_sha.clone(),
+            bump: state.bump_inputs.clone(),
         },
     };
     sink.event(&event);
@@ -1922,6 +2004,13 @@ fn render_event_line(event: &JournalEvent) -> String {
         } => {
             format!("run {run_id} started ({} target(s))", targets.len())
         }
+        EventKind::BumpApplied {
+            commit,
+            effective_date,
+        } => format!(
+            "  version bumped (commit {}, {effective_date})",
+            short_sha(commit)
+        ),
         EventKind::PhaseEntered { phase } => format!("→ {}", phase.as_str()),
         EventKind::PhaseCompleted { phase, outcome } => match outcome {
             PhaseOutcome::Ok => format!("✓ {} complete", phase.as_str()),
@@ -2070,28 +2159,6 @@ fn bump_error_to_cli(
 /// [`BumpPlan`](ossctl_core::protocol::plan::BumpPlan) directly (the caller guards
 /// `bump.is_some()`), so the message never
 /// fabricates an empty `→` from an absent bump.
-fn bump_execution_unimplemented_error(
-    plan_id: &str,
-    bump: &ossctl_core::protocol::plan::BumpPlan,
-) -> CliError {
-    CliError::user(
-        "bump_execution_unimplemented",
-        format!(
-            "plan {} owns an engine version bump ({} → {}), but cut-time execution of the \
-             bump phase (edit the version + pins + Cargo.lock + CHANGELOG in a clean checkout, run \
-             any bump_hook, commit, and tag the bump commit) is not yet wired — it must be \
-             validated by a real cut, which is the maintainer's acceptance step. The sealed plan is \
-             complete; apply the bump by hand (per the AGENTS.md release recipe) and cut a \
-             `--bump`-less plan, or await the executor follow-up. Cutting now would build and \
-             publish the OLD manifest version — refused",
-            short_sha(plan_id),
-            bump.from_version,
-            bump.to_version,
-        ),
-    )
-    .with_invalid_value(plan_id.to_string())
-}
-
 fn resolve_repo_root(flag: Option<&PathBuf>) -> Result<PathBuf, CliError> {
     match flag {
         Some(p) => Ok(p.clone()),
@@ -2314,6 +2381,8 @@ mod tests {
             plan_id: "plan-abc".to_string(),
             version: "1.0.0".to_string(),
             targets: vec!["cargo".to_string()],
+            head_sha: None,
+            bump: None,
         };
         JournalEvent {
             schema_version: JOURNAL_SCHEMA_VERSION,

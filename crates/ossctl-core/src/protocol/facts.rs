@@ -123,6 +123,20 @@ pub struct WorkspaceMember {
     /// normal + build dependencies gate order; dev-dependencies are excluded (they
     /// never gate publish order and can legitimately cycle).
     pub workspace_deps: Vec<String>,
+    /// The **literal version requirement string** this member's manifest declares
+    /// for each intra-workspace dependency that carries one, keyed by dependency
+    /// crate name (e.g. `{"octl-core": "=0.4.0"}` for `octl-core = { path = "…",
+    /// version = "=0.4.0" }`). Only edges present in [`Self::workspace_deps`] appear,
+    /// and only when the manifest declares an explicit `version` on the dependency —
+    /// a path-only or `workspace = true`-inherited edge (whose requirement is not
+    /// literally in this manifest) is **absent**, not defaulted.
+    ///
+    /// This is what makes the bump phase's pin rewrite **precise**
+    /// (`release-rust-workspace-multicrate` facet 3): the planner emits a pin rewrite
+    /// only for an edge whose requirement literally equals `=<from_version>` (the
+    /// lockstep convention), never for a caret/range/`workspace = true` edge it would
+    /// otherwise clobber. Off-wire, like the rest of [`RustWorkspace`].
+    pub dep_reqs: std::collections::BTreeMap<String, String>,
 }
 
 /// One detected package manifest and the name/version parsed from it.

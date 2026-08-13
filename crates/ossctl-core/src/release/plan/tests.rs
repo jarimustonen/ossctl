@@ -772,12 +772,19 @@ fn an_all_distribution_ecosystem_repo_has_no_derivable_version() {
 
 // ── multi-crate workspace derivation (release-rust-workspace-multicrate) ─────
 
-/// A `WorkspaceMember` in one line (deps are intra-workspace crate names).
+/// A `WorkspaceMember` in one line (deps are intra-workspace crate names). Each dep is
+/// given a lockstep `=<version>` requirement, the convention the pin-rewrite derivation
+/// keys on — matching what `detect_rust_workspace` records for the `octl-core = { path,
+/// version = "=X" }` shape this feature targets.
 fn member(name: &str, version: &str, deps: &[&str]) -> WorkspaceMember {
     WorkspaceMember {
         package: name.to_string(),
         version: Some(version.to_string()),
         workspace_deps: deps.iter().map(|d| (*d).to_string()).collect(),
+        dep_reqs: deps
+            .iter()
+            .map(|d| ((*d).to_string(), format!("={version}")))
+            .collect(),
     }
 }
 

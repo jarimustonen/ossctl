@@ -16,7 +16,7 @@ use crate::ports::{
     Clock, CommandOutput, CommandRunner, IdGen, JournalLock, JournalStore, RegistryQuery,
 };
 use crate::protocol::journal::{Phase, PhaseOutcome, RunStatus};
-use crate::protocol::plan::{PlanPhase, PlanTarget, ReleasePlan};
+use crate::protocol::plan::{BumpLevel, BumpPlan, PinRewrite, PlanPhase, PlanTarget, ReleasePlan};
 use crate::release::adapters::{EffectCtx, EMPTY_ARTIFACTS};
 use crate::release::journal::{Journal, JournalPaths};
 
@@ -125,6 +125,13 @@ struct FakeCmd {
     /// version the confirm checks against (default `1.2.3`; override with
     /// [`FakeCmd::crate_version`] for a plan cut at a different version).
     publish_version: String,
+    /// When set, `git worktree add --detach <dest> <sha>` copies this seed workspace
+    /// tree into `<dest>` (a real directory), so the bump executor's real `std::fs`
+    /// manifest/CHANGELOG edits run against real files in the sealed checkout.
+    worktree_seed: Option<PathBuf>,
+    /// The sha `git rev-parse HEAD` reports after the bump commit (the bump-commit sha
+    /// the tag must point at), when a bump test set one.
+    bump_commit: Option<String>,
 }
 impl FakeCmd {
     fn new() -> Self {
@@ -136,7 +143,16 @@ impl FakeCmd {
             origin: None,
             published: Rc::new(RefCell::new(HashMap::new())),
             publish_version: "1.2.3".to_string(),
+            worktree_seed: None,
+            bump_commit: None,
         }
+    }
+    /// Seed the sealed checkout from `seed` and report `bump_commit` as the post-bump
+    /// `git rev-parse HEAD` — the setup a coordinator-level `--bump` test needs.
+    fn with_bump_checkout(mut self, seed: PathBuf, bump_commit: &str) -> Self {
+        self.worktree_seed = Some(seed);
+        self.bump_commit = Some(bump_commit.to_string());
+        self
     }
     /// A runner whose `git cat-file` reports the sealed commit absent — the
     /// clean-checkout fail-closed path (`release-cut-clean-checkout`).
@@ -209,6 +225,37 @@ impl CommandRunner for FakeCmd {
                 } else {
                     String::new()
                 },
+            });
+        }
+        // Seed the sealed checkout: `git worktree add --detach <dest> <sha>` copies the
+        // seed workspace into <dest> so the bump executor edits real files there.
+        if program == "git" && args.first() == Some(&"worktree") && args.get(1) == Some(&"add") {
+            if let Some(seed) = &self.worktree_seed {
+                if let Some(dest) = args.iter().rev().nth(1) {
+                    copy_tree(seed, Path::new(dest));
+                }
+            }
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        }
+        // Report the post-bump commit sha / current branch for the bump phase.
+        if program == "git" && args == ["rev-parse", "HEAD"] {
+            if let Some(sha) = &self.bump_commit {
+                return Ok(CommandOutput {
+                    status: Some(0),
+                    stdout: format!("{sha}\n"),
+                    stderr: String::new(),
+                });
+            }
+        }
+        if program == "git" && args == ["rev-parse", "--abbrev-ref", "HEAD"] {
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: "main\n".to_string(),
+                stderr: String::new(),
             });
         }
         // Serve the origin remote so `resolve_repo_slug` can parse a GitHub slug.
@@ -2312,7 +2359,15 @@ fn delegating_over_an_already_created_release_is_refused_not_double_recorded() {
     );
 
     let plan = delegated_plan();
-    let err = tag_phase(&mut journal, &mut sink, &tagger, &plan, Some("cargo-dist")).unwrap_err();
+    let err = tag_phase(
+        &mut journal,
+        &mut sink,
+        &tagger,
+        &plan,
+        &plan.head_sha,
+        Some("cargo-dist"),
+    )
+    .unwrap_err();
     match err {
         CutError::PhaseFailed { phase, target, .. } => {
             assert_eq!(phase, Phase::Tag);
@@ -2356,7 +2411,15 @@ fn creating_over_an_already_delegated_release_is_refused() {
         version: "1.0.0".into(),
         ..two_target_plan()
     };
-    let err = tag_phase(&mut journal, &mut sink, &tagger, &plan, None).unwrap_err();
+    let err = tag_phase(
+        &mut journal,
+        &mut sink,
+        &tagger,
+        &plan,
+        &plan.head_sha,
+        None,
+    )
+    .unwrap_err();
     assert!(matches!(
         err,
         CutError::PhaseFailed {
@@ -2872,4 +2935,227 @@ fn checkout_is_torn_down_even_when_a_phase_fails() {
         "the checkout must be torn down even on a phase failure: {:?}",
         cmd.calls()
     );
+}
+
+// ── Engine-owned version bump (release-rust-workspace-multicrate facet 2/3) ───
+
+/// Recursively copy a directory tree (the seed workspace → the sealed checkout dest).
+fn copy_tree(src: &Path, dest: &Path) {
+    std::fs::create_dir_all(dest).unwrap();
+    for entry in std::fs::read_dir(src).unwrap().flatten() {
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        if from.is_dir() {
+            copy_tree(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).unwrap();
+        }
+    }
+}
+
+/// A throwaway lib+bin workspace at 0.4.0, the bin pinning the lib `=0.4.0` — the seed
+/// the fake `git worktree add` copies into the sealed checkout.
+fn seed_workspace() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "ossctl-coord-bump-seed-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    std::fs::create_dir_all(dir.join("crates/core")).unwrap();
+    std::fs::create_dir_all(dir.join("crates/cli")).unwrap();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/core\", \"crates/cli\"]\n\n[workspace.package]\nversion = \"0.4.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("crates/core/Cargo.toml"),
+        "[package]\nname = \"acme-core\"\nversion.workspace = true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("crates/cli/Cargo.toml"),
+        "[package]\nname = \"acme\"\nversion.workspace = true\n\n[dependencies]\nacme-core = { path = \"../core\", version = \"=0.4.0\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("CHANGELOG.md"),
+        "# Changelog\n\n## [Unreleased]\n### Added\n- a feature\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// A single-crates.io-target plan carrying a `--bump` phase (0.4.0 → 0.5.0) with one pin
+/// rewrite. The publish version is the BUMPED 0.5.0 (what the tree becomes).
+fn bump_plan() -> ReleasePlan {
+    ReleasePlan {
+        plan_id: "plan-bump".into(),
+        contract_schema_version: 1,
+        head_sha: "sealedhead".into(),
+        version: "0.5.0".into(),
+        // The publish target uses the canned-metadata crate name (`tool`); the bump
+        // edits (below) concern the seeded acme/acme-core workspace independently.
+        targets: vec![PlanTarget {
+            ecosystem: Ecosystem::Rust,
+            package: Some("tool".into()),
+            registry: Registry::CratesIo,
+            adapter: Adapter::CargoPublish,
+        }],
+        phases: {
+            let mut p = vec![PlanPhase::Bump];
+            p.extend_from_slice(&PlanPhase::SEQUENCE);
+            p
+        },
+        bump: Some(BumpPlan {
+            level: BumpLevel::Minor,
+            from_version: "0.4.0".into(),
+            to_version: "0.5.0".into(),
+            pin_rewrites: vec![PinRewrite {
+                in_package: "acme".into(),
+                dependency: "acme-core".into(),
+                from: "=0.4.0".into(),
+                to: "=0.5.0".into(),
+            }],
+            changelog_finalize: true,
+            bump_hook: None,
+        }),
+        homebrew_tap: None,
+        license: None,
+    }
+}
+
+#[test]
+fn a_bump_plan_applies_the_bump_tags_the_bump_commit_and_completes() {
+    let seed = seed_workspace();
+    let cmd = FakeCmd::new()
+        .with_bump_checkout(seed.clone(), "bumpsha00")
+        .crate_version("0.5.0");
+    let registry = cmd.registry();
+    let clock = FakeClock(Cell::new(1_786_579_200)); // 2026-08-13
+    let idgen = FakeIdGen("RUNBUMP".into());
+    let tagger = FakeTagger::new();
+    let store = FakeStore::default();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &registry,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+
+    let plan = bump_plan();
+    let mut journal = Journal::create_bump(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        plan.plan_id.clone(),
+        plan.version.clone(),
+        vec!["rust".into()],
+        plan.head_sha.clone(),
+        crate::protocol::journal::BumpInputs {
+            level: "minor".into(),
+            from_version: "0.4.0".into(),
+        },
+    )
+    .unwrap();
+    let mut sink = RecordingSink::default();
+
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).expect("bump cut completes");
+
+    // The bump was applied + journalled, and the tag points at the BUMP commit.
+    let state = journal.state();
+    assert_eq!(
+        state.bump.as_ref().map(|b| b.commit.as_str()),
+        Some("bumpsha00"),
+        "BumpApplied recorded the bump commit"
+    );
+    assert_eq!(
+        state.bump.as_ref().map(|b| b.effective_date.as_str()),
+        Some("2026-08-13")
+    );
+    assert!(
+        tagger
+            .calls()
+            .iter()
+            .any(|c| c == "create:v0.5.0@bumpsha00"),
+        "the tag must point at the bump commit, not the sealed head: {:?}",
+        tagger.calls()
+    );
+    assert_eq!(state.status, RunStatus::Completed);
+
+    // The bump edits landed in the checkout: the seeded copy the fake worktree wrote is
+    // torn down, so assert via the runner calls that the bump commit + lockfile refresh ran.
+    assert!(cmd.calls().iter().any(|c| c == "cargo update --workspace"));
+    assert!(cmd
+        .calls()
+        .iter()
+        .any(|c| c.starts_with("git commit -m release: v0.5.0")));
+
+    let _ = std::fs::remove_dir_all(&seed);
+}
+
+#[test]
+fn a_resumed_bump_run_does_not_double_bump() {
+    // A run whose journal already carries BumpApplied (phase interrupted before its
+    // completion) must NOT re-apply the bump on re-entry.
+    let seed = seed_workspace();
+    let cmd = FakeCmd::new()
+        .with_bump_checkout(seed.clone(), "bumpsha00")
+        .crate_version("0.5.0");
+    let registry = cmd.registry();
+    let clock = FakeClock(Cell::new(1_786_579_200));
+    let idgen = FakeIdGen("RUNBUMP2".into());
+    let tagger = FakeTagger::new();
+    let store = FakeStore::default();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &registry,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let plan = bump_plan();
+    let mut journal = Journal::create_bump(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        plan.plan_id.clone(),
+        plan.version.clone(),
+        vec!["rust".into()],
+        plan.head_sha.clone(),
+        crate::protocol::journal::BumpInputs {
+            level: "minor".into(),
+            from_version: "0.4.0".into(),
+        },
+    )
+    .unwrap();
+    // Pre-seed a BumpApplied fact (as if a prior attempt applied it), then re-enter.
+    journal
+        .append(EventKind::BumpApplied {
+            commit: "priorbump".into(),
+            effective_date: "2026-08-01".into(),
+        })
+        .unwrap();
+    let mut sink = RecordingSink::default();
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).expect("resumed bump completes");
+
+    // No second commit was made (the bump was NOT re-applied), and the tag points at the
+    // ALREADY-recorded bump commit.
+    assert!(
+        !cmd.calls().iter().any(|c| c.starts_with("git commit")),
+        "a resumed bump must not re-commit: {:?}",
+        cmd.calls()
+    );
+    assert!(tagger
+        .calls()
+        .iter()
+        .any(|c| c == "create:v0.5.0@priorbump"));
+    let _ = std::fs::remove_dir_all(&seed);
 }

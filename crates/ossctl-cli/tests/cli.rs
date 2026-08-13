@@ -1509,16 +1509,15 @@ fn release_plan_bump_rejects_a_bad_level() {
     assert_eq!(v["error"]["invalid_value"], "bugfix");
 }
 
-/// `release cut` on a sealed bump plan fails CLOSED (`bump_execution_unimplemented`):
-/// the plan side has landed but cut-time execution of the bump phase is a follow-up
-/// validated by a real cut. Refusing here prevents building/publishing the un-bumped
-/// manifest version — the exact partial-publish footgun the feature exists to prevent.
+/// A sealed `--bump` plan's preview now describes an EXECUTABLE bump (the engine cuts
+/// it), no longer the retired `bump_execution_unimplemented` refusal. A full bump cut
+/// mutates a clean checkout + publishes to a registry, so it is exercised end-to-end at
+/// the coordinator/unit level against fakes (`release::coordinator` +
+/// `release::bump_exec`), never against the live crates.io — the acceptance cut is the
+/// maintainer's step. Here we assert the plan-time contract the approver reads.
 #[test]
-fn release_cut_of_a_bump_plan_fails_closed() {
+fn release_plan_bump_preview_describes_an_executable_bump() {
     let dir = approved_git_repo(); // manifest at 1.0.0
-    let journal = tempfile::tempdir().unwrap();
-
-    // Seal a --bump plan and read its computed plan_id.
     let planned = ossctl()
         .args([
             "release",
@@ -1537,30 +1536,19 @@ fn release_cut_of_a_bump_plan_fails_closed() {
         "bump plan should seal: {planned:?}"
     );
     let pv: serde_json::Value = serde_json::from_slice(&planned.stdout).expect("plan JSON");
-    let plan_id = pv["data"]["plan_id"].as_str().expect("plan_id").to_string();
-
-    // Cut it with the SAME --bump (so the drift check passes) → fail closed on execution.
-    let out = ossctl()
-        .args([
-            "release",
-            "cut",
-            "--plan",
-            &plan_id,
-            "--bump",
-            "patch",
-            "--repo-root",
-        ])
-        .arg(dir.path())
-        .arg("--journal-dir")
-        .arg(journal.path())
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1), "bump cut must refuse: {out:?}");
-    let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
-    assert_eq!(v["error"]["code"], "bump_execution_unimplemented");
+    let warnings = pv["warnings"].as_array().expect("warnings array");
+    let joined: String = warnings
+        .iter()
+        .filter_map(|w| w.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        out.stdout.is_empty(),
-        "no journal events emitted on a closed refusal"
+        joined.contains("owns an engine version bump"),
+        "the preview must describe the engine bump execution: {joined}"
+    );
+    assert!(
+        !joined.contains("bump_execution_unimplemented") && !joined.contains("will REFUSE"),
+        "the retired fail-closed language must be gone: {joined}"
     );
 }
 

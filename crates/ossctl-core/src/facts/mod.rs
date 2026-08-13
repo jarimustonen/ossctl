@@ -437,7 +437,7 @@ fn push_member_dir(
 /// dependent before its dependency makes the dependent's `cargo publish` fail on the
 /// not-yet-indexed sibling — a safe, no-mis-publish failure, but a *failed release for
 /// a valid workspace*. The edge parse is therefore precise where it counts:
-/// [`member_dependency_names`] treats only `path`/`workspace` dependencies as edges
+/// [`member_dependency_edges`] treats only `path`/`workspace` dependencies as edges
 /// (a registry dep sharing a member's name is not an edge, so no false constraint /
 /// false cycle), and reads the plain, target-specific, sub-table, and dotted-key
 /// dependency forms plus inline `package = "…"` renames. Its two documented blind
@@ -450,7 +450,9 @@ struct RawMember {
     package: String,
     version: Option<String>,
     publishable: bool,
-    deps: Vec<String>,
+    /// Intra-workspace dependency edges: crate name + the literal version
+    /// requirement the manifest declares for it (or `None` for a path-only edge).
+    deps: Vec<(String, Option<String>)>,
 }
 
 fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace> {
@@ -480,7 +482,7 @@ fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace>
             package,
             version,
             publishable: member_publishable_to_crates_io(&text),
-            deps: member_dependency_names(&text),
+            deps: member_dependency_edges(&text),
         });
     }
 
@@ -496,11 +498,26 @@ fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace>
         .iter()
         .filter(|m| m.publishable)
         .map(|m| {
+            // Restrict to edges to OTHER publishable members; carry each edge's literal
+            // requirement string (when the manifest declared one) so the pin-rewrite
+            // derivation can key precisely on the `=<ver>` lockstep convention.
+            let mut dep_reqs: std::collections::BTreeMap<String, String> =
+                std::collections::BTreeMap::new();
+            for (name, req) in &m.deps {
+                if name.as_str() == m.package || !publishable_names.contains(name.as_str()) {
+                    continue;
+                }
+                if let Some(req) = req {
+                    // First declaration wins (a crate appearing in both `[dependencies]`
+                    // and `[build-dependencies]` shares one requirement in practice).
+                    dep_reqs.entry(name.clone()).or_insert_with(|| req.clone());
+                }
+            }
             let mut workspace_deps: Vec<String> = m
                 .deps
                 .iter()
+                .map(|(name, _req)| name.clone())
                 .filter(|d| d.as_str() != m.package && publishable_names.contains(d.as_str()))
-                .cloned()
                 .collect();
             workspace_deps.sort();
             workspace_deps.dedup();
@@ -508,6 +525,7 @@ fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace>
                 package: m.package.clone(),
                 version: m.version.clone(),
                 workspace_deps,
+                dep_reqs,
             }
         })
         .collect();
@@ -587,14 +605,18 @@ enum DepTable {
         package: Option<String>,
         /// Whether the body marks this an intra-workspace dep (`path`/`workspace`).
         local: bool,
+        /// The literal `version = "…"` requirement the body declares, if any — carried
+        /// so the pin-rewrite derivation can key on the exact `=<ver>` lockstep string.
+        version: Option<String>,
     },
     /// A non-order-gating table (`[dev-dependencies]`, `[features]`, `[package]`, …).
     Other,
 }
 
-/// The intra-workspace dependency crate names a Cargo member manifest declares — the
-/// raw edge set [`detect_rust_workspace`] intersects with the publishable member
-/// names, de-duplicated and sorted.
+/// The intra-workspace dependency edges a Cargo member manifest declares, each paired
+/// with the **literal version requirement** the manifest states for it (or `None` for a
+/// path-only / `workspace = true` edge whose requirement is not in this manifest). The
+/// raw edge set [`detect_rust_workspace`] intersects with the publishable member names.
 ///
 /// **Only `path` / `workspace` dependencies are edges.** A registry dependency
 /// (`serde = "1"`, or an inline table with only `version`) is NOT an intra-workspace
@@ -604,10 +626,15 @@ enum DepTable {
 /// This mirrors Cargo's own model: a member edge exists iff the dependency resolves
 /// to a `path`/`workspace` source.
 ///
+/// The paired requirement is the precise-pin-rewrite source
+/// (`release-rust-workspace-multicrate` facet 3): the planner keeps only the edge whose
+/// requirement literally equals `=<from_version>`, so a caret/range/`workspace = true`
+/// edge is never clobbered.
+///
 /// Line-oriented (no TOML dependency — matching this module's parsing style). It reads:
 /// `[dependencies]` / `[build-dependencies]` and their target-specific
 /// (`[target.<cfg>.dependencies]`) and sub-table (`[dependencies.<name>]`) forms;
-/// inline tables (`dep = { path = "…", package = "real" }`), dotted keys
+/// inline tables (`dep = { path = "…", package = "real", version = "=X" }`), dotted keys
 /// (`dep.path = "…"`, `dep.workspace = true`), and the `package = "…"` rename in each.
 /// Dev-dependencies are excluded (they never gate publish order and can legitimately
 /// cycle).
@@ -616,10 +643,12 @@ enum DepTable {
 /// `detect_rust_workspace`):** a dependency inheriting a *rename* through the root
 /// `[workspace.dependencies]` (`alias.workspace = true` where the root maps `alias`
 /// to a differently-named crate) resolves to `alias`, missing the edge; a *multi-line*
-/// inline table is read only by its first physical line.
-fn member_dependency_names(text: &str) -> Vec<String> {
+/// inline table is read only by its first physical line; a dotted `dep.version = "…"`
+/// requirement on a line separate from `dep.path` is not captured (so that edge's pin is
+/// left un-rewritten — fail closed).
+fn member_dependency_edges(text: &str) -> Vec<(String, Option<String>)> {
     let mut state = DepTable::Other;
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<(String, Option<String>)> = Vec::new();
 
     for line in text.lines() {
         let t = strip_toml_comment(line).trim();
@@ -631,18 +660,25 @@ fn member_dependency_names(text: &str) -> Vec<String> {
         }
         match &mut state {
             DepTable::Table => {
-                if let Some(name) = dep_edge_from_line(t) {
-                    out.push(name);
+                if let Some(edge) = dep_edge_from_line(t) {
+                    out.push(edge);
                 }
             }
-            DepTable::Sub { package, local, .. } => {
-                // Accumulate the sub-table body: a `package` rename and the
-                // `path`/`workspace` markers that make it a local edge.
+            DepTable::Sub {
+                package,
+                local,
+                version,
+                ..
+            } => {
+                // Accumulate the sub-table body: a `package` rename, the
+                // `path`/`workspace` markers that make it a local edge, and the
+                // `version` requirement.
                 if let Some((k, v)) = split_key_value(t) {
                     match k {
                         "package" if package.is_none() => *package = extract_quoted(v),
                         "path" => *local = true,
                         "workspace" if v.trim_start().starts_with("true") => *local = true,
+                        "version" if version.is_none() => *version = extract_quoted(v),
                         _ => {}
                     }
                 }
@@ -651,9 +687,6 @@ fn member_dependency_names(text: &str) -> Vec<String> {
         }
     }
     flush_dep_subtable(&mut state, &mut out);
-
-    out.sort();
-    out.dedup();
     out
 }
 
@@ -672,6 +705,7 @@ fn classify_dep_table(header: &str) -> DepTable {
             key: name.trim().trim_matches(['"', '\'']).to_string(),
             package: None,
             local: false,
+            version: None,
         };
     }
     // dev-dependencies (plain or target-specific) never gate publish order.
@@ -718,7 +752,7 @@ fn dep_subtable_name(header: &str) -> Option<&str> {
 /// `package = "…"` rename when present, else the bare key. Dotted forms
 /// (`foo.path = "…"`, `foo.workspace = true`) are recognized; a lone `foo.version` /
 /// `foo.package` is not a local marker.
-fn dep_edge_from_line(line: &str) -> Option<String> {
+fn dep_edge_from_line(line: &str) -> Option<(String, Option<String>)> {
     let (key_full, val) = split_key_value(line)?;
     let mut segs = key_full.split('.');
     let crate_key = segs.next().unwrap_or("").trim().trim_matches(['"', '\'']);
@@ -726,9 +760,15 @@ fn dep_edge_from_line(line: &str) -> Option<String> {
         return None;
     }
     match segs.next().map(str::trim) {
-        // Dotted local markers: `foo.path = "…"` / `foo.workspace = true`.
-        Some("path") => Some(crate_key.to_string()),
-        Some("workspace") if val.trim_start().starts_with("true") => Some(crate_key.to_string()),
+        // Dotted local markers: `foo.path = "…"` / `foo.workspace = true`. A dotted
+        // `foo.version = "…"` on a separate physical line is not carried here (each
+        // line is read independently) — a documented blind spot that fails a cut
+        // closed (a missing pin rewrite leaves a stale `=<from>` pin the publish
+        // rejects), never mis-rewrites.
+        Some("path") => Some((crate_key.to_string(), None)),
+        Some("workspace") if val.trim_start().starts_with("true") => {
+            Some((crate_key.to_string(), None))
+        }
         // `foo.version`, `foo.package`, `foo.features`, `foo.optional`, … alone do not
         // mark a local dep.
         Some(_) => None,
@@ -737,7 +777,8 @@ fn dep_edge_from_line(line: &str) -> Option<String> {
             if !val.starts_with('{') || !inline_table_is_local(val) {
                 return None;
             }
-            Some(inline_table_package(val).unwrap_or_else(|| crate_key.to_string()))
+            let name = inline_table_package(val).unwrap_or_else(|| crate_key.to_string());
+            Some((name, inline_table_version(val)))
         }
     }
 }
@@ -745,14 +786,18 @@ fn dep_edge_from_line(line: &str) -> Option<String> {
 /// Emit a completed dependency sub-table's edge into `out` when the body marked it a
 /// local dep — its `package` rename if any, else the sub-table key. A registry
 /// sub-table (no `path`/`workspace`) emits nothing. Resets `state` to [`DepTable::Other`].
-fn flush_dep_subtable(state: &mut DepTable, out: &mut Vec<String>) {
+fn flush_dep_subtable(state: &mut DepTable, out: &mut Vec<(String, Option<String>)>) {
     if let DepTable::Sub {
         key,
         package,
         local: true,
+        version,
     } = state
     {
-        out.push(package.clone().unwrap_or_else(|| key.clone()));
+        out.push((
+            package.clone().unwrap_or_else(|| key.clone()),
+            version.clone(),
+        ));
     }
     *state = DepTable::Other;
 }
@@ -835,6 +880,29 @@ fn inline_table_package(inline: &str) -> Option<String> {
         // Not the rename key (a substring, or `package` not followed by `=`): keep
         // scanning past this occurrence.
         rest = &rest[pos + "package".len()..];
+    }
+    None
+}
+
+/// The `version = "…"` value inside an inline dependency table (`{ path = "…",
+/// version = "=0.4.0" }`), or `None` when the table declares no explicit version. A
+/// best-effort single-line scan matching `version` as a **whole key** — the same
+/// whole-token discipline as [`inline_table_package`], so a `version` substring inside
+/// another value is never misread.
+fn inline_table_version(inline: &str) -> Option<String> {
+    let mut rest = inline;
+    while let Some(pos) = rest.find("version") {
+        let prev_is_ident = rest[..pos]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-');
+        let after = rest[pos + "version".len()..].trim_start();
+        if !prev_is_ident {
+            if let Some(value) = after.strip_prefix('=') {
+                return extract_quoted(value.trim_start());
+            }
+        }
+        rest = &rest[pos + "version".len()..];
     }
     None
 }
@@ -1673,6 +1741,46 @@ mod tests {
             b.workspace_deps.is_empty(),
             "an inline registry dep (no path/workspace) is not an edge"
         );
+    }
+
+    #[test]
+    fn rust_workspace_graph_records_the_lockstep_pin_requirement() {
+        // facet 3: an inline `= "=X"` pin's requirement is carried in dep_reqs so the
+        // planner can rewrite only the exact lockstep edge.
+        let root = "[workspace]\nmembers = [\"core\", \"cli\"]\n";
+        let core = "[package]\nname = \"octl-core\"\nversion = \"0.4.0\"\n";
+        let cli = "[package]\nname = \"cli\"\nversion = \"0.4.0\"\n\n[dependencies]\n\
+                   octl-core = { path = \"../core\", version = \"=0.4.0\" }\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/core/Cargo.toml", core)
+            .file("/repo/cli/Cargo.toml", cli);
+        let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
+        let cli = ws.members.iter().find(|m| m.package == "cli").unwrap();
+        assert_eq!(cli.workspace_deps, vec!["octl-core".to_string()]);
+        assert_eq!(
+            cli.dep_reqs.get("octl-core").map(String::as_str),
+            Some("=0.4.0")
+        );
+    }
+
+    #[test]
+    fn rust_workspace_graph_omits_req_for_a_pathonly_edge() {
+        // A path-only edge (no version) records the edge but no requirement, so the
+        // planner emits no pin rewrite for it (fail closed — the publish would surface
+        // a real error if a pin were needed).
+        let root = "[workspace]\nmembers = [\"core\", \"cli\"]\n";
+        let core = "[package]\nname = \"octl-core\"\nversion = \"0.4.0\"\n";
+        let cli = "[package]\nname = \"cli\"\nversion = \"0.4.0\"\n\n[dependencies]\n\
+                   octl-core = { path = \"../core\" }\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/core/Cargo.toml", core)
+            .file("/repo/cli/Cargo.toml", cli);
+        let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
+        let cli = ws.members.iter().find(|m| m.package == "cli").unwrap();
+        assert_eq!(cli.workspace_deps, vec!["octl-core".to_string()]);
+        assert!(!cli.dep_reqs.contains_key("octl-core"));
     }
 
     #[test]

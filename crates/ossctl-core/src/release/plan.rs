@@ -644,9 +644,19 @@ fn changelog_is_finalizable(contract: &Contract) -> bool {
 /// means `M`'s manifest carries a `D = "=<from_version>"` pin that must become
 /// `D = "=<to_version>"`. Emitted deterministically (sorted by dependent then
 /// dependency), one per edge; empty for a single-crate workspace or a repo with no
-/// detected workspace graph. Assumes the lockstep `=<version>` convention this
-/// feature targets — a caret/range dep would not literally match `=<from>` at cut
-/// time, which the executor tolerates (a rewrite whose `from` is absent is a no-op).
+/// detected workspace graph.
+///
+/// **Precise, not over-broad** (`release-rust-workspace-multicrate` facet 3, llm-review):
+/// a rewrite is emitted **only** when the member's manifest declares that edge's
+/// requirement literally as `=<from_version>` — the exact lockstep pin — read from
+/// [`WorkspaceMember::dep_reqs`](crate::protocol::facts::WorkspaceMember). A
+/// caret/range/`workspace = true`/independently-versioned edge (whose recorded
+/// requirement is absent or is not `=<from_version>`) is **skipped**, so the bump never
+/// clobbers a `^1.2` or a `workspace = true` sibling that does not track the workspace
+/// version in lockstep. Skipping a genuinely-lockstepped edge whose requirement the
+/// parser could not read (a dotted-key blind spot) fails the cut *closed* — the stale
+/// `=<from>` pin the publish rejects — never a mis-rewrite. The executor re-verifies the
+/// exact old value in the manifest before replacing (fail closed on zero/multiple).
 fn derive_pin_rewrites(facts: &Facts, from_version: &str, to_version: &str) -> Vec<PinRewrite> {
     let Some(workspace) = facts.rust_workspace.as_ref() else {
         return Vec::new();
@@ -656,6 +666,7 @@ fn derive_pin_rewrites(facts: &Facts, from_version: &str, to_version: &str) -> V
         .iter()
         .map(|m| m.package.as_str())
         .collect();
+    let from_pin = format!("={from_version}");
     let mut rewrites: Vec<PinRewrite> = Vec::new();
     for member in &workspace.members {
         for dep in &member.workspace_deps {
@@ -663,10 +674,15 @@ fn derive_pin_rewrites(facts: &Facts, from_version: &str, to_version: &str) -> V
             if !is_member.contains(dep.as_str()) {
                 continue;
             }
+            // Only a literal `=<from_version>` lockstep pin is rewritten — a caret/range
+            // or an inherited (`workspace = true`) requirement is left untouched.
+            if member.dep_reqs.get(dep).map(String::as_str) != Some(from_pin.as_str()) {
+                continue;
+            }
             rewrites.push(PinRewrite {
                 in_package: member.package.clone(),
                 dependency: dep.clone(),
-                from: format!("={from_version}"),
+                from: from_pin.clone(),
                 to: format!("={to_version}"),
             });
         }

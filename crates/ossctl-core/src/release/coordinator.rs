@@ -295,6 +295,13 @@ pub fn execute(
     // + `origin`, never on build output, so resolving it once up front is correct.
     let repo_slug = resolve_repo_slug(ctx, &targets);
 
+    // The REAL repo root + current branch, captured BEFORE re-rooting to the checkout:
+    // the engine-owned bump commit is advanced on the real repo's branch (best-effort),
+    // which needs the branch name read from the real repo's git config, not the
+    // throwaway detached checkout.
+    let real_repo_root = ctx.repo_root;
+    let branch = resolve_current_branch(ctx);
+
     // Publish from a CLEAN CHECKOUT of the sealed commit, not the live tree
     // (`release-cut-clean-checkout`). Materialize a throwaway detached `git
     // worktree` at `plan.head_sha` (fail-closed if that commit is absent locally),
@@ -304,6 +311,19 @@ pub fn execute(
     let checkout = SealedCheckout::materialize(ctx, &plan.head_sha)?;
     let checkout_ctx = ctx.with_repo_root(checkout.path());
     let ctx = &checkout_ctx;
+
+    // Engine-owned version bump (--bump plans only) — FIRST, before any build/publish,
+    // so every later phase builds and publishes the BUMPED tree. Applies the sealed
+    // edits in the checkout, runs any bump_hook, commits, and journals the bump commit
+    // (idempotent on resume — never double-bumps). A no-bump plan is a clean no-op here.
+    bump_phase(journal, sink, ctx, plan, real_repo_root, branch.as_deref())?;
+    // The commit the tag must point at: the bump commit for a --bump run (the bump
+    // moved HEAD past the sealed pre-bump commit), else the sealed head_sha.
+    let tag_commit = journal
+        .state()
+        .bump
+        .as_ref()
+        .map_or_else(|| plan.head_sha.clone(), |b| b.commit.clone());
 
     // The source-tarball URL + homebrew formula inputs depend only on the plan + the
     // already-resolved slug, never on any build output, so the dry-run/build phases
@@ -366,7 +386,14 @@ pub fn execute(
     // yet does not own the GitHub Release, so those plans still get an engine-created
     // Release (`coordinator-release-vs-cargo-dist-ownership`).
     let release_owner = github_release_owner(&targets);
-    tag_phase(journal, sink, tagger, plan, release_owner.as_deref())?;
+    tag_phase(
+        journal,
+        sink,
+        tagger,
+        plan,
+        &tag_commit,
+        release_owner.as_deref(),
+    )?;
     // dist (post-tag finalize): now the tag archive exists, finalize homebrew with
     // its real sha256. Runs for every cut (a no-op when there is no post-tag
     // target); its Ok completion flips the run to Completed. (`repo_slug` /
@@ -731,7 +758,7 @@ fn reversible_phase(
                     sink.extend(built.artifacts);
                 }
             }),
-            Phase::Publish | Phase::Tag | Phase::Dist => {
+            Phase::Bump | Phase::Publish | Phase::Tag | Phase::Dist => {
                 unreachable!("reversible_phase only runs dry_run/build")
             }
         };
@@ -845,6 +872,93 @@ fn publish_phase(
     Ok(())
 }
 
+/// Run the engine-owned version-bump barrier (`--bump` plans only) — FIRST, before
+/// dry-run-all, so every later phase builds and publishes the bumped tree
+/// (`release-rust-workspace-multicrate` facet 2/3).
+///
+/// Applies the sealed edit set inside the clean checkout (version, `=`-pins, Cargo.lock,
+/// CHANGELOG), runs any declared `bump_hook`, commits, and journals the resulting bump
+/// commit as [`EventKind::BumpApplied`]. A no-bump plan is a clean no-op (returns before
+/// entering the barrier). **Idempotent on resume:** a re-entered phase that already
+/// carries the `BumpApplied` fact skips the (destructive) re-apply and just completes the
+/// barrier — never double-bumps — while a phase interrupted *before* `BumpApplied` re-runs
+/// the apply from the freshly re-materialized clean checkout (safe: the checkout is the
+/// pristine sealed tree each cut). A failed apply records `phase_completed bump failed`
+/// and stops before any build/publish — nothing external has happened.
+fn bump_phase(
+    journal: &mut Journal<'_>,
+    sink: &mut dyn ProgressSink,
+    ctx: &EffectCtx<'_>,
+    plan: &ReleasePlan,
+    real_repo_root: &std::path::Path,
+    branch: Option<&str>,
+) -> Result<(), CutError> {
+    let Some(bump) = plan.bump.as_ref() else {
+        return Ok(());
+    };
+    let phase = Phase::Bump;
+    if phase_completed_ok(journal.state(), phase) {
+        return Ok(());
+    }
+    record(journal, sink, EventKind::PhaseEntered { phase })?;
+
+    // Idempotent re-entry: if a prior attempt already applied + journalled the bump (an
+    // interruption between `BumpApplied` and `phase_completed`), do NOT re-apply — the
+    // commit already exists and re-running the edits/hook would be a double-bump. Only
+    // complete the barrier. Otherwise apply the bump against the pristine checkout.
+    if journal.state().bump.is_none() {
+        let effective_date = crate::release::bump_exec::civil_date(ctx.clock.now_unix());
+        match crate::release::bump_exec::apply_bump(
+            ctx,
+            bump,
+            &effective_date,
+            real_repo_root,
+            branch,
+        ) {
+            Ok(outcome) => {
+                record(
+                    journal,
+                    sink,
+                    EventKind::BumpApplied {
+                        commit: outcome.commit,
+                        effective_date: outcome.effective_date,
+                    },
+                )?;
+            }
+            Err(e) => return fail_phase(journal, sink, phase, None, e.to_string()),
+        }
+    }
+
+    record(
+        journal,
+        sink,
+        EventKind::PhaseCompleted {
+            phase,
+            outcome: PhaseOutcome::Ok,
+        },
+    )?;
+    Ok(())
+}
+
+/// The real repo's current branch (`git rev-parse --abbrev-ref HEAD`), or `None` when
+/// HEAD is detached (`"HEAD"`) or git fails — the target the engine-owned bump commit is
+/// best-effort advanced to on `origin`. Read from the REAL repo (not the detached
+/// checkout), before re-rooting.
+fn resolve_current_branch(ctx: &EffectCtx<'_>) -> Option<String> {
+    let out = ctx
+        .runner
+        .run("git", &["rev-parse", "--abbrev-ref", "HEAD"], ctx.repo_root)
+        .ok()?;
+    if out.status != Some(0) {
+        return None;
+    }
+    let branch = out.stdout.trim();
+    if branch.is_empty() || branch == "HEAD" {
+        return None;
+    }
+    Some(branch.to_string())
+}
+
 /// Run the tag-once barrier — coordinator-owned, reached only after every publish
 /// succeeded. Drives the three tag steps in order, each journalled separately and
 /// each skipped if already recorded (resume). Any step failure records
@@ -879,6 +993,7 @@ fn tag_phase(
     sink: &mut dyn ProgressSink,
     tagger: &dyn Tagger,
     plan: &ReleasePlan,
+    tag_commit: &str,
     release_owner: Option<&str>,
 ) -> Result<(), CutError> {
     let phase = Phase::Tag;
@@ -891,9 +1006,11 @@ fn tag_phase(
     let title = format!("Release {}", plan.version);
 
     if !tag_step_done(journal.state(), &tag, |s| s.created_local) {
-        // Tag the plan's SEALED commit, not whatever HEAD is now — the approval
-        // seam binds HEAD, so the tag must point at the approved commit.
-        if let Err(e) = tagger.create_tag(&tag, &plan.head_sha, &title) {
+        // Tag the run's landed commit: the engine-owned BUMP commit for a --bump run
+        // (the bump advanced HEAD past the sealed pre-bump commit), else the plan's
+        // sealed head_sha. Either way it is a fixed commit bound to the approval seam,
+        // never "whatever HEAD is now".
+        if let Err(e) = tagger.create_tag(&tag, tag_commit, &title) {
             return fail_phase(journal, sink, phase, None, format!("create local tag: {e}"));
         }
         record(
@@ -1251,7 +1368,7 @@ fn target_cleared(state: &RunState, phase: Phase, target: &str) -> bool {
         Phase::DryRun => state.dry_run.contains(target),
         Phase::Build => state.built.contains(target),
         Phase::Publish | Phase::Dist => state.published.contains_key(target),
-        Phase::Tag => false,
+        Phase::Bump | Phase::Tag => false,
     }
 }
 

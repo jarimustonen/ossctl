@@ -173,13 +173,26 @@ pub fn apply(state: &mut RunState, event: &JournalEvent) {
             plan_id,
             version,
             targets,
+            head_sha,
+            bump,
         } => {
             state.run_id.clone_from(run_id);
             state.plan_id.clone_from(plan_id);
             state.version.clone_from(version);
             state.targets.clone_from(targets);
+            state.head_sha.clone_from(head_sha);
+            state.bump_inputs.clone_from(bump);
             state.created_ts = event.ts;
             state.status = RunStatus::InProgress;
+        }
+        EventKind::BumpApplied {
+            commit,
+            effective_date,
+        } => {
+            state.bump = Some(crate::protocol::journal::BumpRecord {
+                commit: commit.clone(),
+                effective_date: effective_date.clone(),
+            });
         }
         EventKind::PhaseEntered { phase } => {
             state.current_phase = Some(*phase);
@@ -507,6 +520,55 @@ impl<'a> Journal<'a> {
         version: String,
         targets: Vec<String>,
     ) -> io::Result<Self> {
+        Self::create_inner(
+            store, clock, idgen, paths, plan_id, version, targets, None, None,
+        )
+    }
+
+    /// Create a `--bump` run, persisting the sealed `head_sha` + [`BumpInputs`](crate::protocol::journal::BumpInputs) on the
+    /// `RunCreated` event so `release resume` can reconstruct the exact sealed plan
+    /// (`build_with_bump`) against the pre-bump commit after the bump commit moves HEAD
+    /// (`release-rust-workspace-multicrate`). Otherwise identical to [`Self::create`].
+    ///
+    /// # Errors
+    /// As [`Self::create`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_bump(
+        store: &'a dyn JournalStore,
+        clock: &'a dyn Clock,
+        idgen: &dyn IdGen,
+        paths: JournalPaths,
+        plan_id: String,
+        version: String,
+        targets: Vec<String>,
+        head_sha: String,
+        bump: crate::protocol::journal::BumpInputs,
+    ) -> io::Result<Self> {
+        Self::create_inner(
+            store,
+            clock,
+            idgen,
+            paths,
+            plan_id,
+            version,
+            targets,
+            Some(head_sha),
+            Some(bump),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_inner(
+        store: &'a dyn JournalStore,
+        clock: &'a dyn Clock,
+        idgen: &dyn IdGen,
+        paths: JournalPaths,
+        plan_id: String,
+        version: String,
+        targets: Vec<String>,
+        head_sha: Option<String>,
+        bump: Option<crate::protocol::journal::BumpInputs>,
+    ) -> io::Result<Self> {
         let lock = store.lock_exclusive(&paths.lock_file())?;
         let run_id = idgen.new_id();
         let mut journal = Self {
@@ -522,6 +584,8 @@ impl<'a> Journal<'a> {
             plan_id,
             version,
             targets,
+            head_sha,
+            bump,
         })?;
         Ok(journal)
     }
@@ -826,6 +890,8 @@ mod tests {
                 plan_id: "plan-abc".into(),
                 version: "0.1.0".into(),
                 targets: vec!["cargo".into(), "npm".into()],
+                head_sha: None,
+                bump: None,
             },
             EventKind::PhaseEntered {
                 phase: Phase::DryRun,
@@ -950,6 +1016,8 @@ mod tests {
                     plan_id: "p".into(),
                     version: "0.1.0".into(),
                     targets: vec!["cargo".into()],
+                    head_sha: None,
+                    bump: None,
                 },
             ),
         );

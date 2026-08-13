@@ -57,14 +57,29 @@ use serde::{Deserialize, Serialize};
 /// journal, and that journal must stay readable while a v3 line is refused by the
 /// older binary.) The reduce path stays backward-tolerant of v1/v2 logs (which lack
 /// this event); `TagState::github_release_delegated` is `#[serde(default)]`.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 3;
+///
+/// **v4** (2026-08-13): added the engine-owned version-bump phase
+/// (`release-rust-workspace-multicrate` facet 2/3) — a new [`Phase::Bump`] barrier
+/// value, the [`EventKind::BumpApplied`] event class, and the additive
+/// `RunCreated { head_sha, bump }` reconstruction fields. Each is a **value a v3
+/// reader cannot interpret** (a `bump` phase / a `bump_applied` line), so the
+/// migration rule requires its own bump: a v3 binary refuses a v4 line rather than
+/// misreading it. The reduce path stays backward-tolerant of v1–v3 logs (which lack
+/// the bump phase/event); the new `RunState` fields are `#[serde(default)]`.
+pub const JOURNAL_SCHEMA_VERSION: u32 = 4;
 
-/// The five coordinator phases, in barrier order (ADR-0002): the derived
-/// `PartialOrd`/`Ord` follows declaration order, so `DryRun < Build < Publish <
-/// Tag < Dist` — the order the projection sorts phase records in.
+/// The coordinator phases, in barrier order (ADR-0002): the derived
+/// `PartialOrd`/`Ord` follows declaration order, so `Bump < DryRun < Build <
+/// Publish < Tag < Dist` — the order the projection sorts phase records in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
+    /// Engine-owned version bump (present only for a `--bump` plan): edit the
+    /// workspace version + `=`-pins + lockfile + CHANGELOG in the clean checkout,
+    /// run any declared `bump_hook`, and commit — **before** dry-run-all, so every
+    /// later phase builds/publishes the bumped tree. Recorded once; idempotent on
+    /// resume via the [`EventKind::BumpApplied`] fact (never double-bumps).
+    Bump,
     /// Dry-run-all: every adapter proves it *can* publish, nothing lands.
     DryRun,
     /// Build-all: every adapter produces its release artifact.
@@ -91,6 +106,7 @@ impl Phase {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Bump => "bump",
             Self::DryRun => "dry_run",
             Self::Build => "build",
             Self::Publish => "publish",
@@ -108,7 +124,7 @@ impl Phase {
     #[must_use]
     pub fn is_publish_or_later(self) -> bool {
         match self {
-            Self::DryRun | Self::Build => false,
+            Self::Bump | Self::DryRun | Self::Build => false,
             Self::Publish | Self::Tag | Self::Dist => true,
         }
     }
@@ -210,6 +226,45 @@ pub struct TagState {
     pub github_release_delegated: bool,
 }
 
+/// The engine-owned bump inputs a `--bump` run persists so `release resume` can
+/// reconstruct the **exact** sealed plan after an interruption.
+///
+/// A `--bump` cut applies the version bump as its first phase, which advances the
+/// working tree's HEAD past the plan's sealed (pre-bump) commit. Resume must
+/// re-derive the plan against the *sealed* commit + the recorded bump level, not the
+/// moved live HEAD, or its recomputed `plan_id` would never match. Persisted on the
+/// `RunCreated` event (before the bump runs), so it is available whether the
+/// interruption happened before or after the bump landed. `None`/absent for a
+/// no-bump run (the default path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BumpInputs {
+    /// The semantic bump level (`major` / `minor` / `patch`) the plan was sealed with.
+    pub level: String,
+    /// The manifest version the bump was computed **from** (the pre-bump workspace
+    /// version) — the input `bump_version(level, from_version)` reproduces `to_version`
+    /// from.
+    pub from_version: String,
+}
+
+/// The record of an **applied** engine bump — the durable fact that makes resume
+/// idempotent (never double-bumps).
+///
+/// Written by the [`Phase::Bump`] barrier once the version/pin/lockfile/CHANGELOG
+/// edits are committed and any `bump_hook` has run. Its presence flips the run's bump
+/// state from *not-started* to *applied*: a resumed cut that sees it skips the bump
+/// entirely and continues from the recorded [`Self::commit`] (which the tag phase then
+/// points at). The [`Self::effective_date`] is journalled once here and reused on
+/// resume so a run spanning midnight cannot re-date the CHANGELOG.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BumpRecord {
+    /// The commit sha the bump edits landed in — the commit the release tag points at
+    /// (not the pre-bump sealed HEAD).
+    pub commit: String,
+    /// The `YYYY-MM-DD` date the CHANGELOG's `[Unreleased]` section was finalized
+    /// under — journalled once so resume reuses it verbatim.
+    pub effective_date: String,
+}
+
 /// One completed-phase record in the [`RunState`] projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseRecord {
@@ -244,6 +299,28 @@ pub enum EventKind {
         version: String,
         /// The ordered target set (e.g. `["rust", "node"]`).
         targets: Vec<String>,
+        /// The git HEAD the plan was sealed against, when persisted (v4+). Resume
+        /// reconstructs a `--bump` plan against this **sealed** commit rather than the
+        /// live HEAD the bump commit moved past. Additive/optional: a pre-v4 log omits
+        /// it (`#[serde(default)]`), and a no-bump run does not depend on it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head_sha: Option<String>,
+        /// The engine-owned bump inputs when this run executes a `--bump` plan; `None`
+        /// for the default no-bump path. Persisted so resume can recompute the exact
+        /// sealed plan (`build_with_bump`) from the level + pre-bump version.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bump: Option<BumpInputs>,
+    },
+    /// The engine version bump was applied and committed (`--bump` runs only) — the
+    /// idempotency fact that stops a resume from double-bumping. Recorded by the
+    /// [`Phase::Bump`] barrier after the version/pin/lockfile/CHANGELOG edits are
+    /// committed and any `bump_hook` has run.
+    BumpApplied {
+        /// The bump commit sha (the commit the release tag points at).
+        commit: String,
+        /// The `YYYY-MM-DD` CHANGELOG effective date, journalled once and reused on
+        /// resume.
+        effective_date: String,
     },
     /// A phase barrier was entered.
     PhaseEntered {
@@ -387,6 +464,7 @@ impl EventKind {
     pub fn idempotency_key(&self) -> String {
         match self {
             Self::RunCreated { .. } => "run_created".to_string(),
+            Self::BumpApplied { .. } => "bump_applied".to_string(),
             Self::PhaseEntered { phase } => format!("phase_entered:{}", phase.as_str()),
             Self::PhaseCompleted { phase, .. } => {
                 format!("phase_completed:{}", phase.as_str())
@@ -428,6 +506,22 @@ pub struct RunState {
     pub version: String,
     /// The ordered target set, as declared at creation.
     pub targets: Vec<String>,
+    /// The git HEAD the plan was sealed against, when the `RunCreated` event carried
+    /// it (v4+). `None` for a pre-v4 or no-bump run. Resume reconstructs a `--bump`
+    /// plan against this sealed commit rather than the moved live HEAD.
+    #[serde(default)]
+    pub head_sha: Option<String>,
+    /// The engine-owned bump inputs (level + pre-bump version) for a `--bump` run;
+    /// `None` for the default no-bump path. Present ⇒ this is a bump run, so resume
+    /// reconstructs the plan via `build_with_bump`.
+    #[serde(default)]
+    pub bump_inputs: Option<BumpInputs>,
+    /// The applied-bump record once the [`Phase::Bump`] barrier committed
+    /// (`BumpApplied`). `None` = not-yet-applied (a bump run mid-flight or a no-bump
+    /// run); `Some` = applied, so resume never re-bumps and the tag points at
+    /// [`BumpRecord::commit`].
+    #[serde(default)]
+    pub bump: Option<BumpRecord>,
     /// The high-water sequence number folded into this state — the append-then-
     /// apply watermark (ADR-0003 §2).
     pub applied_seq: u64,
@@ -474,6 +568,9 @@ impl RunState {
             plan_id: String::new(),
             version: String::new(),
             targets: Vec::new(),
+            head_sha: None,
+            bump_inputs: None,
+            bump: None,
             applied_seq: 0,
             status: RunStatus::InProgress,
             current_phase: None,
