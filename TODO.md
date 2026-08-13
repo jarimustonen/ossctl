@@ -5,19 +5,59 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-08-12 (stint #18). New agent: read this, then continue with a fresh
-`/stint-start`. Main is clean; the DAG commit is committed (push it with the next round's
-pull-rebase-push, per policy). Live: **0.4.0** on all four channels. **⚠️ ONE HIGH item is now
-queued as the head-of-line: `release-rust-workspace-multicrate`** (feature — filed 2026-08-12 by the
-orchestratectl session). Start there, or ask Jari._
+_Handoff written 2026-08-13 (stint #19). New agent: read this, then continue with a fresh
+`/stint-start`. Main is clean + pushed. Live: **0.4.0** on all four channels (UNCHANGED — no release
+this round). **⚠️ FIRST THING: a facets-2+3 worker is IN FLIGHT and self-merges** — verify its landing
+before anything else (see the ⚠️ block below). Head-of-line stays `release-rust-workspace-multicrate`
+(facets 1+4 landed this round; 2+3 in flight)._
 
-_**Stint #18 (2026-08-12) — a short LISTING / DAG-maintenance round, no release, no code.** Jari asked
-for a glasspad list of all open issues; while building it a NEW HIGH issue appeared mid-stint
-(`release-rust-workspace-multicrate`, committed `a170409` by the orchestratectl session). Reconciled it
-into the DAG as LANE A's head-of-line and refreshed the now-stale "no HIGH blocker" prose. All 27 open
-issues are covered by the DAG (drift check clean). No worktrees spawned, nothing deployed. The glasspad
-issue list is published at glasspad.maalla.dev (hosted, single-page `publish`; that server's whole-space
-`publish-space` endpoint 404s — use single-page publish or static `build`)._
+_**Stint #19 (2026-08-12→13) — release-engine feature round + 1 feedback round. Landed facets 1+4 of
+`release-rust-workspace-multicrate`; facets 2+3 in flight.** Spawned one autonomous design-first spinoff
+for the HIGH head-of-line. It landed (green + multi-model `/llm-review`) the two facets that needed no
+new architecture decision:_
+_- **Facet 1 — dep-ordered multi-crate publish CLOSURE derivation.** `ossctl release plan` now derives
+  the full dependency-ordered publish set for a multi-crate Rust workspace (lib before bin) **from a
+  bin-only contract** — the core unblock toward retiring hand-cut orchestratectl releases. A live
+  `orchestratectl release plan` will now show both crates, ordered._
+_- **Facet 4 — `homebrew_tap` carry** from the contract's distribution block into the plan (was null)._
+_- **Critical over-publish caught in review before it shipped:** the first impl published EVERY publishable
+  workspace member whenever any rust target was present (would sweep an unrelated, deliberately-undeclared
+  crate into an IRREVERSIBLE publish). gpt-5.6 flagged it; fixed to only the declared targets' transitive
+  dependency CLOSURE, with precise path/workspace edges. (Review report: `history/review-release-rust-
+  workspace-multicrate.md`.)_
+_Landed head `9a9c219`, +1509 lines across `plan.rs`, `facts/mod.rs`, tests. Green gate clean (439 tests),
+pushed._
+
+_**Feedback round — Jari decided facet-2's version source: `--bump major|minor|patch`.** Facet 2 (engine-
+owned version bump) collided with the settled 0.3.0 single-source-version decision (`--version` removed):
+with no version input the engine can't know what to bump TO. Jari's call: **`--bump major|minor|patch`** —
+the engine COMPUTES the new version from the manifest + bump level; NO hand-typed literal, `--version`
+stays removed. Recorded in `issues/release-rust-workspace-multicrate/item.md` (commit `b1850ed`)._
+
+_**⚠️ IN-FLIGHT WORKER — verify its landing FIRST (this is why you can't assume main is final):**_
+_- Run `01kzx1581x4y9q5jb0ew4daefs` (headless, supervisor was 36114), branch
+  `wt/01kzx1581x-release-bump-phase`, building **facets 2+3**: the `--bump` engine-owned version-bump
+  plan phase (set `[workspace.package] version`, rewrite `=<ver>` pins, refresh Cargo.lock, finalize
+  CHANGELOG) + a **contract-declared `bump_hook`** for version-embedding snapshot regen (schema_version
+  bump + back-compat deser). It self-merges via `run merge` and CLOSES the issue if fully done._
+_- **NEXT AGENT, do this first:** `orchestratectl run wait 01kzx1581x4y9q5jb0ew4daefs --output json`
+  then read `landed`/`summary`; verify by CONTENT on main (not the worker branch ref); run the full
+  green gate; `git pull --rebase && git push`. If it landed PARTIAL or `success:false`, read its
+  `discussion_items` (`orchestratectl node show 01kzx1581x4y9q5jb0ew4daefs n-0001 --output json`) and
+  reconcile. If it landed a schema_version bump, confirm golden vectors updated._
+
+_**After facets 2+3 land:** the issue's ultimate DONE = a real **orchestratectl** cut succeeds end-to-end
+(needs crates.io creds + the orchestratectl repo + an IRREVERSIBLE publish) — that live acceptance is the
+MAINTAINER's step, not a worktree's. Only then close/retire the head-of-line._
+
+_**Hardening backlog from facet-1 review** lives inside `issues/release-rust-workspace-multicrate/item.md`
+(NOT yet separate issuectl issues): workspace-graph parser edge cases — `workspace.dependencies`-inherited
+renames, publish-field workspace inheritance, non-virtual root-package workspaces, multi-line inline
+tables, recursive/patterned member globs, Windows abs-path confinement, manifest-truncation-as-
+authoritative, and a cut-time cross-check of the sealed plan ORDER vs `cargo metadata` topology. File as
+issues + lane them if picked up._
+
+_**Housekeeping:** the Dependabot `clap` PR is still open on the remote — adjacent, not triaged._
 
 _🎉 **THREE RELEASES THIS SESSION — 0.2.5, 0.3.0, 0.4.0.** Stint #16 made the engine's real-cut publish
 TRUSTWORTHY (0.2.5) then HARDENED it (0.3.0, BREAKING). Stint #17 shipped 0.4.0 — pi.dev skill dual-homing._
@@ -114,7 +154,7 @@ release, no code) that reconciled the new HIGH `release-rust-workspace-multicrat
 
 **Read first (the spec):** `docs/adr/000{1,2,3,4}-*.md` (CLI taxonomy, release engine, config+journal, one-target-one-publish-unit).
 
-## Execution DAG (2026-08-12, stint #17 handoff)
+## Execution DAG (2026-08-13, stint #19 handoff)
 
 Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
 (never copied here). Merge at Phase 0/handoff (drop landed, add active, keep existing order).
@@ -128,21 +168,22 @@ Do not re-add them here.
 
 **Track B — "ossctl cuts ITSELF through the engine" — ✅ COMPLETE (stint #14) and now ROUTINE (stints
 #15/#16/#17 shipped 0.2.4/0.2.5/0.3.0/0.4.0 the same way; #16 made the real-cut publish trustworthy + hardened).**
-⚠️ **ONE NEW HIGH release blocker (filed 2026-08-12 by the orchestratectl session):**
-`release-rust-workspace-multicrate` — the engine produces an INCOMPLETE plan for a DOWNSTREAM two-crate
-workspace (orchestratectl: only the bin is a target so a cut fails on the `=`-pin; no version-bump phase;
-homebrew_tap null). ossctl's OWN cut works only because ossctl declares both crates; the engine must
-DERIVE the dep-ordered member publish + own the version bump. Everything ELSE below is DEFERRED hardening,
+⚠️ **ONE HIGH release feature, PARTIALLY LANDED (stint #19):** `release-rust-workspace-multicrate` —
+made the engine's plan COMPLETE for a downstream two-crate workspace. Facets 1 (dep-ordered multi-crate
+publish CLOSURE derivation from a bin-only contract) + 4 (homebrew_tap carry) LANDED; facets 2 (`--bump`
+engine-owned version-bump phase) + 3 (contract-declared snapshot bump_hook) are IN FLIGHT (run
+01kzx1581x4y9q5jb0ew4daefs, self-merges — verify FIRST). After 2+3 land, ultimate DONE = a real
+orchestratectl cut end-to-end (maintainer's step). Everything ELSE below is DEFERRED hardening,
 review follow-ups, or the one approved future feature (`oss-dist-channel-generator`, UNLANED). LANE C
 is retired for ossctl's own cut — only `release-macos-hauis-coupling` survives (homebase-adjacent).
 **Do NOT harden LANE C.**
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: release-rust-workspace-multicrate (HIGH, feature — filed 2026-08-12 by the orchestratectl session; the ONE HIGH item now queued). 0.4.0 is live on all four channels (crates.io ossctl-core+ossctl@0.4.0; GitHub Release v0.4.0, 14 assets; Homebrew tap v0.4.0) — Track B (ossctl's own cut) stays routine. The NEW head is a DOWNSTREAM engine gap: plan/cut can't cut orchestratectl's two-crate workspace (dep-ordered member publish + version-bump phase + homebrew_tap carry all missing). LANE A, spans plan.rs + coordinator + a new bump phase.
+GLOBAL HEAD-OF-LINE: release-rust-workspace-multicrate (HIGH, feature — STILL the head; PARTIALLY LANDED stint #19). Facets 1 (dep-ordered multi-crate publish CLOSURE derivation from a bin-only contract) + 4 (homebrew_tap carry) LANDED green + reviewed (head 9a9c219). Facets 2 (`--bump` engine-owned version-bump phase) + 3 (contract-declared bump_hook for snapshot regen) are IN FLIGHT in run 01kzx1581x4y9q5jb0ew4daefs (self-merges — verify its landing FIRST, see handoff ⚠️). Maintainer decision recorded: facet-2 version source = `--bump major|minor|patch` (engine computes; --version stays removed). After 2+3 land, ultimate DONE = a real orchestratectl cut end-to-end (maintainer's step). 0.4.0 stays live on all four channels; Track B (ossctl's own cut) routine.
   Then DEFERRED/optional: release-ci-publish-mode (glasspad friction — needs Jari triage; RELATED — both are downstream-cut gaps), per-distribution-release, release-verify-delegated-github-release, release-cut-stale-binary-guard, the cargo receipt-provenance cluster, LANE B additive hardening. FEATURE (approved, own stint): oss-dist-channel-generator via /worktree-make-skill. Also open in orchestratectl repo: supervisor-stall-detection (filed this session).
 LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly)
-  ▶ release-rust-workspace-multicrate  (HIGH, feature — NEW head-of-line, filed 2026-08-12 by the orchestratectl session. Engine produces an INCOMPLETE plan for a downstream two-crate Rust workspace: (1) only the bin crate is a target → cut fails on the `=<ver>` pin because the lib isn't published; DERIVE dep-ordered member publish from the workspace graph (lib → bin). (2) NO version-bump phase — engine must OWN the bump as a content-addressed plan phase: workspace `[workspace.package] version`, intra-workspace `=<ver>` pins, Cargo.lock, CHANGELOG finalize, + regenerate version-embedding insta snapshots. (3) homebrew_tap null even though the contract's distribution declares the per-tool tap → carry it into the plan. DONE = a real orchestratectl cut succeeds end-to-end. RELATED: release-ci-publish-mode + per-distribution-release (all downstream-cut engine gaps). collision: contract/schema.rs may be touched for target-derivation)
+  ▶ release-rust-workspace-multicrate  (HIGH, feature — PARTIALLY LANDED stint #19; still the head. [DONE facet 1] DERIVE dep-ordered multi-crate publish CLOSURE from a bin-only contract (lib → bin) — landed green + reviewed, gpt-5.6 caught+fixed a critical over-publish (was publishing every member; now only the declared targets' transitive closure). [DONE facet 4] carry homebrew_tap into the plan. [IN FLIGHT facets 2+3 — run 01kzx1581x4y9q5jb0ew4daefs, self-merges] facet 2 = `--bump major|minor|patch` engine-owned version-bump phase (compute version from manifest+level; set `[workspace.package] version`, rewrite `=<ver>` pins, Cargo.lock, CHANGELOG finalize — maintainer decision recorded in item.md, commit b1850ed); facet 3 = contract-declared `bump_hook` for version-embedding snapshot regen (schema_version bump + back-compat deser). After 2+3: ultimate DONE = a real orchestratectl cut end-to-end (maintainer's step). Facet-1 review left a workspace-graph-parser hardening backlog inside item.md. collision: contract/schema.rs touched for facet-3 field)
   [DONE stint #15] resume-publish-phase-never-reached      (fixed — resume no longer demands --allow-unverified when the publish phase was never reached; unsafe rows unchanged)
   [DONE stint #15] release-abandon-reason-leading-dashes   (fixed — `release abandon --reason` accepts values starting with `--` via allow_hyphen_values)
   [DONE stint #15] homebrew-tapwrite-preserve-formula      (done — ownership marker: full-regen only when marked, else surgical url/sha edit or fail-closed refusal; hand-maintained formulas preserved)
