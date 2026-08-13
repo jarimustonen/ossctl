@@ -269,6 +269,28 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
             t.ecosystem.as_str()
         ));
     }
+    // A `--bump` plan is a PREVIEW: the plan side (computed version + sealed edit set) has
+    // landed, but the engine cannot yet EXECUTE the bump at cut time, so `release cut`
+    // refuses it (fail closed) rather than publish the un-bumped version. Say so up front
+    // so an approver does not mistake a sealed bump plan for a cuttable one.
+    if let Some(bump) = &plan.bump {
+        warnings.push(format!(
+            "this is a --bump PREVIEW ({} → {}): the sealed plan is complete but engine-owned \
+             bump execution is not yet wired, so `release cut` will REFUSE it \
+             (bump_execution_unimplemented). It proves the computed version + edit set; it is not \
+             yet cuttable",
+            bump.from_version, bump.to_version
+        ));
+        // Surface any declared bump_hook VERBATIM: it is arbitrary code the eventual
+        // executor runs during the release, so an approver must see exactly what will run
+        // (a supply-chain eyes-on gate). Quoted to prevent output-spoofing via the value.
+        if let Some(hook) = &bump.bump_hook {
+            warnings.push(format!(
+                "this bump declares a bump_hook the engine will run during the release — review it \
+                 as trusted code: {hook:?}"
+            ));
+        }
+    }
 
     match format {
         OutputFormat::Json => crate::output::emit_json(&plan, &warnings)?,
@@ -1500,8 +1522,8 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     // publish the OLD manifest version (the bump never applied) — the exact
     // partial-publish footgun `release-rust-workspace-multicrate` exists to prevent —
     // so we refuse rather than mis-publish. The sealed plan is complete and ready.
-    if current.bump.is_some() {
-        return Err(bump_execution_unimplemented_error(&current));
+    if let Some(bump) = &current.bump {
+        return Err(bump_execution_unimplemented_error(&current.plan_id, bump));
     }
 
     // Preflight the plan *before* creating a run, so an unexecutable plan (an
@@ -1589,9 +1611,9 @@ fn plan_stale_error(approved: &str, current: &ReleasePlan) -> CliError {
 ///
 /// Shared by `plan` (to emit the sealed artifact) and `cut` (to recompute it for the
 /// drift check), so both agree on how `--bump` maps to a plan down to the byte. The
-/// version arithmetic is validated once here at the input boundary (a non-semver
-/// manifest version fails closed via [`compute_bumped_version`]), and the resulting
-/// tag-shape is validated for both the current and the computed version.
+/// core constructor owns the version arithmetic (a non-semver manifest version fails
+/// closed as `unbumpable_version`), and the resulting tag-shape is validated for both
+/// the current and the computed version.
 fn derive_release_plan(
     contract: &Contract,
     facts: &ossctl_core::protocol::facts::Facts,
@@ -1604,16 +1626,20 @@ fn derive_release_plan(
     validate_version(&current_version)?;
     match parse_bump_level(bump_arg)? {
         Some(level) => {
-            let new_version = compute_bumped_version(level, &current_version)?;
-            validate_version(&new_version)?;
-            Ok(ossctl_core::release::plan::build_with_bump(
+            // The core constructor OWNS the arithmetic (computes to_version from
+            // level+from_version), so the plan can never seal a version that contradicts
+            // its declared level. A non-semver manifest version fails closed here.
+            let plan = ossctl_core::release::plan::build_with_bump(
                 contract,
                 facts,
                 head_sha,
                 &current_version,
-                &new_version,
                 level,
-            ))
+            )
+            .map_err(|e| bump_error_to_cli(level, e))?;
+            // The computed version becomes the `v{version}` tag — validate its shape.
+            validate_version(&plan.version)?;
+            Ok(plan)
         }
         None => Ok(ossctl_core::release::plan::build(
             contract,
@@ -2015,54 +2041,55 @@ fn parse_bump_level(
     }
 }
 
-/// Compute the new version for a `--bump <level>` from the current manifest version,
-/// mapping the strict-semver failure to the §10 error envelope.
+/// Map a strict-semver [`BumpError`](ossctl_core::release::bump::BumpError) from the
+/// core bump constructor to the §10 error envelope.
 ///
 /// The engine derives the number (there is no hand-typed literal version); a
-/// non-semver manifest version fails **closed** here rather than producing a wrong
-/// release version.
-fn compute_bumped_version(
+/// non-semver manifest version fails **closed** rather than producing a wrong release
+/// version.
+fn bump_error_to_cli(
     level: ossctl_core::protocol::plan::BumpLevel,
-    current: &str,
-) -> Result<String, CliError> {
-    ossctl_core::release::bump::bump_version(level, current).map_err(|e| {
-        CliError::user(
-            "unbumpable_version",
-            format!(
-                "cannot compute a --bump {} from the current manifest version '{}': {}",
-                level.as_str(),
-                e.version,
-                e.reason
-            ),
-        )
-        .with_invalid_value(e.version)
-    })
+    err: ossctl_core::release::bump::BumpError,
+) -> CliError {
+    CliError::user(
+        "unbumpable_version",
+        format!(
+            "cannot compute a --bump {} from the current manifest version '{}': {}",
+            level.as_str(),
+            err.version,
+            err.reason
+        ),
+    )
+    .with_invalid_value(err.version)
 }
 
 /// The refusal returned when a cut targets an engine-owned bump plan: the plan side
 /// (compute + seal, `release-rust-workspace-multicrate` facet 2/3) has landed, but the
 /// cut-time execution of the bump phase is a follow-up validated by a real cut. Exit 1
-/// — fail closed rather than build/publish the un-bumped manifest version.
-fn bump_execution_unimplemented_error(plan: &ReleasePlan) -> CliError {
-    let (from, to) = plan
-        .bump
-        .as_ref()
-        .map(|b| (b.from_version.clone(), b.to_version.clone()))
-        .unwrap_or_default();
+/// — fail closed rather than build/publish the un-bumped manifest version. Takes the
+/// [`BumpPlan`](ossctl_core::protocol::plan::BumpPlan) directly (the caller guards
+/// `bump.is_some()`), so the message never
+/// fabricates an empty `→` from an absent bump.
+fn bump_execution_unimplemented_error(
+    plan_id: &str,
+    bump: &ossctl_core::protocol::plan::BumpPlan,
+) -> CliError {
     CliError::user(
         "bump_execution_unimplemented",
         format!(
-            "plan {} owns an engine version bump ({from} → {to}), but cut-time execution of the \
+            "plan {} owns an engine version bump ({} → {}), but cut-time execution of the \
              bump phase (edit the version + pins + Cargo.lock + CHANGELOG in a clean checkout, run \
              any bump_hook, commit, and tag the bump commit) is not yet wired — it must be \
              validated by a real cut, which is the maintainer's acceptance step. The sealed plan is \
              complete; apply the bump by hand (per the AGENTS.md release recipe) and cut a \
              `--bump`-less plan, or await the executor follow-up. Cutting now would build and \
              publish the OLD manifest version — refused",
-            short_sha(&plan.plan_id),
+            short_sha(plan_id),
+            bump.from_version,
+            bump.to_version,
         ),
     )
-    .with_invalid_value(plan.plan_id.clone())
+    .with_invalid_value(plan_id.to_string())
 }
 
 fn resolve_repo_root(flag: Option<&PathBuf>) -> Result<PathBuf, CliError> {
@@ -2149,7 +2176,9 @@ fn render_plan_text(plan: &ReleasePlan, warnings: &[String]) {
             println!("  changelog: finalize [Unreleased] → [{}]", bump.to_version);
         }
         if let Some(hook) = &bump.bump_hook {
-            println!("  bump_hook: {hook}");
+            // Quoted (Debug) so a hook value carrying newlines/control chars cannot spoof
+            // the surrounding plan output the approver reads.
+            println!("  bump_hook: {hook:?}");
         }
     }
     println!("targets:    {}", plan.targets.len());
@@ -2436,27 +2465,16 @@ mod tests {
         assert!(err.message.contains("major, minor, patch"));
     }
 
-    /// `compute_bumped_version` computes per level and fails **closed** on a non-semver
-    /// manifest version (`unbumpable_version`) rather than guessing.
+    /// `bump_error_to_cli` maps a core `BumpError` (non-semver manifest version) to the
+    /// fail-closed `unbumpable_version` envelope, echoing the offending version.
     #[test]
-    fn compute_bumped_version_computes_and_fails_closed() {
+    fn bump_error_to_cli_fails_closed_on_a_non_semver_version() {
         use ossctl_core::protocol::plan::BumpLevel;
-        assert_eq!(
-            compute_bumped_version(BumpLevel::Patch, "0.4.0").unwrap(),
-            "0.4.1"
-        );
-        assert_eq!(
-            compute_bumped_version(BumpLevel::Minor, "0.4.0").unwrap(),
-            "0.5.0"
-        );
-        assert_eq!(
-            compute_bumped_version(BumpLevel::Major, "0.4.0").unwrap(),
-            "1.0.0"
-        );
-
-        let err = compute_bumped_version(BumpLevel::Patch, "not-semver")
-            .expect_err("a non-semver version must fail closed");
-        assert_eq!(err.code, "unbumpable_version");
+        let err = ossctl_core::release::bump::bump_version(BumpLevel::Patch, "not-semver")
+            .expect_err("non-semver must fail closed");
+        let cli = bump_error_to_cli(BumpLevel::Patch, err);
+        assert_eq!(cli.code, "unbumpable_version");
+        assert_eq!(cli.invalid_value.as_deref(), Some("not-semver"));
     }
 
     /// A `--reason` value beginning with `--` must be taken literally, not parsed

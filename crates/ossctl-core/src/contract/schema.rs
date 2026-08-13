@@ -391,12 +391,24 @@ pub struct Release {
     /// engine folds the hook's file changes into the bump commit and **fails closed** if
     /// the hook exits non-zero. `null` (absent) = no hook, the default.
     ///
+    /// **Security (trust boundary).** A declared hook is **arbitrary code the engine
+    /// runs during a release**, with whatever environment the cut carries (potentially
+    /// registry-publish credentials), before the publish barrier. It is equivalent in
+    /// trust to a `build.rs` / a test the release already runs, but it lives in the
+    /// contract, which may be reviewed less carefully than Rust source — so a malicious
+    /// `bump_hook` is a supply-chain surface. The engine surfaces the hook **verbatim**
+    /// as a plan-time warning so an approver sees exactly what will run, and the
+    /// executor's invocation contract (shell vs argv, working directory, timeout,
+    /// environment/secret policy, permitted file changes) is specified where execution
+    /// is wired — until then no hook is ever run (`release cut` refuses a bump plan).
+    ///
     /// A **purely additive** optional field: it is omitted from the canonical JSON when
     /// absent (`skip_serializing_if`), so a contract that declares no hook serializes
     /// byte-for-byte as before and its `plan_id` is unchanged. By the migration rule an
-    /// additive optional field does not bump `schema_version` (the forward-compat
-    /// mechanism absorbs it for older readers, which in any case lack `--bump` and so
-    /// never act on the hook).
+    /// additive optional field does not bump `schema_version`; and this codebase parses
+    /// the contract through a hand-written normalizer (no serde `Deserialize`), so there
+    /// is no missing-field deser hazard for older readers, which in any case lack
+    /// `--bump` and so never act on the hook.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bump_hook: Option<String>,
 }

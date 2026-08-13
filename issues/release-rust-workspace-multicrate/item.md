@@ -10,6 +10,8 @@ commits:
   summary: derive dep-ordered multi-crate workspace publish set in the plan (facet 1+4)
 - hash: '604e092'
   summary: publish dependency closure + precise workspace edges (llm-review fixes)
+- hash: 8a25b69
+  summary: engine-owned --bump plan phase + contract bump_hook (facets 2+3, plan side; cut fails closed pending executor)
 ---
 
 # release engine: support dependency-ordered multi-crate Rust workspace publish + version bump (retire hand-cut releases)

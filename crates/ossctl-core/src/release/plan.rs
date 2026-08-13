@@ -102,28 +102,38 @@ pub fn build(contract: &Contract, facts: &Facts, head_sha: &str, version: &str) 
 /// facet 2).
 ///
 /// `from_version` is the current `[workspace.package] version` (the tree's single
-/// source of truth); `to_version` is the caller-computed new version
-/// ([`crate::release::bump::bump_version`] applied to `from_version` — the CLI
-/// computes it so the version arithmetic is validated once, at the input boundary).
-/// The returned plan carries a [`PlanPhase::Bump`] at the front of its phase
-/// sequence and a [`BumpPlan`] describing the edits (pin rewrites, CHANGELOG
-/// finalize, any declared `bump_hook`), all folded into the content address. Its
-/// [`ReleasePlan::version`] is `to_version` — every publish/tag threads the *new*
-/// version.
+/// source of truth); the engine **computes** the new version by applying `level` to
+/// it ([`crate::release::bump::bump_version`]) — the caller supplies only the level,
+/// never a literal target, so the plan can never seal a `to_version` that contradicts
+/// its declared `level` (the invariant lives in the core constructor, not the CLI).
+/// The returned plan carries a [`PlanPhase::Bump`] at the front of its phase sequence
+/// and a [`BumpPlan`] describing the edits (pin rewrites, CHANGELOG finalize, any
+/// declared `bump_hook`), all folded into the content address. Its
+/// [`ReleasePlan::version`] is the computed new version — every publish/tag threads it.
 ///
 /// A `--bump`-less plan is [`build`]; the two share every non-bump derivation, so
 /// the bump path is a strict additive superset.
-#[must_use]
+///
+/// # Errors
+/// [`BumpError`](crate::release::bump::BumpError) when `from_version` is not a strict
+/// `MAJOR.MINOR.PATCH` release version — the engine will not seal a plan whose computed
+/// version it cannot derive (fail closed).
 pub fn build_with_bump(
     contract: &Contract,
     facts: &Facts,
     head_sha: &str,
     from_version: &str,
-    to_version: &str,
     level: BumpLevel,
-) -> ReleasePlan {
-    let bump = derive_bump_plan(contract, facts, level, from_version, to_version);
-    build_inner(contract, facts, head_sha, to_version, Some(bump))
+) -> Result<ReleasePlan, crate::release::bump::BumpError> {
+    let to_version = crate::release::bump::bump_version(level, from_version)?;
+    let bump = derive_bump_plan(contract, facts, level, from_version, &to_version);
+    Ok(build_inner(
+        contract,
+        facts,
+        head_sha,
+        &to_version,
+        Some(bump),
+    ))
 }
 
 /// The shared core of [`build`] / [`build_with_bump`]: resolve targets, assemble the
@@ -172,14 +182,21 @@ fn build_inner(
     }
 }
 
-/// Compute the content-addressed `plan_id` for `(contract, facts, head_sha,
-/// version)` **without** allocating a full [`ReleasePlan`].
+/// Compute the content-addressed `plan_id` of a **`--bump`-less** plan for
+/// `(contract, facts, head_sha, version)` **without** allocating a full
+/// [`ReleasePlan`].
 ///
 /// The drift-check seam for the coordinator: given the plan a human approved, it
 /// re-derives the *current* repo's contract + facts + `HEAD`, calls this with
 /// the approved plan's sealed `version`, and compares. Prefer [`verify`], which
 /// wraps this and reports *which* inputs drifted; this raw form is exposed for
 /// callers that only need the digest.
+///
+/// **No-bump only.** This seals the invariant phase sequence with **no** bump plan,
+/// so it computes the id of the *no-bump* plan for these inputs — it is **not** the id
+/// of a `--bump` plan (that comes from [`build_with_bump`]). The bump-aware drift check
+/// lives in the CLI (`cut` re-derives via [`build_with_bump`] and compares `plan_id`
+/// directly); this helper is unchanged by the bump feature and stays no-bump.
 #[must_use]
 pub fn compute_plan_id(
     contract: &Contract,
@@ -606,8 +623,16 @@ fn derive_bump_plan(
 /// where a release bot (release-please/changesets) owns the CHANGELOG and the engine
 /// must not also rewrite it (a double-writer would clash). The concrete date is a
 /// cut-time value and is deliberately not part of the plan (see [`BumpPlan::changelog_finalize`]).
+///
+/// An **exhaustive** match (not `!= Automated`) so a future `ChangelogMode` variant —
+/// e.g. a "none"/"off" that means *no* changelog to finalize — must make a deliberate
+/// choice here rather than silently defaulting to engine-finalized (which would seal a
+/// bump plan that promotes a changelog that does not exist).
 fn changelog_is_finalizable(contract: &Contract) -> bool {
-    !matches!(contract.changelog.mode, ChangelogMode::Automated)
+    match contract.changelog.mode {
+        ChangelogMode::Curated | ChangelogMode::Fragment => true,
+        ChangelogMode::Automated => false,
+    }
 }
 
 /// Derive the intra-workspace `=`-version pin rewrites the bump applies in lockstep
@@ -646,7 +671,12 @@ fn derive_pin_rewrites(facts: &Facts, from_version: &str, to_version: &str) -> V
             });
         }
     }
-    rewrites.sort_by(|a, b| (&a.in_package, &a.dependency).cmp(&(&b.in_package, &b.dependency)));
+    rewrites.sort_unstable_by(|a, b| {
+        (&a.in_package, &a.dependency).cmp(&(&b.in_package, &b.dependency))
+    });
+    // Defensive dedup: a well-formed facts graph lists each (member, dep) edge once, so
+    // this is a no-op in practice; it guards against a facts parser that emitted a
+    // duplicate edge producing a duplicated rewrite.
     rewrites.dedup_by(|a, b| a.in_package == b.in_package && a.dependency == b.dependency);
     rewrites
 }

@@ -283,7 +283,7 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
             parse_bump_hook(m, p),
         ),
         Some(_) => {
-            p.err("release must be a mapping with model/layout".to_string());
+            p.err("release must be a mapping (model / layout / bump_hook)".to_string());
             (ReleaseModel::Gated, ReleaseLayout::Single, None)
         }
     };
