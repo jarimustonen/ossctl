@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 <!-- oss-changelog:unreleased-end -->
 
+## [0.5.0] - 2026-08-13
+
+### Added
+- **Engine-owned version bump: `ossctl release plan --bump major|minor|patch`.** The release engine
+  now computes the new version from the workspace manifest plus a semantic *level* (the human supplies
+  only major/minor/patch — no hand-typed literal, honoring the 0.3.0 single-source-version decision)
+  and seals it as a content-addressed bump phase. `ossctl release cut` **executes** that phase inside
+  the clean checkout of the sealed commit: it sets `[workspace.package] version`, applies precise
+  intra-workspace `=<version>` pin rewrites, refreshes `Cargo.lock`, finalizes the CHANGELOG, runs any
+  contract-declared `release.bump_hook`, commits, and points the release tag at the *bump* commit. The
+  bump is resume-safe (a `BumpApplied` journal fact prevents a double-bump on an interrupted cut) and
+  the no-bump path is byte-for-byte identical (unchanged `plan_id`). Omitting `--bump` preserves the
+  existing behavior — the engine publishes the version already in the tree
+  (`release-rust-workspace-multicrate`, facets 2+3).
+- **Contract-declared `release.bump_hook`.** An optional contract field naming a project command the
+  bump phase runs after applying the version edits (e.g. to regenerate version-embedding snapshots),
+  surfaced verbatim with a post-hook version-validation guard. Additive/optional — existing contracts
+  serialize unchanged.
+- **Dependency-ordered multi-crate workspace publish.** `ossctl release plan` now derives the full
+  dependency-ordered publish set for a multi-crate Rust workspace (lib before bin) from a **bin-only**
+  contract — the transitive dependency *closure* of the declared targets, with precise path/workspace
+  edges — so a downstream two-crate workspace no longer fails its cut on an unpublished `=`-pinned
+  library. Only the declared targets' closure is swept in (never unrelated publishable members)
+  (`release-rust-workspace-multicrate`, facet 1).
+
+### Changed
+- **`homebrew_tap` is carried from the contract's `distribution` block into the sealed plan** (was
+  `null`), so a multi-crate workspace's Homebrew leg is planned correctly
+  (`release-rust-workspace-multicrate`, facet 4).
+
 ## [0.4.0] - 2026-08-11
 
 ### Added
