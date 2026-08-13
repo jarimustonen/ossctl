@@ -2,7 +2,7 @@
 created: 2026-08-12
 updated: 2026-08-13
 type: feature
-status: in-progress
+status: open
 priority: high
 labels: [release, rust]
 commits:
@@ -12,6 +12,8 @@ commits:
   summary: publish dependency closure + precise workspace edges (llm-review fixes)
 - hash: 8a25b69
   summary: engine-owned --bump plan phase + contract bump_hook (facets 2+3, plan side; cut fails closed pending executor)
+- hash: '8276630'
+  summary: apply llm-review consensus fixes (build_with_bump owns arithmetic, preview warning, hook security note, changelog match)
 ---
 
 # release engine: support dependency-ordered multi-crate Rust workspace publish + version bump (retire hand-cut releases)
@@ -108,3 +110,51 @@ the bump level, the engine owns the derived edits as a content-addressed plan ph
 finalize CHANGELOG (`[Unreleased]` → dated). Facet 3 (version-embedding snapshot regen) rides
 on this via a **contract-declared bump_hook** the repo runs (keeps the engine out of per-repo
 test-harness specifics), per the spinoff's recommendation.
+
+## Progress — facets 2+3 spinoff (2026-08-13): PLAN side landed; cut-time EXECUTION deferred
+
+**Landed (green + 4-model reviewed, `wt/01kzx1581x-release-bump-phase`):**
+
+- **Facet 2 (plan side) — engine-owned `--bump`. DONE.** `ossctl release plan --bump
+  major|minor|patch` computes the new version from the current manifest version + the
+  level (strict semver, fails closed on non-semver) and seals a **content-addressed bump
+  phase** (`PlanPhase::Bump` prepended): computed `to_version`, intra-workspace `=`-pin
+  rewrites (derived from the workspace graph), CHANGELOG-finalize intent, and the declared
+  `bump_hook`. The core constructor OWNS the arithmetic so a plan can never seal a version
+  that contradicts its level. `--bump`-less plans are **byte-identical** (plan_id unchanged;
+  additive/skip-none; no SEAL_VERSION bump — proven by the unchanged golden vectors).
+- **Facet 3 (contract) — `release.bump_hook`. DONE.** Optional additive field (no
+  `schema_version` bump — the codebase is Serialize-only, no deser hazard; matches the
+  additive-field migration rule). Carried into the bump plan; surfaced verbatim as a
+  plan-time reviewer warning (supply-chain eyes-on).
+- **`--bump` on `plan` + `cut`** (strict enum validation, JSON error envelope); shared
+  `derive_release_plan`. Unit + integration tests: version compute per level, derived edit
+  set, pin rewrite, changelog finalize, hook wiring, bad-value rejection, content-addressing,
+  opt-in superset. Green gate + `/llm-review` (report `history/review-release-bump-phase.md`).
+
+**NOT landed — cut-time EXECUTION of the bump phase (the remainder; issue stays OPEN):**
+`release cut` **fails closed** (`bump_execution_unimplemented`) on any bump plan rather than
+build/publish the un-bumped version. The executor half could not be validated here because it
+requires a real irreversible crates.io cut (the maintainer's acceptance step, explicitly out
+of this spinoff's scope). Remaining work, all gated behind that live validation:
+
+1. **Apply the sealed edits at cut time** in the clean checkout (`release-cut-clean-checkout`):
+   set `[workspace.package] version`, apply the pin rewrites, `cargo update` (lockfile),
+   finalize the CHANGELOG (dated), run the `bump_hook`, commit — BEFORE the build barrier —
+   and point the tag at the **bump commit** (today `tag_phase` tags the pre-bump `head_sha`),
+   pushing the commit to the branch.
+2. **Pin-rewrite precision** (llm-review, all 4): extend `Facts` to carry each intra-workspace
+   dependency's **requirement string**, and emit a `PinRewrite` only when the current req
+   literally equals `=<from>` (today it assumes the `=`-lockstep convention for every
+   member→member edge — correct for the lib+bin target, over-broad for caret/range/
+   `workspace = true`/independent-version members). The executor must verify the exact old
+   value before replacing and fail closed on zero/multiple matches.
+3. **Post-bump resume/verify state machine**: `BumpState { NotStarted | Applied{bump_commit,
+   effective_date, tree_hash} }` on the journal; `verify` must re-derive the bump (not hold
+   `approved.bump` fixed); resume must recognize the recorded bump commit and never re-bump.
+   Journal the effective changelog **date** once and reuse on resume (today it is unsealed).
+4. **`bump_hook` execution contract**: shell-vs-argv, working dir, timeout, environment/secret
+   policy, permitted file changes, and a post-hook validation pass (re-read manifests + lock +
+   changelog, reject unexpected modifications). Document the trust model.
+
+Acceptance (a real orchestratectl cut through the engine) remains the maintainer's step.
