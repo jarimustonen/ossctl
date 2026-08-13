@@ -95,3 +95,14 @@ Deferred as they are exotic for the target lib+bin shape and fail-safe:
 - `MANIFEST_LIMIT` truncation is treated as authoritative for release parsing;
 - a cut-time cross-check of the sealed plan ORDER against `cargo metadata` topology
   (the plan hash covers the target SET + order, but nothing re-validates order at cut).
+
+## Maintainer decision (2026-08-13, stint #19 feedback round) — facet-2 version source
+
+Facet 2's version input = **`--bump major|minor|patch`**. The engine COMPUTES the new
+version from the current manifest version + the bump level; there is NO hand-typed literal
+version (honors the 0.3.0 single-source-version decision — `--version` stays removed). Given
+the bump level, the engine owns the derived edits as a content-addressed plan phase: set
+`[workspace.package] version`, rewrite intra-workspace `=<version>` pins, refresh Cargo.lock,
+finalize CHANGELOG (`[Unreleased]` → dated). Facet 3 (version-embedding snapshot regen) rides
+on this via a **contract-declared bump_hook** the repo runs (keeps the engine out of per-repo
+test-harness specifics), per the spinoff's recommendation.
