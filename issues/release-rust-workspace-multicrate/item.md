@@ -1,8 +1,8 @@
 ---
 created: 2026-08-12
-updated: 2026-08-13
+updated: 2026-08-14
 type: feature
-status: in-progress
+status: done
 priority: high
 labels: [release, rust]
 commits:
@@ -18,6 +18,7 @@ commits:
   summary: cut-time bump executor (facets 2/3 executor half); green + tested; issue stays open pending live acceptance cut
 - hash: 7590c2a
   summary: apply llm-review consensus fixes (resume checkout-at-bump-commit, set_workspace_version from-verify, skip-lock-when-absent, remove premature branch push, refuse bump resume); deferred items folded into issue
+closed: 2026-08-14
 ---
 
 # release engine: support dependency-ordered multi-crate Rust workspace publish + version bump (retire hand-cut releases)
@@ -206,7 +207,17 @@ publish) was explicitly out of scope and NOT run. Remaining validation, all gate
 - the `bump_hook` against orchestratectl's real insta snapshot-regen command;
 - the `bump_hook` timeout gap (add a first-class per-command timeout to `CommandRunner`).
 
-Issue stays **OPEN** until a live cut proves it.
+## Closed done (2026-08-14, maintainer decision) — code complete; live acceptance decoupled
+
+All four facets are **implemented, green, and 4-model reviewed** — nothing remains to build. Shipped
+in **ossctl 0.5.0** (2026-08-13, all four channels live): facet 1 (dep-ordered multi-crate publish
+closure), facet 4 (`homebrew_tap` carry), facets 2+3 (`--bump` plan + cut-time executor). The
+maintainer closes this **done** on code-complete: the original "verified on a real cut" acceptance is
+a live, credential-gated validation, not remaining engineering, so it is **decoupled** from this
+issue. The next step is a real `ossctl release cut --bump` on **orchestratectl** (the original
+driver); if that live cut surfaces problems, they are triaged as **new issues** (or this one is
+reopened), not tracked as open work here. The deferred parser-hardening follow-ups below already
+each fail a cut CLOSED for the shapes they don't handle, so none blocks the live cut.
 
 ### llm-review follow-ups (4-model review, `history/review-release-bump-executor.md`)
 
