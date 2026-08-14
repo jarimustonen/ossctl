@@ -5,132 +5,65 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-08-13 (stint #19). New agent: read this, then continue with a fresh
-`/stint-start`. Main is clean + pushed. Live: **0.4.0** on all four channels (UNCHANGED — no release
-this round). **⚠️ FIRST THING: a facets-2+3 worker is IN FLIGHT and self-merges** — verify its landing
-before anything else (see the ⚠️ block below). Head-of-line stays `release-rust-workspace-multicrate`
-(facets 1+4 landed this round; 2+3 in flight)._
+_Handoff written 2026-08-14 (stint #20). New agent: read this, then continue with a fresh
+`/stint-start`. Main is clean + pushed. Live: **0.5.0** on all four channels (SHIPPED this round).
+**No active/queued task — the DAG frontier is EMPTY.** The HIGH head `release-rust-workspace-multicrate`
+is CLOSED done; everything else open is DEFERRED hardening / review follow-ups / optional features. The
+only live thread is external: the **orchestratectl 0.2.0 `--bump` live-acceptance cut** (orchestratectl's
+timeline, prepared this round — see below). A fresh `/stint-start` will find nothing queued; wait for
+Jari to name work, or pick a DEFERRED item if he wants backlog burn-down._
 
-_**Stint #19 (2026-08-12→13) — release-engine feature round + 1 feedback round. Landed facets 1+4 of
-`release-rust-workspace-multicrate`; facets 2+3 in flight.** Spawned one autonomous design-first spinoff
-for the HIGH head-of-line. It landed (green + multi-model `/llm-review`) the two facets that needed no
-new architecture decision:_
-_- **Facet 1 — dep-ordered multi-crate publish CLOSURE derivation.** `ossctl release plan` now derives
-  the full dependency-ordered publish set for a multi-crate Rust workspace (lib before bin) **from a
-  bin-only contract** — the core unblock toward retiring hand-cut orchestratectl releases. A live
-  `orchestratectl release plan` will now show both crates, ordered._
-_- **Facet 4 — `homebrew_tap` carry** from the contract's distribution block into the plan (was null)._
-_- **Critical over-publish caught in review before it shipped:** the first impl published EVERY publishable
-  workspace member whenever any rust target was present (would sweep an unrelated, deliberately-undeclared
-  crate into an IRREVERSIBLE publish). gpt-5.6 flagged it; fixed to only the declared targets' transitive
-  dependency CLOSURE, with precise path/workspace edges. (Review report: `history/review-release-rust-
-  workspace-multicrate.md`.)_
-_Landed head `9a9c219`, +1509 lines across `plan.rs`, `facts/mod.rs`, tests. Green gate clean (439 tests),
-pushed._
+_**Stint #20 (2026-08-13→14) — shipped 0.5.0, closed the HIGH head, prepared orchestratectl for its live cut.**_
 
-_**Feedback round — Jari decided facet-2's version source: `--bump major|minor|patch`.** Facet 2 (engine-
-owned version bump) collided with the settled 0.3.0 single-source-version decision (`--version` removed):
-with no version input the engine can't know what to bump TO. Jari's call: **`--bump major|minor|patch`** —
-the engine COMPUTES the new version from the manifest + bump level; NO hand-typed literal, `--version`
-stays removed. Recorded in `issues/release-rust-workspace-multicrate/item.md` (commit `b1850ed`)._
+_**🎉 0.5.0 SHIPPED (2026-08-13) — all four channels, autonomous engine self-cut, exit 0.** Plan
+`83dc4e29…`, release commit `1be179b`, tag `v0.5.0`. crates.io ×2 (ossctl-core + ossctl via sparse
+index), GitHub Release v0.5.0 + 14 cross-platform assets (cargo-dist CI, **hauis macOS aarch64 clean, no
+400**), Homebrew tap → v0.5.0 (engine direct tap-write, real sha256). Cut via the PROVEN recipe (manual
+version bump in step 1, then `release plan`/`cut` WITHOUT `--bump`) — deliberately NOT dogfooding the new
+`--bump` executor on the irreversible path (its live acceptance is decoupled, see orx below). **What 0.5.0
+ships (everything since 0.4.0):** the full `release-rust-workspace-multicrate` feature — facet 1
+(dep-ordered multi-crate publish CLOSURE from a bin-only contract), facet 4 (`homebrew_tap` carry), facets
+2+3 (`--bump major|minor|patch` plan phase + cut-time executor + contract `release.bump_hook`)._
 
-_**⚠️ IN-FLIGHT WORKER — verify its landing FIRST (this is why you can't assume main is final):**_
-_- Run `01kzx1581x4y9q5jb0ew4daefs` (headless, supervisor was 36114), branch
-  `wt/01kzx1581x-release-bump-phase`, building **facets 2+3**: the `--bump` engine-owned version-bump
-  plan phase (set `[workspace.package] version`, rewrite `=<ver>` pins, refresh Cargo.lock, finalize
-  CHANGELOG) + a **contract-declared `bump_hook`** for version-embedding snapshot regen (schema_version
-  bump + back-compat deser). It self-merges via `run merge` and CLOSES the issue if fully done._
-_- **NEXT AGENT, do this first:** `orchestratectl run wait 01kzx1581x4y9q5jb0ew4daefs --output json`
-  then read `landed`/`summary`; verify by CONTENT on main (not the worker branch ref); run the full
-  green gate; `git pull --rebase && git push`. If it landed PARTIAL or `success:false`, read its
-  `discussion_items` (`orchestratectl node show 01kzx1581x4y9q5jb0ew4daefs n-0001 --output json`) and
-  reconcile. If it landed a schema_version bump, confirm golden vectors updated._
+_**✅ `release-rust-workspace-multicrate` CLOSED done (`9876bd4`).** All 4 facets landed across stints
+#19–#20 (2 autonomous spinoffs, each green + 4-model `/llm-review`): the plan side (`bff2cd2`+`31e3df7`,
+stint #19 in-flight worker that landed this round) and the cut-time EXECUTOR (`ce33e25`+`7590c2a`, this
+round — executes the sealed bump in the clean checkout: version + precise `=`-only pin rewrites via Facts
+dep-req strings + Cargo.lock + CHANGELOG finalize + `bump_hook`; tag on the BUMP commit; resume-safe
+`BumpApplied` guard so no double-bump; journal schema v3→v4; a fail-closed `bump_hook` exec contract
+`sh -c` verbatim + post-hook version validation). The review caught + fixed a unanimous critical (resume
+built/published the PRE-bump tree). Maintainer closed it **on code-complete**: the original "verified on a
+real cut" acceptance is a live, credential-gated validation, **decoupled** to the orx cut below — if that
+surfaces problems they become NEW issues (or this reopens), not open work here._
 
-_**After facets 2+3 land:** the issue's ultimate DONE = a real **orchestratectl** cut succeeds end-to-end
-(needs crates.io creds + the orchestratectl repo + an IRREVERSIBLE publish) — that live acceptance is the
-MAINTAINER's step, not a worktree's. Only then close/retire the head-of-line._
+_**🔗 THE ONE LIVE THREAD — orchestratectl 0.2.0 `--bump` live-acceptance cut (orx's timeline).** This is
+the real live proof of the `--bump` executor. orchestratectl (`~/Sources/orchestratectl`) is mid-refactor
+toward **0.2.0** (bigger refactoring in progress; nothing user-facing was releasable when checked —
+`[Unreleased]` empty). We did NOT cut a contentless release. Instead we PREPARED orx (autonomous spinoff
+in the orx repo, `2db04f4`+`63ad5bf`, validated with the ossctl 0.5.0 binary):_
+_- declared `release.bump_hook: "INSTA_UPDATE=always cargo test -p orchestratectl --test envelope_snapshots"`
+  (dependency-free; regenerates ONLY the 3 version_* insta snapshots on a bump, never the version — passes
+  the executor's fail-closed post-hook guard);_
+_- added a v2 `distribution:` block to orx's `OSS-RELEASE.md` (tap `jarimustonen/homebrew-orchestratectl`
+  + platforms) — **because ossctl 0.5.0 sources the plan's `homebrew_tap` from the contract's distribution
+  block, NOT from `dist-workspace.toml`** (a real downstream-readiness gap this prep surfaced);_
+_- proven: scratch bump 0.1.8→0.2.0 regenerated exactly the 3 snapshots + `check-version-snapshots.sh` +
+  `cargo test --workspace` green; and ossctl-0.5.0 `contract validate` (0 warn) + `release plan --bump
+  minor` → version 0.2.0, both crates dep-ordered (octl-core → orchestratectl), tap carried, bump_hook
+  surfaced verbatim._
+_**NEXT for this thread (whenever orx 0.2.0 is ready to ship — likely a separate orx stint, not ossctl):**
+run `ossctl release cut --bump minor` on orx with a 0.5.0+ binary. If it works, the `--bump` executor is
+live-proven and hand-cutting orchestratectl retires. If problems: file NEW issues (orx or ossctl as
+appropriate). NB: the PATH `ossctl` is stale (0.2.2 via brew) — `brew upgrade ossctl` to 0.5.0 or use a
+fresh-built binary; `ossctl version` is the only stale-binary tell._
 
-_**Hardening backlog from facet-1 review** lives inside `issues/release-rust-workspace-multicrate/item.md`
-(NOT yet separate issuectl issues): workspace-graph parser edge cases — `workspace.dependencies`-inherited
-renames, publish-field workspace inheritance, non-virtual root-package workspaces, multi-line inline
-tables, recursive/patterned member globs, Windows abs-path confinement, manifest-truncation-as-
-authoritative, and a cut-time cross-check of the sealed plan ORDER vs `cargo metadata` topology. File as
-issues + lane them if picked up._
+_**Housekeeping:** no lingering ossctl worktrees (both round workers settled + torn down). The Dependabot
+`clap` PR (now `clap-4.6.6`) is still open on the remote — adjacent, not triaged._
 
-_**Housekeeping:** the Dependabot `clap` PR is still open on the remote — adjacent, not triaged._
-
-_🎉 **THREE RELEASES THIS SESSION — 0.2.5, 0.3.0, 0.4.0.** Stint #16 made the engine's real-cut publish
-TRUSTWORTHY (0.2.5) then HARDENED it (0.3.0, BREAKING). Stint #17 shipped 0.4.0 — pi.dev skill dual-homing._
-
-_**0.4.0 (2026-08-11, stint #17)** — `pidev-dual-home-skills` DONE: `ossctl skill install` now dual-homes
-each `SKILL.md` into `~/.pi/agent/skills/<name>/` (pi.dev harness) — with `--agent` omitted it writes
-BOTH Claude + pi.dev by DEFAULT (`--agent claude`=single-home, `pi`/`codex`=narrow, `all`=every runtime).
-New `Runtime::Pi`; `--json installed[]` shape unchanged (additive). Part of the Claude Code→pi.dev
-migration (homebase `pidev-migration`/WS4). Minor bump (new feature + default-behavior change). Fully-
-autonomous engine self-cut, exit 0, all four channels live. Plan `b77d521c…`, head `f5b31dc`._
-
-_🎉 **STINT #16 — 0.2.5 THEN 0.3.0 SHIPPED. The engine's real-cut publish is now TRUSTWORTHY and
-HARDENED.** Round-1 fixed the two HIGH bugs the first real downstream cut (issuectl 0.8.1) exposed and
-shipped 0.2.5 (self-visibility confirm + single-source version). Round-2 (Jari approved doing ALL 4
-cut-noop review follow-ups) shipped 0.3.0 — a BREAKING release removing --version + 3 more hardenings.
-Both were fully-autonomous engine self-cuts, exit 0, all four channels verified live._
-
-_**0.3.0 (2026-08-11, BREAKING)** — 4 cut-noop review follow-ups, 3 sequenced LANE A workers:
-`release-drop-version-flag` (HARD-removed --version — version derives solely from the manifest; stray
-flag = unknown_flag error; all callers + recipe + oss-release skill updated), `version-source-fail-
-closed-nonrust` (VersionSource capability model — manifest-versioned non-Rust now fails CLOSED, was
-open), `release-cut-clean-checkout` (cut/resume publish from a fresh checkout of the sealed head_sha —
-reproducible, immune to mid-cut edits; proven on the 0.3.0 self-cut), `is-published-digest-authenticate`
-(checksum-match the resume idempotency skip before trusting it; mismatch/outage fail closed). Plan
-`7a38b4ee…`, head `da9850e`. ⚠️ Worker B (clean-checkout) HUNG on the first spawn (agent alive, 0
-commits/events for 6h) → cancelled (nothing to harvest) + re-spawned fresh, landed clean 2nd try._
-
-_**0.2.5 (2026-08-10)** — `ossctl release cut` self-cut: dry-run-all → build-all → publish-all
-(ossctl-core + ossctl → crates.io) → tag v0.2.5 → dist (homebrew direct tap-write). GH Release + 14
-cross-platform assets delegated to cargo-dist CI (**succeeded, hauis macOS aarch64 clean, no 400**).
-All four channels verified live at 0.2.5 (crates.io ×2 via sparse index; GitHub Release v0.2.5;
-Homebrew tap → v0.2.5). Plan `a59584a3…`, head `ccbab61`._
-
-_**What 0.2.5 contains (all user-facing):**_
-_- `cut-noop-self-visibility-check` (HIGH, the real fix) — after the irreversible `cargo publish` the
-  cargo adapter now CONFIRMS the target's own `{name,version}` reached the crates.io index (reusing the
-  bounded index-wait, so normal propagation lag is tolerated) BEFORE journaling a receipt. A silent
-  no-op upload now fails the cut CLOSED with no fabricated receipt; a registry outage fails closed
-  distinctly. **Proven live on 0.2.5's own self-cut** (passed on a real upload without flakiness)._
-_- `release-version-single-source` — the release version is derived from the workspace manifest (single
-  source of truth); `--version` is now an OPTIONAL must-match confirmation that subsumes the drift guard._
-_- `release-cut-publish-noop` (HIGH) — the `--version`-vs-tree drift guard + mock-registry integration
-  test + root-cause analysis (first-round landing; the definitive fix is the self-visibility check above)._
-_- `publish-crates-yml` (HIGH regression) — both `cargo publish` lines in the dep-order CI step tolerate
-  cargo's exact "already exists on crates.io index" diagnostic as success (anchored match) → no more
-  spurious red release runs when the tag-push publish races the engine's own publish. CI-only._
-
-_**Why the critical bug's root cause was NOT a reproduced source no-op:** the worker judged the issuectl
-timeout most consistent with an env/registry-token difference OR issuectl-core not declared as its own
-release target — not reproducible locally without crates.io creds. The self-visibility check is the
-structural defense: whatever the cause, a cut that doesn't actually upload now fails loudly instead of
-faking success. If a real downstream cut still no-ops after this, capture the exact emitted `cargo
-publish` line, the target manifest versions, and whether every publishable crate is a declared target._
-
-_✅ **`pidev-dual-home-skills` is DONE (shipped in 0.4.0)** — no longer the head-of-line. (Note: the
-earlier PENDING runs named `pidev-dual-home-skills` / `dual-home-skills` turned out to be **glasspad's**
-worker, not ossctl's; ossctl's was implemented fresh this stint.)_
-
-_⚠️ **ONE HIGH blocker is now queued: `release-rust-workspace-multicrate`** (feature, LANE A head-of-line,
-filed 2026-08-12 by the orchestratectl session). The engine produces an INCOMPLETE plan for a DOWNSTREAM
-two-crate Rust workspace: (1) only the bin crate is a target → a cut fails on the `=<ver>` pin because
-the lib isn't published (must DERIVE dep-ordered member publish from the workspace graph); (2) no
-version-bump phase (the engine must OWN the bump — workspace version + `=<ver>` pins + Cargo.lock +
-CHANGELOG finalize + regenerate version-embedding insta snapshots — as a content-addressed plan phase);
-(3) `homebrew_tap` null despite the contract's distribution declaring the tap (carry it into the plan).
-DONE = a real orchestratectl cut succeeds end-to-end. RELATED downstream-cut gaps (all still DEFERRED):
-`release-ci-publish-mode` (glasspad friction — 'publish-in-CI / tag-only cut' mode; still wants Jari's
-triage) and `per-distribution-release`. ossctl's OWN cut path stays trustworthy + hardened (0.2.5/0.3.0),
-so Track B is unaffected; this is purely a downstream-consumer gap. Everything else in the DAG is
-DEFERRED/optional._
-
-_**Housekeeping:** no lingering worktrees (all three round workers settled + torn down). A Dependabot
-`clap-4.6.5` PR is open on the remote — adjacent, not triaged this stint._
+_**Earlier releases (compressed):** 0.4.0 (#17, pi.dev skill dual-home), 0.3.0 (#16r2, BREAKING —
+--version removed + non-Rust fail-closed + clean-checkout cut + digest-authenticated resume skip), 0.2.5
+(#16, real-cut publish made trustworthy: post-publish self-visibility confirm + single-source version).
+Full detail in git log + `issues/`._
 
 _**hauis note:** 0.2.5's CI macOS aarch64 build on `hauis` succeeded with NO 400 — token healthy. If a
 future cut 400s: `ssh hauis 'git config --global --unset-all "http.https://github.com/.extraheader"'`
@@ -154,7 +87,7 @@ release, no code) that reconciled the new HIGH `release-rust-workspace-multicrat
 
 **Read first (the spec):** `docs/adr/000{1,2,3,4}-*.md` (CLI taxonomy, release engine, config+journal, one-target-one-publish-unit).
 
-## Execution DAG (2026-08-13, stint #19 handoff)
+## Execution DAG (2026-08-14, stint #20 handoff)
 
 Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
 (never copied here). Merge at Phase 0/handoff (drop landed, add active, keep existing order).
@@ -166,24 +99,21 @@ The cross-repo standardisation ("Track A") and hauis CI runners are HOMEBASE con
 personal environment), NOT ossctl work — moved to homebase issue `cross-repo-release-standardisation`.
 Do not re-add them here.
 
-**Track B — "ossctl cuts ITSELF through the engine" — ✅ COMPLETE (stint #14) and now ROUTINE (stints
-#15/#16/#17 shipped 0.2.4/0.2.5/0.3.0/0.4.0 the same way; #16 made the real-cut publish trustworthy + hardened).**
-⚠️ **ONE HIGH release feature, PARTIALLY LANDED (stint #19):** `release-rust-workspace-multicrate` —
-made the engine's plan COMPLETE for a downstream two-crate workspace. Facets 1 (dep-ordered multi-crate
-publish CLOSURE derivation from a bin-only contract) + 4 (homebrew_tap carry) LANDED; facets 2 (`--bump`
-engine-owned version-bump phase) + 3 (contract-declared snapshot bump_hook) are IN FLIGHT (run
-01kzx1581x4y9q5jb0ew4daefs, self-merges — verify FIRST). After 2+3 land, ultimate DONE = a real
-orchestratectl cut end-to-end (maintainer's step). Everything ELSE below is DEFERRED hardening,
-review follow-ups, or the one approved future feature (`oss-dist-channel-generator`, UNLANED). LANE C
-is retired for ossctl's own cut — only `release-macos-hauis-coupling` survives (homebase-adjacent).
-**Do NOT harden LANE C.**
+**Track B — "ossctl cuts ITSELF through the engine" — ✅ COMPLETE (stint #14) and ROUTINE (stints
+#15–#20 shipped 0.2.4→0.5.0 the same way).** ✅ **The HIGH release feature is now DONE (stint #20):**
+`release-rust-workspace-multicrate` — all 4 facets landed + CLOSED; shipped in 0.5.0. **The active
+frontier is EMPTY** — no queued/scheduled task. Everything below is DEFERRED hardening, review
+follow-ups, or the one approved future feature (`oss-dist-channel-generator`, UNLANED). The one live
+thread is EXTERNAL: the orchestratectl 0.2.0 `--bump` live-acceptance cut (orx's timeline — see handoff
+block; prepared this round). LANE C is retired for ossctl's own cut — only `release-macos-hauis-coupling`
+survives (homebase-adjacent). **Do NOT harden LANE C.**
 
 <!-- execution-dag:begin -->
 ```
-GLOBAL HEAD-OF-LINE: release-rust-workspace-multicrate (HIGH, feature — STILL the head; PARTIALLY LANDED stint #19). Facets 1 (dep-ordered multi-crate publish CLOSURE derivation from a bin-only contract) + 4 (homebrew_tap carry) LANDED green + reviewed (head 9a9c219). Facets 2 (`--bump` engine-owned version-bump phase) + 3 (contract-declared bump_hook for snapshot regen) are IN FLIGHT in run 01kzx1581x4y9q5jb0ew4daefs (self-merges — verify its landing FIRST, see handoff ⚠️). Maintainer decision recorded: facet-2 version source = `--bump major|minor|patch` (engine computes; --version stays removed). After 2+3 land, ultimate DONE = a real orchestratectl cut end-to-end (maintainer's step). 0.4.0 stays live on all four channels; Track B (ossctl's own cut) routine.
-  Then DEFERRED/optional: release-ci-publish-mode (glasspad friction — needs Jari triage; RELATED — both are downstream-cut gaps), per-distribution-release, release-verify-delegated-github-release, release-cut-stale-binary-guard, the cargo receipt-provenance cluster, LANE B additive hardening. FEATURE (approved, own stint): oss-dist-channel-generator via /worktree-make-skill. Also open in orchestratectl repo: supervisor-stall-detection (filed this session).
+GLOBAL HEAD-OF-LINE: (NONE — active frontier EMPTY). The HIGH `release-rust-workspace-multicrate` is DONE + CLOSED (all 4 facets, shipped 0.5.0). No task is queued or scheduled. A fresh /stint-start finds nothing to pick — wait for Jari to name work, or burn down a DEFERRED item below if he asks. The one live thread is EXTERNAL, not an ossctl DAG node: the orchestratectl 0.2.0 `--bump` live-acceptance cut (orx prepared this round; runs on orx's timeline — `ossctl release cut --bump minor` there when 0.2.0 ships).
+  DEFERRED/optional (none blocks anything, none scheduled): release-ci-publish-mode (glasspad friction — needs Jari triage; RELATED to the orx downstream-cut work), per-distribution-release, release-verify-delegated-github-release, release-cut-stale-binary-guard, the cargo receipt-provenance cluster, LANE B additive hardening. FEATURE (approved, own stint): oss-dist-channel-generator via /worktree-make-skill.
 LANE A — release engine (crates/ossctl-core/src/release/**; SEQUENCE strictly)
-  ▶ release-rust-workspace-multicrate  (HIGH, feature — PARTIALLY LANDED stint #19; still the head. [DONE facet 1] DERIVE dep-ordered multi-crate publish CLOSURE from a bin-only contract (lib → bin) — landed green + reviewed, gpt-5.6 caught+fixed a critical over-publish (was publishing every member; now only the declared targets' transitive closure). [DONE facet 4] carry homebrew_tap into the plan. [IN FLIGHT facets 2+3 — run 01kzx1581x4y9q5jb0ew4daefs, self-merges] facet 2 = `--bump major|minor|patch` engine-owned version-bump phase (compute version from manifest+level; set `[workspace.package] version`, rewrite `=<ver>` pins, Cargo.lock, CHANGELOG finalize — maintainer decision recorded in item.md, commit b1850ed); facet 3 = contract-declared `bump_hook` for version-embedding snapshot regen (schema_version bump + back-compat deser). After 2+3: ultimate DONE = a real orchestratectl cut end-to-end (maintainer's step). Facet-1 review left a workspace-graph-parser hardening backlog inside item.md. collision: contract/schema.rs touched for facet-3 field)
+  [DONE stint #20] release-rust-workspace-multicrate  (HIGH, feature — CLOSED done, shipped 0.5.0. facet 1 = dep-ordered multi-crate publish CLOSURE from a bin-only contract (lib → bin; gpt-5.6 caught+fixed a critical over-publish); facet 4 = homebrew_tap carry; facet 2 = `--bump major|minor|patch` engine-owned version-bump plan phase + cut-time EXECUTOR (version + `=`-only pin rewrites via Facts dep-reqs + Cargo.lock + CHANGELOG finalize + bump_hook; tag on the bump commit; resume-safe BumpApplied guard; journal v3→v4); facet 3 = contract-declared `release.bump_hook` for version-embedding snapshot regen. 2 spinoffs, each green + 4-model /llm-review (a unanimous critical — resume built the PRE-bump tree — caught+fixed). Live `--bump` acceptance decoupled to the orx 0.2.0 cut. Facet-1 review left a workspace-graph-parser hardening backlog inside item.md — file as issues if picked up.)
   [DONE stint #15] resume-publish-phase-never-reached      (fixed — resume no longer demands --allow-unverified when the publish phase was never reached; unsafe rows unchanged)
   [DONE stint #15] release-abandon-reason-leading-dashes   (fixed — `release abandon --reason` accepts values starting with `--` via allow_hyphen_values)
   [DONE stint #15] homebrew-tapwrite-preserve-formula      (done — ownership marker: full-regen only when marked, else surgical url/sha edit or fail-closed refusal; hand-maintained formulas preserved)
