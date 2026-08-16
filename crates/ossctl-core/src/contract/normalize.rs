@@ -29,6 +29,9 @@ use crate::ports::Fs;
 /// The contract file the normalizer reads, relative to the repo root.
 pub const CONTRACT_FILENAME: &str = "OSS-RELEASE.md";
 
+/// The optional cargo-dist configuration checked for a Homebrew-release drift.
+const DIST_WORKSPACE_FILENAME: &str = "dist-workspace.toml";
+
 /// Canonical ecosystem order — used to de-duplicate and stably order the
 /// `ecosystems` list (mirrors the Python `VALID_ECOSYSTEMS` ordered list).
 const ECOSYSTEM_ORDER: [Ecosystem; 5] = [
@@ -466,6 +469,7 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
     // Homebrew cross-field consistency: missing-tap (either producer), the
     // double-publish collision, and the dead-tap advisory — the full truth table.
     check_homebrew_configuration(&targets, &distributions, p);
+    check_dist_workspace_homebrew(&distributions, repo_root, fs, p);
     // A distribution block ships public binaries (GH-Release artifacts, a curl-pipe
     // installer, a Homebrew tap PR) — that is publishing, and a spike is not being
     // published. Mirrors the `release.model: auto` floor: raise maturity or drop the
@@ -520,6 +524,56 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
         docs_site,
         extra_fields,
         warnings,
+    }
+}
+
+/// Warn when cargo-dist configures Homebrew but the release contract cannot plan it.
+///
+/// `OSS-RELEASE.md` remains authoritative: cargo-dist's config is only a
+/// best-effort drift signal. A missing, unreadable, invalid, or irrelevant file
+/// therefore produces no diagnostic and never changes validation's success.
+fn check_dist_workspace_homebrew(
+    distributions: &[Distribution],
+    repo_root: &Path,
+    fs: &dyn Fs,
+    p: &mut Problems,
+) {
+    let path = repo_root.join(DIST_WORKSPACE_FILENAME);
+    let Ok(bytes) = fs.read(&path) else {
+        return;
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        return;
+    };
+    let Ok(config) = text.parse::<toml::Value>() else {
+        return;
+    };
+    let Some(dist) = config.get("dist").and_then(toml::Value::as_table) else {
+        return;
+    };
+
+    let has_tap = dist
+        .get("tap")
+        .and_then(toml::Value::as_str)
+        .is_some_and(|tap| !tap.trim().is_empty());
+    let has_homebrew_publish_job = dist
+        .get("publish-jobs")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|jobs| {
+            jobs.iter()
+                .filter_map(toml::Value::as_str)
+                .any(|job| job == "homebrew")
+        });
+
+    if (has_tap || has_homebrew_publish_job)
+        && !distributions.iter().any(|d| d.homebrew_tap.is_some())
+    {
+        p.warn(
+            "dist-workspace.toml configures Homebrew, but the contract omits \
+             distribution.homebrew_tap; the Homebrew leg will not be planned. Add \
+             distribution.homebrew_tap: owner/repo to OSS-RELEASE.md"
+                .to_string(),
+        );
     }
 }
 
@@ -1699,31 +1753,43 @@ fn yaml_to_json(v: &Value, path: &str) -> Result<serde_json::Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
-    /// A fake `Fs`: `normalize_str` never `read`s, so only the directory set
-    /// matters (for the fragment-dir advisory check).
+    /// A fake `Fs` for filesystem-dependent normalization checks.
     struct FakeFs {
         dirs: HashSet<PathBuf>,
+        files: HashMap<PathBuf, Vec<u8>>,
     }
 
     impl FakeFs {
         fn empty() -> Self {
             Self {
                 dirs: HashSet::new(),
+                files: HashMap::new(),
             }
         }
 
         fn with_dirs<const N: usize>(dirs: [&str; N]) -> Self {
             Self {
                 dirs: dirs.iter().map(PathBuf::from).collect(),
+                files: HashMap::new(),
+            }
+        }
+
+        fn with_file(path: &str, content: &str) -> Self {
+            Self {
+                dirs: HashSet::new(),
+                files: HashMap::from([(PathBuf::from(path), content.as_bytes().to_vec())]),
             }
         }
     }
 
     impl Fs for FakeFs {
-        fn read(&self, _path: &Path) -> io::Result<Vec<u8>> {
-            Err(io::Error::from(io::ErrorKind::NotFound))
+        fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+            self.files
+                .get(path)
+                .cloned()
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
         }
         fn exists(&self, path: &Path) -> bool {
             self.dirs.contains(path)
@@ -1731,9 +1797,8 @@ mod tests {
         fn is_dir(&self, path: &Path) -> bool {
             self.dirs.contains(path)
         }
-        fn is_file(&self, _path: &Path) -> bool {
-            // The contract normalizer models only directories (fragment-dir).
-            false
+        fn is_file(&self, path: &Path) -> bool {
+            self.files.contains_key(path)
         }
         fn read_dir(&self, _dir: &Path) -> io::Result<Vec<String>> {
             // The contract normalizer never lists directories.
@@ -2317,6 +2382,126 @@ mod tests {
         assert_eq!(d["homebrew_tap"], "jarimustonen/homebrew-issuectl");
         // A bare (singular) block carries a `null` association key.
         assert!(d["package"].is_null());
+    }
+
+    // ── cargo-dist Homebrew drift advisory ───────────────────────────────────
+
+    /// A Homebrew configuration in cargo-dist without the authoritative contract
+    /// tap warns: release planning deliberately reads only the contract.
+    #[test]
+    fn dist_workspace_tap_without_contract_tap_warns() {
+        let fs = FakeFs::with_file(
+            "/repo/dist-workspace.toml",
+            "[dist]\ntap = \"owner/homebrew-tool\"\n",
+        );
+        let n = norm_with(
+            "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\n---\n",
+            &fs,
+        );
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("distribution.homebrew_tap")
+                    && w.contains("will not be planned")),
+            "expected cargo-dist drift warning: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// A cargo-dist Homebrew publish job has the same silent-drop risk as a tap.
+    #[test]
+    fn dist_workspace_homebrew_publish_job_without_distribution_warns() {
+        let fs = FakeFs::with_file(
+            "/repo/dist-workspace.toml",
+            "[dist]\npublish-jobs = [\"homebrew\"]\n",
+        );
+        let n = norm_with(
+            "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\n---\n",
+            &fs,
+        );
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("distribution.homebrew_tap")
+                    && w.contains("will not be planned")),
+            "expected cargo-dist drift warning: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// A distribution without its own tap still warns when cargo-dist configures one.
+    #[test]
+    fn dist_workspace_tap_with_distribution_lacking_tap_warns() {
+        let fs = FakeFs::with_file(
+            "/repo/dist-workspace.toml",
+            "[dist]\ntap = \"owner/homebrew-tool\"\n",
+        );
+        let n = norm_with(
+            "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ndistribution:\n  \
+             adapter: cargo-dist\n  installers: [shell]\n---\n",
+            &fs,
+        );
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("distribution.homebrew_tap")),
+            "expected cargo-dist drift warning: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// When both configs declare the tap, cargo-dist contributes no warning.
+    #[test]
+    fn dist_workspace_tap_matching_contract_is_silent() {
+        let fs = FakeFs::with_file(
+            "/repo/dist-workspace.toml",
+            "[dist]\ntap = \"owner/homebrew-tool\"\n",
+        );
+        let n = norm_with(
+            "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ndistribution:\n  \
+             adapter: cargo-dist\n  installers: [homebrew]\n  homebrew_tap: owner/homebrew-tool\n---\n",
+            &fs,
+        );
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.problems.warnings.is_empty(),
+            "warnings: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// An absent cargo-dist config does not add a warning.
+    #[test]
+    fn absent_dist_workspace_is_silent() {
+        let n = norm("---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\n---\n");
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.problems.warnings.is_empty(),
+            "warnings: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// cargo-dist config is advisory, so malformed TOML does not fail validation.
+    #[test]
+    fn unparseable_dist_workspace_is_silent() {
+        let fs = FakeFs::with_file("/repo/dist-workspace.toml", "[dist\ntap = \"owner/tap\"");
+        let n = norm_with(
+            "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\n---\n",
+            &fs,
+        );
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.problems.warnings.is_empty(),
+            "warnings: {:?}",
+            n.problems.warnings
+        );
     }
 
     // ── homebrew cross-field consistency floors (truth table) ────────────────
