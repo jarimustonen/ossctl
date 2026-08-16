@@ -2,10 +2,14 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: task
-status: in-progress
+status: done
 priority: high
 lane: repo-hygiene
 lane_seq: 10
+commits:
+- hash: bdad778
+  summary: neutralize user-specific artifact references
+closed: 2026-08-16
 ---
 
 # Audit: no user-specific facts in a public artifact
