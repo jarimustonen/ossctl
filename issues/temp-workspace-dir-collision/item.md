@@ -4,6 +4,8 @@ updated: 2026-08-16
 type: bug
 status: open
 priority: normal
+lane: release-hardening
+lane_seq: 5
 ---
 
 # Flaky macOS CI: temp_workspace() fixture dirs can collide

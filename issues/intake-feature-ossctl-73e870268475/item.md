@@ -4,10 +4,11 @@ updated: 2026-08-16
 type: feature
 reporter: jari
 status: open
-priority: normal
+priority: high
 labels:
 - via:agent-homebase-wrapup
-- needs-triage
+lane: release-safety
+lane_seq: 5
 ---
 
 # release plan/cut should cover the Homebrew tap leg
@@ -51,3 +52,9 @@ project-canon handoff from v0.1.1 onward and has now cost manual work on three r
 
 Note: cargo-dist can push a formula itself, so an alternative shape is for the `dist` phase to
 own the tap. Either way the engine, not the human, should close the loop.
+
+## Comments
+
+### 2026-08-16T19:03:17Z · @claude
+
+Admitted to the plan and laned release-safety (stint #21), priority raised to high. VERIFIED STILL LIVE on 0.5.0 — the report was made against 0.2.x, but the gap is not the version. Root cause identified during triage: declaring homebrew_tap in the contract's distribution block does NOT create a publish target; the tap must ALSO be listed under targets: with registry homebrew / adapter homebrew-tap. ossctl's own contract declares both, which is why its own cut publishes the tap; the reporting project declared only the distribution block, so plan sealed 2 targets and the tap leg was silently dropped. Same silent-drop family as @contract-validate-warn (landed today) but more severe: that one now warns, this one still drops with no signal at all. Fix direction: derive the homebrew target from distribution.homebrew_tap, or refuse/warn loudly when a tap is declared with no corresponding target — decide which in the unit.
