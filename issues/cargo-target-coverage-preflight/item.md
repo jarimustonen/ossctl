@@ -1,10 +1,12 @@
 ---
 created: 2026-08-05
-updated: 2026-08-05
+updated: 2026-08-16
 type: feature
-status: open
+status: duplicate
 priority: normal
 epic: ossctl-phase4-build
+related: ['@cargo-publish-receipt-provenance-resume-safety']
+closed: 2026-08-16
 ---
 
 ## Description
@@ -24,3 +26,9 @@ Two related gaps the reviewers noted:
 Resolve the cargo workspace dependency graph during plan construction / `validate_plan` preflight (one `cargo metadata`), and reject before any external action when: a target's publishable workspace dep is not itself a declared target; targets are not in dependency order (or reorder them); or a dep target uses the wrong registry/adapter or an incompatible version. Persist explicit dep edges / a sealed topo order in the plan so the generic coordinator executes an already-validated order and the adapter does only the immediate index-readiness check. Keep Rust-specific graph logic in a cargo-aware planner, not in the coordinator core. Add tests: reversed-input reorder/reject; missing-dep-target rejection; wrong-registry/adapter dep rejection.
 
 Refs-Issue: cargo-adapter-multitarget-double-publish
+
+## Resolution
+
+### 2026-08-16T08:34:10Z · @issuectl
+
+Plan-time cargo target coverage belongs with the retained cargo release hardening cluster, not as a separate backlog item.

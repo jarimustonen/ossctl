@@ -1,11 +1,12 @@
 ---
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-08-16
 type: improvement
-status: open
+status: duplicate
 priority: normal
 epic: ossctl-phase4-build
-related: ['@cargo-adapter-workspace-publish']
+related: ['@cargo-adapter-workspace-publish', '@cargo-publish-receipt-provenance-resume-safety']
+closed: 2026-08-16
 ---
 
 # Per-member publish receipts for multi-crate cargo cuts (verify/reconcile visibility)
@@ -29,3 +30,9 @@ Proper fix reshapes load-bearing seam surfaces the parent issue deliberately kep
 Either way: capture the resolved member set + versions at PLAN time (in the plan hash) so the executed set is sealed, and add a coordinator-level test proving exactly what is journaled after member 1 lands and member 2 fails.
 
 Context: `crates/ossctl-core/src/release/adapters/cargo.rs` (publish loop), `crates/ossctl-core/src/release/coordinator.rs` (`publish_phase`, `to_journal_receipt`), `crates/ossctl-core/src/protocol/{plan,journal,release}.rs`. Full triage: `history/assessment-cargo-adapter-workspace-publish.md`.
+
+## Resolution
+
+### 2026-08-16T08:34:10Z · @issuectl
+
+Folded into the retained cargo publish receipt and provenance hardening cluster.

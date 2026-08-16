@@ -1,9 +1,10 @@
 ---
 created: 2026-08-06
-updated: 2026-08-06
+updated: 2026-08-16
 type: feature
 status: open
 priority: normal
+lane: oss-family
 ---
 
 # No oss-* generator for gh-releases/cargo-dist + homebrew distribution channels

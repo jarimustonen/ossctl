@@ -1,11 +1,12 @@
 ---
 created: 2026-08-05
-updated: 2026-08-05
+updated: 2026-08-16
 type: bug
 status: open
 priority: normal
 epic: ossctl-phase4-build
 related: ['@release-engine-cut-cargo-dist-flow']
+lane: release-hardening
 ---
 
 # homebrew post-tag publish: crash window can open a duplicate PR on resume

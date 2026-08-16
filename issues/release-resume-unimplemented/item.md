@@ -2,8 +2,9 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: bug
-status: open
+status: obsolete
 priority: high
+closed: 2026-08-16
 ---
 
 # release resume/verify cannot finish a partially-published run (0.2.2)
@@ -41,3 +42,9 @@ project-canon 0.1.x release, 2026-08-16. Two runs abandoned; the release was fin
 
 ## Env
 ossctl 0.2.2.
+
+## Resolution
+
+### 2026-08-16T08:34:10Z · @issuectl
+
+Obsolete 0.2.2-era report, partly downstream of the removed --version drift. Refile a current, narrow resume bug if 0.5.x still strands a partially published run.

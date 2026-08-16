@@ -1,10 +1,11 @@
 ---
 created: 2026-08-05
-updated: 2026-08-05
+updated: 2026-08-16
 type: task
 status: open
 priority: normal
 epic: ossctl-phase4-build
+lane: release-safety
 ---
 
 # release verify should confirm CI created a delegated GitHub Release

@@ -3,11 +3,13 @@ created: 2026-08-16
 updated: 2026-08-16
 type: feature
 reporter: jari
-status: open
+status: duplicate
 priority: normal
 labels:
 - via:agent-homebase-wrapup
 - needs-triage
+related: ['@oss-dist-channel-generator']
+closed: 2026-08-16
 ---
 
 # No standalone Homebrew-formula (re)generate/push; generated model assum…
@@ -43,3 +45,9 @@ how the sibling taps say "Formula published by cargo-dist on release."
 
 ## Env
 ossctl 0.2.2. Related: release-cut-ignores-version, release-resume-unimplemented (same release).
+
+## Resolution
+
+### 2026-08-16T08:34:10Z · @issuectl
+
+The standalone Homebrew formula regeneration need belongs in the retained oss-dist channel generator work.

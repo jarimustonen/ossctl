@@ -1,10 +1,11 @@
 ---
 created: 2026-08-05
-updated: 2026-08-05
+updated: 2026-08-16
 type: improvement
-status: open
+status: wontfix
 priority: normal
 epic: ossctl-phase4-build
+closed: 2026-08-16
 ---
 
 # harden core Journal::open/read against journal identity + structural corruption
@@ -18,3 +19,9 @@ Raised by /llm-review (gpt-5.6-sol, claude-opus-4-7) during the release-list-aba
 Proposed: after reduce, validate (in core, one place): first event is `RunCreated`; exactly one `RunCreated`; first seq is 1; seq strictly increasing/unique; `state.run_id == requested run id`; identity fields non-empty. Return `InvalidData` on violation so the CLI maps it to `journal_unreadable`. Real-world likelihood is low (run ids are tool-minted ULIDs; would need a hand-crafted/corrupt journal), which is why it is deferred rather than fixed inline — but it is a cheap, correct hardening of the shared read paths (affects verify/show/resume/list/abandon uniformly). Out of scope for the list/abandon feature per its hard constraints (no broad ossctl-core rework).
 
 Discovered during release-list-abandon-not-implemented.
+
+## Resolution
+
+### 2026-08-16T08:34:10Z · @issuectl
+
+Low-likelihood corruption hardening, not current work. Closing under the no-backlog policy.

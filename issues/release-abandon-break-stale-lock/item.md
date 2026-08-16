@@ -1,10 +1,11 @@
 ---
 created: 2026-08-05
-updated: 2026-08-10
+updated: 2026-08-16
 type: improvement
 status: open
 priority: normal
 epic: ossctl-phase4-build
+lane: release-hardening
 ---
 
 # release abandon cannot break a stale single-active-cut lock after a hard-killed run

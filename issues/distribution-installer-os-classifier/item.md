@@ -1,11 +1,12 @@
 ---
 created: 2026-08-07
-updated: 2026-08-07
+updated: 2026-08-16
 type: improvement
-status: open
+status: wontfix
 priority: normal
 epic: ossctl-phase4-build
 related: ['@distribution-installer-platform-crosscheck']
+closed: 2026-08-16
 ---
 
 # distribution: unify installer/target OS-compatibility into a structured, adapter-aware classifier
@@ -50,3 +51,9 @@ Cross-cutting: touches `contract/normalize.rs`, the `dist` generator, and the ad
 (ADR-0002). Needs its own design (shared type + interface); deliberately NOT bundled into the
 warning diff, whose positional `triple_os` fix already covers the common desktop triples and
 the Android/iOS false-negative. Non-urgent quality lift for the open triple space.
+
+## Resolution
+
+### 2026-08-16T08:34:10Z · @issuectl
+
+Quality lift for a broader adapter model, but no current consumer needs it. Closing under the no-backlog policy.

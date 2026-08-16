@@ -1,9 +1,10 @@
 ---
 created: 2026-08-10
-updated: 2026-08-10
+updated: 2026-08-16
 type: feature
 status: open
 priority: normal
+lane: release-safety
 ---
 
 # release engine: support a 'publish-in-CI / tag-only cut' release mode

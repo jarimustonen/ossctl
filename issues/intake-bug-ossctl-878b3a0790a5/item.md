@@ -3,11 +3,12 @@ created: 2026-08-16
 updated: 2026-08-16
 type: bug
 reporter: jari
-status: open
+status: fixed
 priority: normal
 labels:
 - via:agent-homebase-wrapup
 - needs-triage
+closed: 2026-08-16
 ---
 
 # release plan rejects --output flag though other subcommands accept it
@@ -44,3 +45,9 @@ the plan_id from the human-formatted output reliably.
 Low severity (the human-readable output is parseable by hand), but it breaks scripted
 release automation and is an AI-first-CLI surface inconsistency. Observed 2026-08-16 while
 cutting issuectl 0.11.0.
+
+## Resolution
+
+### 2026-08-16T08:34:10Z · @issuectl
+
+Current release plan supports --json structured output. The specific old --output json spelling is not the canonical surface, but the AI-first automation need is covered.

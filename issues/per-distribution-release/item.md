@@ -1,9 +1,10 @@
 ---
 created: 2026-08-10
-updated: 2026-08-10
+updated: 2026-08-16
 type: feature
-status: open
+status: wontfix
 priority: normal
+closed: 2026-08-16
 ---
 
 # Per-distribution release + dist generate for a monorepo
@@ -33,3 +34,9 @@ mis-cutting. This issue tracks making them multi-distribution-aware.
 
 ## Not in scope
 The contract MODEL is already done (this is purely engine/tooling catch-up).
+
+## Resolution
+
+### 2026-08-16T08:34:10Z · @issuectl
+
+No current monorepo release consumer needs multi-distribution release execution. Refile when a real repo requires it.

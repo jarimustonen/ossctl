@@ -1,11 +1,12 @@
 ---
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-08-16
 type: improvement
-status: open
+status: wontfix
 priority: normal
 epic: ossctl-phase4-build
 related: ['@distribution-cross-platform-targets']
+closed: 2026-08-16
 ---
 
 # distribution.platforms is Rust-triple-shaped but goreleaser/manual don't consume triples
@@ -36,3 +37,9 @@ Touches `DistributionAdapter` semantics and the release-engine `coordinator`/`ad
 appears — ossctl and its current users are Rust (cargo-dist), for which the Rust-triple `platforms`
 field is exactly right. Revisit when the first non-Rust consumer surfaces. Stays in the backlog, does
 not gate anything.
+
+## Resolution
+
+### 2026-08-16T08:34:10Z · @issuectl
+
+Maintainer already deferred this until a real non-Rust distribution consumer exists. Closing to avoid a permanent backlog item.

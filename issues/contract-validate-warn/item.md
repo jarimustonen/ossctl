@@ -1,9 +1,10 @@
 ---
 created: 2026-08-15
-updated: 2026-08-15
+updated: 2026-08-16
 type: improvement
 status: open
 priority: normal
+lane: release-safety
 ---
 
 # contract validate: warn when dist-workspace.toml declares a homebrew tap absent from the contract distribution block

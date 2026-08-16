@@ -2,8 +2,9 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: bug
-status: open
+status: obsolete
 priority: high
+closed: 2026-08-16
 ---
 
 # release cut publishes the manifest version, not --version — no bump, no mismatch refusal
@@ -36,3 +37,9 @@ project-canon 0.1.x release, 2026-08-16. Plan sealed `version: 0.1.0` against a 
 
 ## Env
 ossctl 0.2.2, cargo-publish adapter, rust workspace.
+
+## Resolution
+
+### 2026-08-16T08:34:10Z · @issuectl
+
+Obsolete after later release-engine changes: --version was removed, manifest version is the single source of truth, and --bump owns version changes. Refile a new issue if a current 0.5.x cut can reproduce a wrong-version publish.

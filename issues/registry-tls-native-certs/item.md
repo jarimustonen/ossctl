@@ -1,11 +1,12 @@
 ---
 created: 2026-08-07
-updated: 2026-08-07
+updated: 2026-08-16
 type: improvement
-status: open
+status: wontfix
 priority: normal
 epic: ossctl-phase4-build
 related: ['@registry-query-http-client']
+closed: 2026-08-16
 ---
 
 # registry HTTP client uses bundled webpki-roots; no system/native cert store
@@ -46,3 +47,9 @@ up.
 Low.
 
 Refs-Issue: registry-query-http-client
+
+## Resolution
+
+### 2026-08-16T08:34:10Z · @issuectl
+
+Deliberate static-musl bundled-roots tradeoff and no current corporate MITM user pain. Refile if native cert support becomes a real requirement.
