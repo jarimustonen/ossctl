@@ -179,3 +179,4 @@ live view. 0.4.0 is shipped; the epic stays open for its tails (see handoff) and
 ## Piialiisan bugiraportit
 
 - [ ] 🐛 Piialiisan bugiraportti: release plan rejects --output flag though other subcommands accept it — jari via Telegram ([`intake-bug-ossctl-878b3a0790a5`](issues/intake-bug-ossctl-878b3a0790a5/item.md))
+- [ ] 🐛 Piialiisan bugiraportti: No standalone Homebrew-formula (re)generate/push; generated model assum… — jari via Telegram ([`intake-feature-ossctl-04e19af4e11d`](issues/intake-feature-ossctl-04e19af4e11d/item.md))
