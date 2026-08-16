@@ -2,7 +2,7 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: task
-status: open
+status: in-progress
 priority: high
 lane: repo-hygiene
 lane_seq: 10
