@@ -87,49 +87,20 @@ release, no code) that reconciled the new HIGH `release-rust-workspace-multicrat
 
 **Read first (the spec):** `docs/adr/000{1,2,3,4}-*.md` (CLI taxonomy, release engine, config+journal, one-target-one-publish-unit).
 
-## Execution DAG (2026-08-14, stint #20 handoff)
+## Scheduling
 
-Scheduling PLAN — source of truth for lane + order; issuectl is authoritative for STATUS
-(never copied here). Merge at Phase 0/handoff (drop landed, add active, keep existing order).
-`▶` = head-of-line snapshot — RE-COMPUTE from issuectl at pick time.
-`after <slug> (needs …)` = logical blocked_by mirror. `collision: <file>` = touches a
-second lane's hot file (spawn-time exclusion).
+Canonical scheduling lives in `issuectl` frontmatter (`lane:`, `lane_seq:`, `blocked_by:`, `collision:`). Do not maintain a markdown DAG or adjacent backlog in this file.
 
-The cross-repo standardisation ("Track A") and hauis CI runners are HOMEBASE concerns (Jari's
-personal environment), NOT ossctl work — moved to homebase issue `cross-repo-release-standardisation`.
-Do not re-add them here.
+Use these views instead:
 
-**Track B — "ossctl cuts ITSELF through the engine" — ✅ COMPLETE (stint #14) and ROUTINE (stints
-#15–#20 shipped 0.2.4→0.5.0 the same way).** ✅ **The HIGH release feature is now DONE (stint #20):**
-`release-rust-workspace-multicrate` — all 4 facets landed + CLOSED; shipped in 0.5.0. **The active
-frontier is EMPTY** — no queued/scheduled task. Everything below is DEFERRED hardening, review
-follow-ups, or the one approved future feature (`oss-dist-channel-generator`, UNLANED). The one live
-thread is EXTERNAL: the orchestratectl 0.2.0 `--bump` live-acceptance cut (orx's timeline — see handoff
-block; prepared this round). LANE C is retired for ossctl's own cut — only `release-macos-hauis-coupling`
-survives (homebase-adjacent). **Do NOT harden LANE C.**
-
-<!-- execution-dag:begin -->
+```bash
+issuectl dag
+issuectl dag --json
+issuectl ls --status open
+issuectl ls --status in-progress
 ```
-GLOBAL HEAD-OF-LINE: issue triage cleanup completed 2026-08-16. Every open non-epic issue is now either laned below or intentionally closed as obsolete, duplicate, or wontfix.
 
-LANE release-safety
-  ▶ release-verify-delegated-github-release
-    release-ci-publish-mode
-    release-cut-stale-binary-guard
-    contract-validate-warn
-
-LANE release-hardening
-  ▶ cargo-publish-receipt-provenance-resume-safety
-    homebrew-publish-resume-idempotency
-    release-abandon-break-stale-lock
-
-LANE contract-safety
-  ▶ extra-fields-nested-nonstring-yaml
-
-LANE oss-family
-  ▶ oss-dist-channel-generator
-```
-<!-- execution-dag:end -->
+`TODO.md` is only the session handoff and project notes; issue bodies and `issuectl dag` are the source of truth.
 
 ## Backlog
 
