@@ -175,3 +175,7 @@ UNLANED — skill-installer + /oss-* family (skill/template work; no release-eng
 Post-release hardening + Track B are children/followups under
 [`ossctl-phase4-build`](issues/ossctl-phase4-build/item.md) (still OPEN). `issuectl list` for the
 live view. 0.4.0 is shipped; the epic stays open for its tails (see handoff) and the lanes above.
+
+## Piialiisan bugiraportit
+
+- [ ] 🐛 Piialiisan bugiraportti: release plan rejects --output flag though other subcommands accept it — jari via Telegram ([`intake-bug-ossctl-878b3a0790a5`](issues/intake-bug-ossctl-878b3a0790a5/item.md))
