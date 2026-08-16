@@ -2,10 +2,14 @@
 created: 2026-08-10
 updated: 2026-08-16
 type: improvement
-status: in-progress
+status: done
 priority: normal
 epic: ossctl-phase4-build
 lane: release-safety
+commits:
+- hash: 461b4fd
+  summary: 'fix(release): refuse stale binaries by default'
+closed: 2026-08-16
 ---
 
 # release plan/cut runs stale engine code silently when the binary was not built from the current tree (no stale-binary guard)
