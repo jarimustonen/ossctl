@@ -41,6 +41,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Inspect resolved contract and release-journal locations and their provenance.
+    Config {
+        #[command(subcommand)]
+        action: crate::config::ConfigAction,
+    },
     /// Read/validate the OSS-RELEASE.md release contract.
     Contract {
         #[command(subcommand)]
@@ -137,6 +142,7 @@ pub fn run() -> ExitCode {
 
     let result = match cli.command {
         Command::Version => cmd_version(format),
+        Command::Config { action } => crate::config::dispatch(action, format),
         Command::Contract { action } => match action {
             ContractAction::Show(args) => crate::contract::show(&args, format),
             ContractAction::Validate(args) => crate::contract::validate(&args, format),

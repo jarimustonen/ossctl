@@ -15,6 +15,8 @@ owns the parts that must be exact and identical for every caller:
 - **`ossctl release plan | cut | resume | verify | show | list | abandon`** — a
   resumable, journaled, per-ecosystem release-cut state machine with a sealed
   content-addressed approval plan.
+- **`ossctl config path | show`** — inspect the project contract and release-journal
+  locations ossctl resolves, with per-value provenance under `--json`.
 - **`ossctl skill | doctor | version`** — companion-skill installer, self-diagnostics,
   and the version/schema surface.
 
@@ -64,6 +66,23 @@ for macOS (arm64 / x86_64) and Linux (statically-linked `musl`, arm64 / x86_64).
 Release [`v0.1.0`](https://github.com/jarimustonen/ossctl/releases/tag/v0.1.0), and via
 the `jarimustonen/ossctl` Homebrew tap. See [`CHANGELOG.md`](CHANGELOG.md) for the
 release history.
+
+## Configuration inspection
+
+`OSS-RELEASE.md` is a project-carried release contract, not a user-level ossctl
+configuration file. ossctl currently has no `OSSCTL_*` configuration variables or
+home-directory config. Inspect the actual paths and overrides it does use:
+
+```sh
+ossctl config path
+ossctl config show --json
+```
+
+The report identifies the contract location (selected by `--repo-root` or the
+current-directory default) and the release journal location (selected by
+`--journal-dir` or derived from Git's common directory). If the current directory is
+not a Git repository, the journal location is reported as unavailable rather than
+inventing a fallback path.
 
 ## Companion skills
 

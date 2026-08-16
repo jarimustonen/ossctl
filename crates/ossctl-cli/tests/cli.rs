@@ -94,6 +94,83 @@ fn unknown_subcommand_is_structured_error() {
     assert_eq!(v["error"]["code"], "unknown_subcommand");
 }
 
+// ── config ───────────────────────────────────────────────────────────────────
+
+/// `config show --json` uses the standard success envelope and makes the
+/// contract-location provenance explicit rather than pretending ossctl has a
+/// user-level config file.
+#[test]
+fn config_show_json_reports_default_provenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = ossctl()
+        .args(["config", "show", "--json", "--repo-root"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "config show must be read-only and succeed"
+    );
+
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["warnings"], serde_json::json!([]));
+    assert!(value["data"]["tool_config_file"].is_null());
+    assert_eq!(value["data"]["contract_path"]["source"], "flag");
+    assert_eq!(
+        value["data"]["contract_path"]["value"],
+        dir.path().join("OSS-RELEASE.md").display().to_string()
+    );
+    // A non-Git directory has no real journal root. The report must expose that
+    // honestly instead of manufacturing an OSSCTL config path.
+    assert!(value["data"]["journal_dir"]["value"].is_null());
+    assert_eq!(value["data"]["journal_dir"]["source"], "unresolved");
+}
+
+/// Explicit selectors are reported as flag provenance, including the journal
+/// override that release commands genuinely consume in CI and debugging.
+#[test]
+fn config_show_json_labels_flag_overrides() {
+    let repo = tempfile::tempdir().unwrap();
+    let journal = tempfile::tempdir().unwrap();
+    let out = ossctl()
+        .args([
+            "config",
+            "show",
+            "--json",
+            "--repo-root",
+            repo.path().to_str().unwrap(),
+            "--journal-dir",
+            journal.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["data"]["contract_path"]["source"], "flag");
+    assert_eq!(value["data"]["journal_dir"]["source"], "flag");
+    assert_eq!(
+        value["data"]["journal_dir"]["value"],
+        journal.path().display().to_string()
+    );
+}
+
+/// `config path` remains a concise, pipe-friendly text listing.
+#[test]
+fn config_path_prints_resolved_locations() {
+    let repo = tempfile::tempdir().unwrap();
+    ossctl()
+        .args(["config", "path", "--repo-root"])
+        .arg(repo.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "contract: {}",
+            repo.path().join("OSS-RELEASE.md").display()
+        )))
+        .stdout(predicate::str::contains("release_journal: unavailable"));
+}
+
 // ── contract show / validate ─────────────────────────────────────────────────
 
 fn fixture(name: &str) -> std::path::PathBuf {
