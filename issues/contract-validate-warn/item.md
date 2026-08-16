@@ -5,6 +5,9 @@ type: improvement
 status: in-progress
 priority: normal
 lane: release-safety
+commits:
+- hash: 2aa530a589b1712c14f101dd116d21cd250443b5
+  summary: 'fix(contract): warn on unplanned Homebrew tap'
 ---
 
 # contract validate: warn when dist-workspace.toml declares a homebrew tap absent from the contract distribution block
