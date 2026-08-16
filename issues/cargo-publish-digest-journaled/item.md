@@ -2,13 +2,14 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: bug
-status: open
+status: wontfix
 priority: high
 epic: ossctl-phase4-build
 related: ['@cargo-publish-receipt-provenance-resume-safety']
 lane: release-hardening
 lane_seq: 20
 blocked_by: ['@registry-published-release-port']
+closed: 2026-08-16
 ---
 
 # Journal the .crate digest at build time instead of re-deriving it on resume
@@ -26,3 +27,9 @@ Also: resume must consult the prepared fact before converting `Missing` to 'publ
 Known blast radius (a prior attempt stalled here — budget for it): a journal v5 event + reducer, coordinator write-ahead ordering, the cargo adapter's prepare/publish flow, and resume classification. Expect BROAD churn in the existing test fixtures; updating them is part of the unit, not a reason to stop. Journal version bump must be deliberate and must keep `release resume` working against runs journaled at v4.
 
 Fail CLOSED on every ambiguity: missing prepared fact, digest mismatch, registry outage. This is the irreversible-publish path.
+
+## Comments
+
+### 2026-08-16T18:32:22Z · @claude
+
+Closed as hypothetical (maintainer decision, stint #21). This finding came from an /llm-review panel, not from an observed failure. Review of the whole open issue base showed roughly 40% of it was defensive work of this class: cosmic-ray scenarios, checks layered on top of checks that already exist elsewhere, and hardening against hostile input in a path where the only actor is the maintainer breaking their own project. The scenario here has not occurred in 13 releases, the path is already structurally guarded (clean checkout of a sealed commit, dry-run before every upload, post-publish visibility confirmation), and both autonomous attempts at it stalled on its blast radius. Reopen if it is ever observed in the field.

@@ -2,11 +2,12 @@
 created: 2026-08-05
 updated: 2026-08-16
 type: bug
-status: open
+status: wontfix
 priority: normal
 epic: ossctl-phase4-build
 related: ['@release-engine-cut-cargo-dist-flow']
 lane: release-hardening
+closed: 2026-08-16
 ---
 
 # homebrew post-tag publish: crash window can open a duplicate PR on resume
@@ -38,3 +39,9 @@ raised belong here (the tap-write path fails **closed** on both today — safe, 
 
 Byte-compare idempotency (a re-run at the SAME version = clean no-op) IS now handled in the tap-write
 path; these two are the remaining resume-safety gaps.
+
+## Comments
+
+### 2026-08-16T18:32:35Z · @claude
+
+Closed as hypothetical (maintainer decision, stint #21). Sourced from an /llm-review panel. The byte-compare idempotency case (re-running a cut at the same version is a clean no-op) was already closed by the direct tap-write change. The two scenarios left both fail closed today and neither is reachable in practice for this project: a non-fast-forward push race needs two cuts writing the same tap concurrently, and this maintainer cuts sequentially, one formula at a time; the stale-version downgrade needs an interrupted cut, then a newer version published, then a return to resume the older one. Failing closed is an acceptable resting state for both. Reopen if the tap ever hosts concurrent or fan-out cuts, which would make the first one real.

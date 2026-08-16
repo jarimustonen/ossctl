@@ -4,6 +4,8 @@ updated: 2026-08-16
 type: task
 status: open
 priority: high
+lane: repo-hygiene
+lane_seq: 10
 ---
 
 # Audit: no user-specific facts in a public artifact
@@ -81,3 +83,8 @@ found. Companion work in `project-canon`: `portable-neutral-defaults` (the concr
 and `canon-no-user-specifics` (promoting this rule to a canon section with a mechanical
 `doctor` check, so it is enforced rather than remembered). Once that check ships, this audit
 becomes automated — this issue is the one-time manual pass.
+
+### 2026-08-16T18:32:12Z · @claude
+
+Laned into a new repo-hygiene lane (stint #21): the audit's likely touch set is docs, AGENTS.md, ADRs, test fixtures and dist-workspace.toml — a different hot-file family from the release-engine lanes, so it runs in parallel without collision. A quick scan confirms the audit is not a no-op: seven files reference user-specific things across three classes (a documented deliberate exception in the project's own build config, documentation, and test/ADR occurrences that are more likely accidental than decided).
+

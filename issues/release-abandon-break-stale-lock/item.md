@@ -25,3 +25,12 @@ Discovered during release-list-abandon-not-implemented.
 ### 2026-08-10T14:42:17Z · @agent-claude
 
 Hit in the wild during the issuectl 0.8.1 cut (2026-08-10): a foreground 2-min timeout killed the cut wrapper, leaving .lock at <git-common-dir>/ossctl/releases/.lock holding dead PID 910. release abandon refused with cut_in_progress; had to kill -0 the pid, confirm dead, and rm the lock by hand before abandon worked. A dead-PID liveness check (or abandon --force) would avoid the manual rm. See also new @release-cut-publish-noop.
+
+### 2026-08-16T18:32:43Z · @claude
+
+SCOPE NARROWED (maintainer decision, stint #21). This issue is real and field-confirmed — it bit during the issuectl 0.8.1 cut, where the lock had to be removed by hand. But the proposed design carries the same speculative-hardening pattern being pruned from this repo today: guarding against process-id reuse, network and shared filesystems, and a full move to advisory locking are all defences against situations this project does not have (one maintainer, one machine, local filesystem, sequential cuts).
+
+IN SCOPE: check whether the recorded lock holder is still alive; if it is not, let abandon break the lock and proceed. Record enough identity in the lock file to make that check meaningful, and keep the existing actionable error for the case where the holder IS alive.
+
+OUT OF SCOPE unless observed: process-id-reuse defence, network/shared-filesystem correctness, replacing the locking architecture with advisory locks, a separate doctor recovery path.
+

@@ -2,12 +2,13 @@
 created: 2026-08-05
 updated: 2026-08-16
 type: bug
-status: open
+status: wontfix
 priority: normal
 epic: ossctl-phase4-build
 lane: release-hardening
 lane_seq: 40
 blocked_by: ['@registry-published-release-port', '@cargo-publish-digest-journaled', '@cargo-fresh-receipt-digest']
+closed: 2026-08-16
 ---
 
 ## Description
@@ -104,3 +105,8 @@ Refs-Issue: is-published-digest-authenticate
 ### 2026-08-16T18:15:19Z · @claude
 
 SPLIT into three sequenced units (stint #21). Two autonomous attempts at this as a single unit stalled: the remaining scope needs a journal event + reducer, coordinator write-ahead ordering, the cargo adapter prepare/publish flow, resume classification and a port reshape all at once; the second worker got a workspace check green but broke the existing test base broadly and returned its diff rather than landing it. Remaining scope now lives in three sequenced children (lane release-hardening, dependency-ordered): @registry-published-release-port (port consolidation + missing AdapterError variant + SemVer/duplicate minors), @cargo-publish-digest-journaled (the core: journal the digest at build time, drop resume-time re-derivation, HIGH), @cargo-fresh-receipt-digest (fresh receipts record a digest; verify populates remote_digest). This issue stays open as the umbrella, blocked on all three.
+
+### 2026-08-16T18:32:35Z · @claude
+
+Closed as hypothetical (maintainer decision, stint #21), together with the three children split from it earlier today (@registry-published-release-port, @cargo-publish-digest-journaled, @cargo-fresh-receipt-digest) — the split was careful decomposition of the wrong thing. Sourced from a 4-model /llm-review of ADR-0004, never from an observed failure. The protected scenario (resuming an interrupted cut days later under a different toolchain) has not occurred in 13 releases and has a working recovery path (abandon and re-cut). The publish path is already structurally guarded: publish runs from a clean checkout of the sealed commit, a dry-run precedes every upload, and the adapter confirms the version reached the index before journaling a receipt. Two capable autonomous workers stalled on the blast radius (journal event + reducer, coordinator write-ahead ordering, adapter flow, resume classification, port reshape, all at once), which is itself evidence the cost/benefit is wrong. Reopen if a resume ever actually wedges.
+
