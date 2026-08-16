@@ -6,6 +6,8 @@ status: open
 priority: normal
 epic: ossctl-phase4-build
 lane: release-hardening
+lane_seq: 40
+blocked_by: ['@registry-published-release-port', '@cargo-publish-digest-journaled', '@cargo-fresh-receipt-digest']
 ---
 
 ## Description
@@ -96,3 +98,9 @@ for (read from the same sparse-index body).
   for crates.io.
 
 Refs-Issue: is-published-digest-authenticate
+
+## Comments
+
+### 2026-08-16T18:15:19Z · @claude
+
+SPLIT into three sequenced units (stint #21). Two autonomous attempts at this as a single unit stalled: the remaining scope needs a journal event + reducer, coordinator write-ahead ordering, the cargo adapter prepare/publish flow, resume classification and a port reshape all at once; the second worker got a workspace check green but broke the existing test base broadly and returned its diff rather than landing it. Remaining scope now lives in three sequenced children (lane release-hardening, dependency-ordered): @registry-published-release-port (port consolidation + missing AdapterError variant + SemVer/duplicate minors), @cargo-publish-digest-journaled (the core: journal the digest at build time, drop resume-time re-derivation, HIGH), @cargo-fresh-receipt-digest (fresh receipts record a digest; verify populates remote_digest). This issue stays open as the umbrella, blocked on all three.
