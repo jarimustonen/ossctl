@@ -2,9 +2,13 @@
 created: 2026-08-07
 updated: 2026-08-16
 type: improvement
-status: in-progress
+status: done
 priority: normal
 lane: contract-safety
+commits:
+- hash: 61e4e467fc3b29124a6dd876b077f165267d416c
+  summary: reject nested non-string yaml keys
+closed: 2026-08-16
 ---
 
 # extra_fields nested non-string keys collapse in yaml_to_json (never-drop gap)
