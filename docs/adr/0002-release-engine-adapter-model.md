@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-07-25
-**Authors:** Jari Mustonen (decision owner); ossctl founding-architecture worktree (agent). Pressure-tested via `/llm-panel` (architect=gemini-3.1-pro, maintainability=gpt-5.6-sol, AI-first-CLI-ergonomics=deepseek-v4-pro, release-engineering=claude-opus-4-7).
+**Authors:** Maintainer (decision owner); founding-architecture worktree (agent). Pressure-tested via `/llm-panel` (architect=gemini-3.1-pro, maintainability=gpt-5.6-sol, AI-first-CLI-ergonomics=deepseek-v4-pro, release-engineering=claude-opus-4-7).
 
 > Companion to **ADR-0001** (founding spine) and **ADR-0003** (config + journal storage). This ADR settles the most program-shaped part of `ossctl`: how the 6 per-ecosystem release adapters plug in, how the coordinator enforces the irreversibility-ordering rule, and how the approval seam lets an AI-first (non-interactive) binary gate a partially-irreversible publish. The journal *format/location* lives in ADR-0003; this ADR defines what the release engine *does* and what it *records*.
 

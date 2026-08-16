@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-07-25
-**Authors:** Jari Mustonen (decision owner); ossctl founding-architecture worktree (agent). Pressure-tested via `/llm-panel` (architect=gemini-3.1-pro, maintainability=gpt-5.6-sol, AI-first-CLI-ergonomics=deepseek-v4-pro, release-engineering=claude-opus-4-7).
+**Authors:** Maintainer (decision owner); founding-architecture worktree (agent). Pressure-tested via `/llm-panel` (architect=gemini-3.1-pro, maintainability=gpt-5.6-sol, AI-first-CLI-ergonomics=deepseek-v4-pro, release-engineering=claude-opus-4-7).
 
 > Companion to **ADR-0001** (founding spine) and **ADR-0002** (release engine). This ADR settles two storage questions: (1) that `OSS-RELEASE.md` stays the project-carried human-facing contract (and is *not* converted to `ossctl`'s own §8 tool config), and (2) the format, location, and resume/reconcile contract of the release-cut journal.
 

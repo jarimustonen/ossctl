@@ -40,10 +40,10 @@ environment.
 and `0.2.0`:
 
 ```rust
-gh_account: "jarimustonen".to_string(),
-repo_root:  "~/Sources".to_string(),
+gh_account: "example-org".to_string(),
+repo_root:  "/path/to/sources".to_string(),
 const DEFAULT_FAMILY_TOOLS: [&str; 7] = [
-    "issuectl", "orchestratectl", "crmctl", "tilictl", "ossctl", "intakectl", "glasspad",
+    "issuectl", "orchestratectl", "private-tool-a", "private-tool-b", "ossctl", "a-private-service", "glasspad",
 ];
 ```
 
@@ -60,9 +60,9 @@ Grep the whole repo — source, defaults, templates, generated output, docs, REA
 golden fixtures, skill content — for:
 
 - the maintainer's account handle / name / email
-- names of **private** family repos: `crmctl`, `tilictl`, `intakectl`, `aggountant`
+- names of **private** family repos: `private-tool-a`, `private-tool-b`, `a-private-service`, `private-tool-c`
   (public siblings are fine to reference where genuinely relevant, e.g. a real dependency)
-- personal path conventions (`~/Sources`, `/Users/<name>`, personal machine hostnames)
+- personal path conventions (`/path/to/sources`, `/Users/<name>`, personal machine hostnames)
 - internal URLs, internal service names, org-internal identifiers
 - any built-in default that encodes one person's environment rather than a neutral value
 
@@ -87,4 +87,29 @@ becomes automated — this issue is the one-time manual pass.
 ### 2026-08-16T18:32:12Z · @claude
 
 Laned into a new repo-hygiene lane (stint #21): the audit's likely touch set is docs, AGENTS.md, ADRs, test fixtures and dist-workspace.toml — a different hot-file family from the release-engine lanes, so it runs in parallel without collision. A quick scan confirms the audit is not a no-op: seven files reference user-specific things across three classes (a documented deliberate exception in the project's own build config, documentation, and test/ADR occurrences that are more likely accidental than decided).
+
+### 2026-08-16T18:38:58Z · @claude
+
+Audit result (2026-08-16): completed the tracked-artifact sweep and neutralised occurrences outside active shared modules.
+
+Fixed:
+- Replaced non-essential maintainer handles, paths, names, and host labels in docs, ADR provenance, README/install guidance, changelog history, workflow comments, issue history, vendored issue-skill prompts, and package authors metadata. Historical examples now use neutral or fictional values such as `example-org` and `/path/to/sources`.
+- Kept the distribution runner override operational but removed the host name. `dist-workspace.toml` now explicitly marks it as a deliberate repository-local exception that is never generated for downstream projects. The downstream-generation test now names only a generic runner.
+- Confirmed no bundled `crates/ossctl-cli/skills/*` template or CLI fixture contains a searched user-specific value. No generated default or installed oss skill inherits one.
+
+Retained, with justification:
+- `LICENSE` and copied crate licenses retain the legal copyright attribution.
+- `Cargo.toml` repository/homepage metadata and `OSS-RELEASE.md` homebrew tap retain this public project's canonical delivery identity. The latter is required for the project's release path.
+- `AGENTS.md` retains the exact self-hosted runner hostname only as the already-documented repository-local build exception. The override remains clearly marked in both `AGENTS.md` and `dist-workspace.toml`.
+- `TODO.md` was not changed, as explicitly constrained.
+
+Not edited because this task was explicitly forbidden from touching active shared areas. These are test-only examples, not shipped defaults, and should be neutralised by their owning release/contract units: `crates/ossctl-core/src/contract/normalize.rs`, `crates/ossctl-core/src/release/plan/tests.rs`, and `crates/ossctl-core/src/release/coordinator/tests.rs`.
+
+The final scan found no private sibling names, personal filesystem conventions, hostnames, or internal URLs outside the retained/blocked items above. Product defaults and generated oss skill content are clean.
+
+### 2026-08-16T18:42:36Z · @claude
+
+Verification: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace`, and `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` passed. `cargo test --workspace` ran 490/491 core tests successfully but failed the pre-existing active release/coordinator test `ossctl_like_contract_cuts_end_to_end_across_target_classes`: its expected post-tag SHA-256 does not match the fixture formula. This task did not modify that forbidden release area.
+
+
 

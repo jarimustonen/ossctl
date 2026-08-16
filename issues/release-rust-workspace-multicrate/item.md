@@ -27,11 +27,11 @@ closed: 2026-08-14
 
 GOAL: make `ossctl release plan/cut` able to cut orchestratectl's releases so we can RETIRE hand-cutting (0.1.1-0.1.6 were all hand-cut; `ossctl release list` shows only an abandoned v0.1.0 run — the engine has never successfully cut a release for this repo).
 
-## Observed gap (ossctl 0.2.2, repo ~/Sources/orchestratectl)
+## Observed gap (ossctl 0.2.2, repo /path/to/orchestratectl)
 `ossctl release plan --version 0.1.6 --json` for a two-crate workspace (crates/octl-core lib + crates/octl-cli bin `orchestratectl`, where the CLI depends on `octl-core = "=<version>"`) produced an INCOMPLETE plan:
 - targets: **only** `{ecosystem: rust, package: orchestratectl, registry: crates.io}` — `octl-core` is NOT a target, so a cut would `cargo publish orchestratectl` while `octl-core@<new-version>` does not yet exist on crates.io → publish fails on the `=<version>` pin.
 - **no version-bump phase**: head_sha was the pre-bump commit (Cargo.toml still at the old version); phases were [dry-run-all, build-all, publish-all, tag, dist]. Nothing bumps the workspace `version`, the octl-cli `octl-core = "=X"` pin, or Cargo.lock.
-- `homebrew_tap: null` even though OSS-RELEASE.md's distribution + the per-tool tap `jarimustonen/orchestratectl` exist.
+- `homebrew_tap: null` even though OSS-RELEASE.md's distribution + the per-tool tap `example-org/orchestratectl` exist.
 
 ## What the engine should do for a Rust workspace release
 1. **Derive dependency-ordered member publish** from the workspace graph: publish path-dependency crates before their dependents (octl-core → orchestratectl), waiting for each to be available on the registry (as `cargo publish` already does within a crate). Both members are `publish = true`.
@@ -64,7 +64,7 @@ GOAL: make `ossctl release plan/cut` able to cut orchestratectl's releases so we
   yields `[octl-core, orchestratectl]` (crates.io) and excludes an `experimental` crate.
 - **Facet 4 — homebrew_tap carry. DONE (was already carried; now tested).** The plan
   threads the per-tool tap from the contract's distribution block; verified non-null for
-  the orchestratectl fixture (`jarimustonen/orchestratectl`).
+  the orchestratectl fixture (`example-org/orchestratectl`).
 
 **NOT landed — need a maintainer design decision (left open deliberately):**
 

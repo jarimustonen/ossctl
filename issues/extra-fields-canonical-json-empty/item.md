@@ -27,7 +27,7 @@ Decision to make (holistically, for BOTH fields at once so they stay symmetric):
 
 Do NOT change one field without the other — asymmetry between top-level and nested is worse than either option.
 
-## Decision (Jari, 2026-08-10) — Option A: omit when empty
+## Decision (maintainer, 2026-08-10) — Option A: omit when empty
 
 **Chosen: A — `skip_serializing_if` so an empty `extra_fields` map is absent from canonical JSON.**
 Apply to BOTH fields symmetrically (`Contract.extra_fields` AND `Distribution.extra_fields`) so the

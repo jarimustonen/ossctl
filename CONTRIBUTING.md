@@ -10,7 +10,7 @@ from it. Contributions are welcome.
 
 ## Reporting issues
 
-This project tracks work with [`issuectl`](https://github.com/jarimustonen/issuectl); issues
+This project tracks work with `issuectl`; issues
 live in the repository under `issues/<slug>/item.md`. To report a bug or propose work, open
 an issue there (via the `/issue` skill, or by adding an `issues/<slug>/item.md` in a PR) and
 describe the expected vs. actual behaviour with steps to reproduce.

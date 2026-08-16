@@ -291,8 +291,8 @@ Cross-platform release: ossctl now installs on Linux as well as macOS.
 
 ## [0.1.0] - 2026-08-04
 
-First release — published to crates.io, GitHub Releases, and the `jarimustonen/ossctl`
-Homebrew tap by dogfooding ossctl on itself (`/oss-init` → `audit` → release).
+First release: published to crates.io, GitHub Releases, and the project's Homebrew tap
+by dogfooding ossctl on itself (`/oss-init` → `audit` → release).
 
 ### Added
 - `ossctl contract show` / `ossctl contract validate` — the single normalizer and
@@ -309,6 +309,3 @@ Homebrew tap by dogfooding ossctl on itself (`/oss-init` → `audit` → release
   (`oss-init`, `oss-readme`, `oss-ci`, `oss-changelog`, `oss-contributing`,
   `oss-security-policy`, `oss-architecture`, `oss-release`), installable into a repo.
 - `ossctl doctor` and `ossctl version` — self-diagnostics and the version/schema surface.
-
-[Unreleased]: https://github.com/jarimustonen/ossctl/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/jarimustonen/ossctl/releases/tag/v0.1.0

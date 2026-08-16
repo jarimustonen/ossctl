@@ -21,7 +21,7 @@ _Source: OSS-RELEASE.md targets/adapter model_
 Surfaced running `/oss-init` on the **issuectl** repo.
 
 ## Observed
-issuectl's release engine is **cargo-dist** (tag-triggered `.github/workflows/release.yml`) which produces: multi-platform GitHub-Release binaries, a shell installer, and a Homebrew formula pushed to a tap (`jarimustonen/homebrew-issuectl`) — PLUS a separate crates.io publish (`publish-crates.yml`). The contract's `targets: [{ecosystem, package, registry, adapter}]` model only represents **registry** publishes; `adapter` allows `cargo-dist` but there is no first-class field for the **binary-distribution + tap + installer** layer.
+issuectl's release engine is **cargo-dist** (tag-triggered `.github/workflows/release.yml`) which produces: multi-platform GitHub-Release binaries, a shell installer, and a Homebrew formula pushed to a tap (`example-org/homebrew-issuectl`) — PLUS a separate crates.io publish (`publish-crates.yml`). The contract's `targets: [{ecosystem, package, registry, adapter}]` model only represents **registry** publishes; `adapter` allows `cargo-dist` but there is no first-class field for the **binary-distribution + tap + installer** layer.
 
 ## Expected / suggestion
 A way to express a cargo-dist-style release in the machine contract, e.g.:
@@ -44,7 +44,7 @@ distribution:                                        # binary/installer/tap laye
   adapter: cargo-dist                                # required: cargo-dist | goreleaser | manual
   gh_releases: true                                  # multi-platform binaries on the GH Release (default true)
   installers: [shell, homebrew]                      # shell | powershell | homebrew | msi | npm
-  homebrew_tap: jarimustonen/homebrew-issuectl       # owner/repo; required when installers ∋ homebrew
+  homebrew_tap: example-org/homebrew-issuectl       # owner/repo; required when installers ∋ homebrew
 ```
 
 Canonical JSON: `distribution` is `null` for a registry-only repo (present-but-null, per the §4 "every field materialized" convention, like `versioning_pattern`).

@@ -28,7 +28,7 @@ the **`dist` phase on the LAST target**, `rust:ossctl:homebrew`._
 The homebrew adapter's dist step shells to:
 
 ```
-brew bump-formula-pr --url https://github.com/jarimustonen/ossctl/archive/refs/tags/v0.2.2.tar.gz \
+brew bump-formula-pr --url https://github.com/example-org/ossctl/archive/refs/tags/v0.2.2.tar.gz \
   --sha256 d10a707094e5c2d1a20064d7c43dfee3e2601bc9fa2576eed1a74ea96f1b2bdd -- ossctl
 ```
 

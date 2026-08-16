@@ -54,15 +54,10 @@ same way:
 This skill was installed for `issuectl 0.6.4`. On the
 first invocation in a session, run `issuectl --version` and compare:
 
-- **Missing**: install one of:
-  - **Homebrew** (macOS/Linux): `brew install jarimustonen/issuectl/issuectl`
-  - **Cargo** (any platform with a Rust toolchain): `cargo install issuectl`
-  - **Shell installer** (no toolchain):
-    `curl -LsSf https://github.com/jarimustonen/issuectl/releases/latest/download/issuectl-installer.sh | sh`
+- **Missing**: install with Cargo (any platform with a Rust toolchain):
+  `cargo install issuectl`.
 - **Older than `0.6.4`**: tell the user the skill expects
-  `0.6.4` and suggest upgrading via the same channel
-  they originally used (`brew upgrade jarimustonen/issuectl/issuectl`,
-  `cargo install issuectl --force`, or re-run the shell installer).
+  `0.6.4` and suggest upgrading with `cargo install issuectl --force`.
   Stop and wait — schema/CLI surface may have changed.
 - **Newer than `0.6.4`**: the installed binary is ahead
   of what this prompt was written for. Tell the user to refresh the

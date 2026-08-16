@@ -2,9 +2,9 @@
 
 **Status:** Accepted
 **Date:** 2026-07-25
-**Authors:** Jari Mustonen (decision owner); ossctl founding-architecture worktree (agent). Pressure-tested with a four-lens `/llm-panel` — architect (gemini-3.1-pro), maintainability (gpt-5.6-sol), AI-first-CLI-ergonomics (deepseek-v4-pro), release-engineering (claude-opus-4-7).
+**Authors:** Maintainer (decision owner); founding-architecture worktree (agent). Pressure-tested with a four-lens `/llm-panel`: architect (gemini-3.1-pro), maintainability (gpt-5.6-sol), AI-first-CLI-ergonomics (deepseek-v4-pro), release-engineering (claude-opus-4-7).
 
-> **Provenance & staging note.** These are the **founding ADRs of the `ossctl` repo** (`~/Sources/ossctl`), written *before* the repo is scaffolded so the tool starts from a sound shape. They are authored here as staging and will be carried into `ossctl/docs/adr/` by `/create-project`. They realize — they do not re-open — the locked family design (`issues/oss-release-skill-family/design.md`) and conform to `AGENTS-AI-FIRST-CLI.md`. Companion decisions: **ADR-0002** (release engine + adapter model + sealed-plan approval seam) and **ADR-0003** (config artifact + journal/state storage). The three interlock; read them together.
+> **Provenance & staging note.** These are the **founding ADRs of the `ossctl` repository**, written *before* the repository was scaffolded so the tool starts from a sound shape. They realize, rather than re-open, the locked family design and conform to `AGENTS-AI-FIRST-CLI.md`. Companion decisions: **ADR-0002** (release engine + adapter model + sealed-plan approval seam) and **ADR-0003** (config artifact + journal/state storage). The three interlock; read them together.
 
 ---
 

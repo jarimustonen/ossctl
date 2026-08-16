@@ -20,7 +20,7 @@ Observed: `gh run list --workflow 'Publish to crates.io'` for both ossctl and is
 
 Expected: a tag push publishes to crates.io automatically alongside binaries+Homebrew.
 
-Fix (verified working in jarimustonen/glasspad): trigger on the version-tag push instead —
+Fix (verified working in example-org/glasspad): trigger on the version-tag push instead —
 ```
 on:
   push:
@@ -29,7 +29,7 @@ on:
 ```
 and change the publish step's `if` from `github.event_name == 'release'` to `== 'push'`. Runs in parallel with release.yml (crates publish needs only the tagged source). Affects the ossctl AND issuectl repo workflows (and any oss-* skill that emits this template).
 
-## Decision (Jari, 2026-08-10) — Option A: fix the generated template (ossctl's job)
+## Decision (maintainer, 2026-08-10) — Option A: fix the generated template (ossctl's job)
 
 **Chosen: A — this is ossctl's job.** If the `/oss-*` family generates a CI workflow template, it must
 generate a *working* one. Apply the verified fix (trigger on the version-tag `push`, change the publish

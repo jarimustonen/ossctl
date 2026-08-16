@@ -19,7 +19,7 @@ closed: 2026-08-10
 The v0.2.4 release marked CI red even though **both crates published fine**
 (crates.io confirmed `ossctl@0.2.4` and `ossctl-core@0.2.4`). The
 `Publish to crates.io` workflow run
-[31390837102](https://github.com/jarimustonen/ossctl/actions/runs/31390837102)
+[31390837102](https://github.com/example-org/ossctl/actions/runs/31390837102)
 failed the `Publish (dep-order)` step:
 
 ```

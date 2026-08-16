@@ -3,7 +3,7 @@ name: Publish to crates.io
 # Triggers on the version-tag push (the SAME tag cargo-dist's release.yml keys
 # off), so crates.io publishing happens in CI with no dependency on a local
 # token. Requires a CARGO_REGISTRY_TOKEN repo secret with publish scope
-# (set once: `gh secret set CARGO_REGISTRY_TOKEN --repo jarimustonen/ossctl`).
+# (set it in this repository's Actions secrets).
 #
 # NOTE: we do NOT trigger on `release: published`. cargo-dist creates the GitHub
 # Release with the default GITHUB_TOKEN, and GitHub does not emit workflow events

@@ -41,9 +41,9 @@ A first-class way to say 'no registry publish' — e.g. `registry: none` accepte
 
 ## Impact / workaround
 
-Consumer (intakectl, a private haapa-only service): `OSS-RELEASE.md` says publish target none, but the normalized contract every `/oss-*` member reads contains a crates.io target. Worked around with `Cargo.toml` `publish = false` (so `cargo publish` hard-fails) + a documented caveat in the release doc — but the machine-readable contract still misrepresents intent, and a future automation consuming the normalized targets could try to publish. The tool should be able to represent 'never publish'.
+Consumer (a-private-service, a private haapa-only service): `OSS-RELEASE.md` says publish target none, but the normalized contract every `/oss-*` member reads contains a crates.io target. Worked around with `Cargo.toml` `publish = false` (so `cargo publish` hard-fails) + a documented caveat in the release doc — but the machine-readable contract still misrepresents intent, and a future automation consuming the normalized targets could try to publish. The tool should be able to represent 'never publish'.
 
-## Decision (Jari, 2026-08-10) — Option B
+## Decision (maintainer, 2026-08-10) — Option B
 
 **Chosen mechanism: B — respect an explicitly-set empty `targets: []` as authoritative** (do
 NOT re-expand it into a default crates.io target). Rejected: A (`registry: none` enum value) and

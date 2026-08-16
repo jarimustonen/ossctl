@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-08-05
-**Authors:** Jari Mustonen (decision owner); `cargo-adapter-multitarget-double-publish` spinoff worktree (agent). Problem surfaced independently by all four reviewers of a `/llm-review` of `release-cut-multi-target-ecosystem`.
+**Authors:** Maintainer (decision owner); `cargo-adapter-multitarget-double-publish` spinoff worktree (agent). Problem surfaced independently by all four reviewers of a `/llm-review` of `release-cut-multi-target-ecosystem`.
 
 > Companion to **ADR-0002** (release engine: adapter model + phase-barrier coordinator). This ADR settles who owns publish ordering for the rust ecosystem once a contract declares **more than one crates.io target**, and removes a double-publish / partial-publish trap the original cargo adapter carried.
 

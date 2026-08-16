@@ -28,7 +28,7 @@ targets + a cargo-dist installer:
 
 ## Impact
 
-Jari's homebase provisions issuectl/ossctl/orchestratectl on every machine via
+maintainer's homebase provisions issuectl/ossctl/orchestratectl on every machine via
 `dotfiles/setup.d/*.sh` hooks. On macOS all three install via brew; on Linux
 (haapa — Ubuntu x86_64 — and any future Linux clone) the issuectl and
 orchestratectl hooks fall back to the cargo-dist release installer, but the

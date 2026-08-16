@@ -48,7 +48,7 @@ fn renders_the_reference_shape() {
     assert!(toml.contains("hosting = \"github\""), "{toml}");
     assert!(toml.contains("github-attestations = true"), "{toml}");
     assert!(toml.contains("pr-run-mode = \"skip\""), "{toml}");
-    // No personal hauis override leaks into a downstream config.
+    // No repository-local runner override leaks into a downstream config.
     assert!(
         !toml.contains("github-custom-runners"),
         "the personal self-hosted-runner override must never be generated: {toml}"

@@ -206,7 +206,11 @@ fn skill_install_oss_dist_writes_distribution_manual() {
             "cross-platform target is documented: {target}"
         );
     }
-    for forbidden in ["hauis", "github-custom-runners", "cargo install cargo-dist"] {
+    for forbidden in [
+        "builder-host",
+        "github-custom-runners",
+        "cargo install cargo-dist",
+    ] {
         assert!(
             !installed.contains(forbidden),
             "skill must not instruct personal infrastructure or global installation: {forbidden}"

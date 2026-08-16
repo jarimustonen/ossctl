@@ -68,7 +68,7 @@ owns the full truth table (tap × installer-producer × target-producer): missin
 producer, double-publish floor when both, dead-tap advisory when neither. Add the truth-table tests
 (GPT-5.6-sol's §10 matrix) covering all eight rows.
 
-## Decision (Jari, 2026-08-10) — FLOOR (hard error)
+## Decision (maintainer, 2026-08-10) — FLOOR (hard error)
 
 **Chosen: hard error (floor), not advisory.** Rationale: the AI-first CLI contract requires reacting
 to errors strictly and immediately — a misconfiguration must fail fast and loud, not slip through as a

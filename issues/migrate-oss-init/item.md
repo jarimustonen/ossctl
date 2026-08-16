@@ -24,7 +24,7 @@ Relocate the already-built /oss-init skill (SKILL.md + SCHEMA.md, currently in h
 
 ### 2026-07-25T11:59:35Z · @jari
 
-Delivery model (confirmed by Jari 2026-07-25): family skills do NOT live in homebase dotfiles. Once ossctl ships them they install via 'ossctl skill install' (§15-17, version-pinned, bundled under crates/ossctl-cli/skills/). This issue removes /oss-init's homebase copy; the broader rule — NO family skill stays in homebase, all via 'ossctl skill install' — applies to prose-skills too. Commits/history in homebase may stay; only the live skill files + Python scripts are deleted.
+Delivery model (confirmed by maintainer 2026-07-25): family skills do NOT live in homebase dotfiles. Once ossctl ships them they install via 'ossctl skill install' (§15-17, version-pinned, bundled under crates/ossctl-cli/skills/). This issue removes /oss-init's homebase copy; the broader rule — NO family skill stays in homebase, all via 'ossctl skill install' — applies to prose-skills too. Commits/history in homebase may stay; only the live skill files + Python scripts are deleted.
 
 ## Comments
 
@@ -34,5 +34,5 @@ ossctl-side migration done (oss-init bundled as skill template shelling out to o
 
 ### 2026-08-04T07:29:22Z · @claude
 
-Homebase-side cleanup DONE (2026-08-04, homebase commit 3fa898f). Removed dotfiles/src/.claude/skills/oss-init/ (SKILL.md, SCHEMA.md, fixtures/, scripts/*.py) plus the stale ~/.claude/skills/oss-init symlinks. All 9 /oss-* skills now install via 'ossctl skill install --force' from homebase setup.d/ossctl.sh, guarded by a cli_version<->binary lockstep check (bin/ossctl-skill-check). Live on gertrud + hauis; brunhild pending next reachable sync; haapa has no brew (skips, by design).
+Homebase-side cleanup DONE (2026-08-04, homebase commit 3fa898f). Removed dotfiles/src/.claude/skills/oss-init/ (SKILL.md, SCHEMA.md, fixtures/, scripts/*.py) plus the stale ~/.claude/skills/oss-init symlinks. All 9 /oss-* skills now install via 'ossctl skill install --force' from homebase setup.d/ossctl.sh, guarded by a cli_version<->binary lockstep check (bin/ossctl-skill-check). Live on builder-host + builder-host; builder-host pending next reachable sync; haapa has no brew (skips, by design).
 

@@ -1,9 +1,8 @@
 # ossctl founding ADRs (staging)
 
-These are the **founding architecture decisions for the `ossctl` repo** (`~/Sources/ossctl`),
-authored here as staging **before** the repo is scaffolded. `/create-project` carries them into
-`ossctl/docs/adr/` as the repo's founding ADRs. They are written portably (they refer to the tool
-as `ossctl` and assume the ossctl repo context, not homebase).
+These are the **founding architecture decisions for the `ossctl` repository**,
+authored as staging **before** the repository was scaffolded. They are written portably: they
+refer to the tool as `ossctl` and assume the ossctl repository context.
 
 They realize — not re-open — the locked family design (`../design.md`) and conform to
 `AGENTS-AI-FIRST-CLI.md`. They were pressure-tested with a four-lens `/llm-panel`

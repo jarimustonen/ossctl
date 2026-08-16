@@ -9,7 +9,7 @@ of this binary (the binary is the source of truth, §17).
 
 ## CLI Design Principles
 
-Use the `/ai-first-cli-canon` skill shipped by `project-canon` as the maintained AI-first CLI canon. It is the binding reference for CLI surface work: strict input validation, `--json` output, JSONL logs, no interactive prompts, informative errors and composable commands. Do not keep or edit a repo-local `AGENTS-AI-FIRST-CLI.md` copy; update the canon in `~/Sources/project-canon` and reinstall the skill from the released tool.
+Use the `/ai-first-cli-canon` skill shipped by `project-canon` as the maintained AI-first CLI canon. It is the binding reference for CLI surface work: strict input validation, `--json` output, JSONL logs, no interactive prompts, informative errors and composable commands. Do not keep or edit a repo-local `AGENTS-AI-FIRST-CLI.md` copy; update the canon at its source and reinstall the skill from the released tool.
 
 
 ## Architecture (decided before code — read first)
@@ -77,8 +77,8 @@ app beyond what the ADRs already fix.
     0.2.1 (2026-08-06), 0.2.2 (2026-08-06), 0.2.3 (2026-08-07), 0.2.4 (2026-08-10), 0.2.5 (2026-08-10),
     0.3.0 (2026-08-11), 0.4.0 (2026-08-11), 0.5.0 (2026-08-13).**
     All on crates.io (`ossctl` + `ossctl-core`), GitHub Releases (cross-platform: macOS aarch64,
-    Linux musl x86_64+aarch64, Windows, `.sh`+`.ps1` installers), and the Homebrew tap
-    `jarimustonen/homebrew-ossctl`. Repo is **public**. 0.1.2 added `ossctl dist generate`. 0.2.0
+    Linux musl x86_64+aarch64, Windows, `.sh`+`.ps1` installers), and its configured
+    Homebrew tap. Repo is **public**. 0.1.2 added `ossctl dist generate`. 0.2.0
     made the engine drive a multi-target cut (multi-target/ecosystem in dep order, one-target-one-
     publish-unit/ADR-0004, CI-delegated skip, GH-Release-to-CI, post-tag homebrew, crates.io-pin)
     + `release list`/`abandon`. 0.2.1 landed the INTERLEAVE fix (adapter defers a `=`-pinned
@@ -123,7 +123,7 @@ app beyond what the ADRs already fix.
     fallback is RETIRED for ossctl's own cut (kept below only as partial-failure insurance). ossctl's
     own `OSS-RELEASE.md` declares the
     four targets (ossctl-core + ossctl on crates.io; ossctl on gh-releases/cargo-dist; ossctl
-    on homebrew) plus a `distribution` block with `homebrew_tap: jarimustonen/homebrew-ossctl`.
+    on homebrew) plus a `distribution` block with its configured `homebrew_tap`.
     The recipe:
     1. Bump `workspace.package.version` + the internal `=X.Y.Z` dep in lockstep → finalize
        CHANGELOG → `cargo build` (refresh lock) → `cargo publish -p ossctl-core --dry-run` →
@@ -166,15 +166,13 @@ app beyond what the ADRs already fix.
   whenever `main` is clean and green — publishing commits to the remote does not need a
   separate go. (This is a repo-scoped grant that overrides the global "pushing is the user's
   step" default.) Still: never force-push a shared branch, and never push a red tree.
-- **Scope boundary: ossctl the PRODUCT ≠ Jari's personal environment.** ossctl owns the
-  generic, reusable release/readiness engine (e.g. `ossctl dist generate`). It does **not**
-  own the cross-repo *standardisation* of Jari's other CLIs (issuectl/orchestratectl/glasspad)
-  or the personal self-hosted CI infra (the `hauis` runners) — those are **homebase**
-  concerns (homebase issue `cross-repo-release-standardisation`). Keep that work out of
-  ossctl's issues/TODO/handoff; only the generic capability lives here, its downstream use
-  across Jari's repos is a homebase matter. (The `hauis` override in `dist-workspace.toml`
-  is a documented personal exception for ossctl's own build, tracked for decoupling in
-  `release-macos-hauis-coupling`.)
+- **Scope boundary: ossctl the PRODUCT ≠ a maintainer's personal environment.** ossctl owns
+  the generic, reusable release/readiness engine (e.g. `ossctl dist generate`). It does **not**
+  own cross-repository standardisation or personal self-hosted CI infrastructure, which are
+  external concerns. Keep that work out of ossctl's issues/TODO/handoff; only the generic
+  capability lives here. The `hauis` override in `dist-workspace.toml` is the documented
+  repository-local exception for ossctl's own build, tracked for decoupling in
+  `release-macos-hauis-coupling`.
 - **Cross-platform is a hard requirement (macOS AND Linux).** All software the `/oss-*`
   family produces — and `ossctl` itself — MUST install and run on **both macOS and Linux**
   (arm64 and x86_64). This is `/oss-*` family canon, not a nice-to-have: a release path
@@ -263,7 +261,7 @@ Every directory follows this structure:
 
 ## Issues & Planning
 
-Issue tracking is managed by [`issuectl`](https://github.com/jarimustonen/issuectl). Use the `/issue` skill (installed by `issuectl init`) to create, search, update, and close issues.
+Issue tracking is managed by `issuectl`. Use the `/issue` skill (installed by `issuectl init`) to create, search, update, and close issues.
 
 - `issues/<slug>/item.md` — every issue and epic (flat layout — no numeric prefix, no `open/closed/` split)
 - Status lives in the `status:` frontmatter field, not in the path

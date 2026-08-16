@@ -32,7 +32,7 @@ breaking the Claude Code path. For vendored/bundled skills, mirror **only**
 
 ## Context
 
-Jari is migrating the agent stack from Claude Code to pi.dev. homebase's
+maintainer is migrating the agent stack from Claude Code to pi.dev. homebase's
 `dotfiles link` already dual-homes its `~/.claude/skills` corpus into
 `~/.pi/agent/skills/` (homebase issue `pidev-skills-portability`, epic
 `pidev-migration`, workstream **WS4** = "propagate the convention to the
