@@ -2,10 +2,14 @@
 created: 2026-08-16
 updated: 2026-08-16
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 lane: release-hardening
 lane_seq: 5
+commits:
+- hash: a4ba5bd
+  summary: 'test: isolate temporary release workspaces'
+closed: 2026-08-16
 ---
 
 # Flaky macOS CI: temp_workspace() fixture dirs can collide
@@ -67,3 +71,9 @@ Either is fine:
 
 `tempfile` is the better end state, since it fixes the leak at the same time.
 The helper is shared by every test in the module, so one change covers them all.
+
+## Comments
+
+### 2026-08-16T19:09:28Z · @pi-agent
+
+Root cause verified: all seven bump-executor fixture tests run as threads in one test process and used the same pid-plus-SystemTime-derived directory name. Multiple sibling tests mutate the root Cargo.toml, including a successful bump from 0.4.0 to 0.5.0 and the hook-reversion test that writes 9.9.9. If their clock stamps collide, one test observes the sibling manifest; apply_bump then cannot find its expected 0.4.0 workspace version and returns WorkspaceVersionNotFound, matching the macOS panic. The coordinator bump-test seed helper used the same weak naming pattern and was fixed as the direct sibling.
