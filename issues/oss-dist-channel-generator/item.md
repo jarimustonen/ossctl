@@ -2,9 +2,13 @@
 created: 2026-08-06
 updated: 2026-08-16
 type: feature
-status: in-progress
+status: done
 priority: normal
 lane: oss-family
+commits:
+- hash: ab30711af7091c0126c8a2e5547d342d982280de
+  summary: 'feat: add oss distribution skill'
+closed: 2026-08-16
 ---
 
 # No oss-* generator for gh-releases/cargo-dist + homebrew distribution channels
