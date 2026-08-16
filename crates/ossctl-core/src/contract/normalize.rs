@@ -1498,6 +1498,20 @@ impl CaptureScope {
             Self::Distribution => "distribution ",
         }
     }
+
+    /// A path rooted at the actual reserved YAML key, with the distribution
+    /// context expressed separately rather than inventing a `distribution
+    /// extra_fields` key in the diagnostic.
+    fn reserved_extra_fields_path(self, key: &str) -> String {
+        let path = format!(
+            "reserved 'extra_fields' field {}",
+            quote_for_diagnostic(key)
+        );
+        match self {
+            Self::TopLevel => path,
+            Self::Distribution => format!("{path} in distribution"),
+        }
+    }
 }
 
 /// Scan a YAML mapping for keys outside `known` and preserve them under a
@@ -1554,7 +1568,13 @@ fn capture_unknown_fields(
                          remove one"
                     ));
                 } else {
-                    extra_fields.insert(key.clone(), yaml_to_json(v));
+                    let path = format!("{label}extra field {}", quote_for_diagnostic(key));
+                    match yaml_to_json(v, &path) {
+                        Ok(value) => {
+                            extra_fields.insert(key.clone(), value);
+                        }
+                        Err(error) => p.err(error),
+                    }
                 }
             }
             other => p.err(format!(
@@ -1603,7 +1623,13 @@ fn merge_reserved_extra_fields(
             for (k, val) in inner {
                 match k {
                     Value::String(key) => {
-                        out.insert(key.clone(), yaml_to_json(val));
+                        let path = scope.reserved_extra_fields_path(key);
+                        match yaml_to_json(val, &path) {
+                            Ok(value) => {
+                                out.insert(key.clone(), value);
+                            }
+                            Err(error) => p.err(error),
+                        }
                     }
                     other => p.err(format!(
                         "reserved '{label}extra_fields' block has a non-string key {} — its keys \
@@ -1621,36 +1647,52 @@ fn merge_reserved_extra_fields(
 }
 
 /// Convert an arbitrary YAML value to JSON, for `extra_fields` preservation.
-fn yaml_to_json(v: &Value) -> serde_json::Value {
+///
+/// JSON objects only admit string keys. Rather than coercing an arbitrary YAML
+/// mapping key (which can collapse distinct values such as `42` and `"42"`),
+/// reject it with the preserved field path. That fail-closed behavior upholds the
+/// never-drop guarantee for mapping keys without changing the canonical JSON
+/// output shape.
+fn yaml_to_json(v: &Value, path: &str) -> Result<serde_json::Value, String> {
     use serde_json::Value as J;
     match v {
-        Value::Null => J::Null,
-        Value::Bool(b) => J::Bool(*b),
+        Value::Null => Ok(J::Null),
+        Value::Bool(b) => Ok(J::Bool(*b)),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                J::from(i)
+                Ok(J::from(i))
             } else if let Some(u) = n.as_u64() {
-                J::from(u)
+                Ok(J::from(u))
             } else if let Some(f) = n.as_f64() {
-                serde_json::Number::from_f64(f).map_or(J::Null, J::Number)
+                Ok(serde_json::Number::from_f64(f).map_or(J::Null, J::Number))
             } else {
-                J::Null
+                Ok(J::Null)
             }
         }
-        Value::String(s) => J::String(s.clone()),
-        Value::Sequence(seq) => J::Array(seq.iter().map(yaml_to_json).collect()),
+        Value::String(s) => Ok(J::String(s.clone())),
+        Value::Sequence(seq) => seq
+            .iter()
+            .enumerate()
+            .map(|(index, value)| yaml_to_json(value, &format!("{path}[{index}]")))
+            .collect::<Result<Vec<_>, _>>()
+            .map(J::Array),
         Value::Mapping(m) => {
             let mut obj = serde_json::Map::new();
             for (k, val) in m {
-                let key = match k {
-                    Value::String(s) => s.clone(),
-                    other => yaml_display(other),
+                let Value::String(key) = k else {
+                    return Err(format!(
+                        "preserved content at {path} has non-string mapping key {}; \
+                         canonical JSON object keys must be strings to preserve every value. \
+                         Quote the key in YAML or replace it with a string key",
+                        yaml_display(k)
+                    ));
                 };
-                obj.insert(key, yaml_to_json(val));
+                let child_path = format!("{path}[{}]", quote_for_diagnostic(key));
+                obj.insert(key.clone(), yaml_to_json(val, &child_path)?);
             }
-            J::Object(obj)
+            Ok(J::Object(obj))
         }
-        Value::Tagged(t) => yaml_to_json(&t.value),
+        Value::Tagged(t) => yaml_to_json(&t.value, path),
     }
 }
 
@@ -3014,6 +3056,126 @@ mod tests {
                 .any(|e| e.contains("distribution field key")),
             "error should be scoped to the distribution block: {:?}",
             n.problems.errors
+        );
+    }
+
+    /// Nested non-string YAML keys cannot be represented as canonical JSON object
+    /// keys without loss, so a numeric/string collision fails closed instead of
+    /// silently overwriting either preserved value.
+    #[test]
+    fn extra_fields_nested_numeric_string_key_collision_is_rejected() {
+        let n =
+            norm("---\nstatus: approved\nmaturity: mvp\nfuture_x:\n  42: a\n  \"42\": b\n---\n");
+        assert_error_contains(&n, "non-string mapping key 42");
+        assert!(
+            n.problems
+                .errors
+                .iter()
+                .any(|error| error.contains("extra field \"future_x\"")),
+            "error should name the preserved field path: {:?}",
+            n.problems.errors
+        );
+        assert!(
+            !n.contract.extra_fields.contains_key("future_x"),
+            "invalid preserved content must not be partially captured"
+        );
+    }
+
+    /// A sequence is legal YAML as a mapping key, but has no lossless JSON-object
+    /// key representation. It must therefore fail closed like scalar non-string
+    /// keys, with the preserved field path in the diagnostic.
+    #[test]
+    fn extra_fields_nested_list_key_is_rejected() {
+        let n = norm(
+            "---\nstatus: approved\nmaturity: mvp\nfuture_x:\n  ? [one, two]\n  : list-key\n---\n",
+        );
+        assert_error_contains(&n, "non-string mapping key <list>");
+        assert!(
+            n.problems
+                .errors
+                .iter()
+                .any(|error| error.contains("extra field \"future_x\"")),
+            "error should name the preserved field path: {:?}",
+            n.problems.errors
+        );
+    }
+
+    /// A non-string key nested several levels down still names its complete path,
+    /// allowing an AI caller to repair the exact mapping rather than hunting
+    /// through an arbitrary preserved value.
+    #[test]
+    fn extra_fields_deeply_nested_non_string_key_reports_path() {
+        let n = norm(
+            "---\nstatus: approved\nmaturity: mvp\nfuture_x:\n  outer:\n    inner:\n      42: answer\n---\n",
+        );
+        assert!(
+            n.problems.errors.iter().any(|error| {
+                error.contains("extra field \"future_x\"[\"outer\"][\"inner\"]")
+                    && error.contains("non-string mapping key 42")
+            }),
+            "error should name the complete nested path: {:?}",
+            n.problems.errors
+        );
+    }
+
+    /// All-string mapping keys retain their existing JSON representation, including
+    /// keys nested inside sequences, so the fail-closed guard is shape-neutral for
+    /// valid forward-compatible content.
+    #[test]
+    fn extra_fields_nested_string_keys_round_trip_unchanged() {
+        let n = norm(
+            "---\nstatus: approved\nmaturity: mvp\nfuture_x:\n  outer:\n    answer: 42\n    items:\n      - name: first\n        enabled: true\n---\n",
+        );
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert_eq!(
+            n.contract.extra_fields.get("future_x"),
+            Some(&serde_json::json!({
+                "outer": {
+                    "answer": 42,
+                    "items": [{"name": "first", "enabled": true}],
+                }
+            }))
+        );
+    }
+
+    /// The three capture contexts all propagate nested conversion failures with
+    /// their own useful root path, including a sequence index where applicable.
+    #[test]
+    fn nested_non_string_key_paths_cover_all_capture_contexts() {
+        let reserved = norm(
+            "---\nstatus: approved\nmaturity: mvp\nextra_fields:\n  future_x:\n    42: answer\n---\n",
+        );
+        assert!(
+            reserved.problems.errors.iter().any(|error| {
+                error.contains("reserved 'extra_fields' field \"future_x\"")
+                    && error.contains("non-string mapping key 42")
+            }),
+            "reserved-block path missing: {:?}",
+            reserved.problems.errors
+        );
+
+        let distribution = norm(
+            "---\nstatus: approved\nmaturity: production\necosystems: [rust]\ndistribution:\n  adapter: cargo-dist\n  future_x:\n    42: answer\n---\n",
+        );
+        assert!(
+            distribution.problems.errors.iter().any(|error| {
+                error.contains("distribution extra field \"future_x\"")
+                    && error.contains("non-string mapping key 42")
+            }),
+            "distribution path missing: {:?}",
+            distribution.problems.errors
+        );
+
+        let sequence = norm(
+            "---\nstatus: approved\nmaturity: mvp\nfuture_x:\n  - ok: first\n  - 42: answer\n---\n",
+        );
+        assert!(
+            sequence.problems.errors.iter().any(|error| {
+                error.contains("extra field \"future_x\"[1]")
+                    && error.contains("non-string mapping key 42")
+            }),
+            "sequence index path missing: {:?}",
+            sequence.problems.errors
         );
     }
 
