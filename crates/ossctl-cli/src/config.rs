@@ -53,13 +53,10 @@ fn path(args: &ConfigArgs, format: OutputFormat) -> Result<(), CliError> {
     match format {
         OutputFormat::Json => crate::output::emit_json(&report, &[])?,
         OutputFormat::Text => {
-            println!("contract: {}", report.contract_path.value);
+            println!("contract_path: {}", report.contract_path.value);
             match &report.journal_dir.value {
-                Some(path) => println!("release_journal: {path}"),
-                None => println!(
-                    "release_journal: unavailable ({})",
-                    report.journal_dir.detail
-                ),
+                Some(path) => println!("journal_dir: {path}"),
+                None => println!("journal_dir: unavailable ({})", report.journal_dir.detail),
             }
         }
     }
@@ -75,19 +72,21 @@ fn show(args: &ConfigArgs, format: OutputFormat) -> Result<(), CliError> {
             println!("contract_path: {}", report.contract_path.value);
             println!("  source: {}", report.contract_path.source);
             println!("  detail: {}", report.contract_path.detail);
+            println!("  lossy: {}", report.contract_path.lossy);
             match &report.journal_dir.value {
                 Some(path) => println!("journal_dir: {path}"),
                 None => println!("journal_dir: unavailable"),
             }
             println!("  source: {}", report.journal_dir.source);
             println!("  detail: {}", report.journal_dir.detail);
+            println!("  lossy: {}", report.journal_dir.lossy);
             if report.git_environment.is_empty() {
                 println!("git_environment: none");
             } else {
                 for value in &report.git_environment {
                     println!(
-                        "git_environment.{}: {} ({})",
-                        value.key, value.value, value.source
+                        "git_environment.{}: {} ({}, lossy={})",
+                        value.key, value.value, value.source, value.lossy
                     );
                 }
             }
@@ -98,20 +97,42 @@ fn show(args: &ConfigArgs, format: OutputFormat) -> Result<(), CliError> {
 
 #[derive(Debug, Serialize)]
 struct ConfigReport {
-    /// `OSS-RELEASE.md` is a project contract, not an ossctl-owned settings file.
-    tool_config_file: Option<String>,
     contract_path: ResolvedPath<String>,
     journal_dir: ResolvedPath<Option<String>>,
-    /// Git environment inputs that can affect git-common-dir resolution. These
-    /// are shown only when set; ossctl defines no `OSSCTL_*` environment config.
+    /// Git environment inputs that affected this invocation's git-common-dir
+    /// resolution. ossctl defines no `OSSCTL_*` environment configuration.
     git_environment: Vec<EnvironmentValue>,
 }
 
 #[derive(Debug, Serialize)]
 struct ResolvedPath<T> {
     value: T,
-    source: &'static str,
+    source: Source,
     detail: String,
+    /// JSON cannot represent arbitrary Unix path bytes. A true value means
+    /// `value` is a lossy display string and must not be copied into an argv.
+    lossy: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Source {
+    Default,
+    Flag,
+    Git,
+    Unresolved,
+}
+
+impl std::fmt::Display for Source {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Default => "default",
+            Self::Flag => "flag",
+            Self::Git => "git",
+            Self::Unresolved => "unresolved",
+        };
+        formatter.write_str(value)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -119,65 +140,98 @@ struct EnvironmentValue {
     key: &'static str,
     value: String,
     source: String,
+    lossy: bool,
 }
 
 fn resolve(args: &ConfigArgs) -> Result<ConfigReport, CliError> {
     let (repo_root, repo_source, repo_detail) = match &args.repo_root {
-        Some(path) => (path.clone(), "flag", "selected by --repo-root".to_string()),
+        Some(path) => (
+            path.clone(),
+            Source::Flag,
+            "selected by --repo-root".to_string(),
+        ),
         None => (
             std::env::current_dir()
                 .map_err(|e| CliError::system("io_error", format!("cannot resolve cwd: {e}")))?,
-            "default",
+            Source::Default,
             "current directory (the default --repo-root)".to_string(),
         ),
     };
 
+    let contract_display = display_path(&repo_root.join(ossctl_core::contract::CONTRACT_FILENAME));
     let contract_path = ResolvedPath {
-        value: repo_root
-            .join(ossctl_core::contract::CONTRACT_FILENAME)
-            .display()
-            .to_string(),
+        value: contract_display.value,
         source: repo_source,
         detail: repo_detail,
+        lossy: contract_display.lossy,
     };
 
     let journal_dir = match &args.journal_dir {
-        Some(path) => ResolvedPath {
-            value: Some(path.display().to_string()),
-            source: "flag",
-            detail: "selected by --journal-dir".to_string(),
-        },
+        Some(path) => {
+            let display = display_path(path);
+            ResolvedPath {
+                value: Some(display.value),
+                source: Source::Flag,
+                detail: "selected by --journal-dir".to_string(),
+                lossy: display.lossy,
+            }
+        }
         None => match JournalPaths::from_git(&RealGitRepo::new(&repo_root), None) {
-            Ok(paths) => ResolvedPath {
-                value: Some(paths.releases_dir().display().to_string()),
-                source: "git",
-                detail: "derived from git rev-parse --git-common-dir".to_string(),
-            },
+            Ok(paths) => {
+                let display = display_path(paths.releases_dir());
+                ResolvedPath {
+                    value: Some(display.value),
+                    source: Source::Git,
+                    detail: "derived from git rev-parse --git-common-dir".to_string(),
+                    lossy: display.lossy,
+                }
+            }
             Err(error) => ResolvedPath {
                 value: None,
-                source: "unresolved",
-                detail: format!(
-                    "requires a Git repository to derive git-common-dir/ossctl/releases: {error}"
-                ),
+                source: Source::Unresolved,
+                detail: format!("could not derive git-common-dir/ossctl/releases: {error}"),
+                lossy: false,
             },
         },
     };
 
-    let git_environment = ["GIT_DIR", "GIT_COMMON_DIR"]
-        .into_iter()
-        .filter_map(|key| {
-            std::env::var(key).ok().map(|value| EnvironmentValue {
-                key,
-                source: format!("env:{key}"),
-                value,
+    // Only the Git-derived journal branch consulted these process inputs. Git
+    // receives them unchanged because `RealGitRepo` inherits its environment.
+    let git_environment = if args.journal_dir.is_none() {
+        ["GIT_DIR", "GIT_COMMON_DIR"]
+            .into_iter()
+            .filter_map(|key| {
+                std::env::var_os(key).map(|value| {
+                    let rendered = value.to_string_lossy();
+                    EnvironmentValue {
+                        key,
+                        source: format!("env:{key}"),
+                        lossy: matches!(rendered, std::borrow::Cow::Owned(_)),
+                        value: rendered.into_owned(),
+                    }
+                })
             })
-        })
-        .collect();
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     Ok(ConfigReport {
-        tool_config_file: None,
         contract_path,
         journal_dir,
         git_environment,
     })
+}
+
+struct DisplayPath {
+    value: String,
+    lossy: bool,
+}
+
+fn display_path(path: &std::path::Path) -> DisplayPath {
+    let rendered = path.as_os_str().to_string_lossy();
+    DisplayPath {
+        lossy: matches!(rendered, std::borrow::Cow::Owned(_)),
+        value: rendered.into_owned(),
+    }
 }

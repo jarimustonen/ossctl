@@ -7,6 +7,9 @@ priority: normal
 labels: [cli-canon, tooling]
 lane: cli-canon
 lane_seq: 10
+commits:
+- hash: 22b4d6eb87a52edf40d23a9c6ed55f60f811624a
+  summary: 'feat(cli): add config inspection commands'
 ---
 
 # cli-canon: §8 config path / config show --json

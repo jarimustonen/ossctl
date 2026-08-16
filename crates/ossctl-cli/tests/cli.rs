@@ -101,10 +101,8 @@ fn unknown_subcommand_is_structured_error() {
 /// user-level config file.
 #[test]
 fn config_show_json_reports_default_provenance() {
-    let dir = tempfile::tempdir().unwrap();
     let out = ossctl()
-        .args(["config", "show", "--json", "--repo-root"])
-        .arg(dir.path())
+        .args(["config", "show", "--json"])
         .output()
         .unwrap();
     assert!(
@@ -115,16 +113,17 @@ fn config_show_json_reports_default_provenance() {
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["schema_version"], 1);
     assert_eq!(value["warnings"], serde_json::json!([]));
-    assert!(value["data"]["tool_config_file"].is_null());
-    assert_eq!(value["data"]["contract_path"]["source"], "flag");
+    assert_eq!(value["data"]["contract_path"]["source"], "default");
     assert_eq!(
         value["data"]["contract_path"]["value"],
-        dir.path().join("OSS-RELEASE.md").display().to_string()
+        std::env::current_dir()
+            .unwrap()
+            .join("OSS-RELEASE.md")
+            .display()
+            .to_string()
     );
-    // A non-Git directory has no real journal root. The report must expose that
-    // honestly instead of manufacturing an OSSCTL config path.
-    assert!(value["data"]["journal_dir"]["value"].is_null());
-    assert_eq!(value["data"]["journal_dir"]["source"], "unresolved");
+    assert!(value["data"]["contract_path"]["lossy"].is_boolean());
+    assert!(value["data"]["journal_dir"]["source"].is_string());
 }
 
 /// Explicit selectors are reported as flag provenance, including the journal
@@ -165,10 +164,40 @@ fn config_path_prints_resolved_locations() {
         .assert()
         .success()
         .stdout(predicate::str::contains(format!(
-            "contract: {}",
+            "contract_path: {}",
             repo.path().join("OSS-RELEASE.md").display()
         )))
-        .stdout(predicate::str::contains("release_journal: unavailable"));
+        .stdout(predicate::str::contains(
+            "journal_dir: unavailable (could not derive",
+        ));
+}
+
+/// Git-backed resolution uses precisely the same git-common-dir location as
+/// release commands, while an explicit journal selector takes precedence.
+#[test]
+fn config_show_reports_git_journal_provenance() {
+    let repo = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(repo.path())
+        .status()
+        .unwrap();
+
+    let out = ossctl()
+        .args(["config", "show", "--json", "--repo-root"])
+        .arg(repo.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["data"]["journal_dir"]["source"], "git");
+    assert_eq!(
+        value["data"]["journal_dir"]["value"],
+        repo.path()
+            .join(".git/ossctl/releases")
+            .display()
+            .to_string()
+    );
 }
 
 // ── contract show / validate ─────────────────────────────────────────────────
