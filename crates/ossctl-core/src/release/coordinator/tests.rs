@@ -8,7 +8,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+
 use std::rc::Rc;
+use tempfile::TempDir;
 
 use super::*;
 use crate::contract::schema::{Adapter, Ecosystem, Registry};
@@ -2953,40 +2955,39 @@ fn copy_tree(src: &Path, dest: &Path) {
     }
 }
 
-/// A throwaway lib+bin workspace at 0.4.0, the bin pinning the lib `=0.4.0` — the seed
-/// the fake `git worktree add` copies into the sealed checkout.
-fn seed_workspace() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "ossctl-coord-bump-seed-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    ));
-    std::fs::create_dir_all(dir.join("crates/core")).unwrap();
-    std::fs::create_dir_all(dir.join("crates/cli")).unwrap();
+/// A unique throwaway lib+bin workspace at 0.4.0, the bin pinning the lib `=0.4.0`.
+/// The fake `git worktree add` copies this seed into the sealed checkout; [`TempDir`]
+/// removes it after the test.
+fn seed_workspace() -> TempDir {
+    let dir = tempfile::Builder::new()
+        .prefix("ossctl-coord-bump-seed-")
+        .tempdir()
+        .unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("crates/core")).unwrap();
+    std::fs::create_dir_all(root.join("crates/cli")).unwrap();
     std::fs::write(
-        dir.join("Cargo.toml"),
+        root.join("Cargo.toml"),
         "[workspace]\nmembers = [\"crates/core\", \"crates/cli\"]\n\n[workspace.package]\nversion = \"0.4.0\"\n",
     )
     .unwrap();
     std::fs::write(
-        dir.join("crates/core/Cargo.toml"),
+        root.join("crates/core/Cargo.toml"),
         "[package]\nname = \"acme-core\"\nversion.workspace = true\n",
     )
     .unwrap();
     std::fs::write(
-        dir.join("crates/cli/Cargo.toml"),
+        root.join("crates/cli/Cargo.toml"),
         "[package]\nname = \"acme\"\nversion.workspace = true\n\n[dependencies]\nacme-core = { path = \"../core\", version = \"=0.4.0\" }\n",
     )
     .unwrap();
     std::fs::write(
-        dir.join("CHANGELOG.md"),
+        root.join("CHANGELOG.md"),
         "# Changelog\n\n## [Unreleased]\n### Added\n- a feature\n",
     )
     .unwrap();
     std::fs::write(
-        dir.join("Cargo.lock"),
+        root.join("Cargo.lock"),
         "# auto\n[[package]]\nname = \"acme-core\"\nversion = \"0.4.0\"\n",
     )
     .unwrap();
@@ -3036,7 +3037,7 @@ fn bump_plan() -> ReleasePlan {
 fn a_bump_plan_applies_the_bump_tags_the_bump_commit_and_completes() {
     let seed = seed_workspace();
     let cmd = FakeCmd::new()
-        .with_bump_checkout(seed.clone(), "bumpsha00")
+        .with_bump_checkout(seed.path().to_path_buf(), "bumpsha00")
         .crate_version("0.5.0");
     let registry = cmd.registry();
     let clock = FakeClock(Cell::new(1_786_579_200)); // 2026-08-13
@@ -3100,8 +3101,6 @@ fn a_bump_plan_applies_the_bump_tags_the_bump_commit_and_completes() {
         .calls()
         .iter()
         .any(|c| c.starts_with("git commit -m release: v0.5.0")));
-
-    let _ = std::fs::remove_dir_all(&seed);
 }
 
 #[test]
@@ -3110,7 +3109,7 @@ fn a_resumed_bump_run_does_not_double_bump() {
     // completion) must NOT re-apply the bump on re-entry.
     let seed = seed_workspace();
     let cmd = FakeCmd::new()
-        .with_bump_checkout(seed.clone(), "bumpsha00")
+        .with_bump_checkout(seed.path().to_path_buf(), "bumpsha00")
         .crate_version("0.5.0");
     let registry = cmd.registry();
     let clock = FakeClock(Cell::new(1_786_579_200));
@@ -3172,5 +3171,4 @@ fn a_resumed_bump_run_does_not_double_bump() {
         "resume must check out the bump commit, not the sealed head: {:?}",
         cmd.calls()
     );
-    let _ = std::fs::remove_dir_all(&seed);
 }

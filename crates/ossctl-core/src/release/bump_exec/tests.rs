@@ -5,7 +5,9 @@
 
 use std::cell::RefCell;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use tempfile::TempDir;
 
 use super::*;
 use crate::ports::{Clock, CommandOutput, CommandRunner, RegistryQuery};
@@ -96,40 +98,39 @@ impl RegistryQuery for NoRegistry {
     }
 }
 
-/// A throwaway workspace dir (root manifest + a lib + a bin pinning the lib + CHANGELOG).
-fn temp_workspace() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "ossctl-bump-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    ));
-    std::fs::create_dir_all(dir.join("crates/core")).unwrap();
-    std::fs::create_dir_all(dir.join("crates/cli")).unwrap();
+/// A unique throwaway workspace (root manifest + a lib + a bin pinning the lib + CHANGELOG).
+/// The directory is removed when its [`TempDir`] owner drops.
+fn temp_workspace() -> TempDir {
+    let dir = tempfile::Builder::new()
+        .prefix("ossctl-bump-test-")
+        .tempdir()
+        .unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("crates/core")).unwrap();
+    std::fs::create_dir_all(root.join("crates/cli")).unwrap();
     std::fs::write(
-        dir.join("Cargo.toml"),
+        root.join("Cargo.toml"),
         "[workspace]\nresolver = \"2\"\nmembers = [\"crates/core\", \"crates/cli\"]\n\n[workspace.package]\nversion = \"0.4.0\"\nedition = \"2021\"\n",
     )
     .unwrap();
     std::fs::write(
-        dir.join("crates/core/Cargo.toml"),
+        root.join("crates/core/Cargo.toml"),
         "[package]\nname = \"acme-core\"\nversion.workspace = true\n",
     )
     .unwrap();
     std::fs::write(
-        dir.join("crates/cli/Cargo.toml"),
+        root.join("crates/cli/Cargo.toml"),
         "[package]\nname = \"acme\"\nversion.workspace = true\n\n[dependencies]\nacme-core = { path = \"../core\", version = \"=0.4.0\" }\n",
     )
     .unwrap();
     std::fs::write(
-        dir.join("CHANGELOG.md"),
+        root.join("CHANGELOG.md"),
         "# Changelog\n\n## [Unreleased]\n### Added\n- a feature\n",
     )
     .unwrap();
     // A tracked lockfile, so the lockfile-refresh step runs (it is skipped when absent).
     std::fs::write(
-        dir.join("Cargo.lock"),
+        root.join("Cargo.lock"),
         "# auto\n[[package]]\nname = \"acme-core\"\nversion = \"0.4.0\"\n",
     )
     .unwrap();
@@ -172,20 +173,20 @@ fn applies_version_pin_changelog_and_commits() {
     let dir = temp_workspace();
     let runner = FakeRunner::new("abc123def456");
     let (clock, reg) = (FakeClock, NoRegistry);
-    let ctx = ctx(&runner, &clock, &reg, &dir);
+    let ctx = ctx(&runner, &clock, &reg, dir.path());
 
     let outcome = apply_bump(&ctx, &bump_plan(), "2026-08-13").unwrap();
     assert_eq!(outcome.commit, "abc123def456");
     assert_eq!(outcome.effective_date, "2026-08-13");
 
-    let root = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+    let root = std::fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
     assert!(
         root.contains("version = \"0.5.0\""),
         "workspace version bumped: {root}"
     );
-    let cli = std::fs::read_to_string(dir.join("crates/cli/Cargo.toml")).unwrap();
+    let cli = std::fs::read_to_string(dir.path().join("crates/cli/Cargo.toml")).unwrap();
     assert!(cli.contains("version = \"=0.5.0\""), "pin rewritten: {cli}");
-    let changelog = std::fs::read_to_string(dir.join("CHANGELOG.md")).unwrap();
+    let changelog = std::fs::read_to_string(dir.path().join("CHANGELOG.md")).unwrap();
     assert!(
         changelog.contains("## [Unreleased]\n\n## [0.5.0] - 2026-08-13"),
         "changelog finalized: {changelog}"
@@ -202,17 +203,15 @@ fn applies_version_pin_changelog_and_commits() {
         !calls.iter().any(|c| c.starts_with("git push")),
         "the executor must not push the branch: {calls:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn skips_the_lockfile_refresh_when_no_lockfile_is_tracked() {
     let dir = temp_workspace();
-    std::fs::remove_file(dir.join("Cargo.lock")).unwrap();
+    std::fs::remove_file(dir.path().join("Cargo.lock")).unwrap();
     let runner = FakeRunner::new("abc");
     let (clock, reg) = (FakeClock, NoRegistry);
-    let ctx = ctx(&runner, &clock, &reg, &dir);
+    let ctx = ctx(&runner, &clock, &reg, dir.path());
     apply_bump(&ctx, &bump_plan(), "2026-08-13").unwrap();
     assert!(
         !runner
@@ -223,7 +222,6 @@ fn skips_the_lockfile_refresh_when_no_lockfile_is_tracked() {
         "no lockfile ⇒ no refresh: {:?}",
         runner.calls.borrow()
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -231,13 +229,13 @@ fn fails_closed_on_a_missing_pin() {
     let dir = temp_workspace();
     // The cli manifest pins `^0.4`, not `=0.4.0` — the sealed pin will not match.
     std::fs::write(
-        dir.join("crates/cli/Cargo.toml"),
+        dir.path().join("crates/cli/Cargo.toml"),
         "[package]\nname = \"acme\"\n\n[dependencies]\nacme-core = { path = \"../core\", version = \"^0.4\" }\n",
     )
     .unwrap();
     let runner = FakeRunner::new("abc");
     let (clock, reg) = (FakeClock, NoRegistry);
-    let ctx = ctx(&runner, &clock, &reg, &dir);
+    let ctx = ctx(&runner, &clock, &reg, dir.path());
 
     let err = apply_bump(&ctx, &bump_plan(), "2026-08-13").unwrap_err();
     assert!(matches!(
@@ -250,7 +248,6 @@ fn fails_closed_on_a_missing_pin() {
         .borrow()
         .iter()
         .any(|c| c.starts_with("git commit")));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -259,13 +256,12 @@ fn fails_closed_when_the_hook_fails() {
     let mut runner = FakeRunner::new("abc");
     runner.hook_fail = true;
     let (clock, reg) = (FakeClock, NoRegistry);
-    let ctx = ctx(&runner, &clock, &reg, &dir);
+    let ctx = ctx(&runner, &clock, &reg, dir.path());
     let mut plan = bump_plan();
     plan.bump_hook = Some("cargo insta test --accept".into());
 
     let err = apply_bump(&ctx, &plan, "2026-08-13").unwrap_err();
     assert!(matches!(err, BumpExecError::Hook { .. }));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -281,7 +277,7 @@ fn fails_closed_when_the_hook_reverts_the_version() {
         .unwrap();
     }));
     let (clock, reg) = (FakeClock, NoRegistry);
-    let ctx = ctx(&runner, &clock, &reg, &dir);
+    let ctx = ctx(&runner, &clock, &reg, dir.path());
     let mut plan = bump_plan();
     plan.pin_rewrites.clear();
     plan.bump_hook = Some("evil".into());
@@ -291,7 +287,6 @@ fn fails_closed_when_the_hook_reverts_the_version() {
         matches!(err, BumpExecError::HookViolatedVersion { .. }),
         "expected a hook-version violation, got {err}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -310,9 +305,8 @@ fn fails_closed_when_lockfile_refresh_fails() {
     let mut runner = FakeRunner::new("abc");
     runner.fail_substr = Some("cargo update".into());
     let (clock, reg) = (FakeClock, NoRegistry);
-    let ctx = ctx(&runner, &clock, &reg, &dir);
+    let ctx = ctx(&runner, &clock, &reg, dir.path());
 
     let err = apply_bump(&ctx, &bump_plan(), "2026-08-13").unwrap_err();
     assert!(matches!(err, BumpExecError::LockRefresh(_)));
-    let _ = std::fs::remove_dir_all(&dir);
 }
