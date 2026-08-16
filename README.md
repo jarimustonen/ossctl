@@ -19,8 +19,10 @@ owns the parts that must be exact and identical for every caller:
   and the version/schema surface.
 
 The prose `/oss-*` skills (README/LICENSE authoring, CI, changelog, contributing,
-security policy, architecture docs, and the orchestrator) ship bundled with the binary
-and are thin callers of it. The binary is the source of truth.
+security policy, architecture docs, distribution-channel generation, and the orchestrator)
+ship bundled with the binary and are thin callers of it. The binary is the source of truth.
+`/oss-dist` wraps `ossctl dist generate` to produce cargo-dist release infrastructure and
+Homebrew tap/secret setup guidance from the approved contract.
 
 ## Install
 

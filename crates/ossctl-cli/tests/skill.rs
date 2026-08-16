@@ -178,6 +178,43 @@ fn skill_print_oss_init_is_wired_to_the_binary() {
     }
 }
 
+/// `oss-dist` is a registered family member and installs the exact rendered
+/// distribution-channel operating manual into an explicit destination (§16–§17).
+#[test]
+fn skill_install_oss_dist_writes_distribution_manual() {
+    let dir = tempfile::tempdir().unwrap();
+    ossctl()
+        .args([
+            "skill", "install", "oss-dist", "--agent", "claude", "--dest",
+        ])
+        .arg(dir.path())
+        .assert()
+        .success();
+
+    let installed = std::fs::read_to_string(dir.path().join("oss-dist/SKILL.md")).unwrap();
+    assert!(installed.contains("# /oss-dist"));
+    assert!(installed.contains("ossctl dist generate"));
+    assert!(installed.contains("HOMEBREW_TAP_TOKEN"));
+    for target in [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-musl",
+        "x86_64-unknown-linux-musl",
+    ] {
+        assert!(
+            installed.contains(target),
+            "cross-platform target is documented: {target}"
+        );
+    }
+    for forbidden in ["hauis", "github-custom-runners", "cargo install cargo-dist"] {
+        assert!(
+            !installed.contains(forbidden),
+            "skill must not instruct personal infrastructure or global installation: {forbidden}"
+        );
+    }
+    assert!(!installed.contains("{{CLI_VERSION}}"));
+}
+
 /// `oss-init` install is byte-identical to print (§16) and lands the canonical file.
 #[test]
 fn skill_install_oss_init_matches_print() {

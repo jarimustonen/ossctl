@@ -126,6 +126,15 @@ pub const CATALOG: &[BundledSkill] = &[
         template: include_str!("../skills/oss-contributing/SKILL.template.md"),
         path_in_repo: "crates/ossctl-cli/skills/oss-contributing/SKILL.template.md",
     },
+    BundledSkill {
+        name: "oss-dist",
+        description:
+            "Generator of Rust binary-distribution infrastructure: contract-driven cargo-dist \
+             config + generated release workflow, Cargo dist profile, and Homebrew tap/secret \
+             operations guidance (a thin skill over `ossctl contract show` + `dist generate`).",
+        template: include_str!("../skills/oss-dist/SKILL.template.md"),
+        path_in_repo: "crates/ossctl-cli/skills/oss-dist/SKILL.template.md",
+    },
 ];
 
 /// Which agent runtime(s) `skill install` targets. Each selects a well-known
