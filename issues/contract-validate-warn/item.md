@@ -2,12 +2,13 @@
 created: 2026-08-15
 updated: 2026-08-16
 type: improvement
-status: in-progress
+status: done
 priority: normal
 lane: release-safety
 commits:
 - hash: 2aa530a589b1712c14f101dd116d21cd250443b5
   summary: 'fix(contract): warn on unplanned Homebrew tap'
+closed: 2026-08-16
 ---
 
 # contract validate: warn when dist-workspace.toml declares a homebrew tap absent from the contract distribution block
