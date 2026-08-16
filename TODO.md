@@ -111,3 +111,4 @@ live view. 0.4.0 is shipped; the epic stays open for its tails (see handoff) and
 ## Piialiisan bugiraportit
 
 - Intake bugs reviewed 2026-08-16. `intake-bug-ossctl-878b3a0790a5` closed fixed because current `release plan` supports `--json`; `intake-feature-ossctl-04e19af4e11d` closed duplicate into `oss-dist-channel-generator`.
+- [ ] 🐛 Piialiisan bugiraportti: release plan/cut should cover the Homebrew tap leg — jari via Telegram ([`intake-feature-ossctl-73e870268475`](issues/intake-feature-ossctl-73e870268475/item.md))
