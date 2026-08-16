@@ -56,6 +56,10 @@ pub struct PlanArgs {
     /// the default path that publishes the version already in the manifest.
     #[arg(long, value_name = "LEVEL")]
     pub bump: Option<String>,
+    /// Permit planning with a binary built from a different commit than this tree.
+    /// This is an explicit escape hatch for intentional cross-tree invocations.
+    #[arg(long)]
+    pub allow_stale_binary: bool,
 }
 
 /// Arguments for `release cut`.
@@ -85,6 +89,10 @@ pub struct CutArgs {
     /// without a bump). Omit for a `--bump`-less plan.
     #[arg(long, value_name = "LEVEL")]
     pub bump: Option<String>,
+    /// Permit cutting with a binary built from a different commit than this tree.
+    /// This is an explicit escape hatch for intentional cross-tree invocations.
+    #[arg(long)]
+    pub allow_stale_binary: bool,
 }
 
 /// A single positional `<run_id>` plus the journal-location flags, shared by
@@ -183,6 +191,67 @@ pub fn dispatch(action: ReleaseAction, format: OutputFormat) -> Result<(), CliEr
     }
 }
 
+/// Check that the executable's build provenance matches the release tree.
+///
+/// A release plan derives its version and targets from the live tree, so a binary
+/// built from an older commit can otherwise produce a convincing plan while running
+/// obsolete release-engine code. Mismatch is therefore refused by default; the
+/// escape hatch exists only for deliberate cross-tree invocations.
+fn release_binary_warnings(
+    git: &RealGitRepo,
+    head_sha: &str,
+    allow_stale_binary: bool,
+) -> Result<Vec<String>, CliError> {
+    let mut warnings = Vec::new();
+    if let Some(warning) =
+        compiled_provenance_warning(crate::cli::GIT_COMMIT, head_sha, allow_stale_binary)?
+    {
+        warnings.push(warning);
+    }
+
+    match git.is_dirty() {
+        Ok(true) => warnings.push(
+            "the release tree has uncommitted changes to tracked files; the provenance check only evaluates HEAD, not uncommitted changes. Commit or discard them before cutting a release".to_string(),
+        ),
+        Ok(false) => {}
+        Err(error) => warnings.push(format!(
+            "could not determine whether the release tree is dirty ({error}); provenance only confirms HEAD"
+        )),
+    }
+
+    Ok(warnings)
+}
+
+fn compiled_provenance_warning(
+    compiled_commit: &str,
+    head_sha: &str,
+    allow_stale_binary: bool,
+) -> Result<Option<String>, CliError> {
+    if !has_git_commit_provenance(compiled_commit) {
+        return Ok(Some(
+            "cannot verify that this ossctl binary matches the release tree: it was built without git commit provenance. Rebuild from a git checkout with `cargo build --release -p ossctl` before cutting a release".to_string(),
+        ));
+    }
+    if compiled_commit.eq_ignore_ascii_case(head_sha) {
+        return Ok(None);
+    }
+
+    let message = format!(
+        "STALE BINARY: this ossctl executable was built from commit {compiled_commit}, but the release tree is at {head_sha}. Rebuild the current tree with `cargo build --release -p ossctl` before planning or cutting a release"
+    );
+    if allow_stale_binary {
+        Ok(Some(format!(
+            "{message}; proceeding only because --allow-stale-binary was passed"
+        )))
+    } else {
+        Err(CliError::user("stale_binary", message))
+    }
+}
+
+fn has_git_commit_provenance(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 /// `ossctl release plan` — compute and seal a content-addressed release plan
 /// (read-only; mutates no external state).
 ///
@@ -231,6 +300,7 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
             format!("cannot plan a release: could not resolve HEAD ({e}) — the repository may have no commits"),
         )
     })?;
+    let provenance_warnings = release_binary_warnings(&git, &head_sha, args.allow_stale_binary)?;
 
     let facts = ossctl_core::facts::gather(&root, &RealFs, &git);
 
@@ -249,6 +319,7 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
     )?;
 
     let mut warnings = normalized.problems.warnings.clone();
+    warnings.extend(provenance_warnings);
     // Surface a non-blocking warning when the contract configures nothing to
     // publish — the plan would tag only.
     if plan.targets.is_empty() {
@@ -1520,6 +1591,7 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
             format!("cannot cut a release: could not resolve HEAD ({e}) — the repository may have no commits"),
         )
     })?;
+    let provenance_warnings = release_binary_warnings(&git, &head_sha, args.allow_stale_binary)?;
     let facts = ossctl_core::facts::gather(&root, &RealFs, &git);
 
     // Re-derive the plan the same way `plan` did — with `--bump` the release version
@@ -1543,6 +1615,12 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     // unresolved package, a duplicate-ecosystem target) is refused up front rather
     // than leaving an orphaned `run_created` run behind.
     coordinator::validate_plan(&current).map_err(|e| cut_error_to_cli("(not created)", e))?;
+
+    for warning in provenance_warnings {
+        // `cut` streams its primary data on stdout, so keep this operator-facing
+        // preflight diagnostic out of that stream.
+        eprintln!("warning: {warning}");
+    }
 
     // Journal location (git-common-dir-local, or an explicit override).
     let paths = JournalPaths::from_git(&git, args.journal_dir.as_deref()).map_err(|e| {
@@ -2250,6 +2328,43 @@ mod tests {
 
     /// A minimal approved `Contract` carrying the given distributions — enough to
     /// exercise the release-engine multi-distribution guard.
+    const COMMIT_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const COMMIT_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn matching_binary_provenance_passes_silently() {
+        assert_eq!(
+            compiled_provenance_warning(COMMIT_A, COMMIT_A, false).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn mismatched_binary_provenance_refuses_without_escape_hatch() {
+        let error = compiled_provenance_warning(COMMIT_A, COMMIT_B, false).unwrap_err();
+        assert_eq!(error.code, "stale_binary");
+        assert!(error.message.contains(COMMIT_A));
+        assert!(error.message.contains(COMMIT_B));
+        assert!(error.message.contains("cargo build --release -p ossctl"));
+    }
+
+    #[test]
+    fn stale_binary_escape_hatch_emits_a_loud_warning() {
+        let warning = compiled_provenance_warning(COMMIT_A, COMMIT_B, true)
+            .unwrap()
+            .expect("escape hatch must remain visible");
+        assert!(warning.contains("STALE BINARY"));
+        assert!(warning.contains("--allow-stale-binary"));
+    }
+
+    #[test]
+    fn missing_binary_provenance_warns_without_refusing() {
+        let warning = compiled_provenance_warning("unknown", COMMIT_A, false)
+            .unwrap()
+            .expect("missing provenance should degrade gracefully");
+        assert!(warning.contains("cannot verify"));
+    }
+
     fn contract_with_distributions(dists: Vec<Distribution>) -> Contract {
         Contract {
             schema_version: 2,

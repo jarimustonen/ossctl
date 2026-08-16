@@ -132,10 +132,10 @@ app beyond what the ADRs already fix.
        `cargo build --release -p ossctl` (the bin crate is **`ossctl`**, NOT `ossctl-cli` —
        `-p ossctl-cli` silently no-ops and leaves a STALE binary) and verify `./target/release/ossctl
        version` prints the just-bumped version. ⚠️ Since 0.2.5 the version is read from the tree at
-       runtime, so `release plan` shows the NEW version even from a stale old binary — `plan`/`cut`
-       will then run OLD engine code silently. `ossctl version` is the only tell. (Stale-binary guard
-       tracked in `release-cut-stale-binary-guard`.) Then
-       `ossctl release plan` (seal + inspect; side-effect-free) → then
+       runtime, so `release plan` can show the NEW version even from a stale old binary. `plan` and
+       `cut` now refuse when the binary's compiled commit differs from tree `HEAD`; rebuild with the
+       command above. `--allow-stale-binary` is an explicit escape hatch only for intentional
+       cross-tree invocations. Then `ossctl release plan` (seal + inspect; side-effect-free) → then
        `ossctl release cut --plan <id>`. **There is no `--version` flag** (removed in 0.3.0,
        `release-drop-version-flag`): the release version comes solely from the workspace manifest
        (the version you bumped in step 1), so a stray `--version` is now a hard clap error, not a

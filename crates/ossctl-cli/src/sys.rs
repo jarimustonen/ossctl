@@ -142,6 +142,16 @@ impl RealGitRepo {
     }
 }
 
+impl RealGitRepo {
+    /// Whether the work tree has changes to tracked files.
+    pub fn is_dirty(&self) -> io::Result<bool> {
+        Ok(!self
+            .git_stdout(&["status", "--porcelain", "--untracked-files=no"])?
+            .trim()
+            .is_empty())
+    }
+}
+
 impl GitRepo for RealGitRepo {
     fn head_commit(&self) -> io::Result<String> {
         let head = self.git_stdout(&["rev-parse", "HEAD"])?.trim().to_string();

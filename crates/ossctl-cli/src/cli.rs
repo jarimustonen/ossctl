@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::error::{CliError, ExitKind};
 use crate::output::OutputFormat;
 
-const GIT_COMMIT: &str = env!("OSSCTL_GIT_COMMIT");
+pub(crate) const GIT_COMMIT: &str = env!("OSSCTL_GIT_COMMIT");
 const CARGO_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser, Debug)]

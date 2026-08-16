@@ -8,6 +8,14 @@ fn ossctl() -> Command {
     Command::cargo_bin("ossctl").expect("ossctl binary builds")
 }
 
+fn test_binary_has_git_provenance() -> bool {
+    let out = ossctl().args(["version", "--json"]).output().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    value["data"]["commit"].as_str().is_some_and(|commit| {
+        matches!(commit.len(), 40 | 64) && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
 /// `version --json` emits the §10/§17 fields inside the canonical envelope.
 #[test]
 fn version_json_emits_schema_fields() {
@@ -1440,6 +1448,47 @@ fn approved_git_repo() -> tempfile::TempDir {
     dir
 }
 
+/// A synthetic repository's HEAD intentionally differs from the test executable's
+/// compiled commit, proving the CLI wire-up refuses a stale binary before planning.
+#[test]
+fn release_plan_refuses_a_stale_binary_by_default() {
+    if !test_binary_has_git_provenance() {
+        return;
+    }
+    let dir = approved_git_repo();
+    let out = ossctl()
+        .args(["release", "plan", "--json", "--repo-root"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(value["error"]["code"], "stale_binary");
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(message.contains("STALE BINARY"));
+    assert!(message.contains("cargo build --release -p ossctl"));
+}
+
+/// `release cut` refuses the same stale executable before it derives or executes
+/// the supplied plan.
+#[test]
+fn release_cut_refuses_a_stale_binary_by_default() {
+    if !test_binary_has_git_provenance() {
+        return;
+    }
+    let dir = approved_git_repo();
+    let out = ossctl()
+        .args(["release", "cut", "--plan", "not-a-plan", "--repo-root"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(value["error"]["code"], "stale_binary");
+}
+
 /// `release cut` on a `draft` contract is refused (a cut mutates external state,
 /// so it requires human approval) — before any git or journal work.
 #[test]
@@ -1473,6 +1522,7 @@ fn release_cut_refuses_a_stale_plan_id() {
         .args([
             "release",
             "cut",
+            "--allow-stale-binary",
             "--plan",
             "0000000000000000",
             "--repo-root",
@@ -1503,7 +1553,13 @@ fn release_cut_refuses_when_the_manifest_version_changed_since_sealing() {
 
     // Seal a real plan at the manifest version (1.0.0) and read its plan_id.
     let planned = ossctl()
-        .args(["release", "plan", "--json", "--repo-root"])
+        .args([
+            "release",
+            "plan",
+            "--json",
+            "--allow-stale-binary",
+            "--repo-root",
+        ])
         .arg(dir.path())
         .output()
         .unwrap();
@@ -1529,7 +1585,14 @@ fn release_cut_refuses_when_the_manifest_version_changed_since_sealing() {
     // Execute the sealed plan_id; the cut re-derives 2.0.0 from the manifest, hashes a
     // different plan_id → drift refusal.
     let out = ossctl()
-        .args(["release", "cut", "--plan", &plan_id, "--repo-root"])
+        .args([
+            "release",
+            "cut",
+            "--allow-stale-binary",
+            "--plan",
+            &plan_id,
+            "--repo-root",
+        ])
         .arg(dir.path())
         .arg("--journal-dir")
         .arg(journal.path())
@@ -1552,6 +1615,7 @@ fn release_plan_bump_computes_the_version_and_seals_a_bump_phase() {
             "release",
             "plan",
             "--json",
+            "--allow-stale-binary",
             "--bump",
             "minor",
             "--repo-root",
@@ -1582,7 +1646,13 @@ fn release_plan_bump_computes_the_version_and_seals_a_bump_phase() {
 fn release_plan_without_bump_omits_the_bump_field() {
     let dir = approved_git_repo();
     let out = ossctl()
-        .args(["release", "plan", "--json", "--repo-root"])
+        .args([
+            "release",
+            "plan",
+            "--json",
+            "--allow-stale-binary",
+            "--repo-root",
+        ])
         .arg(dir.path())
         .output()
         .unwrap();
@@ -1590,6 +1660,13 @@ fn release_plan_without_bump_omits_the_bump_field() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("plan stdout JSON");
     assert!(v["data"].get("bump").is_none(), "no --bump ⇒ no bump key");
     assert_eq!(v["data"]["phases"][0], "dry-run-all");
+    assert!(
+        v["warnings"].as_array().unwrap().iter().any(|warning| {
+            warning.as_str().unwrap().contains("provenance")
+                || warning.as_str().unwrap().contains("STALE BINARY")
+        }),
+        "the provenance diagnostic must remain visible: {v}"
+    );
 }
 
 /// `release plan --bump bogus` is a strict, informative rejection (AI-first CLI:
@@ -1602,6 +1679,7 @@ fn release_plan_bump_rejects_a_bad_level() {
             "release",
             "plan",
             "--json",
+            "--allow-stale-binary",
             "--bump",
             "bugfix",
             "--repo-root",
@@ -1629,6 +1707,7 @@ fn release_plan_bump_preview_describes_an_executable_bump() {
             "release",
             "plan",
             "--json",
+            "--allow-stale-binary",
             "--bump",
             "patch",
             "--repo-root",
@@ -1826,7 +1905,13 @@ fn release_resume_refuses_an_unverifiable_target() {
 
     // Seal a real plan so the resume's drift check passes; reuse its id + version.
     let planned = ossctl()
-        .args(["release", "plan", "--json", "--repo-root"])
+        .args([
+            "release",
+            "plan",
+            "--json",
+            "--allow-stale-binary",
+            "--repo-root",
+        ])
         .arg(repo.path())
         .output()
         .unwrap();
@@ -1884,7 +1969,14 @@ fn release_cut_rejects_a_git_ref_unsafe_version() {
         )
         .unwrap();
         let out = ossctl()
-            .args(["release", "cut", "--plan", "x", "--repo-root"])
+            .args([
+                "release",
+                "cut",
+                "--allow-stale-binary",
+                "--plan",
+                "x",
+                "--repo-root",
+            ])
             .arg(dir.path())
             .output()
             .unwrap();
