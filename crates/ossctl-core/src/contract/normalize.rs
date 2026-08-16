@@ -1343,8 +1343,11 @@ fn check_badge_producers(
 /// - **double-publish:** a `homebrew` installer AND a `homebrew-tap` target both
 ///   generate + push a formula to the personal tap — a guaranteed collision.
 ///
-/// Plus one **advisory** (warning, not a floor): a configured tap with no producer
-/// of either kind is dead config — nothing ever writes to it.
+/// A configured tap with no producer is a **floor**, not an advisory: a successful
+/// release would otherwise omit the Homebrew channel. The engine cannot safely
+/// synthesize a target because a distribution block may not identify which package
+/// supplies the formula (especially in a multi-crate workspace), so the contract
+/// must name the target explicitly.
 ///
 /// **Why aggregate, not per-package (deliberate).** The three signals are OR-ed
 /// across all distributions/targets rather than grouped by the monorepo `package`
@@ -1396,12 +1399,17 @@ fn check_homebrew_configuration(
         );
     }
 
-    // Advisory: a tap nobody writes to (no installer producer, no tap target).
+    // Floor: a tap with no formula producer would otherwise make a green release
+    // silently skip Homebrew. Do not derive a target here: `distribution.package`
+    // is optional, so a single-distribution multi-crate workspace may not identify
+    // which package/formula the irreversible Homebrew write should use.
     if has_tap && !installer_producer && !tap_target_producer {
-        p.warn(
-            "distribution.homebrew_tap is set but there is neither a 'homebrew' installer in \
-             distribution.installers nor a 'homebrew'-registry target with adapter 'homebrew-tap' \
-             — no formula is generated, so the tap will never be updated"
+        p.err(
+            "floor: distribution.homebrew_tap is set but there is neither a 'homebrew' installer \
+             in distribution.installers nor a 'homebrew'-registry target with adapter \
+             'homebrew-tap' — release plan/cut would silently skip the tap. Add an explicit \
+             homebrew target (registry: homebrew, adapter: homebrew-tap) for the formula package, \
+             or declare the homebrew installer that owns publishing it"
                 .to_string(),
         );
     }
@@ -2549,7 +2557,7 @@ mod tests {
             (false, false, true, false), // 2: tap-target, no tap → missing-tap floor
             (false, true, false, false), // 3: installer, no tap → per-block floor
             (false, true, true, false),  // 4: both producers, no tap → floors
-            (true, false, false, true),  // 5: tap, no producer → dead-tap advisory (valid)
+            (true, false, false, false), // 5: tap, no producer → silent-release-skip floor
             (true, false, true, true),   // 6: tap + tap-target → well-formed (ossctl's case)
             (true, true, false, true),   // 7: tap + installer → well-formed (cargo-dist)
             (true, true, true, false),   // 8: tap + both producers → double-publish floor
@@ -2586,24 +2594,31 @@ mod tests {
         );
     }
 
-    /// Row 5: a configured tap with neither producer is dead config — an advisory
-    /// warning, and the contract still normalizes clean.
+    /// Regression for `intake-feature-ossctl-73e870268475`: the field-reported
+    /// shape had two crates.io targets and a distribution tap, but no Homebrew
+    /// formula producer. It must fail validation and therefore cannot seal a green
+    /// plan that omits the tap.
     #[test]
-    fn homebrew_dead_tap_is_an_advisory_not_a_floor() {
-        let n = norm(&hb_case(true, false, false));
-        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
-        assert!(
-            n.problems
-                .warnings
-                .iter()
-                .any(|w| w.contains("the tap will never be updated")),
-            "expected dead-tap advisory, warnings were {:?}",
-            n.problems.warnings
+    fn distribution_tap_without_formula_producer_is_a_floor() {
+        let text = concat!(
+            "---\n",
+            "status: approved\n",
+            "maturity: production\n",
+            "ecosystems: [rust]\n",
+            "targets:\n",
+            "  - {ecosystem: rust, package: project-canon-core, registry: crates.io, adapter: cargo-publish}\n",
+            "  - {ecosystem: rust, package: project-canon-cli, registry: crates.io, adapter: cargo-publish}\n",
+            "distribution:\n",
+            "  adapter: cargo-dist\n",
+            "  installers: [shell, powershell]\n",
+            "  homebrew_tap: owner/homebrew-project-canon\n",
+            "---\n",
         );
+        assert_error_contains(&norm(text), "release plan/cut would silently skip the tap");
     }
 
     /// Row 6: a `homebrew-tap` target with a configured tap and no installer
-    /// producer is the well-formed case (ossctl's own shape) — clean, no advisory.
+    /// producer is the well-formed case (ossctl's own shape) — clean.
     #[test]
     fn homebrew_tap_target_with_tap_is_clean() {
         let n = norm(&hb_case(true, false, true));
@@ -2616,6 +2631,18 @@ mod tests {
             "unexpected dead-tap advisory: {:?}",
             n.problems.warnings
         );
+    }
+
+    /// The repository's own contract already carries the explicit target, so this
+    /// safety floor must leave its four-target release path unchanged.
+    #[test]
+    fn ossctl_contract_keeps_its_four_explicit_targets() {
+        let n = norm(include_str!("../../../../OSS-RELEASE.md"));
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert_eq!(n.contract.targets.len(), 4);
+        assert!(n.contract.targets.iter().any(|target| {
+            target.registry == Registry::Homebrew && target.adapter == Adapter::HomebrewTap
+        }));
     }
 
     /// registry/adapter compatibility: a `homebrew`-registry target with a
@@ -3584,25 +3611,14 @@ mod tests {
         assert_error_contains(&norm(text), "not allowed on maturity 'spike'");
     }
 
-    /// A `homebrew_tap` set with neither a `homebrew` installer nor a
-    /// `homebrew`-registry target is dead config — a warning, not a floor (the
-    /// contract is still valid). This is the genuinely-orphaned tap: no consumer
-    /// exists, so the tap is truly never updated.
+    /// A `homebrew_tap` without either supported formula producer fails closed:
+    /// otherwise a green release would omit the declared tap.
     #[test]
-    fn distribution_tap_without_installer_warns() {
+    fn distribution_tap_without_installer_or_target_fails_closed() {
         let text = "---\nstatus: approved\nmaturity: mvp\n\
                     distribution:\n  adapter: cargo-dist\n  installers: [shell]\n  \
                     homebrew_tap: owner/tap\n---\n";
-        let n = norm(text);
-        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
-        assert!(
-            n.problems
-                .warnings
-                .iter()
-                .any(|w| w.contains("no formula is generated, so the tap will never be updated")),
-            "expected dead-tap warning: {:?}",
-            n.problems.warnings
-        );
+        assert_error_contains(&norm(text), "release plan/cut would silently skip the tap");
     }
 
     /// A `homebrew_tap` set with NO `homebrew` installer but WITH a

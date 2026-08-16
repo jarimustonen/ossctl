@@ -898,6 +898,18 @@ fn ossctl_own_plan_is_unchanged_by_the_derivation() {
             Registry::CratesIo,
             Adapter::CargoPublish,
         ),
+        target(
+            Ecosystem::Rust,
+            "ossctl",
+            Registry::GhReleases,
+            Adapter::CargoDist,
+        ),
+        target(
+            Ecosystem::Rust,
+            "ossctl",
+            Registry::Homebrew,
+            Adapter::HomebrewTap,
+        ),
     ];
     let mut f = rust_facts();
     f.rust_workspace = Some(RustWorkspace {
@@ -915,8 +927,14 @@ fn ossctl_own_plan_is_unchanged_by_the_derivation() {
     assert_eq!(with_graph.plan_id, without_graph.plan_id);
     assert_eq!(
         target_packages(&with_graph),
-        vec![Some("ossctl-core"), Some("ossctl")]
+        vec![
+            Some("ossctl-core"),
+            Some("ossctl"),
+            Some("ossctl"),
+            Some("ossctl"),
+        ]
     );
+    assert_eq!(with_graph.targets.len(), 4);
 }
 
 #[test]
