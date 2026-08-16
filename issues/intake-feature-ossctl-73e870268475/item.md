@@ -3,12 +3,16 @@ created: 2026-08-16
 updated: 2026-08-16
 type: feature
 reporter: jari
-status: in-progress
+status: done
 priority: high
 labels:
 - via:agent-homebase-wrapup
 lane: release-safety
 lane_seq: 5
+commits:
+- hash: cc1df6aff13addf10dad4a95715e9c2f0a9b8c54
+  summary: 'fix(release): refuse unplanned Homebrew taps'
+closed: 2026-08-16
 ---
 
 # release plan/cut should cover the Homebrew tap leg
