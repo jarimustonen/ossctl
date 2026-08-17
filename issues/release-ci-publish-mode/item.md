@@ -1,6 +1,6 @@
 ---
 created: 2026-08-10
-updated: 2026-08-16
+updated: 2026-08-17
 type: feature
 status: open
 priority: normal
@@ -65,3 +65,8 @@ and fall back to the manual `git tag && git push` recipe.
   unused plan.
 - Encountered with `ossctl 0.2.2`.
 
+## Comments
+
+### 2026-08-17T07:43:48Z · @claude
+
+AUDIT EVIDENCE (2026-08-17 cross-repo audit): this mode is not speculative — glasspad's AGENTS.md FORBIDS the engine cut today ('publishing runs in CI, not from a local cargo publish'; publish-crates.yml is tag-triggered) and orchestratectl hand-publishes. Both repos would move onto the engine (and gain the plan-store/D4/verify safety) only via this feature: a cut mode where publish-all is delegated to tag-triggered CI (engine does gates + tag + verify; CI does crates.io + binaries + tap). Priority consideration: with verify-phase landed, a tag-only cut still gets full post-cut observation, which is exactly what glasspad's hand recipe lacks.
