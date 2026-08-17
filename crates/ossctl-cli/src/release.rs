@@ -558,13 +558,13 @@ fn reconcile_warnings(
 }
 
 fn render_reconcile_text(report: &ReconcileReport, warnings: &[String]) -> Result<(), CliError> {
-    crate::output::stdoutln!("run_id:     {}", report.run_id);
-    crate::output::stdoutln!("plan_id:    {}", report.plan_id);
+    crate::output::stdoutln!("run_id:     {}", report.run_id)?;
+    crate::output::stdoutln!("plan_id:    {}", report.plan_id)?;
     crate::output::stdoutln!(
         "status:     {} (journal seq {})",
         report.run_status.as_str(),
         report.journal_seq
-    );
+    )?;
     let s = &report.summary;
     crate::output::stdoutln!(
         "reconciled: {} ({} matches, {} conflicts, {} missing, {} unknown)",
@@ -573,7 +573,7 @@ fn render_reconcile_text(report: &ReconcileReport, warnings: &[String]) -> Resul
         s.conflicts,
         s.missing,
         s.unknown
-    );
+    )?;
     for t in &report.targets {
         crate::output::stdoutln!(
             "  {:<10} {:<8} {:<20} {}",
@@ -581,13 +581,13 @@ fn render_reconcile_text(report: &ReconcileReport, warnings: &[String]) -> Resul
             t.ecosystem,
             format!("{}@{}", t.package.as_deref().unwrap_or("<none>"), t.version),
             t.outcome.as_str(),
-        );
+        )?;
         if let Some(detail) = &t.detail {
-            crate::output::stdoutln!("             └─ {detail}");
+            crate::output::stdoutln!("             └─ {detail}")?;
         }
     }
     for w in warnings {
-        crate::output::stdoutln!("warning:    {w}");
+        crate::output::stdoutln!("warning:    {w}")?;
     }
     Ok(())
 }
@@ -702,19 +702,19 @@ fn show_warnings(state: &RunState) -> Vec<String> {
 /// status, phase progress, per-target landing state, tags, then the event window.
 /// Works for a live or a terminal run; the status line says which.
 fn render_show_text(state: &RunState, events: &[JournalEvent]) -> Result<(), CliError> {
-    crate::output::stdoutln!("run_id:     {}", state.run_id);
-    crate::output::stdoutln!("plan_id:    {}", state.plan_id);
-    crate::output::stdoutln!("version:    {}", state.version);
+    crate::output::stdoutln!("run_id:     {}", state.run_id)?;
+    crate::output::stdoutln!("plan_id:    {}", state.plan_id)?;
+    crate::output::stdoutln!("version:    {}", state.version)?;
     match state.status {
         RunStatus::Abandoned => match &state.abandon_reason {
             Some(reason) => crate::output::stdoutln!(
                 "status:     abandoned ({reason}) (journal seq {})",
                 state.applied_seq
-            ),
+            )?,
             None => crate::output::stdoutln!(
                 "status:     abandoned (journal seq {})",
                 state.applied_seq
-            ),
+            )?,
         },
         status => {
             let phase = state
@@ -725,11 +725,11 @@ fn render_show_text(state: &RunState, events: &[JournalEvent]) -> Result<(), Cli
                 "status:     {}{phase} (journal seq {})",
                 status.as_str(),
                 state.applied_seq
-            );
+            )?;
         }
     }
 
-    crate::output::stdoutln!("targets:    {}", state.targets.len());
+    crate::output::stdoutln!("targets:    {}", state.targets.len())?;
     for target in &state.targets {
         let landing = if let Some(receipt) = state.published.get(target) {
             format!("published @{}", receipt.version)
@@ -742,7 +742,7 @@ fn render_show_text(state: &RunState, events: &[JournalEvent]) -> Result<(), Cli
         } else {
             "pending".to_string()
         };
-        crate::output::stdoutln!("  {target:<10} {landing}");
+        crate::output::stdoutln!("  {target:<10} {landing}")?;
     }
 
     for (tag, tstate) in &state.tags {
@@ -759,12 +759,12 @@ fn render_show_text(state: &RunState, events: &[JournalEvent]) -> Result<(), Cli
         if tstate.github_release_delegated {
             steps.push("release→CI");
         }
-        crate::output::stdoutln!("tag {tag}: {}", steps.join(", "));
+        crate::output::stdoutln!("tag {tag}: {}", steps.join(", "))?;
     }
 
-    crate::output::stdoutln!("events:     {}", events.len());
+    crate::output::stdoutln!("events:     {}", events.len())?;
     for event in events {
-        crate::output::stdoutln!("  {}", render_event_line(event));
+        crate::output::stdoutln!("  {}", render_event_line(event))?;
     }
     Ok(())
 }
@@ -915,13 +915,13 @@ pub fn list(args: &ListArgs, format: OutputFormat) -> Result<(), CliError> {
 /// Render the run list as a human table (text mode).
 fn render_list_text(body: &RunListBody, warnings: &[String]) -> Result<(), CliError> {
     if body.runs.is_empty() && body.unreadable.is_empty() {
-        crate::output::stdoutln!("no release runs found");
+        crate::output::stdoutln!("no release runs found")?;
     } else if !body.runs.is_empty() {
         crate::output::stdoutln!(
             "{} run(s), {} in flight",
             body.runs.len(),
             body.in_flight_count
-        );
+        )?;
         for r in &body.runs {
             let flight = if r.in_flight { " *" } else { "  " };
             crate::output::stdoutln!(
@@ -930,9 +930,9 @@ fn render_list_text(body: &RunListBody, warnings: &[String]) -> Result<(), CliEr
                 r.status,
                 r.tag,
                 short_sha(&r.plan_id),
-            );
+            )?;
             if let Some(reason) = &r.abandon_reason {
-                crate::output::stdoutln!("     └─ abandoned: {reason}");
+                crate::output::stdoutln!("     └─ abandoned: {reason}")?;
             }
         }
     }
@@ -941,10 +941,10 @@ fn render_list_text(body: &RunListBody, warnings: &[String]) -> Result<(), CliEr
             "unreadable ({}): {} — status unknown, may be active",
             body.unreadable.len(),
             body.unreadable.join(", ")
-        );
+        )?;
     }
     for w in warnings {
-        crate::output::stdoutln!("warning: {w}");
+        crate::output::stdoutln!("warning: {w}")?;
     }
     Ok(())
 }
@@ -1196,20 +1196,20 @@ fn abandon_lock_not_broken_error(run_id: &str, reason: impl AsRef<str>) -> CliEr
 
 /// Render the abandonment outcome as human lines (text mode).
 fn render_abandon_text(report: &AbandonReport, warnings: &[String]) -> Result<(), CliError> {
-    crate::output::stdoutln!("run {} abandoned", report.run_id);
-    crate::output::stdoutln!("version: {}", report.version);
-    crate::output::stdoutln!("reason:  {}", report.reason);
+    crate::output::stdoutln!("run {} abandoned", report.run_id)?;
+    crate::output::stdoutln!("version: {}", report.version)?;
+    crate::output::stdoutln!("reason:  {}", report.reason)?;
     if report.published_targets.is_empty() {
-        crate::output::stdoutln!("published: none (nothing had landed)");
+        crate::output::stdoutln!("published: none (nothing had landed)")?;
     } else {
         crate::output::stdoutln!(
             "published (still live): {}",
             report.published_targets.join(", ")
-        );
+        )?;
     }
-    crate::output::stdoutln!("note: {}", report.note);
+    crate::output::stdoutln!("note: {}", report.note)?;
     for w in warnings {
-        crate::output::stdoutln!("warning: {w}");
+        crate::output::stdoutln!("warning: {w}")?;
     }
     Ok(())
 }
@@ -1327,7 +1327,7 @@ pub fn resume(args: &ResumeArgs, format: OutputFormat) -> Result<(), CliError> {
                 crate::output::stdoutln!(
                     "run {} is already complete — nothing to resume",
                     args.run_id
-                );
+                )?;
             }
             return Ok(());
         }
@@ -2218,11 +2218,11 @@ fn render_event_line(event: &JournalEvent) -> String {
 
 /// Text summary printed after a successful cut (json mode's summary is the stream).
 fn render_cut_success(run_id: &str, plan: &ReleasePlan) -> Result<(), CliError> {
-    crate::output::stdoutln!();
-    crate::output::stdoutln!("release complete — run {run_id}");
-    crate::output::stdoutln!("version: {}", plan.version);
-    crate::output::stdoutln!("tag:     v{}", plan.version);
-    crate::output::stdoutln!("published {} target(s)", plan.targets.len());
+    crate::output::stdoutln!()?;
+    crate::output::stdoutln!("release complete — run {run_id}")?;
+    crate::output::stdoutln!("version: {}", plan.version)?;
+    crate::output::stdoutln!("tag:     v{}", plan.version)?;
+    crate::output::stdoutln!("published {} target(s)", plan.targets.len())?;
     Ok(())
 }
 
@@ -2449,16 +2449,16 @@ fn invalid_contract_error(normalized: &Normalized) -> CliError {
 }
 
 fn render_plan_text(plan: &ReleasePlan, warnings: &[String]) -> Result<(), CliError> {
-    crate::output::stdoutln!("plan_id:    {}", plan.plan_id);
-    crate::output::stdoutln!("head:       {}", plan.head_sha);
-    crate::output::stdoutln!("version:    {}", plan.version);
+    crate::output::stdoutln!("plan_id:    {}", plan.plan_id)?;
+    crate::output::stdoutln!("head:       {}", plan.head_sha)?;
+    crate::output::stdoutln!("version:    {}", plan.version)?;
     if let Some(bump) = &plan.bump {
         crate::output::stdoutln!(
             "bump:       {} ({} → {})",
             bump.level.as_str(),
             bump.from_version,
             bump.to_version
-        );
+        )?;
         for r in &bump.pin_rewrites {
             crate::output::stdoutln!(
                 "  pin:      {} depends on {} : {} → {}",
@@ -2466,18 +2466,18 @@ fn render_plan_text(plan: &ReleasePlan, warnings: &[String]) -> Result<(), CliEr
                 r.dependency,
                 r.from,
                 r.to
-            );
+            )?;
         }
         if bump.changelog_finalize {
-            crate::output::stdoutln!("  changelog: finalize [Unreleased] → [{}]", bump.to_version);
+            crate::output::stdoutln!("  changelog: finalize [Unreleased] → [{}]", bump.to_version)?;
         }
         if let Some(hook) = &bump.bump_hook {
             // Quoted (Debug) so a hook value carrying newlines/control chars cannot spoof
             // the surrounding plan output the approver reads.
-            crate::output::stdoutln!("  bump_hook: {hook:?}");
+            crate::output::stdoutln!("  bump_hook: {hook:?}")?;
         }
     }
-    crate::output::stdoutln!("targets:    {}", plan.targets.len());
+    crate::output::stdoutln!("targets:    {}", plan.targets.len())?;
     for t in &plan.targets {
         crate::output::stdoutln!(
             "  {:<8} {:<12} {:<20} (package: {})",
@@ -2485,7 +2485,7 @@ fn render_plan_text(plan: &ReleasePlan, warnings: &[String]) -> Result<(), CliEr
             t.registry.as_str(),
             t.adapter.as_str(),
             t.package.as_deref().unwrap_or("<inferred at cut>"),
-        );
+        )?;
     }
     let phases = plan
         .phases
@@ -2493,13 +2493,13 @@ fn render_plan_text(plan: &ReleasePlan, warnings: &[String]) -> Result<(), CliEr
         .map(|p| p.as_str())
         .collect::<Vec<_>>()
         .join(" → ");
-    crate::output::stdoutln!("phases:     {phases}");
+    crate::output::stdoutln!("phases:     {phases}")?;
     for w in warnings {
-        crate::output::stdoutln!("warning:    {w}");
+        crate::output::stdoutln!("warning:    {w}")?;
     }
-    crate::output::stdoutln!();
-    crate::output::stdoutln!("To execute this exact plan (refuses if the repo drifts):");
-    crate::output::stdoutln!("  ossctl release cut --plan {}", plan.plan_id);
+    crate::output::stdoutln!()?;
+    crate::output::stdoutln!("To execute this exact plan (refuses if the repo drifts):")?;
+    crate::output::stdoutln!("  ossctl release cut --plan {}", plan.plan_id)?;
     Ok(())
 }
 

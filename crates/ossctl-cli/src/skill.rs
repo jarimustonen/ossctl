@@ -322,7 +322,7 @@ fn list(format: OutputFormat) -> Result<(), CliError> {
         OutputFormat::Json => emit_json(&ListPayload { skills }, &[])?,
         OutputFormat::Text => {
             if skills.is_empty() {
-                crate::output::stdoutln!("no skills bundled");
+                crate::output::stdoutln!("no skills bundled")?;
             } else {
                 for s in &skills {
                     crate::output::stdoutln!(
@@ -330,7 +330,7 @@ fn list(format: OutputFormat) -> Result<(), CliError> {
                         s.name,
                         s.cli_version,
                         s.description
-                    );
+                    )?;
                 }
             }
         }
@@ -366,9 +366,9 @@ fn print(args: &PrintArgs, format: OutputFormat) -> Result<(), CliError> {
             &[],
         )?,
         // Text: byte-identical to what `install` writes to disk — no "rendered"
-        // vs "raw" distinction (§16). `print!` (not `println!`) so a file that
-        // ends in exactly one newline is reproduced faithfully.
-        OutputFormat::Text => crate::output::stdout!("{content}"),
+        // vs "raw" distinction (§16). The no-newline helper reproduces a file
+        // ending in exactly one newline faithfully.
+        OutputFormat::Text => crate::output::stdout!("{content}")?,
     }
     Ok(())
 }
@@ -468,7 +468,7 @@ fn install(args: &InstallArgs, format: OutputFormat) -> Result<(), CliError> {
                 eprintln!("warning: {w}");
             }
             for e in &installed {
-                crate::output::stdoutln!("installed {} ({}) → {}", e.name, e.agent, e.dest_path);
+                crate::output::stdoutln!("installed {} ({}) → {}", e.name, e.agent, e.dest_path)?;
             }
         }
     }

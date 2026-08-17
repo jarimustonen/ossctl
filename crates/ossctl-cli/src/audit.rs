@@ -110,10 +110,10 @@ fn invalid_contract_error(normalized: &Normalized) -> CliError {
 
 fn render_audit_text(report: &AuditReport) -> Result<(), CliError> {
     let core = report.core_complete.as_str();
-    crate::output::stdoutln!("repo_root:      {}", report.repo_root);
-    crate::output::stdoutln!("maturity:       {}", report.maturity.as_str());
-    crate::output::stdoutln!("gated core:     {core}");
-    crate::output::stdoutln!("gaps:           {}", report.gaps.len());
+    crate::output::stdoutln!("repo_root:      {}", report.repo_root)?;
+    crate::output::stdoutln!("maturity:       {}", report.maturity.as_str())?;
+    crate::output::stdoutln!("gated core:     {core}")?;
+    crate::output::stdoutln!("gaps:           {}", report.gaps.len())?;
     for g in &report.gaps {
         crate::output::stdoutln!(
             "  [{:>11}] {:<24} ({}, {}, {}) — {}",
@@ -123,16 +123,16 @@ fn render_audit_text(report: &AuditReport) -> Result<(), CliError> {
             g.member,
             g.status.as_str(),
             g.detail
-        );
+        )?;
     }
     let cp = &report.community_profile;
     if cp.checked {
-        crate::output::stdoutln!("community:      GitHub community-profile checked");
+        crate::output::stdoutln!("community:      GitHub community-profile checked")?;
     } else {
         crate::output::stdoutln!(
             "community:      not checked ({})",
             cp.unavailable_reason.as_deref().unwrap_or("unknown")
-        );
+        )?;
     }
     Ok(())
 }

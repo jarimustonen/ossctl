@@ -94,9 +94,9 @@ pub fn validate(args: &ValidateArgs, format: OutputFormat) -> Result<(), CliErro
                 doc.status.as_str(),
                 doc.maturity.as_str(),
                 doc.targets.len()
-            );
+            )?;
             for warning in &doc.warnings {
-                crate::output::stdoutln!("warning: {warning}");
+                crate::output::stdoutln!("warning: {warning}")?;
             }
         }
     }
@@ -169,15 +169,15 @@ fn render_show_text(doc: &Contract) -> Result<(), CliError> {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    crate::output::stdoutln!("schema_version: {}", doc.schema_version);
-    crate::output::stdoutln!("status:         {}", doc.status.as_str());
-    crate::output::stdoutln!("maturity:       {}", doc.maturity.as_str());
-    crate::output::stdoutln!("ecosystems:     {ecos}");
-    crate::output::stdoutln!("targets:        {}", doc.targets.len());
-    crate::output::stdoutln!("versioning:     {}", doc.versioning.as_str());
-    crate::output::stdoutln!("license:        {}", doc.license);
+    crate::output::stdoutln!("schema_version: {}", doc.schema_version)?;
+    crate::output::stdoutln!("status:         {}", doc.status.as_str())?;
+    crate::output::stdoutln!("maturity:       {}", doc.maturity.as_str())?;
+    crate::output::stdoutln!("ecosystems:     {ecos}")?;
+    crate::output::stdoutln!("targets:        {}", doc.targets.len())?;
+    crate::output::stdoutln!("versioning:     {}", doc.versioning.as_str())?;
+    crate::output::stdoutln!("license:        {}", doc.license)?;
     for w in &doc.warnings {
-        crate::output::stdoutln!("warning:        {w}");
+        crate::output::stdoutln!("warning:        {w}")?;
     }
     Ok(())
 }

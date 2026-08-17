@@ -157,9 +157,9 @@ fn render_text(report: &DoctorReport) -> Result<(), CliError> {
             Status::Warn => "WARN",
             Status::Fail => "FAIL",
         };
-        crate::output::stdoutln!("{tag:<4} {}  {}", c.id, c.message);
+        crate::output::stdoutln!("{tag:<4} {}  {}", c.id, c.message)?;
         if let Some(fix) = &c.fix_suggestion {
-            crate::output::stdoutln!("       fix: {fix}");
+            crate::output::stdoutln!("       fix: {fix}")?;
         }
     }
     crate::output::stdoutln!(
@@ -167,6 +167,6 @@ fn render_text(report: &DoctorReport) -> Result<(), CliError> {
         report.summary.ok,
         report.summary.warn,
         report.summary.fail
-    );
+    )?;
     Ok(())
 }

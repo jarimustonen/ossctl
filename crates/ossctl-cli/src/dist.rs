@@ -318,19 +318,19 @@ fn run_dist_generate(runner: &dyn CommandRunner, root: &Path) -> Result<(), CliE
 }
 
 fn render_text(report: &DistReport, warnings: &[String]) -> Result<(), CliError> {
-    crate::output::stdoutln!("wrote:              {}", report.dist_config);
+    crate::output::stdoutln!("wrote:              {}", report.dist_config)?;
     match report.workflow {
-        Some(w) => crate::output::stdoutln!("generated:          {w}"),
-        None => crate::output::stdoutln!("generated:          (skipped — --no-workflow)"),
+        Some(w) => crate::output::stdoutln!("generated:          {w}")?,
+        None => crate::output::stdoutln!("generated:          (skipped — --no-workflow)")?,
     }
-    crate::output::stdoutln!("cargo-dist-version: {}", report.cargo_dist_version);
-    crate::output::stdoutln!("installers:         {}", report.installers.join(", "));
-    crate::output::stdoutln!("targets:            {}", report.targets.len());
+    crate::output::stdoutln!("cargo-dist-version: {}", report.cargo_dist_version)?;
+    crate::output::stdoutln!("installers:         {}", report.installers.join(", "))?;
+    crate::output::stdoutln!("targets:            {}", report.targets.len())?;
     for t in &report.targets {
-        crate::output::stdoutln!("  {t}");
+        crate::output::stdoutln!("  {t}")?;
     }
     for w in warnings {
-        crate::output::stdoutln!("warning:            {w}");
+        crate::output::stdoutln!("warning:            {w}")?;
     }
     Ok(())
 }

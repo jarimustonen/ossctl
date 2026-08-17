@@ -1,3 +1,5 @@
+#![deny(clippy::print_stdout)]
+
 //! `ossctl` binary entry point.
 //!
 //! A thin clap + I/O shell over `ossctl-core`. All deterministic logic lives in

@@ -66,7 +66,7 @@ pub fn write_stdout(args: fmt::Arguments<'_>) -> Result<(), CliError> {
 }
 
 fn write_to(writer: &mut dyn Write, args: fmt::Arguments<'_>) -> Result<(), CliError> {
-    match writer.write_fmt(args) {
+    match writer.write_fmt(args).and_then(|()| writer.flush()) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
         Err(error) => Err(CliError::system(
@@ -78,16 +78,16 @@ fn write_to(writer: &mut dyn Write, args: fmt::Arguments<'_>) -> Result<(), CliE
 
 macro_rules! stdout {
     ($($arg:tt)*) => {{
-        $crate::output::write_stdout(format_args!($($arg)*))?
+        $crate::output::write_stdout(format_args!($($arg)*))
     }};
 }
 
 macro_rules! stdoutln {
     () => {{
-        $crate::output::write_stdout(format_args!("\n"))?
+        $crate::output::write_stdout(format_args!("\n"))
     }};
     ($($arg:tt)*) => {{
-        $crate::output::write_stdout(format_args!("{}\n", format_args!($($arg)*)))?
+        $crate::output::write_stdout(format_args!("{}\n", format_args!($($arg)*)))
     }};
 }
 
@@ -143,31 +143,30 @@ mod tests {
         assert!(error.message.starts_with("failed to write stdout: "));
     }
 
-    #[test]
-    fn command_sources_do_not_bypass_fallible_stdout_writer() {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        for entry in std::fs::read_dir(src).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("rs") {
-                continue;
-            }
-            let source = std::fs::read_to_string(&path).unwrap();
-            for line in source.lines() {
-                let code = line.split("//").next().unwrap_or_default();
-                for forbidden in [concat!("pri", "nt!("), concat!("print", "ln!(")] {
-                    for (index, _) in code.match_indices(forbidden) {
-                        let is_part_of_identifier = code[..index]
-                            .chars()
-                            .next_back()
-                            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
-                        assert!(
-                            is_part_of_identifier,
-                            "{} bypasses output::write_stdout: {code}",
-                            path.display()
-                        );
-                    }
-                }
-            }
+    struct FlushFailingWriter(io::ErrorKind);
+
+    impl Write for FlushFailingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
         }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::from(self.0))
+        }
+    }
+
+    #[test]
+    fn deferred_broken_pipe_is_success() {
+        let mut writer = FlushFailingWriter(io::ErrorKind::BrokenPipe);
+        assert!(write_to(&mut writer, format_args!("payload")).is_ok());
+    }
+
+    #[test]
+    fn deferred_non_broken_pipe_is_structured_system_error() {
+        let mut writer = FlushFailingWriter(io::ErrorKind::PermissionDenied);
+        let error = write_to(&mut writer, format_args!("payload")).unwrap_err();
+
+        assert!(matches!(error.kind, crate::error::ExitKind::System));
+        assert_eq!(error.code, "io_stdout");
     }
 }
