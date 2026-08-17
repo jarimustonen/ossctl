@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-17
+
 ### Added
 - **CLI help is now machine-readable.** `ossctl --help --json` and nested command help
   emit the canonical success envelope with clap-derived subcommands, flags, positional
