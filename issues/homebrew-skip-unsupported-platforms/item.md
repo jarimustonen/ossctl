@@ -2,11 +2,15 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: bug
-status: in-progress
+status: fixed
 priority: high
 related: ['@homebrew-formula-uninstallable']
 lane: release-safety
 lane_seq: 0
+commits:
+- hash: 114f613
+  summary: 'fix(homebrew): skip unsupported distribution platforms'
+closed: 2026-08-17
 ---
 
 # Homebrew formula renderer fails on non-Homebrew platforms instead of skipping them
