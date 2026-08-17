@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the same workspace is refused by `release cut`, because publish-all runs before
   the tag that triggers CI and that wait can never be satisfied.
 
+### Fixed
+- **Closed stdout pipes no longer panic the CLI.** Text and JSON output now share a
+  fallible writer: a downstream reader closing early exits quietly with success, while
+  other stdout failures use the canonical system-error envelope (`cli-panics-broken`).
+
 ## [0.8.0] - 2026-08-17
 
 ### Fixed

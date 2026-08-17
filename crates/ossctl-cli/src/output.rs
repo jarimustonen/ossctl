@@ -15,6 +15,9 @@
 //! a release-engine concern and is added when the long-running `release`
 //! commands land — the scaffold has no long-running command to stream.
 
+use std::fmt;
+use std::io::{self, Write};
+
 use serde::Serialize;
 
 use ossctl_core::SCHEMA_VERSION;
@@ -51,7 +54,47 @@ struct SuccessEnvelope<'a, T: Serialize> {
     warnings: &'a [String],
 }
 
-/// Serialize `body` inside the canonical success envelope and print it to
+/// Write formatted success output to stdout without panicking.
+///
+/// A closed downstream pipe is conventional pipeline completion, so it is
+/// treated as success and emitted nowhere. Other write failures are system I/O
+/// errors and flow through the CLI's canonical error envelope.
+pub fn write_stdout(args: fmt::Arguments<'_>) -> Result<(), CliError> {
+    let stdout = io::stdout();
+    let mut lock = stdout.lock();
+    write_to(&mut lock, args)
+}
+
+fn write_to(writer: &mut dyn Write, args: fmt::Arguments<'_>) -> Result<(), CliError> {
+    match writer.write_fmt(args) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(CliError::system(
+            "io_stdout",
+            format!("failed to write stdout: {error}"),
+        )),
+    }
+}
+
+macro_rules! stdout {
+    ($($arg:tt)*) => {{
+        $crate::output::write_stdout(format_args!($($arg)*))?
+    }};
+}
+
+macro_rules! stdoutln {
+    () => {{
+        $crate::output::write_stdout(format_args!("\n"))?
+    }};
+    ($($arg:tt)*) => {{
+        $crate::output::write_stdout(format_args!("{}\n", format_args!($($arg)*)))?
+    }};
+}
+
+pub(crate) use stdout;
+pub(crate) use stdoutln;
+
+/// Serialize `body` inside the canonical success envelope and write it to
 /// stdout as a single pretty JSON document followed by a newline.
 ///
 /// Only the JSON branch routes here; text rendering is each subcommand's own
@@ -65,6 +108,66 @@ pub fn emit_json<T: Serialize>(body: &T, warnings: &[String]) -> Result<(), CliE
     let mut s = serde_json::to_string_pretty(&envelope)
         .map_err(|e| CliError::system("internal_serialize", e.to_string()))?;
     s.push('\n');
-    print!("{s}");
-    Ok(())
+    write_stdout(format_args!("{s}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FailingWriter(io::ErrorKind);
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(self.0))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn broken_pipe_is_success() {
+        let mut writer = FailingWriter(io::ErrorKind::BrokenPipe);
+        assert!(write_to(&mut writer, format_args!("payload")).is_ok());
+    }
+
+    #[test]
+    fn other_stdout_failure_is_structured_system_error() {
+        let mut writer = FailingWriter(io::ErrorKind::PermissionDenied);
+        let error = write_to(&mut writer, format_args!("payload")).unwrap_err();
+
+        assert!(matches!(error.kind, crate::error::ExitKind::System));
+        assert_eq!(error.code, "io_stdout");
+        assert!(error.message.starts_with("failed to write stdout: "));
+    }
+
+    #[test]
+    fn command_sources_do_not_bypass_fallible_stdout_writer() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for entry in std::fs::read_dir(src).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for line in source.lines() {
+                let code = line.split("//").next().unwrap_or_default();
+                for forbidden in [concat!("pri", "nt!("), concat!("print", "ln!(")] {
+                    for (index, _) in code.match_indices(forbidden) {
+                        let is_part_of_identifier = code[..index]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+                        assert!(
+                            is_part_of_identifier,
+                            "{} bypasses output::write_stdout: {code}",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

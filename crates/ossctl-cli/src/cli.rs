@@ -326,14 +326,14 @@ fn cmd_version(format: OutputFormat) -> Result<(), CliError> {
     match format {
         OutputFormat::Json => crate::output::emit_json(&payload, &[])?,
         OutputFormat::Text => {
-            println!("ossctl {}", payload.version);
-            println!("commit:            {}", payload.commit);
-            println!("schema version:    {}", payload.schema_version);
-            println!(
+            crate::output::stdoutln!("ossctl {}", payload.version);
+            crate::output::stdoutln!("commit:            {}", payload.commit);
+            crate::output::stdoutln!("schema version:    {}", payload.schema_version);
+            crate::output::stdoutln!(
                 "supported schemas: {}",
                 format_u32_list(payload.supported_schemas)
             );
-            println!("bundled skills:    {}", payload.skills.len());
+            crate::output::stdoutln!("bundled skills:    {}", payload.skills.len());
         }
     }
     Ok(())

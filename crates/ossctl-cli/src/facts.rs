@@ -52,7 +52,7 @@ pub fn run(args: &FactsArgs, format: OutputFormat) -> Result<(), CliError> {
 
     match format {
         OutputFormat::Json => crate::output::emit_json(&facts, &[])?,
-        OutputFormat::Text => render_facts_text(&facts),
+        OutputFormat::Text => render_facts_text(&facts)?,
     }
     Ok(())
 }
@@ -65,7 +65,7 @@ fn resolve_repo_root(flag: Option<&PathBuf>) -> Result<PathBuf, CliError> {
     }
 }
 
-fn render_facts_text(f: &Facts) {
+fn render_facts_text(f: &Facts) -> Result<(), CliError> {
     let ecos = if f.ecosystems.is_empty() {
         "[]".to_string()
     } else {
@@ -75,32 +75,35 @@ fn render_facts_text(f: &Facts) {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    println!("repo_root:         {}", f.repo_root);
-    println!("is_git:            {}", f.is_git);
-    println!("has_commits:       {}", f.has_commits);
-    println!("ecosystems:        {ecos}");
-    println!("packages:          {}", f.packages.len());
-    println!("has_ci:            {}", f.has_ci);
-    println!("tags:              {}", f.tags.len());
-    println!("has_semver_tag:    {}", f.has_semver_tag);
-    println!("has_ge_1_0:        {}", f.has_ge_1_0_release);
-    println!(
+    crate::output::stdoutln!("repo_root:         {}", f.repo_root);
+    crate::output::stdoutln!("is_git:            {}", f.is_git);
+    crate::output::stdoutln!("has_commits:       {}", f.has_commits);
+    crate::output::stdoutln!("ecosystems:        {ecos}");
+    crate::output::stdoutln!("packages:          {}", f.packages.len());
+    crate::output::stdoutln!("has_ci:            {}", f.has_ci);
+    crate::output::stdoutln!("tags:              {}", f.tags.len());
+    crate::output::stdoutln!("has_semver_tag:    {}", f.has_semver_tag);
+    crate::output::stdoutln!("has_ge_1_0:        {}", f.has_ge_1_0_release);
+    crate::output::stdoutln!(
         "committers:        {} total, {} recent-year",
-        f.committers_total, f.committers_recent_year
+        f.committers_total,
+        f.committers_recent_year
     );
     if let Some(bot) = &f.dependency_bot {
-        println!("dependency_bot:    {bot}");
+        crate::output::stdoutln!("dependency_bot:    {bot}");
     }
     if let Some(label) = &f.readme_self_label {
-        println!("readme_self_label: {label}");
+        crate::output::stdoutln!("readme_self_label: {label}");
     }
     if let Some(desc) = &f.description {
-        println!("description:       {desc}");
+        crate::output::stdoutln!("description:       {desc}");
     }
     // Surface the raw signals so a human can see what drives the maturity call.
-    println!(
+    crate::output::stdoutln!(
         "maturity_signals:  production={}, spike={}",
-        f.maturity_signals.production, f.maturity_signals.spike
+        f.maturity_signals.production,
+        f.maturity_signals.spike
     );
-    println!("inferred_maturity: {}", f.inferred_maturity.as_str());
+    crate::output::stdoutln!("inferred_maturity: {}", f.inferred_maturity.as_str());
+    Ok(())
 }

@@ -53,10 +53,13 @@ fn path(args: &ConfigArgs, format: OutputFormat) -> Result<(), CliError> {
     match format {
         OutputFormat::Json => crate::output::emit_json(&report, &[])?,
         OutputFormat::Text => {
-            println!("contract_path: {}", report.contract_path.value);
+            crate::output::stdoutln!("contract_path: {}", report.contract_path.value);
             match &report.journal_dir.value {
-                Some(path) => println!("journal_dir: {path}"),
-                None => println!("journal_dir: unavailable ({})", report.journal_dir.detail),
+                Some(path) => crate::output::stdoutln!("journal_dir: {path}"),
+                None => crate::output::stdoutln!(
+                    "journal_dir: unavailable ({})",
+                    report.journal_dir.detail
+                ),
             }
         }
     }
@@ -69,24 +72,27 @@ fn show(args: &ConfigArgs, format: OutputFormat) -> Result<(), CliError> {
     match format {
         OutputFormat::Json => crate::output::emit_json(&report, &[])?,
         OutputFormat::Text => {
-            println!("contract_path: {}", report.contract_path.value);
-            println!("  source: {}", report.contract_path.source);
-            println!("  detail: {}", report.contract_path.detail);
-            println!("  lossy: {}", report.contract_path.lossy);
+            crate::output::stdoutln!("contract_path: {}", report.contract_path.value);
+            crate::output::stdoutln!("  source: {}", report.contract_path.source);
+            crate::output::stdoutln!("  detail: {}", report.contract_path.detail);
+            crate::output::stdoutln!("  lossy: {}", report.contract_path.lossy);
             match &report.journal_dir.value {
-                Some(path) => println!("journal_dir: {path}"),
-                None => println!("journal_dir: unavailable"),
+                Some(path) => crate::output::stdoutln!("journal_dir: {path}"),
+                None => crate::output::stdoutln!("journal_dir: unavailable"),
             }
-            println!("  source: {}", report.journal_dir.source);
-            println!("  detail: {}", report.journal_dir.detail);
-            println!("  lossy: {}", report.journal_dir.lossy);
+            crate::output::stdoutln!("  source: {}", report.journal_dir.source);
+            crate::output::stdoutln!("  detail: {}", report.journal_dir.detail);
+            crate::output::stdoutln!("  lossy: {}", report.journal_dir.lossy);
             if report.git_environment.is_empty() {
-                println!("git_environment: none");
+                crate::output::stdoutln!("git_environment: none");
             } else {
                 for value in &report.git_environment {
-                    println!(
+                    crate::output::stdoutln!(
                         "git_environment.{}: {} ({}, lossy={})",
-                        value.key, value.value, value.source, value.lossy
+                        value.key,
+                        value.value,
+                        value.source,
+                        value.lossy
                     );
                 }
             }

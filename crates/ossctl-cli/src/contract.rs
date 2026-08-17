@@ -59,7 +59,7 @@ pub fn show(args: &ShowArgs, format: OutputFormat) -> Result<(), CliError> {
     let doc = &normalized.contract;
     match format {
         OutputFormat::Json => crate::output::emit_json(doc, &doc.warnings)?,
-        OutputFormat::Text => render_show_text(doc),
+        OutputFormat::Text => render_show_text(doc)?,
     }
     Ok(())
 }
@@ -88,7 +88,7 @@ pub fn validate(args: &ValidateArgs, format: OutputFormat) -> Result<(), CliErro
             crate::output::emit_json(&body, &doc.warnings)?;
         }
         OutputFormat::Text => {
-            println!(
+            crate::output::stdoutln!(
                 "OK: {} normalizes cleanly (status={}, maturity={}, targets={})",
                 contract::CONTRACT_FILENAME,
                 doc.status.as_str(),
@@ -96,7 +96,7 @@ pub fn validate(args: &ValidateArgs, format: OutputFormat) -> Result<(), CliErro
                 doc.targets.len()
             );
             for warning in &doc.warnings {
-                println!("warning: {warning}");
+                crate::output::stdoutln!("warning: {warning}");
             }
         }
     }
@@ -159,7 +159,7 @@ fn require_approved(doc: &Contract) -> Result<(), CliError> {
     .with_invalid_value(doc.status.as_str()))
 }
 
-fn render_show_text(doc: &Contract) {
+fn render_show_text(doc: &Contract) -> Result<(), CliError> {
     let ecos = if doc.ecosystems.is_empty() {
         "[]".to_string()
     } else {
@@ -169,14 +169,15 @@ fn render_show_text(doc: &Contract) {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    println!("schema_version: {}", doc.schema_version);
-    println!("status:         {}", doc.status.as_str());
-    println!("maturity:       {}", doc.maturity.as_str());
-    println!("ecosystems:     {ecos}");
-    println!("targets:        {}", doc.targets.len());
-    println!("versioning:     {}", doc.versioning.as_str());
-    println!("license:        {}", doc.license);
+    crate::output::stdoutln!("schema_version: {}", doc.schema_version);
+    crate::output::stdoutln!("status:         {}", doc.status.as_str());
+    crate::output::stdoutln!("maturity:       {}", doc.maturity.as_str());
+    crate::output::stdoutln!("ecosystems:     {ecos}");
+    crate::output::stdoutln!("targets:        {}", doc.targets.len());
+    crate::output::stdoutln!("versioning:     {}", doc.versioning.as_str());
+    crate::output::stdoutln!("license:        {}", doc.license);
     for w in &doc.warnings {
-        println!("warning:        {w}");
+        crate::output::stdoutln!("warning:        {w}");
     }
+    Ok(())
 }

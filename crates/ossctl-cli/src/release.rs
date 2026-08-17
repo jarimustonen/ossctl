@@ -404,7 +404,7 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
 
     match format {
         OutputFormat::Json => crate::output::emit_json(&plan, &warnings)?,
-        OutputFormat::Text => render_plan_text(&plan, &warnings),
+        OutputFormat::Text => render_plan_text(&plan, &warnings)?,
     }
     Ok(())
 }
@@ -493,7 +493,7 @@ pub fn verify(args: &RunIdArgs, format: OutputFormat) -> Result<(), CliError> {
 
     match format {
         OutputFormat::Json => crate::output::emit_json(&report, &warnings)?,
-        OutputFormat::Text => render_reconcile_text(&report, &warnings),
+        OutputFormat::Text => render_reconcile_text(&report, &warnings)?,
     }
     Ok(())
 }
@@ -557,21 +557,25 @@ fn reconcile_warnings(
     warnings
 }
 
-fn render_reconcile_text(report: &ReconcileReport, warnings: &[String]) {
-    println!("run_id:     {}", report.run_id);
-    println!("plan_id:    {}", report.plan_id);
-    println!(
+fn render_reconcile_text(report: &ReconcileReport, warnings: &[String]) -> Result<(), CliError> {
+    crate::output::stdoutln!("run_id:     {}", report.run_id);
+    crate::output::stdoutln!("plan_id:    {}", report.plan_id);
+    crate::output::stdoutln!(
         "status:     {} (journal seq {})",
         report.run_status.as_str(),
         report.journal_seq
     );
     let s = &report.summary;
-    println!(
+    crate::output::stdoutln!(
         "reconciled: {} ({} matches, {} conflicts, {} missing, {} unknown)",
-        s.reconciled, s.matches, s.conflicts, s.missing, s.unknown
+        s.reconciled,
+        s.matches,
+        s.conflicts,
+        s.missing,
+        s.unknown
     );
     for t in &report.targets {
-        println!(
+        crate::output::stdoutln!(
             "  {:<10} {:<8} {:<20} {}",
             t.target,
             t.ecosystem,
@@ -579,12 +583,13 @@ fn render_reconcile_text(report: &ReconcileReport, warnings: &[String]) {
             t.outcome.as_str(),
         );
         if let Some(detail) = &t.detail {
-            println!("             └─ {detail}");
+            crate::output::stdoutln!("             └─ {detail}");
         }
     }
     for w in warnings {
-        println!("warning:    {w}");
+        crate::output::stdoutln!("warning:    {w}");
     }
+    Ok(())
 }
 
 /// The most-recent journal events `release show` returns as the §12 "recent
@@ -659,7 +664,7 @@ pub fn show(args: &RunIdArgs, format: OutputFormat) -> Result<(), CliError> {
             };
             crate::output::emit_json(&snapshot, &show_warnings(&state))?;
         }
-        OutputFormat::Text => render_show_text(&state, window),
+        OutputFormat::Text => render_show_text(&state, window)?,
     }
     Ok(())
 }
@@ -696,24 +701,27 @@ fn show_warnings(state: &RunState) -> Vec<String> {
 /// Render a run's state as a human progress summary (text mode) — identity,
 /// status, phase progress, per-target landing state, tags, then the event window.
 /// Works for a live or a terminal run; the status line says which.
-fn render_show_text(state: &RunState, events: &[JournalEvent]) {
-    println!("run_id:     {}", state.run_id);
-    println!("plan_id:    {}", state.plan_id);
-    println!("version:    {}", state.version);
+fn render_show_text(state: &RunState, events: &[JournalEvent]) -> Result<(), CliError> {
+    crate::output::stdoutln!("run_id:     {}", state.run_id);
+    crate::output::stdoutln!("plan_id:    {}", state.plan_id);
+    crate::output::stdoutln!("version:    {}", state.version);
     match state.status {
         RunStatus::Abandoned => match &state.abandon_reason {
-            Some(reason) => println!(
+            Some(reason) => crate::output::stdoutln!(
                 "status:     abandoned ({reason}) (journal seq {})",
                 state.applied_seq
             ),
-            None => println!("status:     abandoned (journal seq {})", state.applied_seq),
+            None => crate::output::stdoutln!(
+                "status:     abandoned (journal seq {})",
+                state.applied_seq
+            ),
         },
         status => {
             let phase = state
                 .current_phase
                 .map(|p| format!(" — in {}", p.as_str()))
                 .unwrap_or_default();
-            println!(
+            crate::output::stdoutln!(
                 "status:     {}{phase} (journal seq {})",
                 status.as_str(),
                 state.applied_seq
@@ -721,7 +729,7 @@ fn render_show_text(state: &RunState, events: &[JournalEvent]) {
         }
     }
 
-    println!("targets:    {}", state.targets.len());
+    crate::output::stdoutln!("targets:    {}", state.targets.len());
     for target in &state.targets {
         let landing = if let Some(receipt) = state.published.get(target) {
             format!("published @{}", receipt.version)
@@ -734,7 +742,7 @@ fn render_show_text(state: &RunState, events: &[JournalEvent]) {
         } else {
             "pending".to_string()
         };
-        println!("  {target:<10} {landing}");
+        crate::output::stdoutln!("  {target:<10} {landing}");
     }
 
     for (tag, tstate) in &state.tags {
@@ -751,13 +759,14 @@ fn render_show_text(state: &RunState, events: &[JournalEvent]) {
         if tstate.github_release_delegated {
             steps.push("release→CI");
         }
-        println!("tag {tag}: {}", steps.join(", "));
+        crate::output::stdoutln!("tag {tag}: {}", steps.join(", "));
     }
 
-    println!("events:     {}", events.len());
+    crate::output::stdoutln!("events:     {}", events.len());
     for event in events {
-        println!("  {}", render_event_line(event));
+        crate::output::stdoutln!("  {}", render_event_line(event));
     }
+    Ok(())
 }
 
 /// One run's summary row in `release list` — enough for the `/oss-release`
@@ -898,24 +907,24 @@ pub fn list(args: &ListArgs, format: OutputFormat) -> Result<(), CliError> {
 
     match format {
         OutputFormat::Json => crate::output::emit_json(&body, &warnings)?,
-        OutputFormat::Text => render_list_text(&body, &warnings),
+        OutputFormat::Text => render_list_text(&body, &warnings)?,
     }
     Ok(())
 }
 
 /// Render the run list as a human table (text mode).
-fn render_list_text(body: &RunListBody, warnings: &[String]) {
+fn render_list_text(body: &RunListBody, warnings: &[String]) -> Result<(), CliError> {
     if body.runs.is_empty() && body.unreadable.is_empty() {
-        println!("no release runs found");
+        crate::output::stdoutln!("no release runs found");
     } else if !body.runs.is_empty() {
-        println!(
+        crate::output::stdoutln!(
             "{} run(s), {} in flight",
             body.runs.len(),
             body.in_flight_count
         );
         for r in &body.runs {
             let flight = if r.in_flight { " *" } else { "  " };
-            println!(
+            crate::output::stdoutln!(
                 "{flight} {:<28} {:<12} {:<10} plan {}",
                 r.run_id,
                 r.status,
@@ -923,20 +932,21 @@ fn render_list_text(body: &RunListBody, warnings: &[String]) {
                 short_sha(&r.plan_id),
             );
             if let Some(reason) = &r.abandon_reason {
-                println!("     └─ abandoned: {reason}");
+                crate::output::stdoutln!("     └─ abandoned: {reason}");
             }
         }
     }
     if !body.unreadable.is_empty() {
-        println!(
+        crate::output::stdoutln!(
             "unreadable ({}): {} — status unknown, may be active",
             body.unreadable.len(),
             body.unreadable.join(", ")
         );
     }
     for w in warnings {
-        println!("warning: {w}");
+        crate::output::stdoutln!("warning: {w}");
     }
+    Ok(())
 }
 
 /// The generic reason recorded when `release abandon` is run without `--reason`.
@@ -1076,7 +1086,7 @@ pub fn abandon(args: &AbandonArgs, format: OutputFormat) -> Result<(), CliError>
 
     match format {
         OutputFormat::Json => crate::output::emit_json(&report, &warnings)?,
-        OutputFormat::Text => render_abandon_text(&report, &warnings),
+        OutputFormat::Text => render_abandon_text(&report, &warnings)?,
     }
     Ok(())
 }
@@ -1185,22 +1195,23 @@ fn abandon_lock_not_broken_error(run_id: &str, reason: impl AsRef<str>) -> CliEr
 }
 
 /// Render the abandonment outcome as human lines (text mode).
-fn render_abandon_text(report: &AbandonReport, warnings: &[String]) {
-    println!("run {} abandoned", report.run_id);
-    println!("version: {}", report.version);
-    println!("reason:  {}", report.reason);
+fn render_abandon_text(report: &AbandonReport, warnings: &[String]) -> Result<(), CliError> {
+    crate::output::stdoutln!("run {} abandoned", report.run_id);
+    crate::output::stdoutln!("version: {}", report.version);
+    crate::output::stdoutln!("reason:  {}", report.reason);
     if report.published_targets.is_empty() {
-        println!("published: none (nothing had landed)");
+        crate::output::stdoutln!("published: none (nothing had landed)");
     } else {
-        println!(
+        crate::output::stdoutln!(
             "published (still live): {}",
             report.published_targets.join(", ")
         );
     }
-    println!("note: {}", report.note);
+    crate::output::stdoutln!("note: {}", report.note);
     for w in warnings {
-        println!("warning: {w}");
+        crate::output::stdoutln!("warning: {w}");
     }
+    Ok(())
 }
 
 /// Resolve the release-journal paths for a pure journal operation
@@ -1313,7 +1324,7 @@ pub fn resume(args: &ResumeArgs, format: OutputFormat) -> Result<(), CliError> {
     match journal.state().status {
         RunStatus::Completed => {
             if !matches!(format, OutputFormat::Json) {
-                println!(
+                crate::output::stdoutln!(
                     "run {} is already complete — nothing to resume",
                     args.run_id
                 );
@@ -1386,7 +1397,7 @@ pub fn resume(args: &ResumeArgs, format: OutputFormat) -> Result<(), CliError> {
     match coordinator::execute(&mut journal, &plan, &ctx, &tagger, &mut sink) {
         Ok(()) => {
             if !matches!(format, OutputFormat::Json) {
-                render_cut_success(&args.run_id, &plan);
+                render_cut_success(&args.run_id, &plan)?;
             }
             Ok(())
         }
@@ -1757,7 +1768,7 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     match coordinator::execute(&mut journal, &current, &ctx, &tagger, &mut sink) {
         Ok(()) => {
             if !matches!(format, OutputFormat::Json) {
-                render_cut_success(&run_id, &current);
+                render_cut_success(&run_id, &current)?;
             }
             Ok(())
         }
@@ -2206,12 +2217,13 @@ fn render_event_line(event: &JournalEvent) -> String {
 }
 
 /// Text summary printed after a successful cut (json mode's summary is the stream).
-fn render_cut_success(run_id: &str, plan: &ReleasePlan) {
-    println!();
-    println!("release complete — run {run_id}");
-    println!("version: {}", plan.version);
-    println!("tag:     v{}", plan.version);
-    println!("published {} target(s)", plan.targets.len());
+fn render_cut_success(run_id: &str, plan: &ReleasePlan) -> Result<(), CliError> {
+    crate::output::stdoutln!();
+    crate::output::stdoutln!("release complete — run {run_id}");
+    crate::output::stdoutln!("version: {}", plan.version);
+    crate::output::stdoutln!("tag:     v{}", plan.version);
+    crate::output::stdoutln!("published {} target(s)", plan.targets.len());
+    Ok(())
 }
 
 /// Short (first 12 hex chars) `HEAD` sha for the drift message.
@@ -2436,35 +2448,38 @@ fn invalid_contract_error(normalized: &Normalized) -> CliError {
     CliError::user("invalid_contract", message).with_problems(problems.clone())
 }
 
-fn render_plan_text(plan: &ReleasePlan, warnings: &[String]) {
-    println!("plan_id:    {}", plan.plan_id);
-    println!("head:       {}", plan.head_sha);
-    println!("version:    {}", plan.version);
+fn render_plan_text(plan: &ReleasePlan, warnings: &[String]) -> Result<(), CliError> {
+    crate::output::stdoutln!("plan_id:    {}", plan.plan_id);
+    crate::output::stdoutln!("head:       {}", plan.head_sha);
+    crate::output::stdoutln!("version:    {}", plan.version);
     if let Some(bump) = &plan.bump {
-        println!(
+        crate::output::stdoutln!(
             "bump:       {} ({} → {})",
             bump.level.as_str(),
             bump.from_version,
             bump.to_version
         );
         for r in &bump.pin_rewrites {
-            println!(
+            crate::output::stdoutln!(
                 "  pin:      {} depends on {} : {} → {}",
-                r.in_package, r.dependency, r.from, r.to
+                r.in_package,
+                r.dependency,
+                r.from,
+                r.to
             );
         }
         if bump.changelog_finalize {
-            println!("  changelog: finalize [Unreleased] → [{}]", bump.to_version);
+            crate::output::stdoutln!("  changelog: finalize [Unreleased] → [{}]", bump.to_version);
         }
         if let Some(hook) = &bump.bump_hook {
             // Quoted (Debug) so a hook value carrying newlines/control chars cannot spoof
             // the surrounding plan output the approver reads.
-            println!("  bump_hook: {hook:?}");
+            crate::output::stdoutln!("  bump_hook: {hook:?}");
         }
     }
-    println!("targets:    {}", plan.targets.len());
+    crate::output::stdoutln!("targets:    {}", plan.targets.len());
     for t in &plan.targets {
-        println!(
+        crate::output::stdoutln!(
             "  {:<8} {:<12} {:<20} (package: {})",
             t.ecosystem.as_str(),
             t.registry.as_str(),
@@ -2478,13 +2493,14 @@ fn render_plan_text(plan: &ReleasePlan, warnings: &[String]) {
         .map(|p| p.as_str())
         .collect::<Vec<_>>()
         .join(" → ");
-    println!("phases:     {phases}");
+    crate::output::stdoutln!("phases:     {phases}");
     for w in warnings {
-        println!("warning:    {w}");
+        crate::output::stdoutln!("warning:    {w}");
     }
-    println!();
-    println!("To execute this exact plan (refuses if the repo drifts):");
-    println!("  ossctl release cut --plan {}", plan.plan_id);
+    crate::output::stdoutln!();
+    crate::output::stdoutln!("To execute this exact plan (refuses if the repo drifts):");
+    crate::output::stdoutln!("  ossctl release cut --plan {}", plan.plan_id);
+    Ok(())
 }
 
 #[cfg(test)]

@@ -72,7 +72,7 @@ pub fn run(args: &AuditArgs, format: OutputFormat) -> Result<(), CliError> {
 
     match format {
         OutputFormat::Json => crate::output::emit_json(&report, &[])?,
-        OutputFormat::Text => render_audit_text(&report),
+        OutputFormat::Text => render_audit_text(&report)?,
     }
     Ok(())
 }
@@ -108,14 +108,14 @@ fn invalid_contract_error(normalized: &Normalized) -> CliError {
     CliError::user("invalid_contract", message).with_problems(problems.clone())
 }
 
-fn render_audit_text(report: &AuditReport) {
+fn render_audit_text(report: &AuditReport) -> Result<(), CliError> {
     let core = report.core_complete.as_str();
-    println!("repo_root:      {}", report.repo_root);
-    println!("maturity:       {}", report.maturity.as_str());
-    println!("gated core:     {core}");
-    println!("gaps:           {}", report.gaps.len());
+    crate::output::stdoutln!("repo_root:      {}", report.repo_root);
+    crate::output::stdoutln!("maturity:       {}", report.maturity.as_str());
+    crate::output::stdoutln!("gated core:     {core}");
+    crate::output::stdoutln!("gaps:           {}", report.gaps.len());
     for g in &report.gaps {
-        println!(
+        crate::output::stdoutln!(
             "  [{:>11}] {:<24} ({}, {}, {}) — {}",
             g.severity.as_str(),
             g.id,
@@ -127,11 +127,12 @@ fn render_audit_text(report: &AuditReport) {
     }
     let cp = &report.community_profile;
     if cp.checked {
-        println!("community:      GitHub community-profile checked");
+        crate::output::stdoutln!("community:      GitHub community-profile checked");
     } else {
-        println!(
+        crate::output::stdoutln!(
             "community:      not checked ({})",
             cp.unavailable_reason.as_deref().unwrap_or("unknown")
         );
     }
+    Ok(())
 }

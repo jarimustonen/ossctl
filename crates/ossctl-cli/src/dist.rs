@@ -194,7 +194,7 @@ pub fn generate(
     };
     match format {
         OutputFormat::Json => crate::output::emit_json(&report, &warnings)?,
-        OutputFormat::Text => render_text(&report, &warnings),
+        OutputFormat::Text => render_text(&report, &warnings)?,
     }
     Ok(())
 }
@@ -317,21 +317,22 @@ fn run_dist_generate(runner: &dyn CommandRunner, root: &Path) -> Result<(), CliE
     Ok(())
 }
 
-fn render_text(report: &DistReport, warnings: &[String]) {
-    println!("wrote:              {}", report.dist_config);
+fn render_text(report: &DistReport, warnings: &[String]) -> Result<(), CliError> {
+    crate::output::stdoutln!("wrote:              {}", report.dist_config);
     match report.workflow {
-        Some(w) => println!("generated:          {w}"),
-        None => println!("generated:          (skipped — --no-workflow)"),
+        Some(w) => crate::output::stdoutln!("generated:          {w}"),
+        None => crate::output::stdoutln!("generated:          (skipped — --no-workflow)"),
     }
-    println!("cargo-dist-version: {}", report.cargo_dist_version);
-    println!("installers:         {}", report.installers.join(", "));
-    println!("targets:            {}", report.targets.len());
+    crate::output::stdoutln!("cargo-dist-version: {}", report.cargo_dist_version);
+    crate::output::stdoutln!("installers:         {}", report.installers.join(", "));
+    crate::output::stdoutln!("targets:            {}", report.targets.len());
     for t in &report.targets {
-        println!("  {t}");
+        crate::output::stdoutln!("  {t}");
     }
     for w in warnings {
-        println!("warning:            {w}");
+        crate::output::stdoutln!("warning:            {w}");
     }
+    Ok(())
 }
 
 /// Resolve `--repo-root` (default cwd) and canonicalize it, mirroring the other

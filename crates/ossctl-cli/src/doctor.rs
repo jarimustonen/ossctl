@@ -94,7 +94,7 @@ fn run_inner(args: &DoctorArgs, format: OutputFormat) -> Result<ExitCode, CliErr
 
     match format {
         OutputFormat::Json => crate::output::emit_json(&report, &[])?,
-        OutputFormat::Text => render_text(&report),
+        OutputFormat::Text => render_text(&report)?,
     }
 
     // `--fix` has nothing to apply yet: the scaffold's checks carry no
@@ -150,20 +150,23 @@ fn summarize(checks: &[CheckResult]) -> Summary {
     s
 }
 
-fn render_text(report: &DoctorReport) {
+fn render_text(report: &DoctorReport) -> Result<(), CliError> {
     for c in &report.checks {
         let tag = match c.status {
             Status::Ok => "OK",
             Status::Warn => "WARN",
             Status::Fail => "FAIL",
         };
-        println!("{tag:<4} {}  {}", c.id, c.message);
+        crate::output::stdoutln!("{tag:<4} {}  {}", c.id, c.message);
         if let Some(fix) = &c.fix_suggestion {
-            println!("       fix: {fix}");
+            crate::output::stdoutln!("       fix: {fix}");
         }
     }
-    println!(
+    crate::output::stdoutln!(
         "summary: {} ok, {} warn, {} fail",
-        report.summary.ok, report.summary.warn, report.summary.fail
+        report.summary.ok,
+        report.summary.warn,
+        report.summary.fail
     );
+    Ok(())
 }
