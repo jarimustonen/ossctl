@@ -137,6 +137,32 @@ fn temp_workspace() -> TempDir {
     dir
 }
 
+/// A single-crate root manifest, with the same tracked lockfile and CHANGELOG surfaces
+/// as [`temp_workspace`].
+fn temp_single_crate() -> TempDir {
+    let dir = tempfile::Builder::new()
+        .prefix("ossctl-single-crate-bump-test-")
+        .tempdir()
+        .unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"acme\"\nversion = \"0.4.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("CHANGELOG.md"),
+        "# Changelog\n\n## [Unreleased]\n### Added\n- a feature\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("Cargo.lock"),
+        "# auto\n[[package]]\nname = \"acme\"\nversion = \"0.4.0\"\n",
+    )
+    .unwrap();
+    dir
+}
+
 fn bump_plan() -> BumpPlan {
     BumpPlan {
         level: BumpLevel::Minor,
@@ -206,6 +232,29 @@ fn applies_version_pin_changelog_and_commits() {
 }
 
 #[test]
+fn applies_version_lockfile_changelog_and_commits_for_a_single_crate() {
+    let dir = temp_single_crate();
+    let runner = FakeRunner::new("single123");
+    let (clock, reg) = (FakeClock, NoRegistry);
+    let ctx = ctx(&runner, &clock, &reg, dir.path());
+    let mut plan = bump_plan();
+    plan.pin_rewrites.clear();
+
+    let outcome = apply_bump(&ctx, &plan, "2026-08-13").unwrap();
+    assert_eq!(outcome.commit, "single123");
+
+    let manifest = std::fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+    assert!(manifest.contains("[package]\nname = \"acme\"\nversion = \"0.5.0\""));
+    let changelog = std::fs::read_to_string(dir.path().join("CHANGELOG.md")).unwrap();
+    assert!(changelog.contains("## [Unreleased]\n\n## [0.5.0] - 2026-08-13"));
+    let calls = runner.calls.borrow();
+    assert!(calls.iter().any(|c| c == "cargo update --workspace"));
+    assert!(calls
+        .iter()
+        .any(|c| c.starts_with("git commit -m release: v0.5.0")));
+}
+
+#[test]
 fn skips_the_lockfile_refresh_when_no_lockfile_is_tracked() {
     let dir = temp_workspace();
     std::fs::remove_file(dir.path().join("Cargo.lock")).unwrap();
@@ -248,6 +297,32 @@ fn fails_closed_on_a_missing_pin() {
         .borrow()
         .iter()
         .any(|c| c.starts_with("git commit")));
+}
+
+#[test]
+fn fails_closed_when_neither_root_version_shape_is_present() {
+    let dir = temp_single_crate();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"acme\"\n",
+    )
+    .unwrap();
+    let runner = FakeRunner::new("abc");
+    let (clock, reg) = (FakeClock, NoRegistry);
+    let ctx = ctx(&runner, &clock, &reg, dir.path());
+    let mut plan = bump_plan();
+    plan.pin_rewrites.clear();
+
+    let err = apply_bump(&ctx, &plan, "2026-08-13").unwrap_err();
+    assert!(matches!(
+        err,
+        BumpExecError::Edit(BumpEditError::RootManifestVersionNotFound)
+    ));
+    assert!(!runner
+        .calls
+        .borrow()
+        .iter()
+        .any(|call| call.starts_with("cargo update") || call.starts_with("git commit")));
 }
 
 #[test]

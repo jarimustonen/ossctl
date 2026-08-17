@@ -6,7 +6,8 @@
 //! (`release-cut-clean-checkout`), before the build barrier, so every later phase
 //! builds and publishes the bumped tree. It:
 //!
-//! 1. sets `[workspace.package] version` in the root manifest;
+//! 1. sets `[workspace.package] version`, or a plain root `[package] version` when the
+//!    workspace-inheritance source is absent;
 //! 2. rewrites each sealed intra-workspace `=`-pin (verifying the exact old value in the
 //!    tree — fail closed on zero/multiple, [`crate::release::bump::rewrite_pin`]);
 //! 3. refreshes `Cargo.lock` (`cargo update --workspace`);
@@ -77,7 +78,7 @@ pub struct BumpOutcome {
 /// **before** the build barrier — no publish or tag has happened.
 #[derive(Debug)]
 pub enum BumpExecError {
-    /// A pure edit transform refused (missing workspace version, a non-matching or
+    /// A pure edit transform refused (missing root manifest version, a non-matching or
     /// ambiguous pin, or an absent `## [Unreleased]` section).
     Edit(BumpEditError),
     /// A manifest/CHANGELOG file could not be read or written in the checkout.
@@ -103,7 +104,7 @@ pub enum BumpExecError {
         /// Captured stderr, trimmed.
         stderr: String,
     },
-    /// The `bump_hook` altered the workspace version away from the bumped value — a
+    /// The `bump_hook` altered the root release version away from the bumped value — a
     /// contract violation (the hook may regenerate derived artifacts, not re-version).
     HookViolatedVersion {
         /// The version the bump set.
@@ -137,7 +138,7 @@ impl std::fmt::Display for BumpExecError {
             }
             Self::HookViolatedVersion { expected, found } => write!(
                 f,
-                "the bump_hook changed the workspace version to `{found}`, but the bump set \
+                "the bump_hook changed the root manifest version to `{found}`, but the bump set \
                  `{expected}` — refusing to publish a hook-altered version"
             ),
             Self::Git(m) => write!(f, "git step failed during the bump: {m}"),
@@ -175,10 +176,16 @@ pub fn apply_bump(
 ) -> Result<BumpOutcome, BumpExecError> {
     let root = ctx.repo_root;
 
-    // 1. Set the workspace version in the root manifest (verified against `from_version`).
+    // 1. Set the root release version (verified against `from_version`). A workspace
+    //    package version is authoritative when present; only an absent workspace source
+    //    falls back to a plain single-crate `[package]` version.
     let root_manifest = root.join("Cargo.toml");
     let text = read(&root_manifest)?;
-    let bumped = bump::set_workspace_version(&text, &bump.from_version, &bump.to_version)?;
+    let bumped = if bump::workspace_version(&text).is_some() {
+        bump::set_workspace_version(&text, &bump.from_version, &bump.to_version)?
+    } else {
+        bump::set_package_version(&text, &bump.from_version, &bump.to_version)?
+    };
     write(&root_manifest, &bumped)?;
 
     // 2. Rewrite each sealed intra-workspace pin in its dependent crate's manifest,
@@ -223,7 +230,7 @@ pub fn apply_bump(
     if let Some(hook) = &bump.bump_hook {
         run_hook(ctx, hook)?;
         let after = read(&root_manifest)?;
-        let found = bump::workspace_version(&after);
+        let found = bump::root_manifest_version(&after);
         if found.as_deref() != Some(bump.to_version.as_str()) {
             return Err(BumpExecError::HookViolatedVersion {
                 expected: bump.to_version.clone(),

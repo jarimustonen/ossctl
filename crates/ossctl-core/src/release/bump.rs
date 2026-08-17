@@ -139,6 +139,9 @@ pub enum BumpEditError {
     /// The `[workspace.package]` section, or its `version = "…"` line, was not found —
     /// the workspace root manifest is not the shape the bump expects.
     WorkspaceVersionNotFound,
+    /// Neither the root `[workspace.package]` nor `[package]` table carried the
+    /// expected `version = "…"` line, so the engine cannot identify a version source.
+    RootManifestVersionNotFound,
     /// A pin rewrite found no line declaring `dependency` with the exact `from`
     /// requirement — the sealed pin does not match the tree, so the executor refuses
     /// rather than guess (fail closed on **zero** matches).
@@ -170,8 +173,13 @@ impl std::fmt::Display for BumpEditError {
         match self {
             Self::WorkspaceVersionNotFound => write!(
                 f,
-                "could not find a `[workspace.package]` `version = \"…\"` line to bump in the \
-                 workspace root manifest"
+                "could not find a `[workspace.package]` `version = \"…\"` line matching the \
+                 sealed bump in the workspace root manifest"
+            ),
+            Self::RootManifestVersionNotFound => write!(
+                f,
+                "could not find a root `[workspace.package]` or `[package]` `version = \"…\"` \
+                 line matching the sealed bump"
             ),
             Self::PinNotFound { dependency, from } => write!(
                 f,
@@ -199,14 +207,33 @@ impl std::fmt::Display for BumpEditError {
 impl std::error::Error for BumpEditError {}
 
 /// The `[workspace.package]` `version = "…"` value, or `None` when the section or its
-/// `version` line is absent — the post-hook validation read (`bump_exec`).
+/// `version` line is absent.
 #[must_use]
 pub fn workspace_version(manifest: &str) -> Option<String> {
+    section_version(manifest, "workspace.package")
+}
+
+/// The root `[package]` `version = "…"` value, or `None` when the table or its version
+/// line is absent.
+#[must_use]
+pub fn package_version(manifest: &str) -> Option<String> {
+    section_version(manifest, "package")
+}
+
+/// The release version source in a root Cargo manifest. A workspace package version is
+/// authoritative when present; otherwise a plain single-crate `[package]` version is
+/// used. This is deliberately a shape check, not a best-effort search across tables.
+#[must_use]
+pub fn root_manifest_version(manifest: &str) -> Option<String> {
+    workspace_version(manifest).or_else(|| package_version(manifest))
+}
+
+fn section_version(manifest: &str, section: &str) -> Option<String> {
     let mut in_section = false;
     for line in manifest.lines() {
         let trimmed = strip_comment(line).trim();
         if let Some(header) = section_header(trimmed) {
-            in_section = header == "workspace.package";
+            in_section = header == section;
         } else if in_section {
             if let Some(v) = scan_key_string(trimmed, "version") {
                 return Some(v);
@@ -239,6 +266,18 @@ pub fn set_workspace_version(
     from: &str,
     to: &str,
 ) -> Result<String, BumpEditError> {
+    set_section_version(manifest, "workspace.package", from, to)
+        .ok_or(BumpEditError::WorkspaceVersionNotFound)
+}
+
+/// Rewrite the root `[package]` `version = "<from>"` line to `to`, preserving the
+/// line's formatting and failing closed when the sealed source version is absent.
+pub fn set_package_version(manifest: &str, from: &str, to: &str) -> Result<String, BumpEditError> {
+    set_section_version(manifest, "package", from, to)
+        .ok_or(BumpEditError::RootManifestVersionNotFound)
+}
+
+fn set_section_version(manifest: &str, section: &str, from: &str, to: &str) -> Option<String> {
     let mut out = String::with_capacity(manifest.len() + to.len());
     let mut in_section = false;
     let mut replaced = false;
@@ -247,7 +286,7 @@ pub fn set_workspace_version(
     while let Some(line) = lines.next() {
         let trimmed = strip_comment(line).trim();
         if let Some(header) = section_header(trimmed) {
-            in_section = header == "workspace.package";
+            in_section = header == section;
         } else if in_section && !replaced {
             if let Some(rewritten) = replace_exact_string_value(line, "version", from, to) {
                 out.push_str(&rewritten);
@@ -259,11 +298,7 @@ pub fn set_workspace_version(
         out.push_str(line);
         push_line_ending(&mut out, lines.peek().is_some(), ends_with_newline);
     }
-    if replaced {
-        Ok(out)
-    } else {
-        Err(BumpEditError::WorkspaceVersionNotFound)
-    }
+    replaced.then_some(out)
 }
 
 /// Rewrite a single intra-workspace `=`-pin (`dependency = "…, version = \"<from>\""`)
@@ -665,11 +700,29 @@ mod tests {
     }
 
     #[test]
-    fn fails_closed_when_no_workspace_package_version() {
-        let manifest = "[package]\nversion = \"1.0.0\"\n";
+    fn package_version_is_available_for_a_plain_single_crate_manifest() {
+        let manifest = "[package]\nname = \"acme\"\nversion = \"1.0.0\"\n";
+        assert_eq!(package_version(manifest).as_deref(), Some("1.0.0"));
+        assert_eq!(root_manifest_version(manifest).as_deref(), Some("1.0.0"));
         assert_eq!(
-            set_workspace_version(manifest, "1.0.0", "2.0.0"),
-            Err(BumpEditError::WorkspaceVersionNotFound)
+            set_package_version(manifest, "1.0.0", "2.0.0").unwrap(),
+            "[package]\nname = \"acme\"\nversion = \"2.0.0\"\n"
+        );
+    }
+
+    #[test]
+    fn root_manifest_version_prefers_workspace_inheritance() {
+        let manifest =
+            "[package]\nversion = \"9.9.9\"\n\n[workspace.package]\nversion = \"1.0.0\"\n";
+        assert_eq!(root_manifest_version(manifest).as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
+    fn package_rewrite_fails_closed_when_neither_root_version_shape_matches() {
+        let manifest = "[package]\nname = \"acme\"\n";
+        assert_eq!(
+            set_package_version(manifest, "1.0.0", "2.0.0"),
+            Err(BumpEditError::RootManifestVersionNotFound)
         );
     }
 

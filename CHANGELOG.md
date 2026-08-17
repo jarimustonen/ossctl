@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Sealed release plans now disclose the mandatory verification barrier.** `release plan` includes `verify` after `dist`, matching the coordinator's real cut sequence; the phase list is part of the approval seal, so its seal format advances to v6 and previously stored v5 plans require a fresh approval for new cuts.
+- **Single-crate release bumps now update the root package manifest.** `release --bump`
+  falls back from `[workspace.package] version` to `[package] version` only when the
+  workspace source is absent, while retaining lockfile refresh, CHANGELOG finalization,
+  hook validation, and fail-closed version checks (`bump-single-crate-manifest`).
 
 ## [0.7.0] - 2026-08-17
 
