@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
+
+### Internal
+- Add a hermetic end-to-end release harness that drives the compiled `ossctl` binary through planning, failed cuts, journal inspection, abandonment, and lock refusal without invoking real publish tooling.
 <!-- oss-changelog:unreleased-end -->
 
 ## [0.6.1] - 2026-08-17
