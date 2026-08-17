@@ -6,6 +6,9 @@ status: in-progress
 priority: high
 lane: release-safety
 lane_seq: 1
+commits:
+- hash: 86b27d5
+  summary: refuse undeclared distribution surfaces
 ---
 
 # release tag phase creates the GitHub Release, breaking cargo-dist hosting and skipping the Homebrew publish
@@ -126,4 +129,9 @@ EXPOSURE CHECK for the pending release queue: glasspad's contract DOES declare b
 ### 2026-08-17T06:10:29Z · @claude
 
 DESIGN LANDED (2026-08-17): design.md in this issue directory covers the whole release-safety cluster. This issue's fix is D4 (facts-to-contract distribution cross-check: warn at plan, hard-refuse at cut when the repo has a cargo-dist release workflow or a declared homebrew_tap that the targets list omits) + D3 (mandatory post-cut verify phase, so a dropped leg can never report green). Option (1) of the Expected list is unreachable for this contract shape (the engine cannot know about an undeclared delegation), confirming the 2026-08-17 trigger comment.
+
+### 2026-08-17T06:28:44Z · @pi
+
+D4 is shipped in 86b27d5: facts now detect cargo-dist and tag-triggered workflows; validation and plan warn, and cut refuses undeclared GitHub Release or unserved Homebrew targets before journal creation. D3 verification remains sequenced work, so this issue stays in progress.
+
 
