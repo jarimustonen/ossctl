@@ -2,13 +2,14 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: bug
-status: in-progress
+status: fixed
 priority: high
 lane: release-safety
 lane_seq: 0
 commits:
 - hash: 50ade5e978569b947eaea56e2b4bc23c458afce2
   summary: 'fix(homebrew): publish prebuilt formula archives'
+closed: 2026-08-17
 ---
 
 # Generated Homebrew formula cannot install: cargo install on a virtual workspace manifest
