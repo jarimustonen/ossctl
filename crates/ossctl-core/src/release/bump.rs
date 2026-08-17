@@ -178,8 +178,8 @@ impl std::fmt::Display for BumpEditError {
             ),
             Self::RootManifestVersionNotFound => write!(
                 f,
-                "could not find a root `[workspace.package]` or `[package]` `version = \"…\"` \
-                 line matching the sealed bump"
+                "could not find a root `[package]` `version = \"…\"` line matching the sealed \
+                 bump after no `[workspace.package]` version source was found"
             ),
             Self::PinNotFound { dependency, from } => write!(
                 f,
@@ -234,7 +234,7 @@ fn section_version(manifest: &str, section: &str) -> Option<String> {
         let trimmed = strip_comment(line).trim();
         if let Some(header) = section_header(trimmed) {
             in_section = header == section;
-        } else if in_section {
+        } else if in_section && line_starts_with_key(trimmed, "version") {
             if let Some(v) = scan_key_string(trimmed, "version") {
                 return Some(v);
             }
@@ -287,7 +287,7 @@ fn set_section_version(manifest: &str, section: &str, from: &str, to: &str) -> O
         let trimmed = strip_comment(line).trim();
         if let Some(header) = section_header(trimmed) {
             in_section = header == section;
-        } else if in_section && !replaced {
+        } else if in_section && !replaced && line_starts_with_key(trimmed, "version") {
             if let Some(rewritten) = replace_exact_string_value(line, "version", from, to) {
                 out.push_str(&rewritten);
                 push_line_ending(&mut out, lines.peek().is_some(), ends_with_newline);
@@ -493,6 +493,14 @@ fn inline_version_value(inline: &str) -> Option<String> {
     scan_key_string(inline, "version")
 }
 
+/// Whether a trimmed line starts with `key =`, excluding a matching string embedded in
+/// another key's value. Section version reads and writes use this stricter rule; inline
+/// dependency-table scans intentionally use the more flexible token search below.
+fn line_starts_with_key(line: &str, key: &str) -> bool {
+    line.strip_prefix(key)
+        .is_some_and(|rest| rest.trim_start().starts_with('='))
+}
+
 /// Whether a `key = "value"` line (whole-key `key`) has value exactly `expected`.
 fn key_has_exact_string(trimmed: &str, key: &str, expected: &str) -> bool {
     scan_key_string(trimmed, key).is_some_and(|v| v == expected)
@@ -675,13 +683,10 @@ mod tests {
 
     #[test]
     fn does_not_match_a_version_inside_a_description_string() {
-        // A `version = "…"` inside a quoted string value (≠ `from`) is not rewritten; the
-        // real version line still is.
-        let manifest =
-            "[workspace.package]\ndescription = \"needs version = 1.0\"\nversion = \"0.4.0\"\n";
+        let manifest = "[workspace.package]\ndescription = 'requires version = \"0.4.0\"'\nversion = \"0.4.0\"\n";
         let out = set_workspace_version(manifest, "0.4.0", "0.5.0").unwrap();
         assert!(
-            out.contains("needs version = 1.0"),
+            out.contains("requires version = \"0.4.0\""),
             "description untouched: {out}"
         );
         assert!(
@@ -708,6 +713,11 @@ mod tests {
             set_package_version(manifest, "1.0.0", "2.0.0").unwrap(),
             "[package]\nname = \"acme\"\nversion = \"2.0.0\"\n"
         );
+        let with_description =
+            "[package]\ndescription = 'requires version = \"1.0.0\"'\nversion = \"1.0.0\"\n";
+        let out = set_package_version(with_description, "1.0.0", "2.0.0").unwrap();
+        assert!(out.contains("requires version = \"1.0.0\""));
+        assert_eq!(package_version(&out).as_deref(), Some("2.0.0"));
     }
 
     #[test]

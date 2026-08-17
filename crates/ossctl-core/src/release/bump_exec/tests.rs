@@ -255,6 +255,28 @@ fn applies_version_lockfile_changelog_and_commits_for_a_single_crate() {
 }
 
 #[test]
+fn fails_closed_when_single_crate_version_does_not_match_the_sealed_plan() {
+    let dir = temp_single_crate();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"acme\"\nversion = \"0.5.0\"\n",
+    )
+    .unwrap();
+    let runner = FakeRunner::new("abc");
+    let (clock, reg) = (FakeClock, NoRegistry);
+    let ctx = ctx(&runner, &clock, &reg, dir.path());
+    let mut plan = bump_plan();
+    plan.pin_rewrites.clear();
+
+    let err = apply_bump(&ctx, &plan, "2026-08-13").unwrap_err();
+    assert!(matches!(
+        err,
+        BumpExecError::Edit(BumpEditError::RootManifestVersionNotFound)
+    ));
+    assert!(runner.calls.borrow().is_empty());
+}
+
+#[test]
 fn skips_the_lockfile_refresh_when_no_lockfile_is_tracked() {
     let dir = temp_workspace();
     std::fs::remove_file(dir.path().join("Cargo.lock")).unwrap();
@@ -337,6 +359,27 @@ fn fails_closed_when_the_hook_fails() {
 
     let err = apply_bump(&ctx, &plan, "2026-08-13").unwrap_err();
     assert!(matches!(err, BumpExecError::Hook { .. }));
+}
+
+#[test]
+fn fails_closed_when_a_hook_reverts_a_single_crate_version() {
+    let dir = temp_single_crate();
+    let mut runner = FakeRunner::new("abc");
+    runner.hook_effect = Some(Box::new(|cwd: &Path| {
+        std::fs::write(
+            cwd.join("Cargo.toml"),
+            "[package]\nname = \"acme\"\nversion = \"9.9.9\"\n",
+        )
+        .unwrap();
+    }));
+    let (clock, reg) = (FakeClock, NoRegistry);
+    let ctx = ctx(&runner, &clock, &reg, dir.path());
+    let mut plan = bump_plan();
+    plan.pin_rewrites.clear();
+    plan.bump_hook = Some("evil".into());
+
+    let err = apply_bump(&ctx, &plan, "2026-08-13").unwrap_err();
+    assert!(matches!(err, BumpExecError::HookViolatedVersion { .. }));
 }
 
 #[test]

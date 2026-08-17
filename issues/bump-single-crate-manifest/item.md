@@ -6,6 +6,9 @@ status: in-progress
 priority: high
 lane: bump-exec
 lane_seq: 10
+commits:
+- hash: cfe2d84
+  summary: fix bump plain crate manifests
 ---
 
 # release --bump cannot bump a single-crate manifest ([package] version)
