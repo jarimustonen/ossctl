@@ -3,7 +3,7 @@ created: 2026-08-17
 updated: 2026-08-17
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 lane: cli-canon
 lane_seq: 20
@@ -12,6 +12,7 @@ commits:
   summary: centralize fallible stdout writes and treat broken pipes as success
 - hash: 67e0243d04dd7df0f23d1926f65e8eb8f4b1f71d
   summary: apply review fixes for checked flushes and compiler-enforced stdout routing
+closed: 2026-08-17
 ---
 
 # CLI panics on broken pipe
