@@ -138,27 +138,82 @@ fn assert_json_help_tree(path: &[String]) {
     assert_eq!(value["schema_version"], 1, "canonical envelope: {args:?}");
     assert_eq!(value["data"]["schema_version"], 1, "help schema: {args:?}");
     let command = &value["data"]["command"];
+    let mut expected_path = vec!["ossctl".to_string()];
+    expected_path.extend_from_slice(path);
+    assert_eq!(
+        command["path"],
+        serde_json::json!(expected_path),
+        "wrong drill-down target: {args:?}"
+    );
+    assert_eq!(
+        command["name"],
+        path.last().map_or("ossctl", String::as_str),
+        "wrong command name: {args:?}"
+    );
     assert!(command["flags"].is_array(), "flags missing: {args:?}");
     assert!(command["args"].is_array(), "args missing: {args:?}");
+    assert!(
+        command["flags"].as_array().unwrap().iter().any(|flag| {
+            flag["long"] == "json" && flag["global"] == true && flag["takes_value"] == false
+        }),
+        "global --json missing: {args:?}"
+    );
+    assert!(
+        !out.stdout.contains(&0x1b),
+        "ANSI escape leaked into JSON: {args:?}"
+    );
     assert!(
         command["examples"]
             .as_array()
             .is_some_and(|items| !items.is_empty()),
         "examples missing: {args:?}"
     );
-    for flag in command["flags"].as_array().unwrap() {
-        assert!(flag.get("env").is_some(), "env mapping missing: {args:?}");
-        assert!(
-            flag["accepted_values"].is_array(),
-            "accepted values missing: {args:?}"
-        );
-    }
-
     for child in command["subcommands"].as_array().unwrap() {
         let mut child_path = path.to_vec();
         child_path.push(child["name"].as_str().unwrap().to_string());
         assert_json_help_tree(&child_path);
     }
+}
+
+/// Short help and option ordering select the same command clap selected, while
+/// a post-`--` token is not mistaken for the global JSON flag.
+#[test]
+fn json_help_respects_help_selection_and_option_ordering() {
+    for (args, expected_path) in [
+        (&["-h", "release", "plan", "--json"][..], &["ossctl"][..]),
+        (
+            &["release", "-h", "plan", "--json"][..],
+            &["ossctl", "release"][..],
+        ),
+        (
+            &["release", "plan", "-h", "--json"][..],
+            &["ossctl", "release", "plan"][..],
+        ),
+        (
+            &["--json", "release", "plan", "--help"][..],
+            &["ossctl", "release", "plan"][..],
+        ),
+        (
+            &["release", "plan", "--json", "--help"][..],
+            &["ossctl", "release", "plan"][..],
+        ),
+    ] {
+        let out = ossctl().args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?} must exit 0");
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            value["data"]["command"]["path"],
+            serde_json::json!(expected_path),
+            "{args:?} selected the wrong command"
+        );
+    }
+
+    let text = ossctl().args(["--help", "--", "--json"]).output().unwrap();
+    assert!(text.status.success());
+    assert_eq!(
+        text.stdout,
+        include_bytes!("snapshots/root-help.txt").as_slice()
+    );
 }
 
 /// Finite accepted values not represented by clap's parser remain structured
@@ -180,6 +235,8 @@ fn json_help_reports_bump_accepted_values() {
         bump["accepted_values"],
         serde_json::json!(["major", "minor", "patch"])
     );
+    assert_eq!(bump["value_names"], serde_json::json!(["LEVEL"]));
+    assert_eq!(bump["env"], serde_json::Value::Null);
 }
 
 /// `doctor` runs the self-check and exits 0 (no failing checks).

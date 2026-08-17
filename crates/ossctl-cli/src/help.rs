@@ -97,23 +97,28 @@ pub(crate) fn emit(argv: &[OsString]) -> Result<(), CliError> {
     crate::output::emit_json(&document, &[])
 }
 
-/// Follow only real subcommand names from argv. Intermediate ossctl commands
-/// contain no value-taking options, so clap's successful `DisplayHelp` result
-/// has already established that these tokens form a valid drill-down path.
+/// Follow clap-resolved subcommand spellings until help terminates parsing.
+/// Intermediate ossctl commands contain no value-taking options (guarded by a
+/// unit test), so non-option tokens can only be subcommands at those levels.
 fn selected_command<'a>(root: &'a Command, argv: &[OsString]) -> (&'a Command, Vec<String>) {
     let mut command = root;
     let mut path = vec![root.get_name().to_string()];
 
-    for token in argv.iter().skip(1).take_while(|token| token != &"--help") {
+    for token in argv.iter().skip(1) {
         let Some(token) = token.to_str() else {
-            continue;
+            break;
         };
-        if let Some(subcommand) = command
-            .get_subcommands()
-            .find(|candidate| candidate.get_name() == token)
-        {
+        if matches!(token, "--" | "--help" | "-h") {
+            break;
+        }
+        if let Some(subcommand) = command.get_subcommands().find(|candidate| {
+            candidate.get_name() == token || candidate.get_all_aliases().any(|alias| alias == token)
+        }) {
             command = subcommand;
-            path.push(token.to_string());
+            // Extras are keyed by the canonical path, never by an alias spelling.
+            path.push(command.get_name().to_string());
+        } else if !token.starts_with('-') {
+            break;
         }
     }
 
@@ -176,6 +181,8 @@ fn command_help(command: &Command, path: &[String]) -> Result<CommandHelp, CliEr
                 meaning: "system or internal error",
             },
         ],
+        // The current public CLI has no deprecated commands or arguments.
+        // Add an extras registry before introducing the first deprecation.
         deprecated: false,
     })
 }
@@ -378,25 +385,66 @@ fn examples(path: &[String]) -> Option<Vec<Example>> {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
     use super::*;
 
     #[test]
-    fn every_real_command_has_a_structured_example() {
+    fn every_real_command_has_a_parseable_structured_example() {
         let mut root = Cli::command();
         root.build();
         assert_examples_cover_tree(&root, &[root.get_name().to_string()]);
     }
 
     fn assert_examples_cover_tree(command: &Command, path: &[String]) {
-        assert!(
-            examples(path).is_some(),
-            "missing examples for {}",
-            path.join(" ")
-        );
+        let command_examples =
+            examples(path).unwrap_or_else(|| panic!("missing examples for {}", path.join(" ")));
+        let path_refs: Vec<&str> = path.iter().map(String::as_str).collect();
+        for example in command_examples {
+            assert!(
+                example.argv.starts_with(&path_refs),
+                "example does not target {}: {:?}",
+                path.join(" "),
+                example.argv
+            );
+            Cli::try_parse_from(&example.argv)
+                .unwrap_or_else(|error| panic!("invalid example for {}: {error}", path.join(" ")));
+        }
         for subcommand in command.get_subcommands() {
             let mut child_path = path.to_vec();
             child_path.push(subcommand.get_name().to_string());
             assert_examples_cover_tree(subcommand, &child_path);
         }
+    }
+
+    #[test]
+    fn alias_selection_uses_the_canonical_command_path() {
+        let mut root = Command::new("ossctl").subcommand(Command::new("list").alias("ls"));
+        root.build();
+        let argv = [OsString::from("ossctl"), OsString::from("ls")];
+        let (command, path) = selected_command(&root, &argv);
+        assert_eq!(command.get_name(), "list");
+        assert_eq!(path, ["ossctl", "list"]);
+    }
+
+    #[test]
+    fn commands_with_subcommands_have_no_value_taking_options() {
+        fn walk(command: &Command) {
+            if command.get_subcommands().next().is_some() {
+                for arg in command.get_arguments() {
+                    assert!(
+                        !arg.get_action().takes_values(),
+                        "{} option {} takes a value and would make structured help selection ambiguous",
+                        command.get_name(),
+                        arg.get_id()
+                    );
+                }
+            }
+            command.get_subcommands().for_each(walk);
+        }
+
+        let mut root = Cli::command();
+        root.build();
+        walk(&root);
     }
 }

@@ -213,7 +213,11 @@ fn handle_clap_error(e: &clap::Error, argv: &[std::ffi::OsString]) -> ExitCode {
         e.kind(),
         ErrorKind::DisplayHelp | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
     ) {
-        if argv.iter().any(|arg| arg == "--json") {
+        if argv
+            .iter()
+            .take_while(|arg| arg.as_os_str() != "--")
+            .any(|arg| arg == "--json")
+        {
             return match crate::help::emit(argv) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
