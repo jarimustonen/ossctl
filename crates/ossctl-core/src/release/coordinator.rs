@@ -1271,16 +1271,22 @@ fn verify_phase(
             continue;
         }
         let outcome = if journal.state().delegated.contains(&tp.id) {
-            match tp.input.target.registry {
-                Registry::Homebrew => {
+            // The observation destination follows the DELEGATED ADAPTER's identity
+            // first, then the registry. A delegated **registry** publish
+            // (`cargo-publish-ci`: CI runs `cargo publish` on the tag) lands on the
+            // registry index, not in a GitHub Release, so the Release-asset observer
+            // would look in the wrong place and fail a healthy cut. Keying that on the
+            // adapter rather than on `registry == crates.io` leaves every other
+            // delegated target — including the odd-but-expressible
+            // `{registry: crates.io, adapter: cargo-dist}` — observed exactly where it
+            // was observed before.
+            match (tp.input.target.adapter, tp.input.target.registry) {
+                (Adapter::CargoPublishCi, _) => {
+                    verify_delegated_registry(&verify_ctx, plan, &tp.input)
+                }
+                (_, Registry::Homebrew) => {
                     verify_delegated_homebrew(&verify_ctx, plan, &tp.input.package)
                 }
-                // A delegated **registry** publish (`cargo-publish-ci`: CI runs
-                // `cargo publish` on the tag) lands on the registry index, not in a
-                // GitHub Release — so it is observed by polling the index, with the
-                // same bounded delegated wait. Routing it through the Release-asset
-                // observer would look in the wrong place and fail a healthy cut.
-                Registry::CratesIo => verify_delegated_registry(&verify_ctx, plan, &tp.input),
                 _ => verify_delegated_release(&verify_ctx, plan, &tp.input.package),
             }
         } else if let Some(receipt) = journal.state().published.get(&tp.id) {

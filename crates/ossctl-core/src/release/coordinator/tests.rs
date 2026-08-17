@@ -3810,3 +3810,61 @@ fn a_mixed_plan_publishes_the_engine_target_and_delegates_the_ci_one() {
     assert_eq!(state.verified.get(&ids[0]), Some(&VerifyOutcome::Matches));
     assert_eq!(state.verified.get(&ids[1]), Some(&VerifyOutcome::Matches));
 }
+
+#[test]
+fn a_delegated_cargo_dist_target_is_still_observed_as_a_github_release() {
+    // Dispatch regression guard: the index observer is keyed on the DELEGATED
+    // ADAPTER (`cargo-publish-ci`), not on `registry == crates.io`. A cargo-dist
+    // target that happens to carry a crates.io registry is odd but expressible, and
+    // it must keep being observed where cargo-dist actually uploads — the GitHub
+    // Release — not on an index it never publishes to (which would fail the cut
+    // after a 20-minute wait).
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::new().crate_version("1.0.0");
+    // Deliberately empty: nothing is on the registry index, so a wrong dispatch
+    // would report Missing.
+    let reg = FakeRegistry::empty();
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = RecordingSink::default();
+
+    let plan = ReleasePlan {
+        targets: vec![plan_target(
+            Ecosystem::Rust,
+            Registry::CratesIo,
+            Adapter::CargoDist,
+        )],
+        ..ci_publish_plan()
+    };
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "p".into(),
+        "1.0.0".into(),
+        ids.clone(),
+    )
+    .unwrap();
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).expect("the cut completes");
+
+    assert_eq!(
+        journal.state().verified.get(&ids[0]),
+        Some(&VerifyOutcome::Matches)
+    );
+    assert!(
+        cmd.calls().iter().any(|c| c.starts_with("gh release view")),
+        "a delegated cargo-dist target must be observed as a GitHub Release: {:?}",
+        cmd.calls()
+    );
+}
