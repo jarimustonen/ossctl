@@ -256,8 +256,11 @@ pub fn apply(state: &mut RunState, event: &JournalEvent) {
         EventKind::TargetCancelled { target, reason } => {
             state.cancelled.insert(target.clone(), reason.clone());
         }
-        EventKind::TargetDelegated { target, .. } => {
+        EventKind::TargetDelegated { target, adapter } => {
             state.delegated.insert(target.clone());
+            state
+                .delegated_adapters
+                .insert(target.clone(), adapter.clone());
         }
         EventKind::TargetVerified { target, outcome } => {
             state.verified.insert(target.clone(), *outcome);
@@ -1176,6 +1179,26 @@ mod tests {
         push(&mut state, Phase::Dist);
         assert_eq!(state.status, RunStatus::InProgress);
         push(&mut state, Phase::Verify);
+        assert_eq!(state.status, RunStatus::Completed);
+    }
+
+    #[test]
+    fn a_v4_dist_ok_stays_completed_for_backward_compat() {
+        let mut state = reduce(&sample_events());
+        let seq = state.applied_seq + 1;
+        apply(
+            &mut state,
+            &JournalEvent {
+                schema_version: 4,
+                seq,
+                ts: 9000,
+                idempotency_key: "phase_completed:dist".into(),
+                kind: EventKind::PhaseCompleted {
+                    phase: Phase::Dist,
+                    outcome: PhaseOutcome::Ok,
+                },
+            },
+        );
         assert_eq!(state.status, RunStatus::Completed);
     }
 

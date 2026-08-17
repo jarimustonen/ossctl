@@ -104,6 +104,44 @@ fn dry_run_failure_is_journaled_and_never_tags() {
 }
 
 #[test]
+fn delegated_release_with_zero_assets_fails_verify_and_is_posthoc_observable() {
+    let repo = TempRepo::new("approved");
+    repo.use_cargo_dist_target();
+    let shims = Shims::new();
+    shims.set("gh", 0, r#"{"assets":[]}"#);
+    let plan = plan_id(&repo, &shims);
+
+    let cut = repo.run(&shims, &["--json", "release", "cut", "--plan", &plan]);
+
+    assert_eq!(cut.status.code(), Some(2));
+    assert_eq!(error_code(&cut), "release_failed");
+    let run_id = only_run_id(&repo);
+    let journal = fs::read_to_string(repo.journal_dir().join(&run_id).join("journal.jsonl"))
+        .expect("read journal");
+    let verify_failed = journal.lines().any(|line| {
+        let event: serde_json::Value = serde_json::from_str(line).expect("journal event JSON");
+        event["kind"] == "phase_completed"
+            && event["phase"] == "verify"
+            && event["outcome"] == "failed"
+    });
+    assert!(
+        verify_failed,
+        "zero release assets must fail the verify barrier:\n{journal}"
+    );
+
+    let verify = repo.run(&shims, &["--json", "release", "verify", &run_id]);
+    assert!(
+        verify.status.success(),
+        "post-hoc verify failed: {verify:?}"
+    );
+    let report = json(&verify);
+    assert_eq!(report["data"]["summary"]["reconciled"], 1);
+    assert_eq!(report["data"]["summary"]["missing"], 1);
+    assert_eq!(report["data"]["targets"][0]["outcome"], "missing");
+    shims.assert_called("gh");
+}
+
+#[test]
 fn abandon_marks_a_failed_run_terminally() {
     let repo = TempRepo::new("approved");
     let shims = Shims::new();

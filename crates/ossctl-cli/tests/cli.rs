@@ -674,11 +674,9 @@ fn seed_journal(run_id: &str, lines: &[&str]) -> tempfile::TempDir {
 }
 
 /// `release verify` reconciles a journaled run and emits the report envelope.
-/// Uses `python` + `binary` targets, which classify as `unknown` without any
-/// network access (python has no wired registry query, so its lookup errors out
-/// immediately; binary is structurally unobservable), so the test is
-/// deterministic and offline. (`rust`/`node` are wired and would hit the network,
-/// so they are deliberately avoided here.)
+/// Uses `python` + `binary` targets. Python remains `unknown` when its registry
+/// lookup cannot run; the binary target is now actively observed and a missing
+/// GitHub Release is reported as `missing`, never accepted as unobservable green.
 #[test]
 fn release_verify_reconciles_a_journaled_run() {
     let dir = seed_journal(
@@ -702,17 +700,16 @@ fn release_verify_reconciles_a_journaled_run() {
     let data = &v["data"];
     assert_eq!(data["run_id"], "RUN01");
     assert_eq!(data["plan_id"], "plan-abc");
-    // Both targets classify as unknown offline; never a false "missing".
     assert_eq!(data["summary"]["reconciled"], 2);
-    assert_eq!(data["summary"]["unknown"], 2);
-    assert_eq!(data["summary"]["missing"], 0);
+    assert_eq!(data["summary"]["unknown"], 1);
+    assert_eq!(data["summary"]["missing"], 1);
     let outcomes: Vec<&str> = data["targets"]
         .as_array()
         .unwrap()
         .iter()
         .map(|t| t["outcome"].as_str().unwrap())
         .collect();
-    assert_eq!(outcomes, vec!["unknown", "unknown"]);
+    assert_eq!(outcomes, vec!["missing", "unknown"]);
 
     // Read-only: verify must not materialize a manifest cache next to the journal.
     assert!(

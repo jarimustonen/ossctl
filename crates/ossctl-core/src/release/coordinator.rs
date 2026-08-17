@@ -122,8 +122,9 @@ use crate::protocol::plan::ReleasePlan;
 use crate::protocol::release::{PublishReceipt as AdapterReceipt, VerifyOutcome};
 
 use super::adapters::{
-    hash_file, resolve, AdapterTarget, EcosystemAdapter, EffectCtx, HomebrewAsset, HomebrewFormula,
-    ReleaseAdapter, ReleaseArtifacts, SourceTarball,
+    hash_file, observe_github_release_assets, resolve, verification_artifacts, AdapterTarget,
+    EcosystemAdapter, EffectCtx, HomebrewAsset, HomebrewFormula, ReleaseAdapter, ReleaseArtifacts,
+    SourceTarball,
 };
 use super::journal::Journal;
 use super::journal_target_ids;
@@ -1247,10 +1248,8 @@ fn verify_phase(
     if phase_completed_ok(journal.state(), phase) {
         return Ok(());
     }
-    let verification_artifacts = ReleaseArtifacts {
-        homebrew: homebrew.cloned(),
-        ..ReleaseArtifacts::default()
-    };
+    let mut verification_artifacts = verification_artifacts(plan);
+    verification_artifacts.homebrew = homebrew.cloned();
     let verify_ctx = ctx.with_artifacts(&verification_artifacts);
     record(journal, sink, EventKind::PhaseEntered { phase })?;
     for tp in targets {
@@ -1334,7 +1333,6 @@ fn verify_delegated_release(
     plan: &ReleasePlan,
     package: &str,
 ) -> VerifyOutcome {
-    let tag = format!("v{}", plan.version);
     let expected: Vec<String> = plan
         .homebrew_platforms
         .iter()
@@ -1342,31 +1340,8 @@ fn verify_delegated_release(
         .collect();
     let start = ctx.clock.now_unix();
     loop {
-        if let Ok(out) = ctx.runner.run(
-            "gh",
-            &["release", "view", &tag, "--json", "assets"],
-            ctx.repo_root,
-        ) {
-            if out.status == Some(0) {
-                let observed = serde_json::from_str::<serde_json::Value>(&out.stdout)
-                    .ok()
-                    .and_then(|v| v.get("assets").and_then(|a| a.as_array()).cloned())
-                    .map(|assets| {
-                        assets
-                            .into_iter()
-                            .filter_map(|a| {
-                                a.get("name").and_then(|n| n.as_str()).map(str::to_owned)
-                            })
-                            .collect::<Vec<_>>()
-                    });
-                if observed.as_ref().is_some_and(|names| {
-                    expected
-                        .iter()
-                        .all(|wanted| names.iter().any(|name| name == wanted))
-                }) {
-                    return VerifyOutcome::Matches;
-                }
-            }
+        if observe_github_release_assets(ctx, &plan.version, &expected) == VerifyOutcome::Matches {
+            return VerifyOutcome::Matches;
         }
         if ctx.clock.now_unix().saturating_sub(start) >= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS {
             return VerifyOutcome::Missing;

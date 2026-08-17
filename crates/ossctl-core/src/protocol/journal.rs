@@ -561,6 +561,10 @@ pub struct RunState {
     /// deserializes (the manifest is disposable and rebuilt from the log anyway).
     #[serde(default)]
     pub delegated: BTreeSet<String>,
+    /// Adapter identity recorded for each CI-delegated target. Additive projection
+    /// data lets post-hoc verification interpret historical delegation events.
+    #[serde(default)]
+    pub delegated_adapters: BTreeMap<String, String>,
     /// Per-target destination observations from the mandatory v5 verify barrier.
     #[serde(default)]
     pub verified: BTreeMap<String, crate::protocol::release::VerifyOutcome>,
@@ -598,6 +602,7 @@ impl RunState {
             published: BTreeMap::new(),
             cancelled: BTreeMap::new(),
             delegated: BTreeSet::new(),
+            delegated_adapters: BTreeMap::new(),
             verified: BTreeMap::new(),
             tags: BTreeMap::new(),
             abandon_reason: None,

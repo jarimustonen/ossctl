@@ -19,7 +19,7 @@ use ossctl_core::protocol::journal::{
 };
 use ossctl_core::protocol::plan::ReleasePlan;
 use ossctl_core::protocol::reconcile::ReconcileReport;
-use ossctl_core::release::adapters::{EffectCtx, EMPTY_ARTIFACTS};
+use ossctl_core::release::adapters::{verification_artifacts, EffectCtx, EMPTY_ARTIFACTS};
 use ossctl_core::release::coordinator::{self, CutError, ProgressSink};
 use ossctl_core::release::distribution::{find_undeclared_distribution, UndeclaredDistribution};
 use ossctl_core::release::journal::{self, Journal, JournalPaths};
@@ -132,7 +132,7 @@ pub struct ResumeArgs {
     #[arg(long, value_name = "PATH")]
     pub journal_dir: Option<PathBuf>,
     /// Proceed past targets whose remote state could not be verified (registry
-    /// outage, an unobservable distribution target). Without this the resume
+    /// outage or failed destination observation). Without this the resume
     /// refuses on any `unknown` target rather than assume it did not publish
     /// (ADR-0003 §4). With it, an unverifiable target is trusted to the journal:
     /// a recorded publish is skipped, an unrecorded one is (re-)published.
@@ -406,11 +406,10 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
 /// remote registry state (ADR-0002 §1, ADR-0003 state table).
 ///
 /// Reads the run's state straight from the authoritative event log (no lock, no
-/// manifest self-heal, no writes) and, for each published target, dispatches the
-/// ecosystem adapter's `verify()` against the registry through the injected
-/// [`RealRegistryQuery`] port — classifying each as `matches`/`conflicts`/
-/// `missing`/`unknown`. A registry lookup that cannot be performed degrades to
-/// `unknown`, never a false `missing`. Emits the reconcile report under the
+/// manifest self-heal, no writes) and dispatches each published or delegated
+/// target through its real read-only destination check: registry index, Homebrew
+/// formula fetch, or GitHub Release asset view. An observation that cannot be
+/// performed degrades to `unknown`, never a false `missing`. Emits the report under the
 /// canonical envelope. This command mutates nothing — not the repo, the journal,
 /// or the registry.
 pub fn verify(args: &RunIdArgs, format: OutputFormat) -> Result<(), CliError> {
@@ -463,9 +462,15 @@ pub fn verify(args: &RunIdArgs, format: OutputFormat) -> Result<(), CliError> {
             .with_invalid_value(args.run_id.clone())
         })?;
 
-    // The reconcile queries the registry only; the runner/clock are supplied
-    // because the adapter effect context requires them, but verify() never runs a
-    // command or reads the clock.
+    // Newer runs retain the authenticated plan beside the journal. It restores
+    // exact adapters and platform obligations; older runs take the journal-only
+    // compatibility path and still perform destination checks from their receipts.
+    let plan = ossctl_core::release::plan_store::PlanStore::new(paths.clone())
+        .load(&state.plan_id)
+        .map_err(plan_store_error)?;
+    let artifacts = plan
+        .as_ref()
+        .map_or_else(Default::default, verification_artifacts);
     let runner = RealCommandRunner;
     let clock = RealClock;
     let registry = RealRegistryQuery;
@@ -474,9 +479,9 @@ pub fn verify(args: &RunIdArgs, format: OutputFormat) -> Result<(), CliError> {
         clock: &clock,
         registry: &registry,
         repo_root: &root,
-        artifacts: &EMPTY_ARTIFACTS,
+        artifacts: &artifacts,
     };
-    let report = ossctl_core::release::reconcile::reconcile(&state, &ctx);
+    let report = ossctl_core::release::reconcile::reconcile_with_plan(&state, plan.as_ref(), &ctx);
     let warnings = reconcile_warnings(&state, &report);
 
     match format {
@@ -513,7 +518,7 @@ fn reconcile_warnings(
         );
     }
     for target in &state.targets {
-        if state.published.contains_key(target) {
+        if report.targets.iter().any(|row| &row.target == target) {
             continue;
         }
         // A cancelled target has a known reason on the journal — report that,
@@ -1337,12 +1342,13 @@ pub fn resume(args: &ResumeArgs, format: OutputFormat) -> Result<(), CliError> {
         None => derive_resume_plan(&root, &git, journal.state(), &args.run_id)?,
     };
 
+    let verification_artifacts = verification_artifacts(&plan);
     let ctx = EffectCtx {
         runner: &runner,
         clock: &clock,
         registry: &registry,
         repo_root: &root,
-        artifacts: &EMPTY_ARTIFACTS,
+        artifacts: &verification_artifacts,
     };
 
     // Reconcile against remote registry state (the state table). This is the only

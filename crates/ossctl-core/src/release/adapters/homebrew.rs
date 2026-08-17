@@ -1,10 +1,9 @@
 //! Homebrew distribution adapter: `homebrew-tap` and `homebrew-core`.
 //!
 //! Updates a Homebrew formula (a custom tap, or a `homebrew-core` bump PR) so
-//! `brew install` resolves the new version. A tap/core is not observable through
-//! the [`RegistryQuery`](crate::ports::RegistryQuery) port, so `verify` returns
-//! [`VerifyOutcome::Unknown`] **explicitly** rather than being excused from the
-//! contract (ADR-0002 §1) — an honest "cannot check", never a false `Missing`.
+//! `brew install` resolves the new version. `verify` fetches the destination
+//! formula and checks its ownership marker, version, and platform URL/checksum
+//! stanzas. A fetch failure is `Unknown`, never a false `Missing`.
 //!
 //! ## Three formula paths: create, tap-write, bump-PR
 //!
@@ -766,8 +765,17 @@ impl ReleaseAdapter for HomebrewAdapter {
             }
             FormulaPath::BumpPr => {
                 let cmd = self.bump_command(ctx.artifacts.source_tarball.as_ref(), &t.package);
-                run_all(ctx, &[cmd])?;
-                Ok(make_receipt(ctx, t, None, None))
+                let outputs = run_all(ctx, &[cmd])?;
+                let remote_url = outputs.last().and_then(|output| {
+                    output
+                        .stdout
+                        .lines()
+                        .rev()
+                        .map(str::trim)
+                        .find(|line| line.starts_with("https://"))
+                        .map(str::to_string)
+                });
+                Ok(make_receipt(ctx, t, None, remote_url))
             }
         }
     }
@@ -793,14 +801,17 @@ impl ReleaseAdapter for HomebrewAdapter {
             "https://raw.githubusercontent.com/{owner}/{repo}/HEAD/Formula/{}.rb",
             receipt.package
         );
-        let out = match ctx
-            .runner
-            .run("curl", &["-sSfL", "--", &raw], ctx.repo_root)
-        {
-            Ok(out) if out.status == Some(0) => out,
-            Ok(_) | Err(_) => return Ok(VerifyOutcome::Unknown),
+        let (status, body) = match ctx.registry.http_get(&raw) {
+            Ok(response) => response,
+            Err(_) => return Ok(VerifyOutcome::Unknown),
         };
-        let formula = out.stdout;
+        if status != 200 {
+            return Ok(VerifyOutcome::Unknown);
+        }
+        let formula = match String::from_utf8(body) {
+            Ok(formula) => formula,
+            Err(_) => return Ok(VerifyOutcome::Unknown),
+        };
         if !formula_carries_marker(formula.as_bytes()) {
             return Ok(VerifyOutcome::Missing);
         }
@@ -810,15 +821,35 @@ impl ReleaseAdapter for HomebrewAdapter {
         {
             return Ok(VerifyOutcome::Missing);
         }
-        // Every Homebrew-servable platform declared for this cut must retain a
-        // URL+sha stanza. The plan data is carried as artifacts by the coordinator.
-        let Some(homebrew) = ctx.artifacts.homebrew.as_ref() else {
-            return Ok(VerifyOutcome::Unknown);
+        // Every Homebrew-servable platform declared by a stored plan must retain
+        // a URL+sha stanza. Pre-plan-store journals cannot recover that exact set;
+        // for them require at least one complete supported-platform stanza rather
+        // than falling back to the old structurally-unobservable `Unknown` result.
+        let expected = ctx
+            .artifacts
+            .homebrew
+            .as_ref()
+            .map(|homebrew| homebrew.platforms.as_slice());
+        let observed = [
+            "if OS.mac? && Hardware::CPU.arm?",
+            "if OS.mac? && Hardware::CPU.intel?",
+            "if OS.linux? && Hardware::CPU.arm?",
+            "if OS.linux? && Hardware::CPU.intel?",
+        ];
+        let conditions: Vec<&str> = match expected {
+            Some(platforms) => platforms
+                .iter()
+                .filter_map(|triple| homebrew_platform_condition(triple))
+                .collect(),
+            None => observed
+                .into_iter()
+                .filter(|condition| formula.contains(condition))
+                .collect(),
         };
-        for triple in &homebrew.platforms {
-            let Some(condition) = homebrew_platform_condition(triple) else {
-                continue;
-            };
+        if conditions.is_empty() {
+            return Ok(VerifyOutcome::Missing);
+        }
+        for condition in conditions {
             let Some(start) = formula.find(condition) else {
                 return Ok(VerifyOutcome::Missing);
             };

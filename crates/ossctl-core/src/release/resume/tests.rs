@@ -23,7 +23,7 @@ use crate::release::adapters::EffectCtx;
 
 // ── Fakes ────────────────────────────────────────────────────────────────────
 
-/// A command runner the reconcile must never touch (it is registry-query only).
+/// Records destination-observation commands used by distribution targets.
 #[derive(Default)]
 struct RecordingCmd {
     calls: RefCell<Vec<String>>,
@@ -541,28 +541,19 @@ fn a_receipt_less_target_with_no_package_never_queries_the_registry() {
 }
 
 #[test]
-fn structurally_unobservable_binary_target_is_unknown_not_missing() {
-    // Binary (GitHub Releases / homebrew) is not observable through RegistryQuery
-    // — even a registry that WOULD answer must not flip it to Matches/Missing.
-    let plan = ReleasePlan {
-        targets: vec![plan_target(
-            Ecosystem::Binary,
-            Registry::GhReleases,
-            Adapter::Manual,
-        )],
-        ..rust_plan()
-    };
-    let state = state_with(&[], &["binary"]);
-    let (cmd, clock) = (RecordingCmd::default(), FixedClock);
-    let reg = FakeRegistry::new().with("binary", "tool", &["1.0.0"]);
-    let r = reconcile(&state, &plan, &cmd, &clock, &reg, false);
-    let d = &r.decisions[0];
-    assert_eq!(d.outcome, VerifyOutcome::Unknown);
-    assert_eq!(d.action, ResumeAction::Unverifiable);
-    assert!(
-        reg.queried.borrow().is_empty(),
-        "binary must not query the registry"
+fn allow_unverified_skips_only_unknown_never_missing_or_conflicts() {
+    assert_eq!(
+        super::classify(JournalState::Published, VerifyOutcome::Unknown, true, true,),
+        ResumeAction::Skip,
+        "the explicit go-ahead may trust only an unobservable receipt"
     );
+    for outcome in [VerifyOutcome::Missing, VerifyOutcome::Conflicts] {
+        assert_eq!(
+            super::classify(JournalState::Published, outcome, true, true),
+            ResumeAction::Conflict,
+            "--allow-unverified must not bypass a concrete {outcome:?} result"
+        );
+    }
 }
 
 // ── Cancelled targets never become publish candidates ────────────────────────

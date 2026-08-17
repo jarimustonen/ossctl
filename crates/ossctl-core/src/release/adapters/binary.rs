@@ -1,10 +1,9 @@
 //! Binary distribution adapter: `manual` / GitHub Releases.
 //!
-//! Attaches prebuilt binaries to a GitHub Release (`gh release`). GitHub
-//! Releases are not observable through the
-//! [`RegistryQuery`](crate::ports::RegistryQuery) port, so `verify` returns
-//! [`VerifyOutcome::Unknown`] **explicitly** (ADR-0002 §1) — an honest "cannot
-//! check", never a false `Missing`.
+//! Attaches prebuilt binaries to a GitHub Release (`gh release`). `verify` uses
+//! a read-only `gh release view` observation and requires uploaded assets. A
+//! command transport failure is `Unknown`; an absent Release or empty asset set is
+//! `Missing`.
 
 use std::time::Duration;
 
@@ -30,6 +29,60 @@ impl BinaryAdapter {
 
     fn tag(t: &AdapterTarget) -> String {
         format!("v{}", t.version)
+    }
+}
+
+/// Observe a GitHub Release and require its uploaded asset set. An empty
+/// `expected_assets` slice still requires at least one asset, which is the
+/// strongest check available when reconciling a pre-plan-store journal.
+pub(super) fn observe_release_assets(
+    ctx: &EffectCtx<'_>,
+    version: &str,
+    expected_assets: &[String],
+) -> VerifyOutcome {
+    let tag = format!("v{version}");
+    let out = match ctx.runner.run(
+        "gh",
+        &["release", "view", &tag, "--json", "assets"],
+        ctx.repo_root,
+    ) {
+        Ok(out) if out.status == Some(0) => out,
+        Ok(_) => return VerifyOutcome::Missing,
+        Err(_) => return VerifyOutcome::Unknown,
+    };
+    let Some(observed) = serde_json::from_str::<serde_json::Value>(&out.stdout)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("assets")
+                .and_then(|assets| assets.as_array())
+                .cloned()
+        })
+        .map(|assets| {
+            assets
+                .into_iter()
+                .filter_map(|asset| {
+                    asset
+                        .get("name")
+                        .and_then(|name| name.as_str())
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>()
+        })
+    else {
+        return VerifyOutcome::Missing;
+    };
+    let matches = if expected_assets.is_empty() {
+        !observed.is_empty()
+    } else {
+        expected_assets
+            .iter()
+            .all(|wanted| observed.iter().any(|name| name == wanted))
+    };
+    if matches {
+        VerifyOutcome::Matches
+    } else {
+        VerifyOutcome::Missing
     }
 }
 
@@ -111,31 +164,7 @@ impl ReleaseAdapter for BinaryAdapter {
         ctx: &EffectCtx<'_>,
         receipt: &PublishReceipt,
     ) -> Result<VerifyOutcome, AdapterError> {
-        let tag = format!("v{}", receipt.version);
-        let out = match ctx.runner.run(
-            "gh",
-            &["release", "view", &tag, "--json", "assets"],
-            ctx.repo_root,
-        ) {
-            Ok(out) if out.status == Some(0) => out,
-            Ok(_) => return Ok(VerifyOutcome::Missing),
-            Err(_) => return Ok(VerifyOutcome::Unknown),
-        };
-        // A release object without its uploaded assets is not an observed binary
-        // publish. The live coordinator additionally checks its known asset set.
-        let has_assets = serde_json::from_str::<serde_json::Value>(&out.stdout)
-            .ok()
-            .and_then(|v| {
-                v.get("assets")
-                    .and_then(|a| a.as_array())
-                    .map(|a| !a.is_empty())
-            })
-            .unwrap_or(false);
-        Ok(if has_assets {
-            VerifyOutcome::Matches
-        } else {
-            VerifyOutcome::Missing
-        })
+        Ok(observe_release_assets(ctx, &receipt.version, &[]))
     }
 
     fn timeout(&self) -> Duration {

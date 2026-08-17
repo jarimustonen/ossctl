@@ -95,6 +95,17 @@ pub trait Fs {
 /// Queries a package registry for already-published state — the "remote is
 /// ground truth" source the release reconciler consults (ADR-0003).
 pub trait RegistryQuery {
+    /// Perform a bounded read-only HTTP GET through the production registry
+    /// client's existing HTTP seam. This also serves destination observers such
+    /// as Homebrew formula verification without spawning `curl`.
+    fn http_get(&self, url: &str) -> io::Result<(u16, Vec<u8>)> {
+        let _ = url;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this registry query does not expose raw HTTP GET",
+        ))
+    }
+
     /// Versions of `package` already published to `ecosystem`'s registry.
     fn published_versions(&self, ecosystem: &str, package: &str) -> io::Result<Vec<String>>;
 

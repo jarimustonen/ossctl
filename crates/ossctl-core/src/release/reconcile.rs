@@ -2,10 +2,11 @@
 //!
 //! Reconciles a journaled run against remote registry state — the remote is
 //! ground truth — classifying each *published* target as one of the four
-//! [`VerifyOutcome`]s. Read-only: it queries the registry through the injected
-//! [`RegistryQuery`](crate::ports::RegistryQuery) port and never mutates the repo,
-//! the journal, or the registry. Backs `ossctl release verify` (and the read-only
-//! half of the `release resume` reconcile decision).
+//! [`VerifyOutcome`]s. Read-only: registry targets use the injected
+//! [`RegistryQuery`](crate::ports::RegistryQuery), while GitHub Releases and
+//! Homebrew formulas use read-only commands through the injected runner. It never
+//! mutates the repo, journal, registry, Release, or tap. Backs `ossctl release
+//! verify` and the read-only half of `release resume`.
 //!
 //! # How a receipt is classified
 //!
@@ -24,25 +25,29 @@
 //!   when digest observation is wired. Which ecosystems the *CLI* can actually
 //!   observe is a property of the injected port — the production
 //!   `RealRegistryQuery` wires `node` first, degrading the rest to `Unknown`.
-//! - `binary` (GitHub Releases, and homebrew taps — which the contract models
-//!   under the `binary` ecosystem) routes to an adapter that is **not** observable
-//!   through [`RegistryQuery`](crate::ports::RegistryQuery), so it honestly reports [`VerifyOutcome::Unknown`].
+//! - GitHub Releases and Homebrew taps are observed at their destinations. A
+//!   missing asset/formula is [`VerifyOutcome::Missing`]; a transport or command
+//!   failure remains [`VerifyOutcome::Unknown`].
 //! - a registry outage, an unresolvable/absent package name, or an ecosystem this
 //!   binary does not recognize all resolve to [`VerifyOutcome::Unknown`] — the
 //!   audit's tri-state discipline: a lookup that could not be performed is
 //!   **never** a false [`VerifyOutcome::Missing`].
 
-use crate::contract::schema::{Ecosystem, ReleaseLayout};
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::contract::schema::{Adapter, Ecosystem, ReleaseLayout};
 use crate::protocol::journal::{PublishReceipt as JournalReceipt, RunState};
+use crate::protocol::plan::{PlanTarget, ReleasePlan};
 use crate::protocol::reconcile::{ReconcileReport, ReconcileSummary, TargetReconcile};
 use crate::protocol::release::{PublishReceipt, VerifyOutcome};
 
-use super::adapters::{resolve, EffectCtx, ReleaseAdapter};
+use super::adapters::{observe_github_release_assets, resolve, EffectCtx, ReleaseAdapter};
+use super::journal_target_ids;
 
 /// Reconcile a journaled run's published targets against current registry state.
 ///
-/// Pure with respect to the world *except* for the read-only registry lookups it
-/// performs through `ctx` — it writes nothing. Iterates the run's `published`
+/// Pure with respect to the world except for read-only destination observations
+/// through `ctx`; it writes nothing. Iterates the run's `published`
 /// receipts in stable (target-id) order, classifies each via the ecosystem
 /// adapter's [`verify`](ReleaseAdapter::verify), and rolls the outcomes up into a
 /// [`ReconcileReport`]. Targets that were declared but never published carry no
@@ -50,12 +55,47 @@ use super::adapters::{resolve, EffectCtx, ReleaseAdapter};
 /// target is not a discrepancy; the CLI surfaces them as envelope warnings).
 #[must_use]
 pub fn reconcile(state: &RunState, ctx: &EffectCtx<'_>) -> ReconcileReport {
-    let mut targets = Vec::with_capacity(state.published.len());
+    reconcile_with_plan(state, None, ctx)
+}
+
+/// Reconcile with an authenticated stored plan when one is available. The plan
+/// restores exact adapter identities and platform obligations that older journal
+/// receipts did not carry; the journal-only fallback still performs the strongest
+/// destination observation its durable facts allow.
+#[must_use]
+pub fn reconcile_with_plan(
+    state: &RunState,
+    plan: Option<&ReleasePlan>,
+    ctx: &EffectCtx<'_>,
+) -> ReconcileReport {
+    let plan_targets: BTreeMap<String, &PlanTarget> = plan
+        .map(|plan| {
+            journal_target_ids(&plan.targets)
+                .into_iter()
+                .zip(&plan.targets)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut ids: BTreeSet<String> = state.published.keys().cloned().collect();
+    ids.extend(state.delegated.iter().cloned());
+    let mut targets = Vec::with_capacity(ids.len());
     let mut summary = ReconcileSummary::default();
 
-    // `published` is a BTreeMap, so iteration is already sorted by target id.
-    for (target_id, receipt) in &state.published {
-        let (outcome, detail) = classify(ctx, receipt);
+    for target_id in ids {
+        let planned = plan_targets.get(&target_id).copied();
+        let (ecosystem, package, version, outcome, detail) =
+            if let Some(receipt) = state.published.get(&target_id) {
+                let (outcome, detail) = classify(ctx, receipt, planned);
+                (
+                    receipt.ecosystem.clone(),
+                    receipt.package.clone(),
+                    receipt.version.clone(),
+                    outcome,
+                    detail,
+                )
+            } else {
+                classify_delegated(ctx, state, &target_id, planned, plan)
+            };
         match outcome {
             VerifyOutcome::Matches => summary.matches += 1,
             VerifyOutcome::Conflicts => summary.conflicts += 1,
@@ -63,10 +103,10 @@ pub fn reconcile(state: &RunState, ctx: &EffectCtx<'_>) -> ReconcileReport {
             VerifyOutcome::Unknown => summary.unknown += 1,
         }
         targets.push(TargetReconcile {
-            target: target_id.clone(),
-            ecosystem: receipt.ecosystem.clone(),
-            package: receipt.package.clone(),
-            version: receipt.version.clone(),
+            target: target_id,
+            ecosystem,
+            package,
+            version,
             outcome,
             detail,
         });
@@ -90,7 +130,11 @@ pub fn reconcile(state: &RunState, ctx: &EffectCtx<'_>) -> ReconcileReport {
 /// that cannot even be turned into a registry query (no package name, or an
 /// unrecognized ecosystem) short-circuits to `Unknown` rather than fabricating a
 /// query that could yield a false `Missing`.
-fn classify(ctx: &EffectCtx<'_>, receipt: &JournalReceipt) -> (VerifyOutcome, Option<String>) {
+fn classify(
+    ctx: &EffectCtx<'_>,
+    receipt: &JournalReceipt,
+    planned: Option<&PlanTarget>,
+) -> (VerifyOutcome, Option<String>) {
     // A receipt with no package name cannot be looked up remotely — honest
     // Unknown, never a query with an empty name that a registry reads as "absent".
     let Some(package) = receipt.package.clone() else {
@@ -113,12 +157,23 @@ fn classify(ctx: &EffectCtx<'_>, receipt: &JournalReceipt) -> (VerifyOutcome, Op
         );
     };
 
-    // Dispatch through the ecosystem's adapter verify(). The specific adapter
-    // identity within an ecosystem does not change verify()'s behavior (all rust
-    // adapters share the registry path; all binary/homebrew adapters report
-    // Unknown), so the default adapter is a faithful stand-in for the receipt,
-    // which does not journal which specific adapter published it.
-    let adapter_id = ecosystem.default_adapter(ReleaseLayout::Single);
+    // Stored plans retain the exact adapter. For a pre-plan-store Homebrew receipt,
+    // the durable formula URL distinguishes it from a GitHub Release receipt.
+    let adapter_id = planned.map_or_else(
+        || {
+            if ecosystem == Ecosystem::Binary
+                && receipt
+                    .registry_url
+                    .as_deref()
+                    .is_some_and(|url| url.contains("/Formula/") || url.contains("/pull/"))
+            {
+                Adapter::HomebrewTap
+            } else {
+                ecosystem.default_adapter(ReleaseLayout::Single)
+            }
+        },
+        |target| target.adapter,
+    );
     let release_receipt = PublishReceipt {
         adapter: adapter_id,
         ecosystem,
@@ -142,10 +197,71 @@ fn classify(ctx: &EffectCtx<'_>, receipt: &JournalReceipt) -> (VerifyOutcome, Op
     (outcome, detail_for(outcome, ecosystem))
 }
 
+fn classify_delegated(
+    ctx: &EffectCtx<'_>,
+    state: &RunState,
+    target_id: &str,
+    planned: Option<&PlanTarget>,
+    plan: Option<&ReleasePlan>,
+) -> (
+    String,
+    Option<String>,
+    String,
+    VerifyOutcome,
+    Option<String>,
+) {
+    let version = plan.map_or_else(|| state.version.clone(), |plan| plan.version.clone());
+    let adapter = planned.map(|target| target.adapter).or_else(|| {
+        state
+            .delegated_adapters
+            .get(target_id)
+            .and_then(|adapter| Adapter::parse(adapter))
+    });
+    let ecosystem = planned.map_or(Ecosystem::Binary, |target| target.ecosystem);
+    let package = planned.and_then(|target| target.package.clone());
+    let outcome = match (adapter, package.as_deref()) {
+        (Some(Adapter::CargoDist), Some(package)) => {
+            let expected = plan
+                .into_iter()
+                .flat_map(|plan| &plan.homebrew_platforms)
+                .map(|triple| format!("{package}-{triple}.tar.xz"))
+                .collect::<Vec<_>>();
+            observe_github_release_assets(ctx, &version, &expected)
+        }
+        (Some(Adapter::CargoDist), None) => observe_github_release_assets(ctx, &version, &[]),
+        (Some(adapter), Some(package)) => {
+            let receipt = PublishReceipt {
+                adapter,
+                ecosystem,
+                package: package.to_string(),
+                version: version.clone(),
+                canonical_ref: String::new(),
+                digest: None,
+                remote_url: None,
+                timestamp: 0,
+            };
+            resolve(adapter)
+                .verify(ctx, &receipt)
+                .unwrap_or(VerifyOutcome::Unknown)
+        }
+        _ => VerifyOutcome::Unknown,
+    };
+    (
+        ecosystem.as_str().to_string(),
+        package,
+        version,
+        outcome,
+        detail_for(outcome, ecosystem),
+    )
+}
+
 /// The operator-facing reason for a non-`matches` outcome (`None` for `matches`).
 fn detail_for(outcome: VerifyOutcome, ecosystem: Ecosystem) -> Option<String> {
     match outcome {
         VerifyOutcome::Matches => None,
+        VerifyOutcome::Missing if ecosystem == Ecosystem::Binary => {
+            Some("the destination does not contain the expected release artifact".to_string())
+        }
         VerifyOutcome::Missing => {
             Some("the registry does not report this version as published".to_string())
         }
@@ -153,11 +269,8 @@ fn detail_for(outcome: VerifyOutcome, ecosystem: Ecosystem) -> Option<String> {
             "the registry holds this version but its digest differs from the recorded receipt"
                 .to_string(),
         ),
-        // Binary/homebrew are structurally unobservable; every other ecosystem's
-        // Unknown means the lookup itself could not be performed.
         VerifyOutcome::Unknown if ecosystem == Ecosystem::Binary => Some(
-            "this distribution target (GitHub Releases or a homebrew formula) is not \
-             observable through the registry query"
+            "the release destination could not be observed (network or command failure)"
                 .to_string(),
         ),
         VerifyOutcome::Unknown => Some(

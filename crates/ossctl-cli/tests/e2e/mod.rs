@@ -8,14 +8,17 @@ use tempfile::TempDir;
 
 pub struct TempRepo {
     dir: TempDir,
+    remote: TempDir,
     name: String,
 }
 
 impl TempRepo {
     pub fn new(status: &str) -> Self {
         let dir = tempfile::tempdir().expect("create temporary repository");
+        let remote = tempfile::tempdir().expect("create temporary bare remote");
         let repo = Self {
             dir,
+            remote,
             name: "e2e-fixture".to_string(),
         };
         repo.write_contract(status);
@@ -38,6 +41,21 @@ impl TempRepo {
         repo.git(&["config", "user.email", "e2e@example.invalid"]);
         repo.git(&["add", "."]);
         repo.git(&["commit", "-m", "initial fixture"]);
+        let output = Command::new("git")
+            .args(["init", "--bare"])
+            .arg(repo.remote.path())
+            .output()
+            .expect("initialize bare remote");
+        assert!(
+            output.status.success(),
+            "initialize bare remote: {output:?}"
+        );
+        repo.git(&[
+            "remote",
+            "add",
+            "origin",
+            repo.remote.path().to_str().expect("utf-8 remote path"),
+        ]);
         repo
     }
 
@@ -49,6 +67,16 @@ impl TempRepo {
         fs::write(self.path().join(name), contents).expect("write committed fixture file");
         self.git(&["add", name]);
         self.git(&["commit", "-m", "fixture change"]);
+    }
+
+    pub fn use_cargo_dist_target(&self) {
+        fs::write(
+            self.path().join("OSS-RELEASE.md"),
+            "---\nschema_version: 1\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets:\n  - {ecosystem: rust, package: e2e-fixture, registry: gh-releases, adapter: cargo-dist}\ndistribution:\n  adapter: cargo-dist\n  gh_releases: true\n  platforms: [aarch64-apple-darwin]\nversioning: semver\nchangelog:\n  mode: curated\nrelease:\n  model: gated\nlicense: MIT\n---\n# e2e-fixture\n",
+        )
+        .expect("write cargo-dist contract");
+        self.git(&["add", "OSS-RELEASE.md"]);
+        self.git(&["commit", "-m", "configure cargo-dist fixture"]);
     }
 
     pub fn journal_dir(&self) -> PathBuf {
@@ -64,7 +92,8 @@ impl TempRepo {
             .env("SHIM_DIR", shims.dir.path())
             .env("HOME", self.path().join("home"))
             .env("CARGO_HOME", self.path().join("cargo-home"))
-            .env("RUSTUP_HOME", self.path().join("rustup-home"));
+            .env("RUSTUP_HOME", self.path().join("rustup-home"))
+            .env("OSSCTL_E2E_FAST_CLOCK", "1");
         command.output().expect("run ossctl")
     }
 
@@ -102,7 +131,7 @@ impl Shims {
         let shims = Self { dir };
         fs::create_dir_all(shims.dir.path().join("spec")).expect("create shim spec directory");
         fs::write(shims.dir.path().join("log"), "").expect("create shim log");
-        for command in ["cargo", "gh", "curl", "sha256sum", "shasum"] {
+        for command in ["cargo", "dist", "gh", "curl", "sha256sum", "shasum"] {
             shims.write_script(command);
             shims.set(command, 0, "");
         }

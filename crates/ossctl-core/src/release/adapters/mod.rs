@@ -41,6 +41,7 @@ use std::time::Duration;
 
 use crate::contract::schema::{Adapter, Ecosystem, Registry, Target};
 use crate::ports::{Clock, CommandOutput, CommandRunner, RegistryQuery};
+use crate::protocol::plan::ReleasePlan;
 use crate::protocol::release::{
     BuildArtifacts, DryRunReport, PlannedCommand, PublishReceipt, VerifyOutcome,
 };
@@ -213,6 +214,40 @@ pub static EMPTY_ARTIFACTS: ReleaseArtifacts = ReleaseArtifacts {
     homebrew: None,
     homebrew_assets: Vec::new(),
 };
+
+/// Build the plan-derived artifact context needed by read-only destination
+/// verification. No build outputs are invented: only the sealed Homebrew formula
+/// obligations are carried so a post-hoc verify checks the exact platform set.
+#[must_use]
+pub fn verification_artifacts(plan: &ReleasePlan) -> ReleaseArtifacts {
+    let homebrew = plan
+        .targets
+        .iter()
+        .any(|target| matches!(target.registry, Registry::Homebrew))
+        .then(|| HomebrewFormula {
+            tap: plan.homebrew_tap.clone(),
+            license: plan.license.clone(),
+            description: plan.description.clone(),
+            version: plan.version.clone(),
+            platforms: plan.homebrew_platforms.clone(),
+        });
+    ReleaseArtifacts {
+        homebrew,
+        ..ReleaseArtifacts::default()
+    }
+}
+
+/// Observe the GitHub Release asset set for a delegated or engine-owned binary
+/// target. Kept at the adapter seam so live cuts and post-hoc verification share
+/// one parser and one outcome discipline.
+#[must_use]
+pub fn observe_github_release_assets(
+    ctx: &EffectCtx<'_>,
+    version: &str,
+    expected_assets: &[String],
+) -> VerifyOutcome {
+    binary::observe_release_assets(ctx, version, expected_assets)
+}
 
 /// The published source tarball a Homebrew formula bump consumes (`--url` /
 /// `--sha256`).
@@ -585,9 +620,8 @@ pub trait ReleaseAdapter {
     ///
     /// The default implementation queries [`RegistryQuery`] by the receipt's
     /// ecosystem + package and classifies via [`classify_receipt`]; a lookup
-    /// failure yields [`VerifyOutcome::Unknown`]. Adapters whose destination is
-    /// not observable through [`RegistryQuery`] (homebrew taps, GitHub Releases)
-    /// override this to return [`VerifyOutcome::Unknown`] explicitly.
+    /// failure yields [`VerifyOutcome::Unknown`]. Homebrew and GitHub Release
+    /// adapters override this with their destination-specific read-only observers.
     ///
     /// # Errors
     /// The default never errors (an outage is [`VerifyOutcome::Unknown`], not an

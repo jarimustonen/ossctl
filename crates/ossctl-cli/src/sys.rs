@@ -223,11 +223,25 @@ impl GitRepo for RealGitRepo {
 /// rather than panicking.
 pub struct RealClock;
 
+/// Virtual offset used only by the subprocess-shim e2e harness. Production
+/// waits remain real; `OSSCTL_E2E_FAST_CLOCK=1` lets a compiled-binary test drive
+/// bounded polling to its ceiling without sleeping for twenty minutes.
+static E2E_CLOCK_OFFSET_SECS: AtomicU64 = AtomicU64::new(0);
+
 impl Clock for RealClock {
     fn now_unix(&self) -> u64 {
-        SystemTime::now()
+        let wall = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs())
+            .map_or(0, |d| d.as_secs());
+        wall.saturating_add(E2E_CLOCK_OFFSET_SECS.load(Ordering::Relaxed))
+    }
+
+    fn sleep(&self, dur: Duration) {
+        if std::env::var_os("OSSCTL_E2E_FAST_CLOCK").is_some() {
+            E2E_CLOCK_OFFSET_SECS.fetch_add(dur.as_secs(), Ordering::Relaxed);
+        } else {
+            std::thread::sleep(dur);
+        }
     }
 }
 
@@ -842,6 +856,10 @@ impl RealRegistryQuery {
 }
 
 impl RegistryQuery for RealRegistryQuery {
+    fn http_get(&self, url: &str) -> io::Result<(u16, Vec<u8>)> {
+        RealRegistryQuery::http_get(url)
+    }
+
     fn published_versions(&self, ecosystem: &str, package: &str) -> io::Result<Vec<String>> {
         match ecosystem {
             "node" => Self::npm_versions(package),

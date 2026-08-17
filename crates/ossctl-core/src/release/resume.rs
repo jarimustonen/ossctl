@@ -29,8 +29,8 @@
 //!
 //! The `Unknown` rows are the tri-state discipline (also ADR-0002 §1): a lookup
 //! that **could not be performed** — a registry outage, a package with no name, an
-//! ecosystem this binary cannot query, or a structurally-unobservable distribution
-//! target (homebrew taps / GitHub Releases) — is **never** read as `Missing` (which
+//! ecosystem this binary cannot query, or a failed destination observation is
+//! **never** read as `Missing` (which
 //! would drive a dangerous blind re-publish of an already-published version). When a
 //! receipt exists (`published × Unknown`) it is surfaced as unverifiable; a resume
 //! proceeds past it only with an explicit human go-ahead (`allow_unverified`), which
@@ -236,7 +236,7 @@ pub fn reconcile_for_resume(
     // supplies only the outcome — the journal-state axis is decided directly from
     // `state.published` below, never from report membership, so a receipt can never
     // be misclassified as not-recorded (which would risk a double publish).
-    let published_report = super::reconcile::reconcile(state, ctx);
+    let published_report = super::reconcile::reconcile_with_plan(state, Some(plan), ctx);
     let published: HashMap<&str, (VerifyOutcome, Option<String>)> = published_report
         .targets
         .iter()
