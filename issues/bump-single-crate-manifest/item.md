@@ -11,6 +11,10 @@ commits:
   summary: fix bump plain crate manifests
 - hash: d6b9ebf
   summary: test harden root manifest bump paths
+- hash: 30341a3
+  summary: fix bump plain crate manifests
+- hash: 6c0986b
+  summary: test harden root manifest bump paths
 closed: 2026-08-17
 ---
 
