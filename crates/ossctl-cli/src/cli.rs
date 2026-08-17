@@ -36,8 +36,12 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Show the same version information as the `version` subcommand.
+    #[arg(short = 'V', long)]
+    version: bool,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -141,22 +145,33 @@ pub fn run() -> ExitCode {
 
     let format = OutputFormat::from_json_flag(cli.json);
 
-    let result = match cli.command {
-        Command::Version => cmd_version(format),
-        Command::Config { action } => crate::config::dispatch(action, format),
-        Command::Contract { action } => match action {
-            ContractAction::Show(args) => crate::contract::show(&args, format),
-            ContractAction::Validate(args) => crate::contract::validate(&args, format),
-        },
-        Command::Facts(args) => crate::facts::run(&args, format),
-        Command::Audit(args) => crate::audit::run(&args, format),
-        Command::Release { action } => crate::release::dispatch(action, format),
-        Command::Dist { action } => crate::dist::dispatch(action, format),
-        Command::Skill { action } => crate::skill::dispatch(action, format),
-        // `doctor` owns its exit code directly (§18: exit 1 on any `fail`
-        // *without* an error envelope), which does not map onto the shared
-        // Result path — the `return` diverges so this arm's type is compatible.
-        Command::Doctor(args) => return crate::doctor::run(&args, format),
+    let result = if cli.version {
+        if cli.command.is_some() {
+            return emit_version_with_subcommand();
+        }
+        cmd_version(format)
+    } else {
+        let command = match cli.command {
+            Some(command) => command,
+            None => return emit_missing_subcommand(),
+        };
+        match command {
+            Command::Version => cmd_version(format),
+            Command::Config { action } => crate::config::dispatch(action, format),
+            Command::Contract { action } => match action {
+                ContractAction::Show(args) => crate::contract::show(&args, format),
+                ContractAction::Validate(args) => crate::contract::validate(&args, format),
+            },
+            Command::Facts(args) => crate::facts::run(&args, format),
+            Command::Audit(args) => crate::audit::run(&args, format),
+            Command::Release { action } => crate::release::dispatch(action, format),
+            Command::Dist { action } => crate::dist::dispatch(action, format),
+            Command::Skill { action } => crate::skill::dispatch(action, format),
+            // `doctor` owns its exit code directly (§18: exit 1 on any `fail`
+            // *without* an error envelope), which does not map onto the shared
+            // Result path — the `return` diverges so this arm's type is compatible.
+            Command::Doctor(args) => return crate::doctor::run(&args, format),
+        }
     };
 
     match result {
@@ -168,12 +183,31 @@ pub fn run() -> ExitCode {
     }
 }
 
+/// Emit the canonical missing-subcommand error when neither a command nor the
+/// version alias was supplied.
+fn emit_missing_subcommand() -> ExitCode {
+    let err = CliError::user("missing_argument", "a subcommand is required");
+    err.emit();
+    ExitCode::from(ExitKind::User as u8)
+}
+
+/// Reject a version alias paired with a command instead of silently skipping it.
+fn emit_version_with_subcommand() -> ExitCode {
+    let err = CliError::user(
+        "invalid_arguments",
+        "--version/-V cannot be combined with a subcommand",
+    );
+    err.emit();
+    ExitCode::from(ExitKind::User as u8)
+}
+
 /// Translate a clap parse failure into either its native help/usage output
 /// (exit 0 for `--help`) or the §10 error envelope on stderr.
 fn handle_clap_error(e: &clap::Error) -> ExitCode {
     use clap::error::{ContextKind, ErrorKind};
-    // Help is not a failure; let clap print and exit 0. `--version` is disabled
-    // at the clap level, so it never surfaces here — agents use `version`.
+    // Help is not a failure; let clap print and exit 0. Clap's built-in version
+    // action is disabled because the custom alias routes through `cmd_version`
+    // and therefore honors the global `--json` flag.
     if matches!(
         e.kind(),
         ErrorKind::DisplayHelp | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand

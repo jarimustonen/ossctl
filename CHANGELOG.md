@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   falls back from `[workspace.package] version` to `[package] version` only when the
   workspace source is absent, while retaining lockfile refresh, CHANGELOG finalization,
   hook validation, and fail-closed version checks (`bump-single-crate-manifest`).
+- **`ossctl --version` and `ossctl -V` now alias `ossctl version`.** The aliases preserve the
+  selected output format, including the canonical JSON envelope (`version-flag-alias`).
 
 ## [0.7.0] - 2026-08-17
 

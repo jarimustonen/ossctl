@@ -45,14 +45,57 @@ fn version_json_emits_schema_fields() {
     );
 }
 
-/// Text mode is the default and prints a human-readable version line.
+/// `--version` / `-V` are exact aliases for the `version` verb in both formats.
 #[test]
-fn version_text_is_default() {
-    ossctl()
-        .arg("version")
-        .assert()
-        .success()
-        .stdout(predicate::str::starts_with("ossctl "));
+fn version_flag_aliases_version_verb() {
+    let text = ossctl().arg("version").output().unwrap();
+    assert!(text.status.success(), "version must exit 0");
+    for flag in ["--version", "-V"] {
+        let alias = ossctl().arg(flag).output().unwrap();
+        assert!(alias.status.success(), "{flag} must exit 0");
+        assert!(alias.stderr.is_empty(), "{flag} must not write stderr");
+        assert_eq!(alias.stdout, text.stdout, "{flag} text output must match");
+    }
+
+    let json = ossctl().args(["version", "--json"]).output().unwrap();
+    assert!(json.status.success(), "version --json must exit 0");
+    for flag in ["--version", "-V"] {
+        for args in [[flag, "--json"], ["--json", flag]] {
+            let alias = ossctl().args(args).output().unwrap();
+            assert!(alias.status.success(), "{args:?} must exit 0");
+            assert!(alias.stderr.is_empty(), "{args:?} must not write stderr");
+            assert_eq!(
+                alias.stdout, json.stdout,
+                "{args:?} JSON envelope must match"
+            );
+        }
+    }
+}
+
+/// A root version alias cannot silently discard a valid command, and it does
+/// not revive the removed release-level `--version` flag.
+#[test]
+fn version_alias_does_not_mask_subcommands_or_release_flags() {
+    for flag in ["--version", "-V"] {
+        let out = ossctl().args([flag, "doctor"]).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{flag} doctor must fail");
+        let error: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+        assert_eq!(error["error"]["code"], "invalid_arguments");
+        assert!(out.stdout.is_empty(), "{flag} doctor must not emit data");
+    }
+
+    for args in [
+        &["release", "plan", "--version", "1.2.3"][..],
+        &["release", "plan", "-V", "1.2.3"][..],
+        &["release", "cut", "--version", "1.2.3"][..],
+        &["release", "cut", "-V", "1.2.3"][..],
+    ] {
+        let out = ossctl().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?} must fail");
+        let error: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+        assert_eq!(error["error"]["code"], "unknown_flag");
+        assert!(out.stdout.is_empty(), "{args:?} must not emit version data");
+    }
 }
 
 /// `doctor` runs the self-check and exits 0 (no failing checks).
