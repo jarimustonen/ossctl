@@ -2,10 +2,16 @@
 created: 2026-08-05
 updated: 2026-08-17
 type: task
-status: in-progress
+status: done
 priority: normal
 epic: ossctl-phase4-build
 lane: release-safety
+closed: 2026-08-17
+commits:
+- hash: 45cfb51
+  summary: verify barrier and destination observers
+- hash: b64a71d
+  summary: finish post-hoc verification and regression coverage
 ---
 
 # release verify should confirm CI created a delegated GitHub Release
@@ -25,3 +31,9 @@ This is an accepted consequence of Option 1 (the chosen direction), NOT a bug in
 `ossctl release verify <run_id>` should recognize a `github_release_delegated` tag and, for it, query GitHub (`gh release view <tag>` / API) to assert the Release now exists (and optionally that expected cross-platform assets are present), rather than assuming success from the delegation event alone. Distinguish: coordinator-created (Release must exist), delegated+observed (exists), delegated+pending (not yet), delegated+failed (absent after a timeout / explicit operator check).
 
 Currently `release verify`/`reconcile` do NOT key on `TagState.github_release` at all (only `release show` display does), so this is additive, not a fix to existing broken behavior.
+
+## Resolution
+
+### 2026-08-17T07:36:06Z · @issuectl
+
+Mandatory verification now polls delegated GitHub Releases for the full declared platform asset set, and standalone release verify performs the same check from the stored plan. The zero-assets regression is covered end to end.

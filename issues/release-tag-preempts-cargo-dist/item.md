@@ -2,13 +2,18 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: bug
-status: in-progress
+status: fixed
 priority: high
 lane: release-safety
 lane_seq: 1
 commits:
 - hash: 86b27d5
   summary: refuse undeclared distribution surfaces
+- hash: 45cfb51
+  summary: verify barrier and destination observers
+- hash: b64a71d
+  summary: finish post-hoc verification and regression coverage
+closed: 2026-08-17
 ---
 
 # release tag phase creates the GitHub Release, breaking cargo-dist hosting and skipping the Homebrew publish
@@ -134,4 +139,8 @@ DESIGN LANDED (2026-08-17): design.md in this issue directory covers the whole r
 
 D4 is shipped in 86b27d5: facts now detect cargo-dist and tag-triggered workflows; validation and plan warn, and cut refuses undeclared GitHub Release or unserved Homebrew targets before journal creation. D3 verification remains sequenced work, so this issue stays in progress.
 
+## Resolution
 
+### 2026-08-17T07:36:06Z · @issuectl
+
+D4, already on main, blocks an under-declared cargo-dist or Homebrew cut before journal creation. D3, completed here, verifies every destination after dist and fails the run if a delegated Release has no assets or another release leg was dropped.

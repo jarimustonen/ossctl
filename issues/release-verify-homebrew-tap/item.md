@@ -2,11 +2,17 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: feature
-status: in-progress
+status: done
 priority: high
 related: ['@homebrew-formula-uninstallable', '@release-verify-delegated-github-release']
 lane: release-safety
 lane_seq: 2
+closed: 2026-08-17
+commits:
+- hash: 45cfb51
+  summary: verify barrier and destination observers
+- hash: b64a71d
+  summary: finish post-hoc verification and regression coverage
 ---
 
 # release verify must confirm the Homebrew tap carries the released version
@@ -75,3 +81,9 @@ instances 2 and 3 but not 1.
 
 This is the generic engine capability and belongs here. Re-enabling or reconfiguring any
 particular downstream project's release pipeline belongs to that project.
+
+## Resolution
+
+### 2026-08-17T07:36:06Z · @issuectl
+
+Mandatory verification now fetches the destination formula through the bounded HTTP seam and checks the ownership marker, released version, and every declared platform URL/checksum stanza. Unknown and stale observations cannot complete a cut.
