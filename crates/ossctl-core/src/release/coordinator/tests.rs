@@ -339,6 +339,7 @@ impl Clock for FakeClock {
         self.0.set(t + 1);
         t
     }
+    fn sleep(&self, _dur: std::time::Duration) {}
 }
 
 struct FakeIdGen(String);
@@ -464,7 +465,38 @@ fn two_target_plan() -> ReleasePlan {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     }
+}
+
+#[test]
+fn homebrew_release_asset_wait_times_out_without_a_source_fallback() {
+    let cmd = FakeCmd::failing_on("curl");
+    let clock = FakeClock(Cell::new(0));
+    let registry = FakeRegistry::empty();
+    let root = Path::new("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &registry,
+        repo_root: root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let plan = two_target_plan();
+    let targets = resolve_target_plans(&plan).unwrap();
+    let target_refs: Vec<&TargetPlan> = targets.iter().collect();
+    let formula = HomebrewFormula {
+        tap: Some("o/tap".into()),
+        license: Some("MIT".into()),
+        description: Some("Tool".into()),
+        platforms: vec!["aarch64-apple-darwin".into()],
+    };
+    let err = fetch_homebrew_assets(&ctx, "o/r", &plan, &formula, &target_refs).unwrap_err();
+    assert!(
+        err.contains("not visible after") && err.contains("Refusing to write a source-build"),
+        "{err}"
+    );
 }
 
 fn new_journal<'a>(
@@ -721,6 +753,8 @@ fn a_failed_package_preflight_stops_at_dry_run_before_publish_or_tag() {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     };
     // The cargo build/package step is now `cargo package --no-verify`, and the
     // dry-run phase runs that SAME preflight (a faithful preflight — see
@@ -922,6 +956,8 @@ fn threads_build_assets_into_binary_publish() {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     };
     execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
 
@@ -972,6 +1008,8 @@ fn threads_source_tarball_url_into_homebrew_publish() {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     };
     execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
 
@@ -1059,6 +1097,8 @@ fn no_slug_lookup_without_a_github_distribution_target() {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     };
     execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
 
@@ -1104,6 +1144,8 @@ fn threads_repo_slug_into_binary_receipt() {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     };
     execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
 
@@ -1173,6 +1215,8 @@ fn threads_no_assets_when_build_phase_is_resumed() {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     };
 
     // First attempt: the binary publish fails after build completed, leaving the
@@ -1398,6 +1442,8 @@ fn two_crates_io_targets_in_one_ecosystem_cut_in_dependency_order() {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     };
 
     // The plan preflights (this is the check that used to hard-fail `invalid_plan`)
@@ -1531,6 +1577,8 @@ fn two_targets_do_not_double_publish_a_shared_dependency_under_index_lag() {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     };
     let ids = crate::release::journal_target_ids(&plan.targets);
     let mut journal = Journal::create(
@@ -1621,6 +1669,8 @@ fn dependent_packaging_interleaves_into_publish_not_build_all() {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     };
     let ids = crate::release::journal_target_ids(&plan.targets);
     let mut journal = Journal::create(
@@ -1706,6 +1756,8 @@ fn resume_after_core_publish_completes_the_dependent_without_republishing_core()
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     };
     let ids = crate::release::journal_target_ids(&plan.targets);
     let mut journal = Journal::create(
@@ -1829,6 +1881,8 @@ fn refuses_a_target_with_no_resolved_package() {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     };
     let err = execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap_err();
     assert!(matches!(err, CutError::Plan(_)));
@@ -1880,6 +1934,8 @@ fn ci_delegated_target_is_skipped_journaled_not_failed() {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     };
     let ids = crate::release::journal_target_ids(&plan.targets);
     let mut journal = Journal::create(
@@ -1984,6 +2040,8 @@ fn ossctl_like_contract_cuts_end_to_end_across_target_classes() {
         bump: None,
         homebrew_tap: Some("jarimustonen/homebrew-ossctl".into()),
         license: Some("MIT".into()),
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     };
     let ids = crate::release::journal_target_ids(&plan.targets);
     // ids: [ossctl-core@crates.io, ossctl@crates.io, ossctl@gh-releases, ossctl@homebrew]
@@ -2075,9 +2133,9 @@ fn ossctl_like_contract_cuts_end_to_end_across_target_classes() {
     );
     assert!(
         formula.contains(
-            "url \"https://github.com/jarimustonen/ossctl/archive/refs/tags/v1.2.3.tar.gz\""
+            "url \"https://github.com/jarimustonen/ossctl/releases/download/v1.2.3/ossctl-aarch64-apple-darwin.tar.xz\""
         ),
-        "formula lacks the tag-archive url: {formula}"
+        "formula lacks the prebuilt release-asset url: {formula}"
     );
     let _ = std::fs::remove_dir_all(&hb_dir);
 
@@ -2127,6 +2185,8 @@ fn delegated_plan() -> ReleasePlan {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     }
 }
 
@@ -2578,6 +2638,8 @@ fn rust_crate_plan(packages: &[&str]) -> ReleasePlan {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     }
 }
 
@@ -3030,6 +3092,8 @@ fn bump_plan() -> ReleasePlan {
         }),
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     }
 }
 

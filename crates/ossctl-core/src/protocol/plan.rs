@@ -96,11 +96,12 @@ pub struct ReleasePlan {
     /// first-formula bootstrap without re-reading the contract. Being a copy of a
     /// value the pre-image already hashes, it changes no `plan_id`.
     pub homebrew_tap: Option<String>,
-    /// The SPDX license expression the cut's generated Homebrew formula records,
-    /// copied from the normalized contract's `license`. Carried for the same
-    /// reason (and with the same content-address neutrality) as
-    /// [`Self::homebrew_tap`].
+    /// The SPDX license expression the cut's generated Homebrew formula records.
     pub license: Option<String>,
+    /// The package description rendered in the generated Homebrew formula.
+    pub description: Option<String>,
+    /// cargo-dist target triples whose release archives the Homebrew formula serves.
+    pub homebrew_platforms: Vec<String>,
 }
 
 /// One concrete publish destination in a sealed plan.

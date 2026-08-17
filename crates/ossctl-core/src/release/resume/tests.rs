@@ -119,6 +119,8 @@ fn rust_plan() -> ReleasePlan {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     }
 }
 
@@ -137,6 +139,8 @@ fn two_target_plan() -> ReleasePlan {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     }
 }
 
@@ -627,6 +631,8 @@ fn cargo_dist_plan() -> ReleasePlan {
         bump: None,
         homebrew_tap: None,
         license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
     }
 }
 

@@ -179,6 +179,12 @@ fn build_inner(
             .iter()
             .find_map(|d| d.homebrew_tap.clone()),
         license: Some(contract.license.clone()),
+        description: facts.description.clone(),
+        homebrew_platforms: contract
+            .distributions
+            .iter()
+            .flat_map(|d| d.platforms.iter().cloned())
+            .collect(),
     }
 }
 

@@ -156,18 +156,31 @@ pub struct ReleaseArtifacts {
     /// every other adapter, which never reads it). Threaded from the plan by the
     /// coordinator alongside [`Self::source_tarball`].
     pub homebrew: Option<HomebrewFormula>,
+    /// Verified release archives for the Homebrew formula, fetched post-tag.
+    pub homebrew_assets: Vec<HomebrewAsset>,
 }
 
 /// The Homebrew-formula inputs a first-formula *create* needs that the source
 /// tarball alone does not carry — the destination tap and the formula's license.
 ///
 /// The [`homebrew`] adapter chooses its **create** vs **bump**
-/// path from whether the target formula already exists in [`Self::tap`]; a
+/// path from whether the target formula already exists in [`HomebrewFormula::tap`]; a
 /// `None` tap (a `homebrew-core` target, or a `homebrew-tap` the contract left
 /// unconfigured) has no bootstrap destination, so the adapter falls back to the
 /// plain `bump-formula-pr` path. Like the rest of [`ReleaseArtifacts`] this is an
 /// in-memory coordinator↔adapter hand-off, never serialized, so it carries no
 /// schema version of its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HomebrewAsset {
+    /// cargo-dist target triple encoded in the archive name.
+    pub triple: String,
+    /// Public GitHub Release asset URL.
+    pub url: String,
+    /// SHA-256 of the exact archive bytes at [`Self::url`].
+    pub sha256: String,
+}
+
+/// Inputs that describe a generated Homebrew formula.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HomebrewFormula {
     /// The destination tap repo as an `owner/repo` slug (from the contract's
@@ -176,6 +189,10 @@ pub struct HomebrewFormula {
     /// The SPDX license expression the generated formula's `license` stanza
     /// records, or `None` to omit the stanza.
     pub license: Option<String>,
+    /// Package metadata description, surfaced by `brew search`.
+    pub description: Option<String>,
+    /// Release archive triples cargo-dist publishes for this package.
+    pub platforms: Vec<String>,
 }
 
 /// A shared empty artifact set — the value carried through the dry-run / build
@@ -191,6 +208,7 @@ pub static EMPTY_ARTIFACTS: ReleaseArtifacts = ReleaseArtifacts {
     source_tarball: None,
     repo_slug: None,
     homebrew: None,
+    homebrew_assets: Vec::new(),
 };
 
 /// The published source tarball a Homebrew formula bump consumes (`--url` /

@@ -122,7 +122,7 @@ use crate::protocol::plan::ReleasePlan;
 use crate::protocol::release::PublishReceipt as AdapterReceipt;
 
 use super::adapters::{
-    hash_file, resolve, AdapterTarget, EcosystemAdapter, EffectCtx, HomebrewFormula,
+    hash_file, resolve, AdapterTarget, EcosystemAdapter, EffectCtx, HomebrewAsset, HomebrewFormula,
     ReleaseAdapter, ReleaseArtifacts, SourceTarball,
 };
 use super::journal::Journal;
@@ -346,6 +346,7 @@ pub fn execute(
         source_tarball: source_tarball.clone(),
         repo_slug: repo_slug.clone(),
         homebrew: homebrew.clone(),
+        homebrew_assets: Vec::new(),
     };
     let pre_ctx = ctx.with_artifacts(&pre_artifacts);
 
@@ -377,6 +378,7 @@ pub fn execute(
         source_tarball,
         repo_slug,
         homebrew,
+        homebrew_assets: Vec::new(),
     };
     // publish-all: per-target irreversible; receipts journalled per target. The
     // publish phase is the only one that sees the build-complete artifacts. It
@@ -728,6 +730,8 @@ fn homebrew_inputs(plan: &ReleasePlan, targets: &[TargetPlan]) -> Option<Homebre
     Some(HomebrewFormula {
         tap: plan.homebrew_tap.clone(),
         license: plan.license.clone(),
+        description: plan.description.clone(),
+        platforms: plan.homebrew_platforms.clone(),
     })
 }
 
@@ -1144,11 +1148,21 @@ fn dist_phase(
             }
             None => None,
         };
+        let homebrew_assets = match (repo_slug, homebrew) {
+            (Some(slug), Some(formula)) => {
+                match fetch_homebrew_assets(ctx, slug, plan, formula, &post_tag) {
+                    Ok(assets) => assets,
+                    Err(message) => return fail_phase(journal, sink, phase, None, message),
+                }
+            }
+            _ => Vec::new(),
+        };
         let artifacts = ReleaseArtifacts {
             assets: Vec::new(),
             source_tarball,
             repo_slug: repo_slug.map(str::to_string),
             homebrew: homebrew.cloned(),
+            homebrew_assets,
         };
         let dist_ctx = ctx.with_artifacts(&artifacts);
         for tp in post_tag {
@@ -1274,6 +1288,84 @@ fn fetch_tag_archive(ctx: &EffectCtx<'_>, url: &str, tmp: &str) -> Result<(), St
 /// attempt (pid + a nanosecond stamp) so concurrent cuts/tests never collide and a
 /// retry never trips over a prior attempt's file. Computing the path is not a
 /// filesystem effect; `curl` (through the runner) is what creates the file.
+/// Wall-clock ceiling and poll interval for cargo-dist's asynchronously-uploaded
+/// GitHub Release archives. These deliberately match the crates.io index wait: a
+/// release cut is bounded and a missing artifact is a hard failure, never a source
+/// build fallback.
+const RELEASE_ASSET_WAIT_TIMEOUT_SECS: u64 = 300;
+const RELEASE_ASSET_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Fetch and hash every archive the generated Homebrew formula will serve. cargo-dist
+/// starts only after the coordinator pushes the tag, so this runs in the post-tag dist
+/// phase and waits for the exact assets rather than racing CI or writing placeholders.
+fn fetch_homebrew_assets(
+    ctx: &EffectCtx<'_>,
+    slug: &str,
+    plan: &ReleasePlan,
+    formula: &HomebrewFormula,
+    targets: &[&TargetPlan],
+) -> Result<Vec<HomebrewAsset>, String> {
+    let package = targets
+        .first()
+        .ok_or_else(|| "homebrew dist has no target".to_string())?
+        .input
+        .package
+        .as_str();
+    let mut assets = Vec::new();
+    for triple in &formula.platforms {
+        if !matches!(
+            triple.as_str(),
+            "aarch64-apple-darwin"
+                | "x86_64-apple-darwin"
+                | "aarch64-unknown-linux-musl"
+                | "x86_64-unknown-linux-musl"
+        ) {
+            return Err(format!("Homebrew formula cannot serve unsupported cargo-dist platform `{triple}`; supported platforms are macOS aarch64/x86_64 and Linux musl aarch64/x86_64"));
+        }
+        let filename = format!("{package}-{triple}.tar.xz");
+        let url = format!(
+            "https://github.com/{slug}/releases/download/v{}/{filename}",
+            plan.version
+        );
+        let tmp =
+            std::env::temp_dir().join(format!("ossctl-homebrew-{filename}-{}", std::process::id()));
+        let tmp_str = tmp.to_string_lossy().to_string();
+        let start = ctx.clock.now_unix();
+        #[allow(unused_assignments)]
+        let mut last = String::new();
+        let sha256_result = loop {
+            let out = ctx.runner.run("curl", &["-sSfL", "-o", &tmp_str, "--", &url], ctx.repo_root)
+                .map_err(|e| format!("cannot run `curl` while waiting for Homebrew release asset `{filename}`: {e}"))?;
+            if out.status == Some(0) {
+                break hash_file(ctx, &tmp_str)
+                    .map_err(|e| format!("cannot hash Homebrew release asset `{filename}`: {e}"));
+            }
+            last = format!(
+                "exit {}: {}",
+                out.status
+                    .map_or_else(|| "signal".to_string(), |c| c.to_string()),
+                out.stderr.trim()
+            );
+            let waited = ctx.clock.now_unix().saturating_sub(start);
+            if waited >= RELEASE_ASSET_WAIT_TIMEOUT_SECS {
+                break Err(format!("Homebrew release asset `{filename}` was not visible after {waited}s (bounded release-asset wait; cargo-dist CI may have failed or not uploaded it): {last}. Refusing to write a source-build or unchecked formula"));
+            }
+            ctx.clock.sleep(RELEASE_ASSET_POLL_INTERVAL);
+        };
+        let _ = ctx.runner.run("rm", &["-f", &tmp_str], ctx.repo_root);
+        let sha256 = sha256_result?;
+        assets.push(HomebrewAsset {
+            triple: triple.clone(),
+            url,
+            sha256,
+        });
+    }
+    if assets.is_empty() {
+        return Err("Homebrew formula has no configured cargo-dist platforms; refusing to write a formula with no installable archive".to_string());
+    }
+    Ok(assets)
+}
+
 fn source_tarball_tmp_path() -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
