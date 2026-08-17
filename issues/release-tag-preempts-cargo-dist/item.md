@@ -4,6 +4,8 @@ updated: 2026-08-17
 type: bug
 status: open
 priority: high
+lane: release-safety
+lane_seq: 1
 ---
 
 # release tag phase creates the GitHub Release, breaking cargo-dist hosting and skipping the Homebrew publish
@@ -104,3 +106,19 @@ most important target, and it was dropped without a single error surfacing to th
 ## Related
 
 - `@release-bump-plan-uncuttable` — separate 0.6.1 bug hit during the same cut.
+
+## Comments
+
+### 2026-08-17T05:47:46Z · @claude
+
+TRIGGER IDENTIFIED (2026-08-17), and it narrows the fix.
+
+Compared the two contracts. ossctl's own contract declares FOUR targets including `{registry: gh-releases, adapter: cargo-dist}` and `{registry: homebrew, adapter: homebrew-tap}`; its cuts print 'release delegated to CI (cargo-dist)' and do NOT create the release. issuectl's contract declares only its TWO crates.io targets — no gh-releases target, no homebrew target — even though the repository genuinely uses cargo-dist and a Homebrew tap.
+
+So the engine did not misbehave against a declared delegation; it had no idea a delegation existed. With no gh-releases target in the contract it fell back to creating the release itself, and collided with the cargo-dist workflow that the repository really does run.
+
+This means fix options (1) and (2) as written cannot work on their own: they assume the engine can tell that hosting is delegated, and for this contract shape it cannot. The engine must either DETECT the cargo-dist backend from the repository (a `dist-workspace.toml` with `ci = "github"` — the same cross-read @contract-validate-warn already added for the Homebrew tap), or refuse to create a release in a repository that has a cargo-dist workflow, or fall back to option (3), verification after the fact.
+
+Note the family resemblance: this is the same defect shape as @intake-feature-ossctl-73e870268475 (a tap declared in the distribution block but absent from targets, silently dropped) and @contract-validate-warn. A contract that under-declares its real distribution surface produces a green cut that quietly does the wrong thing. A validation warning for 'this repo has a cargo-dist workflow but no gh-releases target' would have caught this before the cut, and is probably the cheapest half of the fix.
+
+EXPOSURE CHECK for the pending release queue: glasspad's contract DOES declare both the gh-releases/cargo-dist and homebrew targets, matching ossctl's shape — so glasspad is NOT exposed to this bug and its planned 0.15.0 cut is safe on this axis. issuectl's contract needs its gh-releases and homebrew targets added; that is an issuectl-repo task, separate from this fix.

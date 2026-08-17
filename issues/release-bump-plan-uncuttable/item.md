@@ -4,6 +4,8 @@ updated: 2026-08-17
 type: bug
 status: open
 priority: high
+lane: release-safety
+lane_seq: 2
 ---
 
 # release plan --bump seals an un-cuttable plan, and the staleness error steers the operator into republishing the current version
@@ -91,3 +93,13 @@ Do the bump by hand (edit `version` in the workspace manifest, `cargo update --w
 finalize the CHANGELOG, commit as `release: X.Y.Z`), then run `ossctl release plan` **without**
 `--bump` and cut the id it returns. That path works: `issuectl` 0.14.1 was cut this way, all six
 phases green.
+
+## Comments
+
+### 2026-08-17T05:47:46Z · @claude
+
+Laned release-safety, second behind @release-tag-preempts-cargo-dist. Ordering rationale: this bug fails LOUDLY (the sealed plan is simply never cuttable, and the byte-identity guard stopped the dangerous follow-on before any upload), and it has a working documented workaround — the manual bump. The tag/cargo-dist collision fails SILENTLY, reporting a complete release while dropping the binaries and the Homebrew formula, so it goes first.
+
+Context worth recording: stint #20 deliberately did NOT dogfood --bump on ossctl's own irreversible cut, decoupling its live acceptance to a downstream cut precisely because it was unproven. That call was correct — this report is that live acceptance, and it failed. --bump has never worked end-to-end.
+
+The most alarming part is not the staleness bug but the remedy the error offers: pointing the operator at the no-bump plan means 'republish the version already on the registry'. Point 3 of the Expected list (never suggest a current_plan_id that targets an already-published version) should be treated as part of this fix, not a nice-to-have — an error message that leads a careful operator toward a bad publish is worse than the bug it reports.
