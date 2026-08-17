@@ -2,7 +2,7 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: feature
-status: open
+status: in-progress
 priority: high
 lane: contract-engine
 lane_seq: 10

@@ -128,7 +128,7 @@ use super::adapters::{
 };
 use super::journal::Journal;
 use super::journal_target_ids;
-use crate::contract::schema::{Adapter, Target};
+use crate::contract::schema::{Adapter, Registry, Target};
 
 /// A destination for the coordinator's progress events, so a real cut can stream
 /// them (`--output=jsonl`, §12) while the same events are durably journalled.
@@ -1257,7 +1257,12 @@ fn verify_phase(
             continue;
         }
         let outcome = if journal.state().delegated.contains(&tp.id) {
-            verify_delegated_release(&verify_ctx, plan, &tp.input.package)
+            match tp.input.target.registry {
+                Registry::Homebrew => {
+                    verify_delegated_homebrew(&verify_ctx, plan, &tp.input.package)
+                }
+                _ => verify_delegated_release(&verify_ctx, plan, &tp.input.package),
+            }
         } else if let Some(receipt) = journal.state().published.get(&tp.id) {
             let receipt = AdapterReceipt {
                 adapter: tp.input.target.adapter,
@@ -1323,6 +1328,37 @@ fn verify_phase(
         },
     )?;
     Ok(())
+}
+
+/// Observe a cargo-dist CI-owned Homebrew formula. Unlike the engine-owned tap
+/// adapter, cargo-dist does not carry ossctl's ownership marker, but it must still
+/// expose the sealed release version and expected platform archive stanzas.
+fn verify_delegated_homebrew(
+    ctx: &EffectCtx<'_>,
+    plan: &ReleasePlan,
+    package: &str,
+) -> VerifyOutcome {
+    let Some(tap) = plan.homebrew_tap.as_deref() else {
+        debug_assert!(false, "delegated Homebrew target planned without a tap");
+        return VerifyOutcome::Unknown;
+    };
+    let start = ctx.clock.now_unix();
+    loop {
+        let outcome = super::adapters::homebrew::verify_tap_formula(
+            ctx,
+            tap,
+            package,
+            &plan.version,
+            false,
+            Some(&plan.homebrew_platforms),
+        );
+        if outcome == VerifyOutcome::Matches
+            || ctx.clock.now_unix().saturating_sub(start) >= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS
+        {
+            return outcome;
+        }
+        ctx.clock.sleep(DELEGATED_RELEASE_VERIFY_POLL_INTERVAL);
+    }
 }
 
 /// Poll a cargo-dist owned GitHub Release until its expected platform archives are

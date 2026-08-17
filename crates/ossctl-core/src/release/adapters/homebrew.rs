@@ -2,8 +2,10 @@
 //!
 //! Updates a Homebrew formula (a custom tap, or a `homebrew-core` bump PR) so
 //! `brew install` resolves the new version. `verify` fetches the destination
-//! formula and checks its ownership marker, version, and platform URL/checksum
-//! stanzas. A fetch failure is `Unknown`, never a false `Missing`.
+//! formula and checks its version and platform URL/checksum stanzas. Engine-owned
+//! `homebrew-tap` formulas must also carry ossctl's ownership marker; CI-delegated
+//! cargo-dist formulas are intentionally unmarked. A fetch failure is `Unknown`,
+//! never a false `Missing`.
 //!
 //! ## Three formula paths: create, tap-write, bump-PR
 //!
@@ -797,73 +799,126 @@ impl ReleaseAdapter for HomebrewAdapter {
         let (Some(owner), Some(repo)) = (parts.get(github + 1), parts.get(github + 2)) else {
             return Ok(VerifyOutcome::Unknown);
         };
-        let raw = format!(
-            "https://raw.githubusercontent.com/{owner}/{repo}/HEAD/Formula/{}.rb",
-            receipt.package
-        );
-        let (status, body) = match ctx.registry.http_get(&raw) {
-            Ok(response) => response,
-            Err(_) => return Ok(VerifyOutcome::Unknown),
-        };
-        if status != 200 {
-            return Ok(VerifyOutcome::Unknown);
-        }
-        let formula = match String::from_utf8(body) {
-            Ok(formula) => formula,
-            Err(_) => return Ok(VerifyOutcome::Unknown),
-        };
-        if !formula_carries_marker(formula.as_bytes()) {
-            return Ok(VerifyOutcome::Missing);
-        }
-        if !formula
-            .lines()
-            .any(|line| line.trim() == format!("version \"{}\"", receipt.version))
-        {
-            return Ok(VerifyOutcome::Missing);
-        }
-        // Every Homebrew-servable platform declared by a stored plan must retain
-        // a URL+sha stanza. Pre-plan-store journals cannot recover that exact set;
-        // for them require at least one complete supported-platform stanza rather
-        // than falling back to the old structurally-unobservable `Unknown` result.
-        let expected = ctx
-            .artifacts
-            .homebrew
-            .as_ref()
-            .map(|homebrew| homebrew.platforms.as_slice());
-        let observed = [
-            "if OS.mac? && Hardware::CPU.arm?",
-            "if OS.mac? && Hardware::CPU.intel?",
-            "if OS.linux? && Hardware::CPU.arm?",
-            "if OS.linux? && Hardware::CPU.intel?",
-        ];
-        let conditions: Vec<&str> = match expected {
-            Some(platforms) => platforms
-                .iter()
-                .filter_map(|triple| homebrew_platform_condition(triple))
-                .collect(),
-            None => observed
-                .into_iter()
-                .filter(|condition| formula.contains(condition))
-                .collect(),
-        };
-        if conditions.is_empty() {
-            return Ok(VerifyOutcome::Missing);
-        }
-        for condition in conditions {
-            let Some(start) = formula.find(condition) else {
-                return Ok(VerifyOutcome::Missing);
-            };
-            let stanza = &formula[start..];
-            if !stanza.contains("url \"") || !stanza.contains("sha256 \"") {
-                return Ok(VerifyOutcome::Missing);
-            }
-        }
-        Ok(VerifyOutcome::Matches)
+        Ok(verify_tap_formula(
+            ctx,
+            &format!("{owner}/{repo}"),
+            &receipt.package,
+            &receipt.version,
+            self.adapter == Adapter::HomebrewTap,
+            None,
+        ))
     }
 
     fn timeout(&self) -> Duration {
         Duration::from_secs(600)
     }
+}
+
+/// Read a tap formula and verify the released version plus each expected platform
+/// stanza. `require_marker` is true only for engine-owned `homebrew-tap` formulas:
+/// cargo-dist's CI-owned formulas have no ossctl marker by design.
+pub(crate) fn verify_tap_formula(
+    ctx: &EffectCtx<'_>,
+    tap: &str,
+    package: &str,
+    version: &str,
+    require_marker: bool,
+    expected_platforms: Option<&[String]>,
+) -> VerifyOutcome {
+    // A delegated formula is written asynchronously after the tag. Give each poll
+    // a distinct URL so a cached 404 or prior formula body cannot outlive the CI
+    // write for the whole bounded verify window.
+    let raw = format!(
+        "https://raw.githubusercontent.com/{tap}/HEAD/Formula/{package}.rb?ossctl_verify={}",
+        ctx.clock.now_unix()
+    );
+    let (status, body) = match ctx.registry.http_get(&raw) {
+        Ok(response) => response,
+        Err(_) => return VerifyOutcome::Unknown,
+    };
+    if status != 200 {
+        return VerifyOutcome::Unknown;
+    }
+    let formula = match String::from_utf8(body) {
+        Ok(formula) => formula,
+        Err(_) => return VerifyOutcome::Unknown,
+    };
+    if require_marker && !formula_carries_marker(formula.as_bytes()) {
+        return VerifyOutcome::Missing;
+    }
+    if !formula
+        .lines()
+        .any(|line| line.trim() == format!("version \"{version}\""))
+    {
+        return VerifyOutcome::Missing;
+    }
+    // Every Homebrew-servable platform declared by a stored plan must retain a
+    // URL+sha stanza. Pre-plan-store journals cannot recover that exact set; for
+    // them require at least one complete supported-platform stanza rather than
+    // falling back to the old structurally-unobservable `Unknown` result.
+    let expected = expected_platforms
+        .filter(|platforms| !platforms.is_empty())
+        .or_else(|| {
+            ctx.artifacts
+                .homebrew
+                .as_ref()
+                .map(|homebrew| homebrew.platforms.as_slice())
+        });
+    let observed = [
+        "if OS.mac? && Hardware::CPU.arm?",
+        "if OS.mac? && Hardware::CPU.intel?",
+        "if OS.linux? && Hardware::CPU.arm?",
+        "if OS.linux? && Hardware::CPU.intel?",
+    ];
+    let conditions: Vec<&str> = match expected {
+        Some(platforms) => platforms
+            .iter()
+            .filter_map(|triple| homebrew_platform_condition(triple))
+            .collect(),
+        None => observed
+            .into_iter()
+            .filter(|condition| formula.contains(condition))
+            .collect(),
+    };
+    if conditions.is_empty() {
+        return VerifyOutcome::Missing;
+    }
+    for condition in conditions {
+        if !formula_has_platform_stanza(&formula, condition) {
+            return VerifyOutcome::Missing;
+        }
+    }
+    VerifyOutcome::Matches
+}
+
+/// Whether a formula contains a URL and checksum for `condition`. ossctl's
+/// renderer places each platform behind one combined condition, while cargo-dist
+/// 0.28.x nests the CPU condition inside an OS block. Accept both writer formats
+/// while retaining a precise platform-specific assertion.
+fn formula_has_platform_stanza(formula: &str, condition: &str) -> bool {
+    let has_url_and_sha = |stanza: &str| stanza.contains("url \"") && stanza.contains("sha256 \"");
+    if let Some(start) = formula.find(condition) {
+        return has_url_and_sha(&formula[start..]);
+    }
+
+    let (os, cpu) = match condition {
+        "if OS.mac? && Hardware::CPU.arm?" => ("if OS.mac?", "if Hardware::CPU.arm?"),
+        "if OS.mac? && Hardware::CPU.intel?" => ("if OS.mac?", "if Hardware::CPU.intel?"),
+        "if OS.linux? && Hardware::CPU.arm?" => ("if OS.linux?", "if Hardware::CPU.arm?"),
+        "if OS.linux? && Hardware::CPU.intel?" => ("if OS.linux?", "if Hardware::CPU.intel?"),
+        _ => return false,
+    };
+    let Some(os_start) = formula.find(os) else {
+        return false;
+    };
+    let after_os = &formula[os_start + os.len()..];
+    let os_block = after_os
+        .find("\n  if OS.")
+        .map_or(after_os, |end| &after_os[..end]);
+    let Some(cpu_start) = os_block.find(cpu) else {
+        return false;
+    };
+    has_url_and_sha(&os_block[cpu_start..])
 }
 
 /// Render a prebuilt-archive Homebrew formula. The archives are fetched and

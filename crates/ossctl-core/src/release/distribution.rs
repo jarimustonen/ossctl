@@ -17,7 +17,7 @@ pub enum UndeclaredDistribution {
         /// Configuration files and workflows establishing the delegated release.
         evidence: Vec<String>,
     },
-    /// A declared tap has no engine-owned Homebrew target.
+    /// A declared tap has no Homebrew target.
     Homebrew,
 }
 
@@ -62,7 +62,7 @@ pub fn undeclared_distribution_warnings(findings: &[UndeclaredDistribution]) -> 
                 "{} detected, but the contract has no 'gh-releases' target — the tag phase would create the GitHub Release itself and collide with the repo's cargo-dist workflow, dropping its binaries and Homebrew publish. Add a target with registry: gh-releases, adapter: cargo-dist and re-plan",
                 evidence.join(", ")
             ),
-            UndeclaredDistribution::Homebrew => "distribution.homebrew_tap is set, but the contract has no 'homebrew' target — the tap leg would be silently skipped. Add a target with registry: homebrew, adapter: homebrew-tap and re-plan".to_string(),
+            UndeclaredDistribution::Homebrew => "distribution.homebrew_tap is set, but the contract has no 'homebrew' target — the tap leg would be silently skipped. Add a target with registry: homebrew and the formula owner's adapter (`homebrew-tap` for the engine or `cargo-dist` for CI), then re-plan".to_string(),
         })
         .collect()
 }
@@ -105,5 +105,22 @@ mod tests {
         };
         let targets = vec![target(Registry::GhReleases), target(Registry::Homebrew)];
         assert!(find_undeclared_distribution(&targets, &surface, true).is_empty());
+    }
+
+    #[test]
+    fn ci_delegated_homebrew_target_declares_the_tap_surface() {
+        let surface = DistributionSurface {
+            has_cargo_dist: true,
+            cargo_dist_evidence: vec!["dist-workspace.toml".to_string()],
+            tag_triggered_workflows: vec!["release.yml".to_string()],
+        };
+        let mut homebrew = target(Registry::Homebrew);
+        homebrew.adapter = Adapter::CargoDist;
+        assert!(find_undeclared_distribution(
+            &[target(Registry::GhReleases), homebrew],
+            &surface,
+            true
+        )
+        .is_empty());
     }
 }

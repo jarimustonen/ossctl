@@ -473,7 +473,7 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
     // Homebrew cross-field consistency: missing-tap (either producer), the
     // double-publish collision, and the dead-tap advisory — the full truth table.
     check_homebrew_configuration(&targets, &distributions, p);
-    check_dist_workspace_homebrew(&distributions, repo_root, fs, p);
+    check_dist_workspace_homebrew(&targets, &distributions, repo_root, fs, p);
     let distribution_surface = detect_distribution_surface(repo_root, fs);
     for warning in undeclared_distribution_warnings(&find_undeclared_distribution(
         &targets,
@@ -547,6 +547,7 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
 /// best-effort drift signal. A missing, unreadable, invalid, or irrelevant file
 /// therefore produces no diagnostic and never changes validation's success.
 fn check_dist_workspace_homebrew(
+    targets: &[Target],
     distributions: &[Distribution],
     repo_root: &Path,
     fs: &dyn Fs,
@@ -566,10 +567,11 @@ fn check_dist_workspace_homebrew(
         return;
     };
 
-    let has_tap = dist
+    let configured_tap = dist
         .get("tap")
         .and_then(toml::Value::as_str)
-        .is_some_and(|tap| !tap.trim().is_empty());
+        .filter(|tap| !tap.trim().is_empty());
+    let has_tap = configured_tap.is_some();
     let has_homebrew_publish_job = dist
         .get("publish-jobs")
         .and_then(toml::Value::as_array)
@@ -579,15 +581,35 @@ fn check_dist_workspace_homebrew(
                 .any(|job| job == "homebrew")
         });
 
-    if (has_tap || has_homebrew_publish_job)
-        && !distributions.iter().any(|d| d.homebrew_tap.is_some())
-    {
+    let contract_tap = distributions.iter().find_map(|d| d.homebrew_tap.as_deref());
+    if (has_tap || has_homebrew_publish_job) && contract_tap.is_none() {
         p.warn(
             "dist-workspace.toml configures Homebrew, but the contract omits \
              distribution.homebrew_tap; the Homebrew leg will not be planned. Add \
              distribution.homebrew_tap: owner/repo to OSS-RELEASE.md"
                 .to_string(),
         );
+    }
+
+    // A CI-delegated target has no publish receipt carrying the actual tap, so its
+    // post-cut observer must use the contract destination. A disagreement with
+    // cargo-dist's configured tap could observe an unrelated stale formula and
+    // report a false green. Reject that reachable double-source mismatch early.
+    let has_ci_delegated_homebrew = targets.iter().any(|target| {
+        target.registry == Registry::Homebrew && target.adapter == Adapter::CargoDist
+    });
+    if let (true, Some(configured), Some(declared)) =
+        (has_ci_delegated_homebrew, configured_tap, contract_tap)
+    {
+        if configured != declared {
+            p.err(format!(
+                "floor: dist-workspace.toml configures Homebrew tap {}, but the CI-delegated \
+                 target's distribution.homebrew_tap is {} — cargo-dist would write one tap while \
+                 ossctl verifies another",
+                quote_for_diagnostic(configured),
+                quote_for_diagnostic(declared)
+            ));
+        }
     }
 }
 
@@ -746,18 +768,21 @@ fn validate_targets(
         };
 
         // Floor: registry/adapter compatibility. A `homebrew`-registry target is
-        // served only by a homebrew adapter — `homebrew-tap` (push a formula to a
-        // personal tap) or `homebrew-core` (bump the central formula). Any other
-        // adapter (e.g. the ecosystem default `cargo-publish`, or `manual`) has no
-        // homebrew formula path, so the target would silently do nothing at cut
-        // time. Reject it here rather than at release time. Only checked once both
-        // are well-formed (a parse error already reported its own problem).
+        // either engine-owned (`homebrew-tap` pushes a personal-tap formula;
+        // `homebrew-core` opens the central-formula PR) or CI-delegated
+        // (`cargo-dist`'s publish-homebrew-formula job writes the tap). Any other
+        // adapter has no formula path, so the target would silently do nothing at
+        // cut time. Reject it here rather than at release time. Only checked once
+        // both fields are well-formed (a parse error already reported its problem).
         if let (Some(Registry::Homebrew), Some(a)) = (registry, adapter) {
-            if !matches!(a, Adapter::HomebrewTap | Adapter::HomebrewCore) {
+            if !matches!(
+                a,
+                Adapter::HomebrewTap | Adapter::HomebrewCore | Adapter::CargoDist
+            ) {
                 p.err(format!(
                     "floor: targets[{idx}] has registry 'homebrew' but adapter {} — a \
-                     homebrew-registry target requires adapter 'homebrew-tap' (personal tap) \
-                     or 'homebrew-core' (central formula)",
+                     homebrew-registry target requires adapter 'homebrew-tap' (personal tap), \
+                     'homebrew-core' (central formula), or 'cargo-dist' (CI-delegated tap)",
                     quote_for_diagnostic(a.as_str())
                 ));
             }
@@ -1345,6 +1370,9 @@ fn check_badge_producers(
 /// **producer** (a `homebrew` installer on any distribution — cargo-dist), and a
 /// target-side formula **producer** (a `homebrew`-registry target whose adapter is
 /// `homebrew-tap`, i.e. the release engine pushes a formula to the personal tap).
+/// A `cargo-dist` Homebrew target is deliberately absent from this signal: its
+/// tag-triggered CI writes the formula, so it is declared and verified but never an
+/// engine-side writer.
 ///
 /// A `homebrew-core` target is deliberately NOT a tap-producer: it bumps the
 /// central formula via a PR and needs no personal tap, so it neither requires a
@@ -1391,19 +1419,43 @@ fn check_homebrew_configuration(
     let tap_target_producer = targets
         .iter()
         .any(|t| t.registry == Registry::Homebrew && t.adapter == Adapter::HomebrewTap);
+    // cargo-dist does not write from the engine, but its CI job and the mandatory
+    // observer both need the contract's tap destination. A target without it would
+    // only fail later in verify as unobservable, so reject it at normalization.
+    let tap_target_needing_tap = targets.iter().any(|t| {
+        t.registry == Registry::Homebrew
+            && matches!(t.adapter, Adapter::HomebrewTap | Adapter::CargoDist)
+    });
 
-    // Floor: a homebrew-tap target needs a tap destination for its formula.
-    if tap_target_producer && !has_tap {
+    // Floor: a personal-tap target needs a declared tap destination, whether its
+    // formula writer is the engine or cargo-dist CI.
+    if tap_target_needing_tap && !has_tap {
         p.err(
-            "floor: a 'homebrew'-registry target with adapter 'homebrew-tap' generates a formula \
-             but no distribution sets homebrew_tap — the formula has nowhere to be pushed (set \
-             distribution.homebrew_tap to the 'owner/repo' tap)"
+            "floor: a 'homebrew'-registry target with adapter 'homebrew-tap' or 'cargo-dist' \
+             needs distribution.homebrew_tap — the formula has nowhere to be published or \
+             observed (set distribution.homebrew_tap to the 'owner/repo' tap)"
+                .to_string(),
+        );
+    }
+
+    let ci_delegated_tap_target = targets
+        .iter()
+        .any(|t| t.registry == Registry::Homebrew && t.adapter == Adapter::CargoDist);
+    // cargo-dist publishes a tap formula only through its Homebrew installer job.
+    // Reject an otherwise-declared target that CI can never realize rather than
+    // letting mandatory verification time out after the tag has been pushed.
+    if ci_delegated_tap_target && !installer_producer {
+        p.err(
+            "floor: a 'homebrew'-registry target with adapter 'cargo-dist' requires \
+             distribution.installers to include 'homebrew' — cargo-dist only writes the formula \
+             through its Homebrew installer job"
                 .to_string(),
         );
     }
 
     // Floor: the double-publish collision — two mechanisms push a formula to the
     // personal tap (cargo-dist's installer AND the engine's homebrew-tap adapter).
+    // A cargo-dist Homebrew target names that same CI writer, so it does not collide.
     if installer_producer && tap_target_producer {
         p.err(
             "floor: both a 'homebrew' installer (distribution.installers) and a 'homebrew'-registry \
@@ -2490,6 +2542,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ci_delegated_homebrew_rejects_a_dist_workspace_tap_mismatch() {
+        let fs = FakeFs::with_file(
+            "/repo/dist-workspace.toml",
+            "[dist]\ntap = \"owner/actual-tap\"\npublish-jobs = [\"homebrew\"]\n",
+        );
+        let n = norm_with(
+            "---\nstatus: approved\nmaturity: production\necosystems: [rust]\ntargets:\n  \
+             - {ecosystem: rust, package: tool, registry: homebrew, adapter: cargo-dist}\n\
+             distribution:\n  adapter: cargo-dist\n  installers: [homebrew]\n  \
+             homebrew_tap: owner/declared-tap\n---\n",
+            &fs,
+        );
+        assert_error_contains(
+            &n,
+            "cargo-dist would write one tap while ossctl verifies another",
+        );
+    }
+
     /// An absent cargo-dist config does not add a warning.
     #[test]
     fn absent_dist_workspace_is_silent() {
@@ -2591,7 +2662,26 @@ mod tests {
     fn homebrew_tap_target_without_tap_is_a_floor() {
         assert_error_contains(
             &norm(&hb_case(false, false, true)),
-            "generates a formula but no distribution sets homebrew_tap",
+            "needs distribution.homebrew_tap",
+        );
+    }
+
+    #[test]
+    fn ci_delegated_homebrew_target_requires_tap_for_ci_and_verify() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\ntargets:\n  \
+                    - {ecosystem: rust, package: ossctl, registry: homebrew, adapter: cargo-dist}\n---\n";
+        assert_error_contains(&norm(text), "needs distribution.homebrew_tap");
+    }
+
+    #[test]
+    fn ci_delegated_homebrew_target_requires_cargo_dist_homebrew_installer() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\ntargets:\n  \
+                    - {ecosystem: rust, package: ossctl, registry: homebrew, adapter: cargo-dist}\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [shell]\n  \
+                    homebrew_tap: owner/tap\n---\n";
+        assert_error_contains(
+            &norm(text),
+            "requires distribution.installers to include 'homebrew'",
         );
     }
 
@@ -2672,8 +2762,36 @@ mod tests {
                     distribution:\n  adapter: cargo-dist\n  homebrew_tap: owner/tap\n---\n";
         assert_error_contains(
             &norm(text),
-            "requires adapter 'homebrew-tap' (personal tap) or 'homebrew-core'",
+            "requires adapter 'homebrew-tap' (personal tap), 'homebrew-core'",
         );
+    }
+
+    /// A CI-delegated cargo-dist target declares a real Homebrew surface without
+    /// making the engine a second tap writer.
+    #[test]
+    fn ci_delegated_homebrew_target_normalizes_and_round_trips() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\ntargets:\n  \
+                    - {ecosystem: rust, package: ossctl, registry: crates.io, adapter: cargo-publish}\n  \
+                    - {ecosystem: rust, package: ossctl, registry: homebrew, adapter: cargo-dist}\n\
+                    distribution:\n  adapter: cargo-dist\n  installers: [homebrew]\n  \
+                    homebrew_tap: owner/tap\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.problems.warnings.is_empty(),
+            "warnings: {:?}",
+            n.problems.warnings
+        );
+        let target = n
+            .contract
+            .targets
+            .iter()
+            .find(|target| target.registry == Registry::Homebrew)
+            .expect("normalized Homebrew target");
+        assert_eq!(target.adapter, Adapter::CargoDist);
+        let canonical = serde_json::to_value(&n.contract).unwrap();
+        assert_eq!(canonical["targets"][1]["adapter"], "cargo-dist");
+        assert_eq!(canonical["targets"][1]["registry"], "homebrew");
     }
 
     /// A `homebrew-core` target is a valid homebrew adapter and needs NO personal
@@ -2701,7 +2819,7 @@ mod tests {
                     - {ecosystem: rust, package: ossctl, registry: homebrew}\n---\n";
         assert_error_contains(
             &norm(text),
-            "requires adapter 'homebrew-tap' (personal tap) or 'homebrew-core'",
+            "requires adapter 'homebrew-tap' (personal tap), 'homebrew-core'",
         );
     }
 

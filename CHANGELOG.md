@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hook validation, and fail-closed version checks (`bump-single-crate-manifest`).
 - **`ossctl --version` and `ossctl -V` now alias `ossctl version`.** The aliases preserve the
   selected output format, including the canonical JSON envelope (`version-flag-alias`).
+- **CI-owned Homebrew taps are now declared and verified without a double writer.** A
+  `registry: homebrew, adapter: cargo-dist` target is normalized as a real release
+  surface, skips the engine tap-write in favor of cargo-dist's CI job, and verifies
+  the published formula version without requiring ossctl's engine-owned marker
+  (`homebrew-ci-delegated-adapter`).
 
 ## [0.7.0] - 2026-08-17
 

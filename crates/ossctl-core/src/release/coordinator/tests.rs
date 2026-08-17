@@ -432,6 +432,24 @@ impl RegistryQuery for FakeRegistry {
     }
 }
 
+/// A cargo-dist-owned formula has no ossctl marker, but is otherwise complete.
+struct UnmarkedFormulaRegistry;
+impl RegistryQuery for UnmarkedFormulaRegistry {
+    fn http_get(&self, _url: &str) -> io::Result<(u16, Vec<u8>)> {
+        Ok((
+            200,
+            format!(
+                "class Tool < Formula\n  version \"1.0.0\"\n  if OS.mac?\n    if Hardware::CPU.arm?\n      url \"https://example/tool-aarch64-apple-darwin.tar.xz\"\n      sha256 \"{CANNED_SHA256}\"\n    end\n  end\nend\n"
+            )
+            .into_bytes(),
+        ))
+    }
+
+    fn published_versions(&self, _ecosystem: &str, _package: &str) -> io::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+}
+
 /// Recording tagger. Records every call; optionally fails one named step.
 struct FakeTagger {
     calls: RefCell<Vec<String>>,
@@ -2166,6 +2184,100 @@ fn ci_delegated_target_is_skipped_journaled_not_failed() {
     .expect("a target_delegated event was streamed");
     let first_tag = first_idx(k, |e| matches!(e, EventKind::TagCreatedLocal { .. })).unwrap();
     assert!(delegated_idx < first_tag, "delegation must precede tagging");
+}
+
+#[test]
+fn ci_delegated_homebrew_skips_dist_write_but_verifies_unmarked_formula() {
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::new();
+    let registry = UnmarkedFormulaRegistry;
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &registry,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let plan = ReleasePlan {
+        plan_id: "p".into(),
+        contract_schema_version: 2,
+        head_sha: "d".into(),
+        version: "1.0.0".into(),
+        targets: vec![PlanTarget {
+            ecosystem: Ecosystem::Rust,
+            package: Some("tool".into()),
+            registry: Registry::Homebrew,
+            adapter: Adapter::CargoDist,
+        }],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
+        homebrew_tap: Some("owner/homebrew-tool".into()),
+        license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
+    };
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "p".into(),
+        "1.0.0".into(),
+        ids.clone(),
+    )
+    .unwrap();
+    let mut sink = RecordingSink::default();
+
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+
+    assert_eq!(journal.state().status, RunStatus::Completed);
+    assert!(journal.state().delegated.contains(&ids[0]));
+    assert!(!journal.state().published.contains_key(&ids[0]));
+    assert_eq!(
+        journal.state().verified.get(&ids[0]),
+        Some(&VerifyOutcome::Matches)
+    );
+    let calls = cmd.calls();
+    assert!(
+        !calls.iter().any(|call| {
+            call.contains("repo clone")
+                || call.contains("push origin")
+                || call.contains("formula update")
+        }),
+        "CI-delegated Homebrew target must never write the tap: {calls:?}"
+    );
+}
+
+#[test]
+fn ci_delegated_homebrew_requires_every_planned_platform_stanza() {
+    let cmd = FakeCmd::new();
+    let clock = FakeClock(Cell::new(1000));
+    let registry = UnmarkedFormulaRegistry;
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &registry,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut plan = delegated_plan();
+    plan.version = "1.0.0".into();
+    plan.homebrew_tap = Some("owner/homebrew-tool".into());
+    plan.homebrew_platforms = vec![
+        "aarch64-apple-darwin".into(),
+        "x86_64-unknown-linux-musl".into(),
+    ];
+
+    assert_eq!(
+        verify_delegated_homebrew(&ctx, &plan, "tool"),
+        VerifyOutcome::Missing
+    );
 }
 
 // A comprehensive end-to-end acceptance across all four target classes; splitting
