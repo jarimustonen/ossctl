@@ -85,7 +85,7 @@ app beyond what the ADRs already fix.
     receipt).
   - **Shipped: 0.1.0 (2026-08-04), 0.1.1 (2026-08-05), 0.1.2 (2026-08-05), 0.2.0 (2026-08-06),
     0.2.1 (2026-08-06), 0.2.2 (2026-08-06), 0.2.3 (2026-08-07), 0.2.4 (2026-08-10), 0.2.5 (2026-08-10),
-    0.3.0 (2026-08-11), 0.4.0 (2026-08-11), 0.5.0 (2026-08-13), 0.6.0 + 0.6.1 (2026-08-17).**
+    0.3.0 (2026-08-11), 0.4.0 (2026-08-11), 0.5.0 (2026-08-13), 0.6.0 + 0.6.1 (2026-08-17), 0.7.0 (2026-08-17).**
     All on crates.io (`ossctl` + `ossctl-core`), GitHub Releases (cross-platform: macOS aarch64,
     Linux musl x86_64+aarch64, `.sh` installer), and its configured
     Homebrew tap. Repo is **public**. **No Windows** — the `x86_64-pc-windows-msvc` target and the
@@ -136,6 +136,17 @@ app beyond what the ADRs already fix.
     at DIST on the homebrew `brew audit` (fixed by `homebrew-dist-brew-audit-fails`, 0.2.3). Each
     blocker fell in turn, always failing closed/safe. **0.2.0 and 0.2.1 were cut manually; 0.2.2 was
     cut by the engine except its homebrew leg (done by hand); 0.2.3 was fully engine-cut.**
+    - **RESOLVED same day (stint #22, shipped in 0.7.0):** both HIGH bugs below are fixed and
+      field-verified. 0.7.0 added the durable PLAN STORE (`release plan` persists the sealed plan
+      under `git-common-dir/ossctl/plans/`; `cut` recovers an omitted `--bump` from it, `resume`
+      survives a code fix moving HEAD), the `undeclared_distribution` refusal (cut refuses before
+      any run when the repo has cargo-dist/tag-workflows the contract does not declare — the
+      issuectl 0.14.1 shape), and a mandatory **verify phase**: a cut is complete only when every
+      target is OBSERVED at its destination (crates.io index, tap formula content incl. marker +
+      version, GitHub Release assets; journal v5; Unknown is not green). The 0.7.0 cut itself was
+      the live acceptance: first-ever `--bump` engine cut (bump → dry-run → build → publish →
+      tag → dist → verify, all green, flagless `cut` recovering the bump from the plan store).
+      The paragraph below is kept as history:
     - **⚠️ HIGH blockers DO exist again (2026-08-17) — this section said "no HIGH blocker remains"
       and that is no longer true.** Cutting `issuectl` 0.14.1 surfaced two field-confirmed HIGH bugs,
       now at the head of `release-safety`: `release-tag-preempts-cargo-dist` (in a repo whose
