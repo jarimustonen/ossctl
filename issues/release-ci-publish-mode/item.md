@@ -2,13 +2,18 @@
 created: 2026-08-10
 updated: 2026-08-17
 type: feature
-status: in-progress
+status: done
 priority: high
 lane: contract-engine
 lane_seq: 30
 commits:
 - hash: 38f6a5b
   summary: CI-delegated crates.io publish mode (cargo-publish-ci) + index-observing verify
+- hash: bbf2e61
+  summary: key the delegated index observer on the adapter, not the registry
+- hash: 1735ade
+  summary: close three post-tag failure modes found by the multi-model review
+closed: 2026-08-17
 ---
 
 # release engine: support a 'publish-in-CI / tag-only cut' release mode
