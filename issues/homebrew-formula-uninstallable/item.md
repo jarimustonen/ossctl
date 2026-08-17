@@ -83,3 +83,17 @@ policy; a source build is a fallback, not the default.
 - The release engine can tell that a published formula is installable, rather than only that the
   bytes were written. Whatever form that takes, "the tap write succeeded" must stop being
   accepted as proof the Homebrew leg worked.
+
+## Comments
+
+### 2026-08-17T04:04:54Z · @claude
+
+COMPARATIVE EVIDENCE (2026-08-17): a sibling tool's tap formula, produced by cargo-dist rather than by ossctl's adapter, has the CORRECT shape — per-platform 'url' entries pointing at the published release binaries with their sha256, no toolchain dependency, and a real 'desc'. ossctl's engine-written formula is the source-build shape, and it does not even install. So the adapter's template is not merely a different choice from cargo-dist's; it is strictly worse on both axes at once.
+
+This sharpens the decision in the section above. Two directions:
+(a) fix the adapter's template to emit the prebuilt-binary shape cargo-dist already emits correctly;
+(b) delegate the Homebrew leg to cargo-dist entirely — the same delegation already used for the GitHub Release — and reduce the engine's role to VERIFYING that the tap carries the released version.
+
+(b) is the smaller and more honest system: cargo-dist demonstrably produces a correct formula today, and the engine's own attempt has been shipping a broken one for six releases without noticing. Weigh it against the 0.2.3 decision that deliberately made the leg self-sufficient (dropping the brew bump-formula-pr dependency) — that decision was about removing a fragile external CLI dependency, not about owning formula rendering, so (b) does not obviously contradict it. This is an architectural call worth recording, not a detail to settle inside a bugfix.
+
+Token status verified: HOMEBREW_TAP_TOKEN has existed on this repository since 2026-08-05, so credential availability is not a constraint on either direction.
