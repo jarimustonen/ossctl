@@ -1078,10 +1078,133 @@ impl Tagger for RealTagger {
 /// `flock`; this impl instead uses an `O_EXCL` lock *file* so `ossctl` takes no
 /// new dependency (`std::fs::File::lock` is newer than the pinned MSRV, and a
 /// `libc`/`fs2` dep would edit the hot workspace `Cargo.toml`). The trade-off: a
-/// hard process kill leaves a stale lock file that a human (or a future `doctor
-/// --fix`) must remove, whereas `flock` releases on death. Mutual exclusion under
-/// normal operation (and Drop-based release) is equivalent.
+/// hard process kill leaves a stale lock file. `release abandon` can break one
+/// only after its same-host holder is proven dead; normal Drop-based release
+/// remains equivalent to `flock` for ordinary operation.
 pub struct RealJournalStore;
+
+/// The result of inspecting a held `O_EXCL` lock for `release abandon` recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleLockOutcome {
+    /// The verified-dead holder's lock was removed.
+    Broken { pid: u32 },
+    /// The lock was deliberately retained because it cannot safely be called stale.
+    NotBroken { reason: String },
+}
+
+#[derive(serde::Deserialize)]
+struct LockHolder {
+    pid: u32,
+    hostname: String,
+    #[allow(dead_code)]
+    started_unix: u64,
+}
+
+/// Determine this machine's hostname through the sys-layer child-process seam.
+/// Failure deliberately becomes an empty identity: a later stale-lock check then
+/// refuses to break rather than guessing.
+pub fn current_hostname() -> String {
+    for (program, args) in [("hostname", &[][..]), ("uname", &["-n"][..])] {
+        if let Ok(output) = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+        {
+            if output.status.success() {
+                let hostname = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !hostname.is_empty() {
+                    return hostname;
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Probe a local PID with `kill(pid, 0)` semantics. `ESRCH` proves death;
+/// `EPERM` proves a process exists but is inaccessible, and is therefore alive.
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> io::Result<bool> {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    let pid = i32::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "lock pid exceeds i32"))?;
+    // SAFETY: `kill` is called with signal zero, which sends no signal and only
+    // asks the kernel to perform the POSIX liveness/permission check.
+    if unsafe { kill(pid, 0) } == 0 {
+        return Ok(true);
+    }
+    match io::Error::last_os_error().raw_os_error() {
+        Some(3) => Ok(false), // ESRCH
+        Some(1) => Ok(true),  // EPERM
+        _ => Err(io::Error::last_os_error()),
+    }
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> io::Result<bool> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "kill -0 liveness probes are unsupported on this platform",
+    ))
+}
+
+impl RealJournalStore {
+    /// Break `lock_path` only when its JSON holder identity proves it is a dead
+    /// process on this host. This narrow recovery is for `release abandon` only.
+    pub fn break_stale_lock(lock_path: &Path) -> io::Result<StaleLockOutcome> {
+        let bytes = match std::fs::read(lock_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(StaleLockOutcome::NotBroken {
+                    reason: "the lock disappeared before it could be inspected".to_string(),
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let holder: LockHolder = match serde_json::from_slice(&bytes) {
+            Ok(holder) => holder,
+            Err(_) => {
+                return Ok(StaleLockOutcome::NotBroken {
+                    reason: "the lock has no readable holder identity (it is legacy or malformed)"
+                        .to_string(),
+                });
+            }
+        };
+        let hostname = current_hostname();
+        if hostname.is_empty() {
+            return Ok(StaleLockOutcome::NotBroken {
+                reason: "this host's name could not be determined".to_string(),
+            });
+        }
+        if holder.hostname.is_empty() {
+            return Ok(StaleLockOutcome::NotBroken {
+                reason: "the recorded holder has no hostname".to_string(),
+            });
+        }
+        if holder.hostname != hostname {
+            return Ok(StaleLockOutcome::NotBroken {
+                reason: format!(
+                    "the recorded holder is on host '{}' rather than this host '{}'",
+                    holder.hostname, hostname
+                ),
+            });
+        }
+        match process_is_alive(holder.pid) {
+            Ok(true) => Ok(StaleLockOutcome::NotBroken {
+                reason: format!("holder pid {} is still alive", holder.pid),
+            }),
+            Ok(false) => {
+                std::fs::remove_file(lock_path)?;
+                Ok(StaleLockOutcome::Broken { pid: holder.pid })
+            }
+            Err(error) => Ok(StaleLockOutcome::NotBroken {
+                reason: format!("could not probe holder pid {}: {error}", holder.pid),
+            }),
+        }
+    }
+}
 
 /// The `O_EXCL` lock guard: removes its lock file on drop (normal release).
 struct RealJournalLock {
@@ -1114,9 +1237,16 @@ impl JournalStore for RealJournalStore {
             .open(lock_path)
         {
             Ok(mut f) => {
-                // Record the holder's pid for diagnostics / stale-lock recovery.
-                let _ = writeln!(f, "{}", std::process::id());
-                let _ = f.sync_all();
+                let holder = serde_json::json!({
+                    "pid": std::process::id(),
+                    "hostname": current_hostname(),
+                    "started_unix": SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_or(0, |duration| duration.as_secs()),
+                });
+                serde_json::to_writer(&mut f, &holder).map_err(io::Error::other)?;
+                f.write_all(b"\n")?;
+                f.sync_all()?;
                 Ok(Box::new(RealJournalLock {
                     path: lock_path.to_path_buf(),
                 }))

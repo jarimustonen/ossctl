@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
 
+### Fixed
+- **`release abandon` now recovers a hard-killed release run's stale lock.** Lock files record
+  their PID, hostname, and start time. `abandon` removes one only when the same-host holder is
+  provably gone (`kill -0` reports `ESRCH`), then retries once and records what it did. Live,
+  malformed/legacy, unidentifiable, and other-host locks still fail with an actionable
+  `cut_in_progress` error (`release-abandon-break-stale-lock`).
+
 ### Internal
 - Add a hermetic end-to-end release harness that drives the compiled `ossctl` binary through planning, failed cuts, journal inspection, abandonment, and lock refusal without invoking real publish tooling.
 <!-- oss-changelog:unreleased-end -->

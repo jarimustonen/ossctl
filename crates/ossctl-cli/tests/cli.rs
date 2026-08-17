@@ -1263,6 +1263,121 @@ fn release_abandon_without_reason_uses_a_default() {
     assert_eq!(v["data"]["published_targets"].as_array().unwrap().len(), 0);
 }
 
+fn lock_hostname() -> String {
+    let output = std::process::Command::new("hostname").output().unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn write_lock(dir: &std::path::Path, value: serde_json::Value) {
+    std::fs::write(dir.join(".lock"), format!("{value}\n")).unwrap();
+}
+
+/// A lock whose same-host holder has exited is stale: abandon removes it, retries
+/// the one lock acquisition, and journals the terminal abandonment fact.
+#[test]
+fn release_abandon_breaks_a_dead_same_host_lock() {
+    let dir = seed_journal("RUN01", &[RUN_CREATED_A.replace("RUNA", "RUN01").as_str()]);
+    let child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exit 0")
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let status = child.wait_with_output().unwrap();
+    assert!(status.status.success());
+    write_lock(
+        dir.path(),
+        serde_json::json!({ "pid": pid, "hostname": lock_hostname(), "started_unix": 1 }),
+    );
+
+    let out = ossctl()
+        .args(["release", "abandon", "RUN01", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "dead holder must be recovered: {out:?}"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["data"]["status"], "abandoned");
+    assert!(value["warnings"].as_array().unwrap().iter().any(|warning| {
+        warning
+            .as_str()
+            .is_some_and(|text| text.contains(&format!("pid {pid}")) && text.contains("ESRCH"))
+    }));
+    assert!(
+        !dir.path().join(".lock").exists(),
+        "journal drop releases retried lock"
+    );
+}
+
+/// A same-host process that is still alive keeps the lock and gets the stable,
+/// actionable `cut_in_progress` envelope rather than being stomped.
+#[test]
+fn release_abandon_refuses_an_alive_lock_holder() {
+    let dir = seed_journal("RUN01", &[RUN_CREATED_A.replace("RUNA", "RUN01").as_str()]);
+    write_lock(
+        dir.path(),
+        serde_json::json!({ "pid": std::process::id(), "hostname": lock_hostname(), "started_unix": 1 }),
+    );
+    let out = ossctl()
+        .args(["release", "abandon", "RUN01", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(value["error"]["code"], "cut_in_progress");
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("still alive"));
+    assert!(dir.path().join(".lock").exists());
+}
+
+#[test]
+fn release_abandon_refuses_legacy_or_malformed_lock_content() {
+    let dir = seed_journal("RUN01", &[RUN_CREATED_A.replace("RUNA", "RUN01").as_str()]);
+    std::fs::write(dir.path().join(".lock"), "910\n").unwrap();
+    let out = ossctl()
+        .args(["release", "abandon", "RUN01", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(value["error"]["code"], "cut_in_progress");
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("legacy or malformed"));
+    assert!(dir.path().join(".lock").exists());
+}
+
+#[test]
+fn release_abandon_refuses_a_lock_from_another_host() {
+    let dir = seed_journal("RUN01", &[RUN_CREATED_A.replace("RUNA", "RUN01").as_str()]);
+    write_lock(
+        dir.path(),
+        serde_json::json!({ "pid": 1, "hostname": "another-host", "started_unix": 1 }),
+    );
+    let out = ossctl()
+        .args(["release", "abandon", "RUN01", "--json", "--journal-dir"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(value["error"]["code"], "cut_in_progress");
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("another-host"));
+    assert!(dir.path().join(".lock").exists());
+}
+
 /// A blank `--reason` is a caller-fixable input error (a journaled reason must be
 /// meaningful).
 #[test]

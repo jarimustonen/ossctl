@@ -28,7 +28,7 @@ use crate::error::CliError;
 use crate::output::OutputFormat;
 use crate::sys::{
     ReadOnlyJournalStore, RealClock, RealCommandRunner, RealFs, RealGitRepo, RealIdGen,
-    RealJournalStore, RealRegistryQuery, RealTagger,
+    RealJournalStore, RealRegistryQuery, RealTagger, StaleLockOutcome,
 };
 
 /// Arguments for `release plan`.
@@ -966,15 +966,8 @@ pub fn abandon(args: &AbandonArgs, format: OutputFormat) -> Result<(), CliError>
 
     let store = RealJournalStore;
     let clock = RealClock;
-
-    // Open under the single-active-cut lock: an abandonment mutates the journal, so
-    // it takes the same lock a cut/resume does and must never race one. A stale lock
-    // (a hard-killed run) is mapped to an actionable message rather than the generic
-    // "another cut is active" — see `abandon_open_error`. (Breaking a stale lock
-    // automatically is a separate, safety-sensitive capability tracked as its own
-    // issue; abandon refuses rather than stomping a possibly-live run.)
-    let mut journal = Journal::open(&store, &clock, paths, &args.run_id)
-        .map_err(|e| abandon_open_error(&args.run_id, e))?;
+    let (mut journal, stale_lock_warning) =
+        open_abandon_journal(&store, &clock, paths, &args.run_id)?;
 
     // A terminal run cannot be abandoned: recording a second terminal fact would be
     // meaningless. Distinguish the two cases so the caller gets an actionable code.
@@ -1047,6 +1040,9 @@ pub fn abandon(args: &AbandonArgs, format: OutputFormat) -> Result<(), CliError>
     // Surface already-published targets as a warning too: they are the one thing an
     // operator abandoning a run most needs to be reminded still exists remotely.
     let mut warnings = Vec::new();
+    if let Some(warning) = stale_lock_warning {
+        warnings.push(warning);
+    }
     if !published_targets.is_empty() {
         warnings.push(format!(
             "{} target(s) were already published under this run and remain published \
@@ -1061,6 +1057,40 @@ pub fn abandon(args: &AbandonArgs, format: OutputFormat) -> Result<(), CliError>
         OutputFormat::Text => render_abandon_text(&report, &warnings),
     }
     Ok(())
+}
+
+/// Open a journal for abandonment. `abandon` alone may recover a stale `O_EXCL`
+/// lock: its recorded hostname must match and `kill -0` must prove the PID dead.
+/// It removes that lock then retries acquisition exactly once.
+fn open_abandon_journal<'a>(
+    store: &'a RealJournalStore,
+    clock: &'a RealClock,
+    paths: JournalPaths,
+    run_id: &str,
+) -> Result<(Journal<'a>, Option<String>), CliError> {
+    match Journal::open(store, clock, paths.clone(), run_id) {
+        Ok(journal) => Ok((journal, None)),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            match RealJournalStore::break_stale_lock(&paths.lock_file()) {
+                Ok(StaleLockOutcome::Broken { pid }) => {
+                    let warning = format!(
+                        "broke stale single-active-cut lock held by pid {pid}: kill -0 reported ESRCH (the holder no longer exists)"
+                    );
+                    let journal = Journal::open(store, clock, paths, run_id)
+                        .map_err(|retry_error| abandon_open_error(run_id, retry_error))?;
+                    Ok((journal, Some(warning)))
+                }
+                Ok(StaleLockOutcome::NotBroken { reason }) => {
+                    Err(abandon_lock_not_broken_error(run_id, reason))
+                }
+                Err(inspect_error) => Err(abandon_lock_not_broken_error(
+                    run_id,
+                    format!("the lock could not be inspected: {inspect_error}"),
+                )),
+            }
+        }
+        Err(error) => Err(abandon_open_error(run_id, error)),
+    }
 }
 
 /// The longest `--reason` the abandon command accepts. A reason is a short
@@ -1104,26 +1134,32 @@ fn normalize_reason(reason: Option<&str>) -> Result<String, CliError> {
     Ok(trimmed.to_string())
 }
 
-/// Map a `Journal::open` failure for `abandon` to the §10 envelope. Identical to
-/// [`open_run_error`] except for the held-lock case: because a hard-killed run
-/// leaves a **stale** `O_EXCL` lock file (not an OS-owned `flock`), abandon — the
-/// tool an operator reaches for *after* a crash — must not tell them to "wait, or
-/// `release abandon`" (the very thing they are running). It names the stale-lock
-/// recovery instead.
+/// Map a `Journal::open` failure for `abandon` to the §10 envelope. A normal
+/// held lock reaches this only after the one permitted stale-lock retry.
 fn abandon_open_error(run_id: &str, e: std::io::Error) -> CliError {
     if e.kind() == std::io::ErrorKind::WouldBlock {
-        return CliError::user(
-            "cut_in_progress",
-            format!(
-                "cannot abandon run {run_id}: the single-active-cut lock is held. If a `release \
-                 cut`/`resume` is genuinely running, let it finish. If its process was killed the \
-                 lock file is stale and must be cleared before any run in this repository can be \
-                 abandoned (the lock is `<git-common-dir>/ossctl/releases/.lock`)."
-            ),
-        )
-        .with_invalid_value(run_id.to_string());
+        return abandon_lock_not_broken_error(
+            run_id,
+            "the lock remained held after the stale-lock recovery attempt",
+        );
     }
     open_run_error(run_id, e)
+}
+
+/// The actionable held-lock refusal, including the exact reason `abandon` did
+/// not break it. This stays a caller-fixable §10 envelope: wait for a live cut,
+/// or inspect the lock before attempting any manual recovery.
+fn abandon_lock_not_broken_error(run_id: &str, reason: impl AsRef<str>) -> CliError {
+    CliError::user(
+        "cut_in_progress",
+        format!(
+            "cannot abandon run {run_id}: the single-active-cut lock is held and was not broken \
+             because {}. If a `release cut`/`resume` is genuinely running, let it finish; otherwise \
+             inspect `<git-common-dir>/ossctl/releases/.lock` before recovery.",
+            reason.as_ref()
+        ),
+    )
+    .with_invalid_value(run_id.to_string())
 }
 
 /// Render the abandonment outcome as human lines (text mode).

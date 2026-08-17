@@ -1,8 +1,8 @@
 ---
 created: 2026-08-05
-updated: 2026-08-16
+updated: 2026-08-17
 type: improvement
-status: open
+status: in-progress
 priority: normal
 epic: ossctl-phase4-build
 lane: release-hardening
