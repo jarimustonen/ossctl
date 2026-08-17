@@ -5,62 +5,104 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-08-14 (stint #20). New agent: read this, then continue with a fresh
-`/stint-start`. Main is clean + pushed. Live: **0.5.0** on all four channels (SHIPPED this round).
-**No active/queued task — the DAG frontier is EMPTY.** The HIGH head `release-rust-workspace-multicrate`
-is CLOSED done; everything else open is DEFERRED hardening / review follow-ups / optional features. The
-only live thread is external: the **orchestratectl 0.2.0 `--bump` live-acceptance cut** (orchestratectl's
-timeline, prepared this round — see below). A fresh `/stint-start` will find nothing queued; wait for
-Jari to name work, or pick a DEFERRED item if he wants backlog burn-down._
+_Handoff written 2026-08-17 (stint #21). New agent: read this, then continue with a fresh
+`/stint-start`. Main is clean + pushed. Live: **0.6.1** on all four channels. The DAG frontier is
+**FULL and the head is HIGH**: `release-tag-preempts-cargo-dist`, then `release-bump-plan-uncuttable`
+— two field-confirmed bugs from the issuectl 0.14.1 cut. Start there; do not go looking for work._
 
-_**Stint #20 (2026-08-13→14) — shipped 0.5.0, closed the HIGH head, prepared orchestratectl for its live cut.**_
+_**⭐ THE THEME — read this before picking anything up.** Four open issues in `release-safety` are
+the same defect wearing different clothes: **the engine reports success without verifying the
+artifact.** `release-tag-preempts-cargo-dist` (green cut, zero binaries, no formula),
+`release-verify-homebrew-tap` (nothing checks the tap carries the released version),
+`release-verify-delegated-github-release` (nothing checks CI made the Release), and the dist
+phase's own `✓ dist complete` which checks nothing. This round found the Homebrew leg had been
+shipping an **uninstallable formula for six releases** while every cut reported green. Treat these
+as one design problem — a publish target that cannot be observed after the fact is not a publish
+target — rather than four tickets. The engine already does this right for crates.io (it confirms
+the version reached the index before journaling a receipt); that is the pattern to copy._
 
-_**🎉 0.5.0 SHIPPED (2026-08-13) — all four channels, autonomous engine self-cut, exit 0.** Plan
-`83dc4e29…`, release commit `1be179b`, tag `v0.5.0`. crates.io ×2 (ossctl-core + ossctl via sparse
-index), GitHub Release v0.5.0 + 14 cross-platform assets (cargo-dist CI, **hauis macOS aarch64 clean, no
-400**), Homebrew tap → v0.5.0 (engine direct tap-write, real sha256). Cut via the PROVEN recipe (manual
-version bump in step 1, then `release plan`/`cut` WITHOUT `--bump`) — deliberately NOT dogfooding the new
-`--bump` executor on the irreversible path (its live acceptance is decoupled, see orx below). **What 0.5.0
-ships (everything since 0.4.0):** the full `release-rust-workspace-multicrate` feature — facet 1
-(dep-ordered multi-crate publish CLOSURE from a bin-only contract), facet 4 (`homebrew_tap` carry), facets
-2+3 (`--bump major|minor|patch` plan phase + cut-time executor + contract `release.bump_hook`)._
+_**Stint #21 (2026-08-16→17) — shipped 0.6.0 + 0.6.1, unbroke Homebrew, pruned 40% of the issue base.**_
 
-_**✅ `release-rust-workspace-multicrate` CLOSED done (`9876bd4`).** All 4 facets landed across stints
-#19–#20 (2 autonomous spinoffs, each green + 4-model `/llm-review`): the plan side (`bff2cd2`+`31e3df7`,
-stint #19 in-flight worker that landed this round) and the cut-time EXECUTOR (`ce33e25`+`7590c2a`, this
-round — executes the sealed bump in the clean checkout: version + precise `=`-only pin rewrites via Facts
-dep-req strings + Cargo.lock + CHANGELOG finalize + `bump_hook`; tag on the BUMP commit; resume-safe
-`BumpApplied` guard so no double-bump; journal schema v3→v4; a fail-closed `bump_hook` exec contract
-`sh -c` verbatim + post-hook version validation). The review caught + fixed a unanimous critical (resume
-built/published the PRE-bump tree). Maintainer closed it **on code-complete**: the original "verified on a
-real cut" acceptance is a live, credential-gated validation, **decoupled** to the orx cut below — if that
-surfaces problems they become NEW issues (or this reopens), not open work here._
+_**🍺 THE HOMEBREW LEG WAS BROKEN AND IS NOW FIXED.** `brew upgrade ossctl` had failed silently since
+0.2.3: the engine-written formula ran `cargo install` against a virtual workspace manifest, which
+cannot work. Six releases reported their Homebrew leg green while publishing a formula nobody could
+install; the maintainer's machine sat on **0.2.2** and it was mistaken for a stale-install habit. The
+formula now carries an ownership marker, per-platform prebuilt archive URLs with checksums,
+`bin.install`, and no Rust toolchain dependency. **Verified: `brew upgrade ossctl` 0.2.2 → 0.6.1.**_
 
-_**🔗 THE ONE LIVE THREAD — orchestratectl 0.2.0 `--bump` live-acceptance cut (orx's timeline).** This is
-the real live proof of the `--bump` executor. orchestratectl (`~/Sources/orchestratectl`) is mid-refactor
-toward **0.2.0** (bigger refactoring in progress; nothing user-facing was releasable when checked —
-`[Unreleased]` empty). We did NOT cut a contentless release. Instead we PREPARED orx (autonomous spinoff
-in the orx repo, `2db04f4`+`63ad5bf`, validated with the ossctl 0.5.0 binary):_
-_- declared `release.bump_hook: "INSTA_UPDATE=always cargo test -p orchestratectl --test envelope_snapshots"`
-  (dependency-free; regenerates ONLY the 3 version_* insta snapshots on a bump, never the version — passes
-  the executor's fail-closed post-hook guard);_
-_- added a v2 `distribution:` block to orx's `OSS-RELEASE.md` (tap `jarimustonen/homebrew-orchestratectl`
-  + platforms) — **because ossctl 0.5.0 sources the plan's `homebrew_tap` from the contract's distribution
-  block, NOT from `dist-workspace.toml`** (a real downstream-readiness gap this prep surfaced);_
-_- proven: scratch bump 0.1.8→0.2.0 regenerated exactly the 3 snapshots + `check-version-snapshots.sh` +
-  `cargo test --workspace` green; and ossctl-0.5.0 `contract validate` (0 warn) + `release plan --bump
-  minor` → version 0.2.0, both crates dep-ordered (octl-core → orchestratectl), tap carried, bump_hook
-  surfaced verbatim._
-_**NEXT for this thread (whenever orx 0.2.0 is ready to ship — likely a separate orx stint, not ossctl):**
-run `ossctl release cut --bump minor` on orx with a 0.5.0+ binary. If it works, the `--bump` executor is
-live-proven and hand-cutting orchestratectl retires. If problems: file NEW issues (orx or ossctl as
-appropriate). NB: the PATH `ossctl` is stale (0.2.2 via brew) — `brew upgrade ossctl` to 0.5.0 or use a
-fresh-built binary; `ossctl version` is the only stale-binary tell._
+_**⚠️ EVERY OTHER TAP NEEDS A ONE-TIME MANUAL MARKER.** The tap-write path refuses to replace an
+unmarked formula (it cannot tell its own pre-marker output from a hand-maintained one). None of the
+issuectl / glasspad / orchestratectl / project-canon taps carry the marker, so each will fail its
+next cut **at the dist phase — after crates.io and the tag have already landed**. Prepend this as the
+formula's first line before cutting, or add it after the failure and `release resume --allow-unverified`:_
 
-_**Housekeeping:** no lingering ossctl worktrees (both round workers settled + torn down). The Dependabot
-`clap` PR (now `clap-4.6.6`) is still open on the remote — adjacent, not triaged._
+    # Generated by ossctl; do not edit by hand (template-version: 1)
 
-_**Earlier releases (compressed):** 0.4.0 (#17, pi.dev skill dual-home), 0.3.0 (#16r2, BREAKING —
+_**Releases: 0.6.0 then 0.6.1, both engine-cut.** 0.6.0 (`ffcef9c`) shipped the installable formula,
+the downstream-safe stale-binary guard, `config path`/`config show`, the contract never-drop fix, the
+`/oss-dist` skill, and the cargo-dist tap warning — but its dist phase failed on the Windows platform
+entry, so the tap never got it. 0.6.1 (`2846d66`, run `01M0727VBSV1P8N6YHC0PWBVXQ`) fixed that and
+completed the tap. **The engine stopped three times before getting through, and every stop was
+correct** — a platform Homebrew cannot serve, a sealed plan that no longer matched the tree, and an
+unmarked formula it refused to clobber. Nothing wrong was written anywhere. Contrast with the six
+silent green releases that preceded them._
+
+_**🪟 WINDOWS DROPPED (maintainer decision, 2026-08-17).** ossctl no longer builds or ships a Windows
+binary or a PowerShell installer. No default changed — Windows has never been in the normalizer's
+default platform set (it is a documented deliberate omission); this repo had simply opted in.
+**`issuectl` is the only remaining repo with that opt-in live** — remove it in its next cut._
+
+_**🧹 40% OF THE ISSUE BASE WAS SPECULATIVE AND IS GONE (maintainer decision).** A full sweep found
+that roughly two in five open issues were AI-review output with no observed failure behind them:
+cosmic-ray scenarios, checks duplicating checks elsewhere, hostile-input hardening on paths where the
+only actor is the maintainer. Five were closed `wontfix` (the cargo publish digest-provenance cluster
+and the homebrew resume remnants), each with a written reason **and a reopen condition** so the same
+finding is not re-filed next quarter. `release-abandon-break-stale-lock` was kept but **narrowed** —
+its real, field-confirmed core is in scope; its process-id-reuse and network-filesystem defences are
+not. **Judge an issue by whether its failure can actually occur here; use provenance only as a
+supporting signal.** Two units this round were spent on findings of this class before the pattern was
+spotted._
+
+_**📮 FILED IN OTHER REPOS this round (this repo owns none of them):**_
+_- `homebase/triage-catch-review-slop` — teach `/triage-unlaned-issues` to catch the speculative class above._
+_- `homebase/triage-script-json-envelope` — **the unlaned-issue detector is BROKEN**: it reads the
+  pre-envelope `issuectl dag --json` shape, exits 3, and `/wrap-up` treats that as "clean". Two real
+  issues went undetected this round. Until it is fixed, compute the set by hand:
+  `comm -3 <(issuectl --json ls --status open | jq -r '.data[]|select(.type!="epic")|.slug'|sort -u) <(issuectl dag --json | jq -r '.data.lanes[].nodes[].slug'|sort -u)`_
+_- `orchestratectl/worktree-issue-provenance` — worktree-filed issues must land UNLANED with visible AI-review provenance._
+_- `project-canon/canon-verify-deferrals` — a deferral justification must be verified, not inherited.
+  Root case: a config comment claimed Homebrew publishing was blocked on a token that had existed for
+  **three and a half months**, and pointed at an owning issue that did not exist. The tap sat three
+  releases behind. Each later pass read the comment and built around it._
+_- `issuectl/homebrew-tap-stale` — annotated with the token evidence; its blocker was never real._
+
+_**Release queue (recommended order, and why):** 1. ~~ossctl 0.6.1~~ DONE. 2. ~~issuectl 0.14.1~~ DONE
+(cut by the maintainer; it produced the two head bugs). 3. **glasspad 0.15.0** — four unreleased
+feat/fix commits; distribution healthy; **its contract declares both the gh-releases/cargo-dist and
+homebrew targets, so it is NOT exposed to `release-tag-preempts-cargo-dist`** — but it does still need
+the tap marker above. **No release needed:** orchestratectl and project-canon are current everywhere._
+
+_**issuectl's contract under-declares its distribution** — only two crates.io targets, no gh-releases
+and no homebrew target, though the repo really uses both. That is the trigger for
+`release-tag-preempts-cargo-dist` and why its tap went stale. Fixing that contract is an issuectl-repo
+task, not ossctl's._
+
+_**Housekeeping:** no lingering ossctl worktrees. Two workers were cancelled mid-round (one wedged, one
+returned an unlanded diff on an over-large unit) — the unit was then **split, and the split was itself
+reverted** when the whole cluster turned out to be speculative. The Dependabot `clap` PR is still open,
+untriaged. The `--bump` executor is confirmed **broken end-to-end** (`release-bump-plan-uncuttable`);
+stint #20's decision not to dogfood it on an irreversible path was vindicated._
+
+_**Stint #20 (2026-08-13→14) — shipped 0.5.0.** Cut via the manual-bump recipe, deliberately NOT
+dogfooding the new `--bump` executor on the irreversible path; that decision is now vindicated (see
+`release-bump-plan-uncuttable`). Closed `release-rust-workspace-multicrate` on code-complete (all 4
+facets: dep-ordered multi-crate closure from a bin-only contract, `homebrew_tap` carry, the `--bump`
+plan phase + cut-time executor + `release.bump_hook`). Also prepared orchestratectl for a `--bump`
+live-acceptance cut — that thread is now MOOT: `--bump` is broken end-to-end and must be fixed before
+any repo can use it. Full detail in git log + `issues/`._
+
+_**Earlier releases (compressed):** 0.5.0 (#20, dep-ordered multi-crate closure + the `--bump` plan/executor
+— the executor is now known broken, see above),_ 0.4.0 (#17, pi.dev skill dual-home), 0.3.0 (#16r2, BREAKING —
 --version removed + non-Rust fail-closed + clean-checkout cut + digest-authenticated resume skip), 0.2.5
 (#16, real-cut publish made trustworthy: post-publish self-visibility confirm + single-source version).
 Full detail in git log + `issues/`._
@@ -74,6 +116,10 @@ _**Operating policy (see AGENTS.md):** (1) releases may be cut AUTONOMOUSLY; (2)
 structural (`release plan` seal + `dry-run-all` + dep-order/index-wait + **the new post-publish
 self-visibility confirm** + `resume`/`abandon`); (3) `git pull --rebase` → `push` always allowed. Green
 gate incl. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`._
+_**Caveat learned this round:** structural safety covers what the engine *does*, not what it
+*reports*. Three fail-closed stops worked perfectly in 0.6.0/0.6.1 — but the same engine had been
+reporting a green Homebrew leg for six releases while shipping an uninstallable formula. Trust the
+refusals; do not trust the green._
 
 _--- older history in git: stints #1–7 built the `/oss-*` deterministic core, #8 finished the
 adapters, #9–11 shipped 0.1.0/0.1.1/0.1.2, #12 multi-target cut, #13 interleave + 0.2.1, #14 completed
@@ -106,9 +152,12 @@ issuectl ls --status in-progress
 
 Post-release hardening + Track B are children/followups under
 [`ossctl-phase4-build`](issues/ossctl-phase4-build/item.md) (still OPEN). `issuectl list` for the
-live view. 0.4.0 is shipped; the epic stays open for its tails (see handoff) and the lanes above.
+live view. 0.6.1 is shipped; the epic stays open for its tails (see handoff) and the lanes above.
 
 ## Piialiisan bugiraportit
 
 - Intake bugs reviewed 2026-08-16. `intake-bug-ossctl-878b3a0790a5` closed fixed because current `release plan` supports `--json`; `intake-feature-ossctl-04e19af4e11d` closed duplicate into `oss-dist-channel-generator`.
-- [ ] 🐛 Piialiisan bugiraportti: release plan/cut should cover the Homebrew tap leg — jari via Telegram ([`intake-feature-ossctl-73e870268475`](issues/intake-feature-ossctl-73e870268475/item.md))
+- Intake reviewed 2026-08-17: no new items. `intake-feature-ossctl-73e870268475` (release plan/cut
+  should cover the Homebrew tap leg) was admitted and is now normal planned work in lane
+  `release-safety` — its root cause is a tap declared in the distribution block but absent from
+  `targets:`, so it is planned as a green cut that silently skips the leg.
