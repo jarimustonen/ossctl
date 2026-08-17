@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-17
+
 ### Fixed
 - **CLI error exits now distinguish caller-actionable failures from operational faults.**
   Missing `OSS-RELEASE.md` contracts now exit `1` rather than `2`; agents branching on
