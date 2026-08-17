@@ -283,6 +283,9 @@ pub fn execute(
     tagger: &dyn Tagger,
     sink: &mut dyn ProgressSink,
 ) -> Result<(), CutError> {
+    // `execute` is public and used by resume as well as fresh cuts, so repeat the
+    // no-effects plan validation even when a caller did not run the CLI preflight.
+    validate_plan(plan)?;
     let targets = resolve_target_plans(plan)?;
 
     // Resolve the GitHub `origin` slug from the REAL repo root, BEFORE re-rooting to
@@ -428,11 +431,24 @@ pub fn execute(
 /// [`execute`] re-runs the same resolution (defense in depth).
 ///
 /// # Errors
-/// [`CutError::Plan`] when a target has no resolved package or two *identical*
+/// [`CutError::Plan`] when a target has no resolved package, two *identical*
 /// targets (same ecosystem, package, registry, and adapter) collide on one
-/// journal id.
+/// journal id, or a Homebrew target has no servable platform.
 pub fn validate_plan(plan: &ReleasePlan) -> Result<(), CutError> {
-    resolve_target_plans(plan).map(|_| ())
+    resolve_target_plans(plan)?;
+    if plan
+        .targets
+        .iter()
+        .any(|target| matches!(target.adapter, Adapter::HomebrewTap | Adapter::HomebrewCore))
+        && !plan.homebrew_platforms.iter().any(|triple| {
+            crate::release::adapters::homebrew::homebrew_platform_condition(triple).is_some()
+        })
+    {
+        return Err(CutError::Plan(
+            "Homebrew formula has no Homebrew-servable cargo-dist platforms; supported platforms are macOS aarch64/x86_64 and Linux musl aarch64/x86_64; refusing to write a formula with no installable archive".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Turn the sealed plan's abstract targets into concrete, adapter-backed units of
@@ -1312,16 +1328,9 @@ fn fetch_homebrew_assets(
         .package
         .as_str();
     let mut assets = Vec::new();
-    for triple in &formula.platforms {
-        if !matches!(
-            triple.as_str(),
-            "aarch64-apple-darwin"
-                | "x86_64-apple-darwin"
-                | "aarch64-unknown-linux-musl"
-                | "x86_64-unknown-linux-musl"
-        ) {
-            return Err(format!("Homebrew formula cannot serve unsupported cargo-dist platform `{triple}`; supported platforms are macOS aarch64/x86_64 and Linux musl aarch64/x86_64"));
-        }
+    for triple in formula.platforms.iter().filter(|triple| {
+        crate::release::adapters::homebrew::homebrew_platform_condition(triple).is_some()
+    }) {
         let filename = format!("{package}-{triple}.tar.xz");
         let url = format!(
             "https://github.com/{slug}/releases/download/v{}/{filename}",
@@ -1361,7 +1370,7 @@ fn fetch_homebrew_assets(
         });
     }
     if assets.is_empty() {
-        return Err("Homebrew formula has no configured cargo-dist platforms; refusing to write a formula with no installable archive".to_string());
+        return Err("Homebrew formula has no Homebrew-servable cargo-dist platforms; supported platforms are macOS aarch64/x86_64 and Linux musl aarch64/x86_64; refusing to write a formula with no installable archive".to_string());
     }
     Ok(assets)
 }

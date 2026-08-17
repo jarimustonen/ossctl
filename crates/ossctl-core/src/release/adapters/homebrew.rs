@@ -792,12 +792,8 @@ pub(super) fn render_formula(
     let desc = ruby_escape(description.unwrap_or(name));
     let mut platforms = String::new();
     for asset in assets {
-        let condition = match asset.triple.as_str() {
-            "aarch64-apple-darwin" => "if OS.mac? && Hardware::CPU.arm?",
-            "x86_64-apple-darwin" => "if OS.mac? && Hardware::CPU.intel?",
-            "aarch64-unknown-linux-musl" => "if OS.linux? && Hardware::CPU.arm?",
-            "x86_64-unknown-linux-musl" => "if OS.linux? && Hardware::CPU.intel?",
-            _ => continue,
+        let Some(condition) = homebrew_platform_condition(&asset.triple) else {
+            continue;
         };
         let _ = write!(
             platforms,
@@ -811,6 +807,19 @@ pub(super) fn render_formula(
         .unwrap_or_default();
     let marker = format!("{FORMULA_MARKER_PREFIX} {FORMULA_TEMPLATE_VERSION})");
     format!("{marker}\nclass {class} < Formula\n  desc \"{desc}\"\n  homepage \"{}\"\n{platforms}{license_line}\n  def install\n    bin.install \"{name_lit}\"\n  end\n\n  test do\n    system bin/\"{name_lit}\", \"version\"\n  end\nend\n", ruby_escape(&homepage))
+}
+
+/// Return the Homebrew formula condition for a cargo-dist target triple, if
+/// Homebrew can serve it. Other distribution platforms, such as Windows, are
+/// served through the GitHub Release instead.
+pub(crate) fn homebrew_platform_condition(triple: &str) -> Option<&'static str> {
+    match triple {
+        "aarch64-apple-darwin" => Some("if OS.mac? && Hardware::CPU.arm?"),
+        "x86_64-apple-darwin" => Some("if OS.mac? && Hardware::CPU.intel?"),
+        "aarch64-unknown-linux-musl" => Some("if OS.linux? && Hardware::CPU.arm?"),
+        "x86_64-unknown-linux-musl" => Some("if OS.linux? && Hardware::CPU.intel?"),
+        _ => None,
+    }
 }
 
 /// Return only a complete, checked archive set. A default-branch tap is user-facing,

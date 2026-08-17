@@ -3403,6 +3403,13 @@ fn homebrew_prebuilt_formula_renders_each_supported_platform_without_rust() {
             url: "https://example/x86_64-unknown-linux-musl.tar.xz".into(),
             sha256: sha.into(),
         },
+        // cargo-dist's full distribution also carries Windows, but a Homebrew
+        // formula must omit it rather than treating it as a rendering failure.
+        HomebrewAsset {
+            triple: "x86_64-pc-windows-msvc".into(),
+            url: "https://example/x86_64-pc-windows-msvc.tar.xz".into(),
+            sha256: sha.into(),
+        },
     ];
     let formula = super::homebrew::render_formula(
         "tool",
@@ -3411,12 +3418,19 @@ fn homebrew_prebuilt_formula_renders_each_supported_platform_without_rust() {
         &assets,
         Some("MIT"),
     );
-    for asset in &assets {
+    for asset in assets
+        .iter()
+        .filter(|asset| asset.triple != "x86_64-pc-windows-msvc")
+    {
         assert!(
             formula.contains(&asset.url) && formula.contains(&asset.sha256),
             "{formula}"
         );
     }
+    assert!(
+        !formula.contains("x86_64-pc-windows-msvc"),
+        "Homebrew formula must not contain a Windows archive: {formula}"
+    );
     assert!(
         formula.contains("desc \"A real tool\"")
             && formula.contains("system bin/\"tool\", \"version\""),

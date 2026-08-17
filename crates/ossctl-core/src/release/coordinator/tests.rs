@@ -471,7 +471,7 @@ fn two_target_plan() -> ReleasePlan {
 }
 
 #[test]
-fn homebrew_release_asset_wait_times_out_without_a_source_fallback() {
+fn homebrew_fails_closed_when_a_servable_release_asset_is_missing() {
     let cmd = FakeCmd::failing_on("curl");
     let clock = FakeClock(Cell::new(0));
     let registry = FakeRegistry::empty();
@@ -490,11 +490,102 @@ fn homebrew_release_asset_wait_times_out_without_a_source_fallback() {
         tap: Some("o/tap".into()),
         license: Some("MIT".into()),
         description: Some("Tool".into()),
-        platforms: vec!["aarch64-apple-darwin".into()],
+        platforms: vec![
+            "aarch64-apple-darwin".into(),
+            "x86_64-pc-windows-msvc".into(),
+        ],
     };
     let err = fetch_homebrew_assets(&ctx, "o/r", &plan, &formula, &target_refs).unwrap_err();
     assert!(
         err.contains("not visible after") && err.contains("Refusing to write a source-build"),
+        "{err}"
+    );
+    assert!(
+        cmd.calls()
+            .iter()
+            .any(|call| call.contains("aarch64-apple-darwin")),
+        "the servable platform was not requested: {:?}",
+        cmd.calls()
+    );
+    assert!(
+        !cmd.calls().iter().any(|call| call.contains("windows-msvc")),
+        "the skipped Windows platform must not mask a missing servable asset: {:?}",
+        cmd.calls()
+    );
+}
+
+#[test]
+fn homebrew_fetches_only_servable_platforms_from_the_full_distribution_set() {
+    // This is ossctl's own distribution shape: cargo-dist also publishes Windows
+    // for the GitHub Release, while Homebrew serves only the three Unix archives.
+    let cmd = FakeCmd::new();
+    let clock = FakeClock(Cell::new(0));
+    let registry = FakeRegistry::empty();
+    let root = Path::new("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &registry,
+        repo_root: root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut plan = two_target_plan();
+    plan.targets.push(plan_target(
+        Ecosystem::Rust,
+        Registry::Homebrew,
+        Adapter::HomebrewTap,
+    ));
+    let targets = resolve_target_plans(&plan).unwrap();
+    let target_refs: Vec<&TargetPlan> = targets
+        .iter()
+        .filter(|target| needs_post_tag(target))
+        .collect();
+    let formula = HomebrewFormula {
+        tap: Some("o/tap".into()),
+        license: Some("MIT".into()),
+        description: Some("Tool".into()),
+        platforms: vec![
+            "aarch64-apple-darwin".into(),
+            "aarch64-unknown-linux-musl".into(),
+            "x86_64-unknown-linux-musl".into(),
+            "x86_64-pc-windows-msvc".into(),
+        ],
+    };
+
+    let assets = fetch_homebrew_assets(&ctx, "o/r", &plan, &formula, &target_refs).unwrap();
+
+    assert_eq!(
+        assets
+            .iter()
+            .map(|asset| asset.triple.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "aarch64-apple-darwin",
+            "aarch64-unknown-linux-musl",
+            "x86_64-unknown-linux-musl",
+        ]
+    );
+    assert!(
+        !cmd.calls().iter().any(|call| call.contains("windows-msvc")),
+        "Homebrew requested a Windows archive: {:?}",
+        cmd.calls()
+    );
+}
+
+#[test]
+fn homebrew_rejects_a_distribution_with_no_servable_platforms() {
+    let mut plan = two_target_plan();
+    plan.targets.push(plan_target(
+        Ecosystem::Rust,
+        Registry::Homebrew,
+        Adapter::HomebrewTap,
+    ));
+    plan.homebrew_platforms = vec!["x86_64-pc-windows-msvc".into()];
+
+    let err = validate_plan(&plan).unwrap_err();
+
+    assert!(
+        matches!(err, CutError::Plan(ref message) if message.contains("no Homebrew-servable cargo-dist platforms")),
         "{err}"
     );
 }
