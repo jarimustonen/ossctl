@@ -161,3 +161,4 @@ live view. 0.6.1 is shipped; the epic stays open for its tails (see handoff) and
   should cover the Homebrew tap leg) was admitted and is now normal planned work in lane
   `release-safety` — its root cause is a tap declared in the distribution block but absent from
   `targets:`, so it is planned as a green cut that silently skips the leg.
+- [ ] 🐛 Piialiisan bugiraportti: ossctl --version is rejected as an unknown flag; it should alias the ve… — jari via Telegram ([`intake-bug-ossctl-d9b2ec7bb6d9`](issues/intake-bug-ossctl-d9b2ec7bb6d9/item.md))
