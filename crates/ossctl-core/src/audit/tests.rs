@@ -550,6 +550,39 @@ fn registry_target_without_license_is_producer_gap() {
     assert_eq!(g.member, "oss-readme");
 }
 
+#[test]
+fn publish_none_repo_is_audited_without_any_publish_gap() {
+    // A publish-none contract (an authored `targets: []` — a private, never-published
+    // repo) is a valid, honored state, not a half-configured one. The audit must not
+    // demand publish infrastructure from it: no registry-license gap even with NO
+    // license configured (nothing is being published to a registry that requires one),
+    // and no cross-platform distribution gap (there is no distribution).
+    let mut contract = contract_at(Maturity::Mvp);
+    contract.targets = vec![];
+    contract.license = String::new();
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n")
+        .file("/repo/CHANGELOG.md", "# Changelog\n")
+        .file("/repo/CONTRIBUTING.md", "# Contributing\n")
+        .file("/repo/CODE_OF_CONDUCT.md", "# CoC\n")
+        .file("/repo/SECURITY.md", "# Security\n")
+        .file("/repo/.github/workflows/ci.yml", "on: push\n");
+    let report = audit(
+        repo(),
+        &contract,
+        &facts_with(Maturity::Mvp, true, Some("dependabot")),
+        &fs,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    assert_eq!(report.core_complete, CoreStatus::Complete);
+    assert!(
+        report.gaps.is_empty(),
+        "a complete publish-none repo has no gaps, got {:?}",
+        ids(&report)
+    );
+}
+
 // ── Cross-platform distribution policy (macOS AND Linux) ───────────────────
 
 #[test]

@@ -191,3 +191,38 @@ be the mode's one real hazard, and it is the one thing the engine refuses to do.
 The contract floors the combination at normalization: `cargo-publish-ci` requires
 `registry: crates.io` and `ecosystem: rust`. A mis-declared target would otherwise tag
 first and fail verify second — after the irreversible step.
+
+## Amendment (2026-08-17) — publish-none: the tag-only cut, a THIRD Release disposition
+
+A repo may legitimately publish **nothing**: a private, never-published service that is
+still version-tracked, changelogged, and tagged (`publish = false` in its manifest,
+deployed by its own script). Its contract declares an authored `targets: []`, which the
+normalizer honors rather than expanding into a phantom registry target (ADR-0003).
+
+This is **not** delegation, and the engine must not model it as one. Delegation means
+something IS published and the engine is not the publisher; publish-none means nothing
+is published by anyone. The coordinator therefore classifies a cut's GitHub Release into
+three states, not two:
+
+| disposition | when | Release object |
+| --- | --- | --- |
+| `Engine` | targets exist, none CI-owns the Release | engine creates it |
+| `DelegatedToCi(adapter)` | a target's tag-triggered CI owns it (cargo-dist) | CI creates it; the engine journals the delegation |
+| `TagOnly` | **no targets at all** | nobody creates one |
+
+`TagOnly` creates and pushes the tag and stops. Creating an empty Release would
+manufacture the outward-facing publish surface the contract explicitly declined, and on
+a repo with no GitHub remote or `gh` auth the attempt would fail the cut *after* the
+irreversible tag push. Neither Release fact is journalled: a delegation record would
+falsely claim CI publishes something.
+
+The version such a cut tags is projected from the tree's own manifests for the declared
+ecosystems (one distinct version ⇒ the release version; several ⇒ `InconsistentTree`;
+none ⇒ `Undeterminable`), because there is no target to project it through. The rule
+"the version is a projection of the tree, never an independent input" is unchanged.
+
+The verify barrier passes **vacuously**: with no declared destination there is nothing
+to observe. That is not `Unknown` ("a declared destination could not be read"), which
+remains red. The emptiness is authored, never inferred — the normalizer honors only an
+explicit `targets: []` — so a dropped `targets` block cannot reach verify as a silent
+green.

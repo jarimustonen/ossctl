@@ -2222,7 +2222,17 @@ fn render_cut_success(run_id: &str, plan: &ReleasePlan) -> Result<(), CliError> 
     crate::output::stdoutln!("release complete — run {run_id}")?;
     crate::output::stdoutln!("version: {}", plan.version)?;
     crate::output::stdoutln!("tag:     v{}", plan.version)?;
-    crate::output::stdoutln!("published {} target(s)", plan.targets.len())?;
+    // Publish-none must not read as a successful publish: a zero-target plan is a
+    // TAG-ONLY cut (no registry publish, no GitHub Release), so say that rather than
+    // reporting "published 0 target(s)" — which invites the reader to assume a
+    // publish happened and merely counted wrong.
+    if plan.targets.is_empty() {
+        crate::output::stdoutln!(
+            "published nothing — tag-only cut (the contract declares no publish targets)"
+        )?;
+    } else {
+        crate::output::stdoutln!("published {} target(s)", plan.targets.len())?;
+    }
     Ok(())
 }
 

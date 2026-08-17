@@ -837,6 +837,61 @@ fn two_crate_workspace_declaring_only_the_bin_derives_both_members_lib_first() {
 }
 
 #[test]
+fn a_publish_none_contract_derives_its_version_from_the_tree_manifest() {
+    // A publish-none repo is still version-tracked and tagged, but it has no target to
+    // project the version through. The version comes from the tree's own manifests for
+    // the declared ecosystems, so `release plan` can derive a tag version instead of
+    // refusing with `version_undeterminable`.
+    let mut c = rust_contract();
+    c.targets = vec![];
+    let f = rust_facts(); // Cargo.toml: acme 0.1.0
+    assert_eq!(resolve_release_version(&c, &f).unwrap(), "0.1.0");
+
+    // A tree that disagrees with itself is still refused — one tag, one version.
+    let mut split = f.clone();
+    split.packages.push(Package {
+        ecosystem: Ecosystem::Rust,
+        manifest: "crates/other/Cargo.toml".to_string(),
+        package: Some("other".to_string()),
+        version: Some("0.2.0".to_string()),
+    });
+    assert!(matches!(
+        resolve_release_version(&c, &split),
+        Err(VersionResolveError::InconsistentTree { .. })
+    ));
+
+    // And a tree with no version anywhere is undeterminable, as before.
+    let mut versionless = f.clone();
+    versionless.packages.clear();
+    assert_eq!(
+        resolve_release_version(&c, &versionless),
+        Err(VersionResolveError::Undeterminable)
+    );
+}
+
+#[test]
+fn a_publish_none_contract_plans_no_targets_even_with_a_publishable_workspace() {
+    // The workspace expansion derives a crate's dependencies only for a DECLARED
+    // crates.io target; with `targets: []` there is no seed, so it must not resurrect
+    // the workspace's crates as publish units. A publish-none contract plans a
+    // tag-only release, and the plan is still sealable/executable (an empty target set
+    // is a valid state, not an unplannable one).
+    let mut c = rust_contract();
+    c.targets = vec![];
+    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+
+    let plan = build(&c, &f, HEAD, "0.1.6");
+    assert!(
+        plan.targets.is_empty(),
+        "publish-none planned targets: {:?}",
+        target_packages(&plan)
+    );
+    assert_eq!(plan.plan_id.len(), 64, "an empty target set still seals");
+    crate::release::coordinator::validate_plan(&plan)
+        .expect("a tag-only plan is executable, not a refusal");
+}
+
+#[test]
 fn a_contract_declaring_only_the_bin_yields_the_same_target_set_as_declaring_both() {
     // The derivation is behavior-equivalent to a fully-declared contract: whether the
     // repo declares only the bin or both crates (ossctl's shape), the RESOLVED,

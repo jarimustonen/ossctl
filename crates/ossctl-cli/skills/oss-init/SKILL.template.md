@@ -197,7 +197,7 @@ docs_site: none
 | `status` | `draft` \| `approved` | `draft` | Approval gate. `/oss-init` writes `draft` and STOPS; a human flips it. Mutating members pass `--require-approved`. |
 | `maturity` | `spike` \| `mvp` \| `production` | inferred (tie → `mvp`) | Master dial. Take it from `ossctl facts`'s `inferred_maturity`. Required. |
 | `ecosystems` | `rust` \| `node` \| `python` \| `go` \| `binary` | inferred from manifests | Multi-valued. `homebrew` is a target, not an ecosystem. `binary` only when NO package ecosystem was detected — never additive to `rust`/`node`/`python`/`go`. |
-| `targets` | list of `{ecosystem, package?, registry, adapter?}` | derived from `ecosystems` | Expanded by the normalizer when omitted. `package` may be `null`. **Registry publishes only** — the binary/installer/tap layer is `distribution`. |
+| `targets` | list of `{ecosystem, package?, registry, adapter?}` | derived from `ecosystems` | Expanded by the normalizer when omitted (a bare `targets:`/`null` reads as omitted). `package` may be `null`. An explicit **empty** `targets: []` is honored as authoritative "publishes nothing" — the publish-none contract, whose `release cut` is tag-only. **Registry publishes only** — the binary/installer/tap layer is `distribution`. A rust crates.io target is floored against the crate's `Cargo.toml`: declaring one for a `publish = false` crate is refused. |
 | `distribution` | `{adapter, gh_releases?, installers?, homebrew_tap?, platforms?}` or omitted | omitted → `null` | The cargo-dist/goreleaser binary layer, **coexisting with** `targets`. `adapter` (**required when the block is present** — not inferred): `cargo-dist` \| `goreleaser` \| `manual`. `gh_releases`: bool, default `true`. `installers`: any of `shell`/`powershell`/`homebrew`/`msi`/`npm`. `homebrew_tap`: `owner/repo` slug — **required when** `installers` includes `homebrew` (floor); a tap without a `homebrew` installer is a *warning* (dead config). `platforms`: list of Rust target-triples — **omitted → the cross-platform default** `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-musl`, `x86_64-unknown-linux-musl` (macOS + Linux; the default MUST cover Linux — the cross-platform install requirement). An explicit **empty** list is rejected (omit the key for the default, or list triples). An explicit set is structurally validated per triple + de-duplicated (order preserved); add `x86_64-pc-windows-msvc` for a Windows build. Repos with C/native deps may override the musl Linux triples to `-gnu`. Emit this for a cargo-dist repo so downstream members SEE the tap + installer + platform set and do NOT regenerate `release.yml`. |
 | `versioning` | `semver` \| `calver:<pattern>` \| `zerover` | `semver` | `calver` carries its pattern. `contract show` splits this into `versioning` + `versioning_pattern`. |
 | `changelog.mode` | `curated` \| `automated` \| `fragment` | `fragment` if multi-contributor, else `curated` | |
@@ -325,7 +325,14 @@ ossctl contract show --json --repo-root <repo-root>
   or equivalent), rather than a maintainer running it locally — use `cargo-publish-ci`
   instead of `cargo-publish`: the engine then gates, tags, and observes crates.io, and
   never publishes from the host (declaring `cargo-publish` there would double-publish
-  against the workflow or fail on a stale local token). Emit `targets` explicitly when the repo has ≥2 targets, a monorepo
+  against the workflow or fail on a stale local token). **If the repo publishes NOTHING** —
+  a private service deployed by its own script, `publish = false` in its `Cargo.toml`, no
+  registry and no GitHub Release — emit the literal `targets: []`. That is the publish-none
+  contract: an OMITTED `targets` expands to the ecosystem default (a crates.io target the
+  repo must never have), while an explicit empty list is honored as authoritative. Do not
+  confuse it with CI delegation — `cargo-publish-ci` still publishes, just from CI. A
+  publish-none repo still versions, changelogs, and tags: its `release cut` is tag-only.
+  Emit `targets` explicitly when the repo has ≥2 targets, a monorepo
   layout, or a non-default registry/adapter; otherwise you may omit `targets` and let the
   normalizer expand them (record the intent in `## Rationale`).
 - **The remaining dials** — `versioning` (default `semver`; `zerover` if pre-1.0 and the

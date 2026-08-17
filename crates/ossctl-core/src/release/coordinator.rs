@@ -408,16 +408,11 @@ pub fn execute(
     // `ci_owns_github_release()` capability, NOT the broader `is_ci_delegated()`: a
     // PyPI-trusted-publisher or release-please target is CI-delegated for its publish
     // yet does not own the GitHub Release, so those plans still get an engine-created
-    // Release (`coordinator-release-vs-cargo-dist-ownership`).
+    // Release (`coordinator-release-vs-cargo-dist-ownership`). A plan with NO targets
+    // (publish-none) is a third state again — tag-only, no Release from anyone.
     let release_owner = github_release_owner(&targets);
-    tag_phase(
-        journal,
-        sink,
-        tagger,
-        plan,
-        &tag_commit,
-        release_owner.as_deref(),
-    )?;
+    let disposition = release_disposition(&targets, release_owner.as_deref());
+    tag_phase(journal, sink, tagger, plan, &tag_commit, disposition)?;
     // dist (post-tag finalize): now the tag archive exists, finalize homebrew with
     // its real sha256. Runs for every cut (a no-op when there is no post-tag
     // target); its Ok completion flips the run to Completed. (`repo_slug` /
@@ -671,6 +666,49 @@ fn github_release_owner(targets: &[TargetPlan]) -> Option<String> {
         .iter()
         .find(|tp| tp.adapter.ci_owns_github_release())
         .map(|tp| tp.input.target.adapter.as_str().to_string())
+}
+
+/// What the tag phase does about the GitHub Release object — the THREE distinct
+/// states, kept explicit so the publish-none case can never be read as either of
+/// the other two.
+///
+/// The distinction matters because "no engine-created Release" has two completely
+/// different causes: something IS published and CI owns the Release object
+/// (delegation), versus nothing is published by anyone (publish-none). Collapsing
+/// them into one `Option<&str>` is what made a zero-target plan quietly create a
+/// Release nobody asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseDisposition<'a> {
+    /// The coordinator creates the Release: the tag is the container for what the
+    /// engine just published. The default for any plan with targets.
+    Engine,
+    /// A target's tag-triggered CI owns the Release (`cargo-dist`) and would clash
+    /// with an engine-created one; the coordinator journals the delegation instead.
+    /// Something IS published here — just not by the engine.
+    DelegatedToCi(&'a str),
+    /// **Publish-none:** the plan has no targets at all (an authored `targets: []`),
+    /// so the tag is the entire release. Nothing is published by the engine or by
+    /// CI, nothing would be attached to a Release, and creating an empty one would
+    /// manufacture the outward-facing publish surface the contract explicitly
+    /// declined — on a repo that may have no GitHub remote or `gh` auth at all,
+    /// where the attempt would fail the cut AFTER the irreversible tag push. So the
+    /// tag phase creates and pushes the tag and stops, matching what `release plan`
+    /// warned ("this plan would create the git tag only").
+    TagOnly,
+}
+
+/// Classify a plan's Release disposition from its resolved targets.
+fn release_disposition<'a>(
+    targets: &[TargetPlan],
+    owner: Option<&'a str>,
+) -> ReleaseDisposition<'a> {
+    if targets.is_empty() {
+        return ReleaseDisposition::TagOnly;
+    }
+    match owner {
+        Some(adapter) => ReleaseDisposition::DelegatedToCi(adapter),
+        None => ReleaseDisposition::Engine,
+    }
 }
 
 /// Whether the cut carries a GitHub-backed distribution target — the binary
@@ -990,20 +1028,23 @@ fn bump_phase(
 ///
 /// The tag (`create_tag` → `push_tag`) is **always** created and pushed here —
 /// that pushed tag is what triggers a CI-owned target's release workflow. The
-/// third step, the GitHub Release, is conditional on `release_owner`:
+/// third step, the GitHub Release, follows the plan's [`ReleaseDisposition`]:
 ///
-/// - `None` (no target whose CI owns the Release): the coordinator creates the
-///   Release itself through the injected [`Tagger`], exactly the ADR-0002 behavior,
-///   journalling [`EventKind::GithubReleaseCreated`].
-/// - `Some(adapter)` (a target whose CI owns the Release, e.g. `cargo-dist`): the
-///   tag-triggered CI owns Release creation and the cross-platform binary upload, so
-///   the coordinator does **not** create it — creating it first would clash with CI
-///   (its `gh release create` then fails on "release already exists"). It records
-///   [`EventKind::GithubReleaseDelegated`] (carrying `adapter`) instead, so
-///   resume/verify treat the missing engine-created Release as intentional and a
-///   resumed run never re-attempts it.
+/// - [`Engine`](ReleaseDisposition::Engine) (targets exist, none of them CI-owns the
+///   Release): the coordinator creates the Release itself through the injected
+///   [`Tagger`], exactly the ADR-0002 behavior, journalling
+///   [`EventKind::GithubReleaseCreated`].
+/// - [`DelegatedToCi(adapter)`](ReleaseDisposition::DelegatedToCi) (a target whose CI
+///   owns the Release, e.g. `cargo-dist`): the tag-triggered CI owns Release creation
+///   and the cross-platform binary upload, so the coordinator does **not** create it —
+///   creating it first would clash with CI (its `gh release create` then fails on
+///   "release already exists"). It records [`EventKind::GithubReleaseDelegated`]
+///   (carrying `adapter`) instead, so resume/verify treat the missing engine-created
+///   Release as intentional and a resumed run never re-attempts it.
+/// - [`TagOnly`](ReleaseDisposition::TagOnly) (publish-none — the plan has no targets
+///   at all): neither. The tag is the entire release; see the variant's doc.
 ///
-/// Either way exactly one Release-disposition fact is journalled per tag, and the
+/// The first two journal exactly one Release-disposition fact per tag, and the
 /// step is idempotent on resume (skipped once its fact is recorded). A
 /// **contradictory** already-recorded disposition — a delegation demanded when the
 /// journal already carries an engine-created Release, or vice versa — is refused as
@@ -1016,7 +1057,7 @@ fn tag_phase(
     tagger: &dyn Tagger,
     plan: &ReleasePlan,
     tag_commit: &str,
-    release_owner: Option<&str>,
+    disposition: ReleaseDisposition<'_>,
 ) -> Result<(), CutError> {
     let phase = Phase::Tag;
     if phase_completed_ok(journal.state(), phase) {
@@ -1055,7 +1096,10 @@ fn tag_phase(
     // Release outcomes are mutually exclusive, so a delegation demanded over an
     // engine-created Release (or the reverse) is an invariant violation, not a step
     // to append on top of the other. Fail-and-journal, never a dual-disposition state.
-    if let Some(adapter) = release_owner {
+    // (`TagOnly` records neither outcome and so has no pair to contradict; the
+    // disposition is a function of the SEALED plan's targets, so it cannot change
+    // between a run's attempts.)
+    if let ReleaseDisposition::DelegatedToCi(adapter) = disposition {
         if tag_step_done(journal.state(), &tag, |s| s.github_release) {
             return fail_phase(
                 journal,
@@ -1069,7 +1113,9 @@ fn tag_phase(
                 ),
             );
         }
-    } else if tag_step_done(journal.state(), &tag, |s| s.github_release_delegated) {
+    } else if disposition == ReleaseDisposition::Engine
+        && tag_step_done(journal.state(), &tag, |s| s.github_release_delegated)
+    {
         return fail_phase(
             journal,
             sink,
@@ -1083,42 +1129,7 @@ fn tag_phase(
         );
     }
 
-    if let Some(adapter) = release_owner {
-        // A target's CI owns the GitHub Release: the tag pushed above triggers its
-        // workflow, which creates+finalizes the Release and uploads the cross-platform
-        // binaries. Record the delegation (skipped on resume once recorded) and do NOT
-        // create the Release — creating it would clash with CI.
-        if !tag_step_done(journal.state(), &tag, |s| s.github_release_delegated) {
-            record(
-                journal,
-                sink,
-                EventKind::GithubReleaseDelegated {
-                    tag: tag.clone(),
-                    delegated_to: adapter.to_string(),
-                },
-            )?;
-        }
-    } else if !tag_step_done(journal.state(), &tag, |s| s.github_release) {
-        match tagger.create_github_release(&tag, &title) {
-            Ok(url) => record(
-                journal,
-                sink,
-                EventKind::GithubReleaseCreated {
-                    tag: tag.clone(),
-                    url,
-                },
-            )?,
-            Err(e) => {
-                return fail_phase(
-                    journal,
-                    sink,
-                    phase,
-                    None,
-                    format!("create GitHub Release: {e}"),
-                )
-            }
-        }
-    }
+    github_release_step(journal, sink, tagger, disposition, &tag, &title)?;
 
     record(
         journal,
@@ -1128,6 +1139,65 @@ fn tag_phase(
             outcome: PhaseOutcome::Ok,
         },
     )?;
+    Ok(())
+}
+
+/// Execute the tag phase's third step — the GitHub Release — per the plan's
+/// [`ReleaseDisposition`]. Idempotent: each branch is skipped once its fact is
+/// journalled, so a resumed run neither re-creates nor re-delegates.
+fn github_release_step(
+    journal: &mut Journal<'_>,
+    sink: &mut dyn ProgressSink,
+    tagger: &dyn Tagger,
+    disposition: ReleaseDisposition<'_>,
+    tag: &str,
+    title: &str,
+) -> Result<(), CutError> {
+    match disposition {
+        ReleaseDisposition::DelegatedToCi(adapter) => {
+            // A target's CI owns the GitHub Release: the tag pushed above triggers its
+            // workflow, which creates+finalizes the Release and uploads the cross-platform
+            // binaries. Record the delegation and do NOT create the Release — creating it
+            // would clash with CI.
+            if !tag_step_done(journal.state(), tag, |s| s.github_release_delegated) {
+                record(
+                    journal,
+                    sink,
+                    EventKind::GithubReleaseDelegated {
+                        tag: tag.to_string(),
+                        delegated_to: adapter.to_string(),
+                    },
+                )?;
+            }
+        }
+        ReleaseDisposition::Engine => {
+            if !tag_step_done(journal.state(), tag, |s| s.github_release) {
+                match tagger.create_github_release(tag, title) {
+                    Ok(url) => record(
+                        journal,
+                        sink,
+                        EventKind::GithubReleaseCreated {
+                            tag: tag.to_string(),
+                            url,
+                        },
+                    )?,
+                    Err(e) => {
+                        return fail_phase(
+                            journal,
+                            sink,
+                            Phase::Tag,
+                            None,
+                            format!("create GitHub Release: {e}"),
+                        )
+                    }
+                }
+            }
+        }
+        // Publish-none: the tag IS the release. No Release object is created and none
+        // is delegated — there is no artifact for either to carry, and journalling a
+        // delegation would falsely claim CI publishes something.
+        ReleaseDisposition::TagOnly => {}
+    }
     Ok(())
 }
 
@@ -1251,6 +1321,15 @@ const DELEGATED_RELEASE_VERIFY_POLL_INTERVAL: std::time::Duration =
 /// Observe every destination after dist. A v5 cut is not complete until each
 /// receipt or CI-delegation has an observed-good result; Unknown is deliberately
 /// a barrier failure, never an implicit success.
+///
+/// **Publish-none (zero targets) passes vacuously, and that is correct.** "There is
+/// nothing to observe" is not the same claim as [`VerifyOutcome::Unknown`] ("a
+/// declared destination could not be read"), which stays a barrier failure. The
+/// emptiness is *authored*, never inferred: the normalizer honors only an explicit
+/// `targets: []` and re-expands an omitted key into the ecosystem default, so a
+/// dropped or mistyped `targets` block cannot reach here as a silent green. The one
+/// property this barrier guarantees — no target ended the cut unobserved — holds
+/// over an empty set by construction.
 fn verify_phase(
     journal: &mut Journal<'_>,
     sink: &mut dyn ProgressSink,

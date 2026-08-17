@@ -96,6 +96,25 @@ longer strictly side-effect-free, but the write is a git-common-dir cache only,
 never a repository file. It lets `cut` and `resume` execute the approved plan
 from its sealed checkout after later code fixes move the live tree.
 
+## Amendment — 2026-08-17: publish-none is representable (`targets: []`)
+
+The contract distinguishes an **omitted** `targets` key from an **explicit empty
+sequence**. Omitted (or `targets: null`) expands to the ecosystem default, unchanged.
+An explicit `targets: []` is the author's authoritative "never publish anywhere" and
+survives normalization as an empty set — the machine-readable way to declare a
+version-tracked but unpublished repo, without a phantom registry target in the
+canonical JSON. An empty target set is a valid, honored state, not a
+misconfiguration; the canonical shape is a JSON array either way, so no consumer
+breaks and `schema_version` does not move.
+
+Normalization additionally cross-reads the repo's `Cargo.toml` `publish` key as
+evidence: a declared crates.io target for a crate that forbids publishing is a floor
+error (the publish could never succeed), while a publish-none contract whose manifests
+do not set `publish = false` is valid with a warning. Both are evidence-gated — no
+readable manifest, no diagnostic — and every blind spot in the `publish` read errs
+toward *publishable*, so the floor never fires on a guess. What a publish-none cut
+does is ADR-0002's tag-only amendment.
+
 **Rejected alternatives**
 
 - **Home-dir / XDG state (`~/.ossctl/...`), as `orchestratectl` uses.** Rejected: `octl` keeps state in the home dir because *its* runs span multiple worktrees and repos; an `ossctl` release is intrinsically tied to **one** repo, so git-common-dir-local state co-locates the journal with the repo it mutates and avoids a home-dir hash-keyed lookup. (`--journal-dir` remains for the CI case.)

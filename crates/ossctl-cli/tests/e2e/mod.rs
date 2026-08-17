@@ -79,6 +79,27 @@ impl TempRepo {
         self.git(&["commit", "-m", "configure cargo-dist fixture"]);
     }
 
+    /// Rewrite the fixture as a **publish-none** repo: an explicit `targets: []`
+    /// contract plus the `publish = false` manifest that backs it up — the private,
+    /// never-published service shape.
+    pub fn use_publish_none_contract(&self) {
+        fs::write(
+            self.path().join("OSS-RELEASE.md"),
+            "---\nschema_version: 2\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets: []\nversioning: semver\nchangelog:\n  mode: curated\nrelease:\n  model: gated\nlicense: MIT\n---\n# e2e-fixture\n",
+        )
+        .expect("write publish-none contract");
+        fs::write(
+            self.path().join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\npublish = false\n",
+                self.name
+            ),
+        )
+        .expect("write publish = false manifest");
+        self.git(&["add", "OSS-RELEASE.md", "Cargo.toml"]);
+        self.git(&["commit", "-m", "configure publish-none fixture"]);
+    }
+
     pub fn journal_dir(&self) -> PathBuf {
         self.path().join(".git/ossctl/releases")
     }

@@ -111,6 +111,71 @@ fn dry_run_failure_is_journaled_and_never_tags() {
 }
 
 #[test]
+fn a_publish_none_repo_plans_and_cuts_a_tag_only_release() {
+    // End to end for the private, never-published repo: the contract's explicit
+    // `targets: []` survives into the plan (no phantom crates.io target), the plan
+    // says so, and the cut tags without publishing anything or creating a GitHub
+    // Release — no `cargo` and no `gh` process is ever spawned.
+    let repo = TempRepo::new("approved");
+    repo.use_publish_none_contract();
+    let shims = Shims::new();
+
+    let plan = repo.run(&shims, &["--json", "release", "plan"]);
+    assert!(plan.status.success(), "plan failed: {plan:?}");
+    let plan_json = json(&plan);
+    assert_eq!(plan_json["data"]["targets"], serde_json::json!([]));
+    let warnings = plan_json["warnings"].as_array().expect("warnings array");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap_or_default().contains("git tag only")),
+        "the plan must say it is tag-only: {warnings:?}"
+    );
+
+    let plan_id = plan_json["data"]["plan_id"].as_str().expect("plan id");
+    let cut = repo.run(&shims, &["--json", "release", "cut", "--plan", plan_id]);
+    assert!(cut.status.success(), "tag-only cut failed: {cut:?}");
+
+    // The tag landed …
+    assert!(Command::new("git")
+        .args(["rev-parse", "--verify", "refs/tags/v0.1.0"])
+        .current_dir(repo.path())
+        .output()
+        .expect("query git tag")
+        .status
+        .success());
+    // … and nothing else did: no publish, no Release, no external publisher invoked.
+    assert!(
+        shims.log().is_empty(),
+        "a tag-only cut ran external publishers: {}",
+        shims.log()
+    );
+    let run_id = only_run_id(&repo);
+    let journal = fs::read_to_string(repo.journal_dir().join(&run_id).join("journal.jsonl"))
+        .expect("read journal");
+    for forbidden in [
+        "target_published",
+        "target_delegated",
+        "github_release_created",
+        "github_release_delegated",
+    ] {
+        assert!(
+            !journal.contains(forbidden),
+            "tag-only cut journalled {forbidden}:\n{journal}"
+        );
+    }
+    assert!(journal.contains("tag_pushed_remote"));
+    let verify_ok = journal.lines().any(|line| {
+        let event: serde_json::Value = serde_json::from_str(line).expect("journal event JSON");
+        event["kind"] == "phase_completed" && event["phase"] == "verify" && event["outcome"] == "ok"
+    });
+    assert!(
+        verify_ok,
+        "verify must complete (nothing to observe is not Unknown):\n{journal}"
+    );
+}
+
+#[test]
 fn delegated_release_with_zero_assets_fails_verify_and_is_posthoc_observable() {
     let repo = TempRepo::new("approved");
     repo.use_cargo_dist_target();

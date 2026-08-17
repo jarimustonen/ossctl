@@ -529,6 +529,36 @@ struct ClassifiedVersions {
 fn classify_target_versions(contract: &Contract, facts: &Facts) -> ClassifiedVersions {
     let mut checkable: Vec<VersionMismatch> = Vec::new();
     let mut missing: Vec<UnversionedTarget> = Vec::new();
+    // Publish-none: the contract declares NO publish target (an authored `targets: []`),
+    // so there is no target to project a version through — yet such a repo is still
+    // version-tracked and tagged (that is what its tag-only cut produces). Project the
+    // version from the tree's own manifests instead, for the ecosystems the contract
+    // declares. The rule is unchanged, only its input: one distinct manifest version is
+    // the release version, several are an `InconsistentTree`, none is `Undeterminable`.
+    // A package with no readable version is skipped rather than failing closed — the
+    // fail-closed set exists to stop an *unchecked publish*, and here nothing is ever
+    // published; a repo with no version anywhere still lands on `Undeterminable`.
+    if contract.targets.is_empty() {
+        for package in &facts.packages {
+            if !contract.ecosystems.contains(&package.ecosystem)
+                || VersionSource::of(package.ecosystem) == VersionSource::Distribution
+            {
+                continue;
+            }
+            if let (Some(name), Some(version)) = (&package.package, &package.version) {
+                checkable.push(VersionMismatch {
+                    package: name.clone(),
+                    ecosystem: package.ecosystem,
+                    manifest_version: version.clone(),
+                });
+            }
+        }
+        checkable.sort_by(|a, b| {
+            (a.ecosystem.as_str(), &a.package).cmp(&(b.ecosystem.as_str(), &b.package))
+        });
+        checkable.dedup_by(|a, b| a.package == b.package && a.ecosystem == b.ecosystem);
+        return ClassifiedVersions { checkable, missing };
+    }
     for t in resolve_targets(contract, facts) {
         // Distribution ecosystems have no tree-manifest version by design — skip them
         // whether or not `facts` happens to carry a version for their package.

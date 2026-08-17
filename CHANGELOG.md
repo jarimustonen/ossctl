@@ -31,6 +31,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contract floor; and an engine-published crate that depends on a CI-delegated crate
   in the same workspace is refused by `release cut`, because publish-all runs before
   the tag that triggers CI and that wait can never be satisfied.
+- **A repo that publishes NOTHING can now be released.** Publish-none (an authored
+  `targets: []` — a private service deployed by its own script, `publish = false` in
+  its manifest) is a first-class contract shape, distinct from CI-delegation (where
+  something *is* published, just not by the engine). Its version is derived from the
+  tree's own manifests rather than through a publish target, so `release plan` no
+  longer refuses with `version_undeterminable`; the cut is **tag-only** — nothing is
+  published, no GitHub Release is created or delegated, and the verify barrier passes
+  vacuously because there is genuinely nothing to observe (still categorically
+  distinct from `Unknown`, which stays a barrier failure). `release cut`'s summary says
+  "published nothing — tag-only cut" rather than reporting a count
+  (`publish-none-unrepresentable`).
+- **The contract now cross-reads `Cargo.toml`'s `publish` key.** A declared crates.io
+  target for a crate whose manifest sets `publish = false` (or an allow-list without
+  `crates-io`) is a normalization floor — the publish could never succeed, and for a
+  CI-delegated target the first symptom would otherwise be a red workflow after the
+  irreversible tag. Conversely, a publish-none contract whose manifests do *not* set
+  `publish = false` normalizes cleanly with a warning naming them: the contract holds,
+  but nothing in the tree stops an accidental `cargo publish`. Evidence-gated in both
+  directions — no readable manifest means no diagnostic.
 
 ### Fixed
 - **Closed stdout pipes no longer panic the CLI.** Text and JSON output now share a

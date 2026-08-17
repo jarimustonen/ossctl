@@ -2479,6 +2479,100 @@ fn delegated_plan() -> ReleasePlan {
     }
 }
 
+/// A publish-none plan: the contract declares `targets: []`, so the cut has nothing
+/// to dry-run, build, publish, dist, or verify.
+fn publish_none_plan() -> ReleasePlan {
+    ReleasePlan {
+        plan_id: "p-none".into(),
+        contract_schema_version: 2,
+        head_sha: "d".into(),
+        version: "1.0.0".into(),
+        targets: vec![],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
+        homebrew_tap: None,
+        license: None,
+        description: Some("A private service that publishes nothing".into()),
+        homebrew_platforms: vec![],
+    }
+}
+
+#[test]
+fn a_publish_none_plan_cuts_a_tag_only_release_and_creates_no_github_release() {
+    // The THIRD Release disposition (neither engine-created nor CI-delegated): with no
+    // targets at all, the tag IS the release. The coordinator must create + push the
+    // tag and stop — creating an empty GitHub Release would manufacture exactly the
+    // outward-facing publish surface the contract declined, and would fail the cut
+    // after the irreversible tag on a repo with no GitHub remote / `gh` auth.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::new();
+    let reg = cmd.registry();
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = RecordingSink::default();
+
+    let plan = publish_none_plan();
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "p-none".into(),
+        "1.0.0".into(),
+        vec![],
+    )
+    .unwrap();
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+
+    let state = journal.state();
+    assert_eq!(state.status, RunStatus::Completed);
+    let tag = state.tags.get("v1.0.0").expect("tag recorded");
+    assert!(tag.created_local && tag.pushed_remote);
+    // NEITHER Release disposition is recorded: nothing was published by the engine,
+    // and nothing was delegated to CI (which would falsely claim CI publishes it).
+    assert!(
+        !tag.github_release && !tag.github_release_delegated,
+        "a publish-none cut recorded a Release disposition"
+    );
+    assert_eq!(tagger.calls(), vec!["create:v1.0.0@d", "push:v1.0.0"]);
+    assert!(
+        !sink.kinds.iter().any(|e| matches!(
+            e,
+            EventKind::GithubReleaseCreated { .. } | EventKind::GithubReleaseDelegated { .. }
+        )),
+        "a Release event was streamed for a tag-only cut: {:?}",
+        sink.kinds
+    );
+    // Nothing was published, and the verify barrier still COMPLETED: with no declared
+    // destination there is nothing to observe, which is a vacuous pass — categorically
+    // different from `Unknown` (a declared destination that could not be read), which
+    // stays a barrier failure.
+    assert!(state.published.is_empty() && state.delegated.is_empty());
+    assert!(state.verified.is_empty());
+    assert!(
+        !sink
+            .kinds
+            .iter()
+            .any(|e| matches!(e, EventKind::TargetVerified { .. })),
+        "a target was verified in a plan with no targets"
+    );
+    for phase in [Phase::Verify, Phase::Dist, Phase::Publish] {
+        assert!(
+            phase_completed_ok(state, phase),
+            "{phase:?} did not complete for a tag-only cut"
+        );
+    }
+}
+
 #[test]
 fn a_ci_delegated_plan_delegates_the_github_release_and_never_creates_it() {
     // Option 1 (coordinator-release-vs-cargo-dist-ownership): when the plan carries
@@ -2716,7 +2810,7 @@ fn delegating_over_an_already_created_release_is_refused_not_double_recorded() {
         &tagger,
         &plan,
         &plan.head_sha,
-        Some("cargo-dist"),
+        ReleaseDisposition::DelegatedToCi("cargo-dist"),
     )
     .unwrap_err();
     match err {
@@ -2768,7 +2862,7 @@ fn creating_over_an_already_delegated_release_is_refused() {
         &tagger,
         &plan,
         &plan.head_sha,
-        None,
+        ReleaseDisposition::Engine,
     )
     .unwrap_err();
     assert!(matches!(

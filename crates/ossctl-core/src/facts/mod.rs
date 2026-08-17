@@ -324,6 +324,73 @@ fn workflow_pushes_tags(text: &str) -> bool {
     false
 }
 
+/// One Cargo manifest's `publish` disposition — the contract normalizer's
+/// cross-read evidence that a declared crates.io target (or the absence of one) is
+/// consistent with what Cargo would actually allow.
+///
+/// Off-wire: this is a normalizer input, not part of the `facts` JSON shape, so it
+/// carries no schema-version obligation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CargoPublishFlag {
+    /// The manifest path relative to the repo root (`Cargo.toml`,
+    /// `crates/foo/Cargo.toml`).
+    pub manifest: String,
+    /// The crate's `[package].name`, or `None` when the manifest declares none.
+    pub package: Option<String>,
+    /// Whether this manifest permits a crates.io publish: `publish` absent or
+    /// `true`, or an allow-list naming `crates-io`.
+    pub publishable: bool,
+}
+
+/// Read every Cargo manifest's `publish` disposition under `repo_root` — the
+/// **supporting evidence** for (or contradiction of) the contract's crates.io
+/// publish targets.
+///
+/// Enumerates exactly the manifests [`gather`] emits as `packages`: the root
+/// `Cargo.toml` when it declares a `[package]`, otherwise the resolved
+/// `[workspace].members` of a virtual workspace (same escape-proofing, glob
+/// expansion, exclusion, and dedup as the member enumeration). Empty when the repo
+/// has no readable `Cargo.toml`, which callers must treat as *no evidence either
+/// way*, never as "nothing is publishable".
+///
+/// **Deliberately one-sided.** The `publish` read is the same textual predicate the
+/// planner uses, so the two forms it cannot see — `publish.workspace = true`
+/// inheritance from `[workspace.package]`, and a multi-line inline table — both read
+/// as *publishable*. Every blind spot therefore errs toward "a publish is allowed",
+/// so a caller that refuses on `publishable == false` never refuses on a guess.
+#[must_use]
+pub fn cargo_publish_evidence(repo_root: &Path, fs: &dyn Fs) -> Vec<CargoPublishFlag> {
+    let root_path = repo_root.join("Cargo.toml");
+    let Some(root_text) = read_text(fs, &root_path, MANIFEST_LIMIT) else {
+        return Vec::new();
+    };
+    // A root that declares its own `[package]` is the whole story (a single-crate
+    // repo, or a root package that also hosts members — the root is what a
+    // crates.io target for it would publish).
+    if toml_section(&root_text, "package").is_some() {
+        return vec![CargoPublishFlag {
+            manifest: "Cargo.toml".to_string(),
+            package: parse_manifest("Cargo.toml", &root_text)
+                .unwrap_or_default()
+                .package,
+            publishable: member_publishable_to_crates_io(&root_text),
+        }];
+    }
+    let ws_pkg = toml_section(&root_text, "workspace.package");
+    workspace_member_dirs(repo_root, fs, &root_text)
+        .iter()
+        .filter_map(|rel| {
+            let text = read_text(fs, &repo_root.join(rel).join("Cargo.toml"), MANIFEST_LIMIT)?;
+            let (package, _) = resolve_member_name_version(&text, ws_pkg.as_deref());
+            Some(CargoPublishFlag {
+                manifest: format!("{rel}/Cargo.toml"),
+                package,
+                publishable: member_publishable_to_crates_io(&text),
+            })
+        })
+        .collect()
+}
+
 /// Sniff root-level manifests into the ordered `ecosystems` + `packages` lists.
 fn detect_manifests(repo_root: &Path, fs: &dyn Fs) -> (Vec<Ecosystem>, Vec<Package>) {
     let mut ecosystems: Vec<Ecosystem> = Vec::new();
@@ -1744,6 +1811,55 @@ mod tests {
             .file("/repo/a/Cargo.toml", a);
         let ws = detect_rust_workspace(repo(), &fs).expect("crates-io allow-listed");
         assert_eq!(ws.members.len(), 1);
+    }
+
+    #[test]
+    fn cargo_publish_evidence_reads_the_root_package() {
+        let fs = FakeFs::default().file(
+            "/repo/Cargo.toml",
+            "[package]\nname = \"solo\"\nversion = \"0.1.0\"\npublish = false\n",
+        );
+        assert_eq!(
+            cargo_publish_evidence(repo(), &fs),
+            vec![CargoPublishFlag {
+                manifest: "Cargo.toml".to_string(),
+                package: Some("solo".to_string()),
+                publishable: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn cargo_publish_evidence_reads_every_workspace_member() {
+        // Both dispositions, per member: `publish = false` and a non-crates.io
+        // allow-list are unpublishable; absent and a `crates-io` allow-list are not.
+        let fs = FakeFs::default()
+            .file(
+                "/repo/Cargo.toml",
+                "[workspace]\nmembers = [\"a\", \"b\"]\n",
+            )
+            .file(
+                "/repo/a/Cargo.toml",
+                "[package]\nname = \"a\"\nversion = \"1.0.0\"\n",
+            )
+            .file(
+                "/repo/b/Cargo.toml",
+                "[package]\nname = \"b\"\nversion = \"1.0.0\"\npublish = false\n",
+            );
+        let evidence = cargo_publish_evidence(repo(), &fs);
+        assert_eq!(
+            evidence
+                .iter()
+                .map(|m| (m.manifest.as_str(), m.publishable))
+                .collect::<Vec<_>>(),
+            vec![("a/Cargo.toml", true), ("b/Cargo.toml", false)]
+        );
+    }
+
+    #[test]
+    fn cargo_publish_evidence_is_empty_without_a_manifest() {
+        // No `Cargo.toml` ⇒ no evidence at all (never "nothing is publishable").
+        assert!(cargo_publish_evidence(repo(), &FakeFs::default()).is_empty());
     }
 
     #[test]
