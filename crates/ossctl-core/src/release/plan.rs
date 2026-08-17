@@ -539,12 +539,34 @@ fn classify_target_versions(contract: &Contract, facts: &Facts) -> ClassifiedVer
     // fail-closed set exists to stop an *unchecked publish*, and here nothing is ever
     // published; a repo with no version anywhere still lands on `Undeterminable`.
     if contract.targets.is_empty() {
-        for package in &facts.packages {
-            if !contract.ecosystems.contains(&package.ecosystem)
-                || VersionSource::of(package.ecosystem) == VersionSource::Distribution
-            {
-                continue;
-            }
+        // SCOPE, in order of authority: a ROOT manifest (`Cargo.toml`,
+        // `package.json` — the repo's own package) outranks the workspace members
+        // below it. Without that preference a normal private workspace — one service
+        // crate at 0.4.0 plus a support crate at 0.1.0 — could never be tagged at all,
+        // and a mixed rust+node repo would compare `Cargo.toml` against `package.json`
+        // and refuse forever. With it, the members only speak when no root package
+        // does (a virtual workspace), where lockstep IS the expectation.
+        let candidates: Vec<&crate::protocol::facts::Package> = facts
+            .packages
+            .iter()
+            .filter(|p| {
+                contract.ecosystems.contains(&p.ecosystem)
+                    && VersionSource::of(p.ecosystem) == VersionSource::Manifest
+                    && p.package.is_some()
+                    && p.version.is_some()
+            })
+            .collect();
+        let roots: Vec<&crate::protocol::facts::Package> = candidates
+            .iter()
+            .copied()
+            .filter(|p| !p.manifest.contains('/'))
+            .collect();
+        let scoped = if roots.is_empty() {
+            &candidates
+        } else {
+            &roots
+        };
+        for package in scoped {
             if let (Some(name), Some(version)) = (&package.package, &package.version) {
                 checkable.push(VersionMismatch {
                     package: name.clone(),

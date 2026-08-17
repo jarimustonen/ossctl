@@ -847,16 +847,37 @@ fn a_publish_none_contract_derives_its_version_from_the_tree_manifest() {
     let f = rust_facts(); // Cargo.toml: acme 0.1.0
     assert_eq!(resolve_release_version(&c, &f).unwrap(), "0.1.0");
 
-    // A tree that disagrees with itself is still refused — one tag, one version.
-    let mut split = f.clone();
-    split.packages.push(Package {
+    // A workspace MEMBER at another version does not veto the root: a private
+    // workspace whose support crate is versioned independently is ordinary, and the
+    // root manifest is the repo's own package — so it is the version authority.
+    let mut with_member = f.clone();
+    with_member.packages.push(Package {
         ecosystem: Ecosystem::Rust,
         manifest: "crates/other/Cargo.toml".to_string(),
         package: Some("other".to_string()),
         version: Some("0.2.0".to_string()),
     });
+    assert_eq!(resolve_release_version(&c, &with_member).unwrap(), "0.1.0");
+
+    // With no root package (a virtual workspace), the members ARE the authority and
+    // must agree — two versions leave no single version to tag.
+    let mut virtual_ws = f.clone();
+    virtual_ws.packages = vec![
+        Package {
+            ecosystem: Ecosystem::Rust,
+            manifest: "crates/a/Cargo.toml".to_string(),
+            package: Some("a".to_string()),
+            version: Some("0.1.0".to_string()),
+        },
+        Package {
+            ecosystem: Ecosystem::Rust,
+            manifest: "crates/b/Cargo.toml".to_string(),
+            package: Some("b".to_string()),
+            version: Some("0.2.0".to_string()),
+        },
+    ];
     assert!(matches!(
-        resolve_release_version(&c, &split),
+        resolve_release_version(&c, &virtual_ws),
         Err(VersionResolveError::InconsistentTree { .. })
     ));
 

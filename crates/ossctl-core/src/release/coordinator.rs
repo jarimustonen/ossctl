@@ -410,9 +410,14 @@ pub fn execute(
     // yet does not own the GitHub Release, so those plans still get an engine-created
     // Release (`coordinator-release-vs-cargo-dist-ownership`). A plan with NO targets
     // (publish-none) is a third state again — tag-only, no Release from anyone.
-    let release_owner = github_release_owner(&targets);
-    let disposition = release_disposition(&targets, release_owner.as_deref());
-    tag_phase(journal, sink, tagger, plan, &tag_commit, disposition)?;
+    tag_phase(
+        journal,
+        sink,
+        tagger,
+        plan,
+        &tag_commit,
+        release_disposition(&targets),
+    )?;
     // dist (post-tag finalize): now the tag archive exists, finalize homebrew with
     // its real sha256. Runs for every cut (a no-op when there is no post-tag
     // target); its Ok completion flips the run to Completed. (`repo_slug` /
@@ -652,22 +657,6 @@ fn checkout_path(head_sha: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("ossctl-cut-{}-{short}-{nanos}", std::process::id()))
 }
 
-/// The adapter identity of the target whose tag-triggered CI **owns the shared
-/// GitHub Release** (via [`ci_owns_github_release`](ReleaseAdapter::ci_owns_github_release)),
-/// or `None` when the coordinator owns it. `Some(_)` makes the tag phase delegate
-/// Release creation to CI instead of creating it
-/// (`coordinator-release-vs-cargo-dist-ownership`).
-///
-/// Returns the **first** such target's adapter (there is at most one in practice —
-/// only `cargo-dist` claims Release ownership); the identity is journalled on the
-/// delegation fact for the operator-facing record.
-fn github_release_owner(targets: &[TargetPlan]) -> Option<String> {
-    targets
-        .iter()
-        .find(|tp| tp.adapter.ci_owns_github_release())
-        .map(|tp| tp.input.target.adapter.as_str().to_string())
-}
-
 /// What the tag phase does about the GitHub Release object — the THREE distinct
 /// states, kept explicit so the publish-none case can never be read as either of
 /// the other two.
@@ -694,19 +683,29 @@ enum ReleaseDisposition<'a> {
     /// where the attempt would fail the cut AFTER the irreversible tag push. So the
     /// tag phase creates and pushes the tag and stops, matching what `release plan`
     /// warned ("this plan would create the git tag only").
+    ///
+    /// **No `SEAL_VERSION` bump accompanies this variant**, deliberately: no earlier
+    /// binary could ever have sealed a zero-target plan, because version resolution
+    /// projected the release version *through* the targets and so refused every
+    /// publish-none contract with `version_undeterminable`. There is therefore no
+    /// stored plan whose execution semantics this changes — the set of affected
+    /// `plan_id`s is empty.
     TagOnly,
 }
 
 /// Classify a plan's Release disposition from its resolved targets.
-fn release_disposition<'a>(
-    targets: &[TargetPlan],
-    owner: Option<&'a str>,
-) -> ReleaseDisposition<'a> {
+///
+/// Derived from the targets alone — the same input the sealed plan binds — so a run's
+/// disposition cannot drift between attempts for a fixed `plan_id`.
+fn release_disposition(targets: &[TargetPlan]) -> ReleaseDisposition<'_> {
     if targets.is_empty() {
         return ReleaseDisposition::TagOnly;
     }
-    match owner {
-        Some(adapter) => ReleaseDisposition::DelegatedToCi(adapter),
+    match targets
+        .iter()
+        .find(|tp| tp.adapter.ci_owns_github_release())
+    {
+        Some(tp) => ReleaseDisposition::DelegatedToCi(tp.input.target.adapter.as_str()),
         None => ReleaseDisposition::Engine,
     }
 }
@@ -1092,41 +1091,48 @@ fn tag_phase(
             EventKind::TagPushedRemote { tag: tag.clone() },
         )?;
     }
-    // Refuse a contradictory already-recorded disposition before acting: the two
-    // Release outcomes are mutually exclusive, so a delegation demanded over an
-    // engine-created Release (or the reverse) is an invariant violation, not a step
-    // to append on top of the other. Fail-and-journal, never a dual-disposition state.
-    // (`TagOnly` records neither outcome and so has no pair to contradict; the
-    // disposition is a function of the SEALED plan's targets, so it cannot change
-    // between a run's attempts.)
-    if let ReleaseDisposition::DelegatedToCi(adapter) = disposition {
-        if tag_step_done(journal.state(), &tag, |s| s.github_release) {
-            return fail_phase(
-                journal,
-                sink,
-                phase,
-                None,
+    // Refuse a contradictory already-recorded disposition before acting: the three
+    // Release outcomes are mutually exclusive, so a disposition demanded over a
+    // different already-journalled one is an invariant violation, not a step to append
+    // on top of the other. Fail-and-journal, never a dual-disposition state. Each
+    // branch checks for the outcomes it is NOT — including `TagOnly`, which tolerates
+    // neither: a run that already created or delegated a Release cannot complete as
+    // "nothing was published". (Unreachable for a fixed `plan_id` — the disposition is
+    // a pure function of the sealed plan's targets — so this can only fire when a
+    // resumed run's binary reclassifies an adapter's ownership.)
+    let contradiction = match disposition {
+        ReleaseDisposition::DelegatedToCi(adapter) => {
+            tag_step_done(journal.state(), &tag, |s| s.github_release).then(|| {
                 format!(
                     "tag {tag} already has an engine-created GitHub Release, but the plan \
-                     delegates the Release to CI ({adapter}); the adapter's ownership \
-                     classification changed between attempts — reconcile the tag by hand"
-                ),
-            );
+                 delegates the Release to CI ({adapter}); the adapter's ownership \
+                 classification changed between attempts — reconcile the tag by hand"
+                )
+            })
         }
-    } else if disposition == ReleaseDisposition::Engine
-        && tag_step_done(journal.state(), &tag, |s| s.github_release_delegated)
-    {
-        return fail_phase(
-            journal,
-            sink,
-            phase,
-            None,
-            format!(
-                "tag {tag}'s GitHub Release was already delegated to CI, but the plan now \
+        ReleaseDisposition::Engine => {
+            tag_step_done(journal.state(), &tag, |s| s.github_release_delegated).then(|| {
+                format!(
+                    "tag {tag}'s GitHub Release was already delegated to CI, but the plan now \
                  has the coordinator create it; the adapter's ownership classification \
                  changed between attempts — reconcile the tag by hand"
-            ),
-        );
+                )
+            })
+        }
+        ReleaseDisposition::TagOnly => tag_step_done(journal.state(), &tag, |s| {
+            s.github_release || s.github_release_delegated
+        })
+        .then(|| {
+            format!(
+                "tag {tag} already carries a GitHub Release disposition, but this plan has \
+                 no publish targets and must be tag-only — a publish-none run cannot \
+                 complete over a Release that was created or delegated; reconcile the tag \
+                 by hand"
+            )
+        }),
+    };
+    if let Some(message) = contradiction {
+        return fail_phase(journal, sink, phase, None, message);
     }
 
     github_release_step(journal, sink, tagger, disposition, &tag, &title)?;
@@ -1324,12 +1330,23 @@ const DELEGATED_RELEASE_VERIFY_POLL_INTERVAL: std::time::Duration =
 ///
 /// **Publish-none (zero targets) passes vacuously, and that is correct.** "There is
 /// nothing to observe" is not the same claim as [`VerifyOutcome::Unknown`] ("a
-/// declared destination could not be read"), which stays a barrier failure. The
-/// emptiness is *authored*, never inferred: the normalizer honors only an explicit
-/// `targets: []` and re-expands an omitted key into the ecosystem default, so a
-/// dropped or mistyped `targets` block cannot reach here as a silent green. The one
+/// declared destination could not be read"), which stays a barrier failure. The one
 /// property this barrier guarantees — no target ended the cut unobserved — holds
 /// over an empty set by construction.
+///
+/// Three upstream gates, not this comment, are what keep an empty target set from
+/// being an *accident* that reports green:
+/// 1. the normalizer re-expands an omitted/`null` `targets` into the ecosystem
+///    default, so only a literal `targets: []` yields an empty set from a well-formed
+///    contract;
+/// 2. every malformed `targets` shape that falls back to an empty vector also records
+///    a normalization ERROR, and the CLI refuses to plan or cut a contract that is
+///    not `Normalized::is_valid()` — the fallback can never reach a plan; and
+/// 3. a contract declaring a binary `distribution` alongside an empty target set is a
+///    normalization floor, so "no targets" cannot coexist with a CI-published
+///    surface that this barrier would then not observe.
+///
+/// A change to any of those three is what would make this vacuous pass unsound.
 fn verify_phase(
     journal: &mut Journal<'_>,
     sink: &mut dyn ProgressSink,

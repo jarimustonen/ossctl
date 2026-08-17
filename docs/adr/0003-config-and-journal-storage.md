@@ -107,13 +107,23 @@ canonical JSON. An empty target set is a valid, honored state, not a
 misconfiguration; the canonical shape is a JSON array either way, so no consumer
 breaks and `schema_version` does not move.
 
+Publish-none means nothing is published **by anyone**, so a declared binary
+`distribution` block (cargo-dist/goreleaser: GitHub-Release artifacts, installers, a
+tap formula) alongside an empty target set is a floor error. The two would contradict
+each other with real consequences: the engine reads the empty set as a tag-only cut
+while the pushed tag triggers the distribution's workflow to publish, unplanned and
+unverified. That floor is what makes an empty target set a sound publish-none
+discriminator for the release engine.
+
 Normalization additionally cross-reads the repo's `Cargo.toml` `publish` key as
-evidence: a declared crates.io target for a crate that forbids publishing is a floor
-error (the publish could never succeed), while a publish-none contract whose manifests
-do not set `publish = false` is valid with a warning. Both are evidence-gated — no
-readable manifest, no diagnostic — and every blind spot in the `publish` read errs
-toward *publishable*, so the floor never fires on a guess. What a publish-none cut
-does is ADR-0002's tag-only amendment.
+evidence, via a **tri-state** read (allowed / forbidden / unknown) over the root
+package *and* every workspace member, resolving `publish.workspace = true`
+inheritance. A declared crates.io target for a crate that forbids publishing is a
+floor error (the publish could never succeed); a publish-none contract whose
+manifests explicitly allow publishing is valid with a warning. Only an explicit
+verdict speaks: no readable manifest, an unmatched package, or a `publish` shape the
+reader cannot resolve yields no diagnostic in either direction — absence of evidence
+is never evidence. What a publish-none cut does is ADR-0002's tag-only amendment.
 
 **Rejected alternatives**
 

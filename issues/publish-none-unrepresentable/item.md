@@ -6,6 +6,9 @@ status: in-progress
 priority: normal
 lane: contract-engine
 lane_seq: 20
+commits:
+- hash: 9e5c037
+  summary: publish-none contract + tag-only cut + Cargo publish cross-read
 ---
 
 # normalizer cannot express a publish-nothing rust repo (targets: [] force-expands to crates.io)

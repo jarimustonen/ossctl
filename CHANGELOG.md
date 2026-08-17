@@ -43,13 +43,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "published nothing — tag-only cut" rather than reporting a count
   (`publish-none-unrepresentable`).
 - **The contract now cross-reads `Cargo.toml`'s `publish` key.** A declared crates.io
-  target for a crate whose manifest sets `publish = false` (or an allow-list without
-  `crates-io`) is a normalization floor — the publish could never succeed, and for a
-  CI-delegated target the first symptom would otherwise be a red workflow after the
-  irreversible tag. Conversely, a publish-none contract whose manifests do *not* set
-  `publish = false` normalizes cleanly with a warning naming them: the contract holds,
-  but nothing in the tree stops an accidental `cargo publish`. Evidence-gated in both
-  directions — no readable manifest means no diagnostic.
+  target for a crate whose manifest sets `publish = false` (or `publish = []`, or an
+  allow-list without `crates-io`) is a normalization floor — the publish could never
+  succeed, and for a CI-delegated target the first symptom would otherwise be a red
+  workflow after the irreversible tag. Conversely, a publish-none contract whose
+  manifests explicitly allow publishing normalizes cleanly with a warning naming them:
+  the contract holds, but nothing in the tree stops an accidental `cargo publish`. The
+  read covers the root package **and** every workspace member (including a hybrid
+  `[package]` + `[workspace]` root) and resolves `publish.workspace = true`
+  inheritance. It is a tri-state: a manifest whose `publish` cannot be resolved yields
+  no diagnostic in either direction, as does an unreadable manifest or a target naming
+  a package no manifest declares — absence of evidence is never evidence.
+- **A binary `distribution` block alongside an empty `targets` is now refused.** The
+  two contradict each other: the engine would cut a tag-only release while the pushed
+  tag triggers cargo-dist/goreleaser to publish binaries the run never planned or
+  verified.
 
 ### Fixed
 - **Closed stdout pipes no longer panic the CLI.** Text and JSON output now share a

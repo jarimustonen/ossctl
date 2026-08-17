@@ -2574,6 +2574,95 @@ fn a_publish_none_plan_cuts_a_tag_only_release_and_creates_no_github_release() {
 }
 
 #[test]
+fn a_tag_only_run_is_idempotent_on_re_execution() {
+    // The coordinator is resume-oriented: re-executing a completed tag-only run must
+    // neither re-create the tag nor start creating a Release.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::new();
+    let reg = cmd.registry();
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = RecordingSink::default();
+    let plan = publish_none_plan();
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "p-none".into(),
+        "1.0.0".into(),
+        vec![],
+    )
+    .unwrap();
+
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+    let after_first = tagger.calls();
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).unwrap();
+
+    assert_eq!(
+        tagger.calls(),
+        after_first,
+        "a re-executed tag-only run touched the tagger again"
+    );
+    assert_eq!(journal.state().status, RunStatus::Completed);
+}
+
+#[test]
+fn a_tag_only_plan_refuses_a_tag_that_already_carries_a_release_disposition() {
+    // The third contradiction pair: the journal says a Release was created (or
+    // delegated), but the plan has no targets and must be tag-only. A publish-none run
+    // cannot complete over a Release — refuse rather than report "published nothing"
+    // for a tag that has one.
+    for recorded in [
+        EventKind::GithubReleaseCreated {
+            tag: "v1.0.0".into(),
+            url: None,
+        },
+        EventKind::GithubReleaseDelegated {
+            tag: "v1.0.0".into(),
+            delegated_to: "cargo-dist".into(),
+        },
+    ] {
+        let store = FakeStore::default();
+        let clock = FakeClock(Cell::new(1000));
+        let idgen = FakeIdGen("RUN01".into());
+        let tagger = FakeTagger::new();
+        let mut sink = RecordingSink::default();
+        let mut journal = journal_with_tag_disposition(&store, &clock, &idgen, recorded.clone());
+
+        let plan = publish_none_plan();
+        let err = tag_phase(
+            &mut journal,
+            &mut sink,
+            &tagger,
+            &plan,
+            &plan.head_sha,
+            ReleaseDisposition::TagOnly,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CutError::PhaseFailed {
+                    phase: Phase::Tag,
+                    ..
+                }
+            ),
+            "expected a tag PhaseFailed for {recorded:?}, got {err:?}"
+        );
+    }
+}
+
+#[test]
 fn a_ci_delegated_plan_delegates_the_github_release_and_never_creates_it() {
     // Option 1 (coordinator-release-vs-cargo-dist-ownership): when the plan carries
     // a CI-delegated target (cargo-dist), the coordinator creates AND pushes the tag

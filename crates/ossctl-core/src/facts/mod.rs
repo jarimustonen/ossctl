@@ -324,6 +324,28 @@ fn workflow_pushes_tags(text: &str) -> bool {
     false
 }
 
+/// What a Cargo manifest says about publishing to crates.io — a **tri-state**,
+/// because "the read found nothing conclusive" is a third answer that must not be
+/// laundered into either verdict.
+///
+/// The two verdicts drive opposite diagnostics in the contract normalizer (a
+/// declared crates.io target is contradicted by `Forbidden`; a publish-none contract
+/// is left unguarded by `Allowed`), so collapsing `Unknown` into either one produces
+/// a confident wrong statement. `Unknown` earns no diagnostic at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CargoPublishPolicy {
+    /// The manifest permits a crates.io publish: `publish` absent, `publish = true`,
+    /// or an allow-list naming `crates-io`.
+    Allowed,
+    /// The manifest forbids it: `publish = false`, `publish = []`, or an allow-list
+    /// without `crates-io`.
+    Forbidden,
+    /// The read could not resolve the key — `publish.workspace = true` with no
+    /// readable `[workspace.package]` to inherit from, or a shape this textual
+    /// reader does not model (a multi-line inline table). Never a verdict.
+    Unknown,
+}
+
 /// One Cargo manifest's `publish` disposition — the contract normalizer's
 /// cross-read evidence that a declared crates.io target (or the absence of one) is
 /// consistent with what Cargo would actually allow.
@@ -337,58 +359,132 @@ pub struct CargoPublishFlag {
     pub manifest: String,
     /// The crate's `[package].name`, or `None` when the manifest declares none.
     pub package: Option<String>,
-    /// Whether this manifest permits a crates.io publish: `publish` absent or
-    /// `true`, or an allow-list naming `crates-io`.
-    pub publishable: bool,
+    /// What the manifest says about a crates.io publish.
+    pub policy: CargoPublishPolicy,
 }
 
 /// Read every Cargo manifest's `publish` disposition under `repo_root` — the
 /// **supporting evidence** for (or contradiction of) the contract's crates.io
 /// publish targets.
 ///
-/// Enumerates exactly the manifests [`gather`] emits as `packages`: the root
-/// `Cargo.toml` when it declares a `[package]`, otherwise the resolved
-/// `[workspace].members` of a virtual workspace (same escape-proofing, glob
-/// expansion, exclusion, and dedup as the member enumeration). Empty when the repo
-/// has no readable `Cargo.toml`, which callers must treat as *no evidence either
-/// way*, never as "nothing is publishable".
+/// Covers the root `Cargo.toml` when it declares a `[package]` **and** every
+/// resolved `[workspace].members` manifest — a hybrid root (`[package]` *and*
+/// `[workspace] members`) is a common Cargo layout and yields both, so a member's
+/// `publish = false` is never invisible behind a publishable root. Member
+/// enumeration is the shared one (escape-proofed, glob-expanded, exclusion-aware,
+/// deduped). Empty when the repo has no readable `Cargo.toml`, which callers must
+/// treat as *no evidence either way*, never as "nothing is publishable".
 ///
-/// **Deliberately one-sided.** The `publish` read is the same textual predicate the
-/// planner uses, so the two forms it cannot see — `publish.workspace = true`
-/// inheritance from `[workspace.package]`, and a multi-line inline table — both read
-/// as *publishable*. Every blind spot therefore errs toward "a publish is allowed",
-/// so a caller that refuses on `publishable == false` never refuses on a guess.
+/// Workspace inheritance is resolved, not guessed: a member writing
+/// `publish.workspace = true` takes the root `[workspace.package]` verdict, and
+/// [`CargoPublishPolicy::Unknown`] when there is none to inherit. Anything else this
+/// textual reader cannot model is `Unknown` too — so neither the error nor the
+/// warning direction ever fires on a shape that was not actually read.
 #[must_use]
 pub fn cargo_publish_evidence(repo_root: &Path, fs: &dyn Fs) -> Vec<CargoPublishFlag> {
     let root_path = repo_root.join("Cargo.toml");
     let Some(root_text) = read_text(fs, &root_path, MANIFEST_LIMIT) else {
         return Vec::new();
     };
-    // A root that declares its own `[package]` is the whole story (a single-crate
-    // repo, or a root package that also hosts members — the root is what a
-    // crates.io target for it would publish).
+    let ws_pkg = toml_section(&root_text, "workspace.package");
+    // The workspace-wide default a member inherits with `publish.workspace = true`.
+    // Absent `[workspace.package]` ⇒ nothing to inherit ⇒ `Unknown` for such a member.
+    let inherited = ws_pkg
+        .as_deref()
+        .map_or(CargoPublishPolicy::Unknown, |block| {
+            block_publish_policy(block)
+        });
+    let mut out = Vec::new();
     if toml_section(&root_text, "package").is_some() {
-        return vec![CargoPublishFlag {
+        out.push(CargoPublishFlag {
             manifest: "Cargo.toml".to_string(),
             package: parse_manifest("Cargo.toml", &root_text)
                 .unwrap_or_default()
                 .package,
-            publishable: member_publishable_to_crates_io(&root_text),
-        }];
+            policy: manifest_publish_policy(&root_text, inherited),
+        });
     }
-    let ws_pkg = toml_section(&root_text, "workspace.package");
-    workspace_member_dirs(repo_root, fs, &root_text)
-        .iter()
-        .filter_map(|rel| {
-            let text = read_text(fs, &repo_root.join(rel).join("Cargo.toml"), MANIFEST_LIMIT)?;
-            let (package, _) = resolve_member_name_version(&text, ws_pkg.as_deref());
-            Some(CargoPublishFlag {
-                manifest: format!("{rel}/Cargo.toml"),
-                package,
-                publishable: member_publishable_to_crates_io(&text),
-            })
+    for rel in workspace_member_dirs(repo_root, fs, &root_text) {
+        let Some(text) = read_text(fs, &repo_root.join(&rel).join("Cargo.toml"), MANIFEST_LIMIT)
+        else {
+            continue;
+        };
+        let (package, _) = resolve_member_name_version(&text, ws_pkg.as_deref());
+        out.push(CargoPublishFlag {
+            manifest: format!("{rel}/Cargo.toml"),
+            package,
+            policy: manifest_publish_policy(&text, inherited),
+        });
+    }
+    out
+}
+
+/// The crates.io publish policy a whole manifest states, resolving a
+/// `publish.workspace = true` member against `inherited`.
+fn manifest_publish_policy(text: &str, inherited: CargoPublishPolicy) -> CargoPublishPolicy {
+    let Some(block) = toml_section(text, "package") else {
+        // No `[package]` — nothing to publish from this manifest at all.
+        return CargoPublishPolicy::Forbidden;
+    };
+    if inherits_workspace_publish(&block) {
+        return inherited;
+    }
+    block_publish_policy(&block)
+}
+
+/// Read a `[package]`/`[workspace.package]` block's `publish` key.
+///
+/// `publish` absent ⇒ [`Allowed`](CargoPublishPolicy::Allowed) (Cargo's default);
+/// `false` ⇒ `Forbidden`; `true` ⇒ `Allowed`; an allow-list ⇒ `Allowed` only when it
+/// names `crates-io` (so `publish = []` is `Forbidden`, matching `cargo metadata`'s
+/// `Some([])`). A `publish` key present in a shape neither reader recognizes — an
+/// inline/multi-line table — is [`Unknown`](CargoPublishPolicy::Unknown) rather than
+/// a guessed default.
+fn block_publish_policy(block: &str) -> CargoPublishPolicy {
+    if let Some(registries) = toml_str_array(block, "publish") {
+        return if registries.iter().any(|r| r == CRATES_IO_REGISTRY_ALIAS) {
+            CargoPublishPolicy::Allowed
+        } else {
+            CargoPublishPolicy::Forbidden
+        };
+    }
+    match toml_bool_value(block, "publish") {
+        Some(true) => CargoPublishPolicy::Allowed,
+        Some(false) => CargoPublishPolicy::Forbidden,
+        // Absent is Cargo's permissive default — but only when the key is genuinely
+        // absent, not when it is present in an unread shape.
+        None => {
+            if block_declares_key(block, "publish") {
+                CargoPublishPolicy::Unknown
+            } else {
+                CargoPublishPolicy::Allowed
+            }
+        }
+    }
+}
+
+/// Whether a member's `publish` is the inheritance form (`publish.workspace = true`
+/// dotted, or `publish = { workspace = true }` inline).
+fn inherits_workspace_publish(block: &str) -> bool {
+    block.lines().any(|line| {
+        let line = strip_toml_comment(line).trim();
+        line.starts_with("publish.workspace")
+            || (line.starts_with("publish")
+                && line.contains('{')
+                && line.contains("workspace")
+                && line.contains("true"))
+    })
+}
+
+/// Whether a block declares `key` at all (in ANY value shape), used to separate a
+/// genuinely absent key from one whose value this reader could not parse.
+fn block_declares_key(block: &str, key: &str) -> bool {
+    block.lines().any(|line| {
+        let line = strip_toml_comment(line).trim();
+        line.strip_prefix(key).is_some_and(|rest| {
+            rest.starts_with(|c: char| c.is_whitespace() || c == '=' || c == '.')
         })
-        .collect()
+    })
 }
 
 /// Sniff root-level manifests into the ordered `ecosystems` + `packages` lists.
@@ -1824,15 +1920,13 @@ mod tests {
             vec![CargoPublishFlag {
                 manifest: "Cargo.toml".to_string(),
                 package: Some("solo".to_string()),
-                publishable: false,
+                policy: CargoPublishPolicy::Forbidden,
             }]
         );
     }
 
     #[test]
     fn cargo_publish_evidence_reads_every_workspace_member() {
-        // Both dispositions, per member: `publish = false` and a non-crates.io
-        // allow-list are unpublishable; absent and a `crates-io` allow-list are not.
         let fs = FakeFs::default()
             .file(
                 "/repo/Cargo.toml",
@@ -1846,13 +1940,126 @@ mod tests {
                 "/repo/b/Cargo.toml",
                 "[package]\nname = \"b\"\nversion = \"1.0.0\"\npublish = false\n",
             );
-        let evidence = cargo_publish_evidence(repo(), &fs);
         assert_eq!(
-            evidence
-                .iter()
-                .map(|m| (m.manifest.as_str(), m.publishable))
-                .collect::<Vec<_>>(),
-            vec![("a/Cargo.toml", true), ("b/Cargo.toml", false)]
+            policies(&fs),
+            vec![
+                ("a/Cargo.toml".to_string(), CargoPublishPolicy::Allowed),
+                ("b/Cargo.toml".to_string(), CargoPublishPolicy::Forbidden),
+            ]
+        );
+    }
+
+    /// A HYBRID root — `[package]` *and* `[workspace] members` — is a common Cargo
+    /// layout, and a member's `publish = false` must not be invisible behind a
+    /// publishable root. Both are read.
+    #[test]
+    fn cargo_publish_evidence_reads_a_hybrid_root_and_its_members() {
+        let fs = FakeFs::default()
+            .file(
+                "/repo/Cargo.toml",
+                "[package]\nname = \"root\"\nversion = \"1.0.0\"\n\n\
+                 [workspace]\nmembers = [\"crates/private\"]\n",
+            )
+            .file(
+                "/repo/crates/private/Cargo.toml",
+                "[package]\nname = \"private\"\nversion = \"1.0.0\"\npublish = false\n",
+            );
+        assert_eq!(
+            policies(&fs),
+            vec![
+                ("Cargo.toml".to_string(), CargoPublishPolicy::Allowed),
+                (
+                    "crates/private/Cargo.toml".to_string(),
+                    CargoPublishPolicy::Forbidden
+                ),
+            ]
+        );
+    }
+
+    /// Every `publish` value shape Cargo accepts, read from the `[package]` block.
+    #[test]
+    fn cargo_publish_evidence_covers_every_publish_value_shape() {
+        let cases = [
+            ("", CargoPublishPolicy::Allowed), // absent
+            ("publish = true\n", CargoPublishPolicy::Allowed),
+            ("publish = false\n", CargoPublishPolicy::Forbidden),
+            ("publish=false\n", CargoPublishPolicy::Forbidden), // no spaces
+            ("publish = false # private\n", CargoPublishPolicy::Forbidden), // trailing comment
+            ("publish = []\n", CargoPublishPolicy::Forbidden),  // empty allow-list
+            ("publish = [\"crates-io\"]\n", CargoPublishPolicy::Allowed),
+            (
+                "publish = [\"my-registry\"]\n",
+                CargoPublishPolicy::Forbidden,
+            ),
+            // A shape this textual reader does not model is Unknown, never a guess.
+            (
+                "publish = { workspace = false }\n",
+                CargoPublishPolicy::Unknown,
+            ),
+        ];
+        for (line, expected) in cases {
+            let fs = FakeFs::default().file(
+                "/repo/Cargo.toml",
+                &format!("[package]\nname = \"solo\"\nversion = \"0.1.0\"\n{line}"),
+            );
+            assert_eq!(
+                cargo_publish_evidence(repo(), &fs)[0].policy,
+                expected,
+                "publish line {line:?}"
+            );
+        }
+    }
+
+    /// A `publish` key in ANOTHER table must not be read as the package's — the read
+    /// is `[package]`-scoped, so a decoy cannot forge a `Forbidden` verdict (which
+    /// would be a spurious hard error in the contract normalizer).
+    #[test]
+    fn cargo_publish_evidence_ignores_a_publish_key_outside_the_package_table() {
+        let fs = FakeFs::default().file(
+            "/repo/Cargo.toml",
+            "[package]\nname = \"solo\"\nversion = \"0.1.0\"\n\n\
+             [package.metadata.release]\npublish = false\n\n\
+             [dependencies]\npublish = \"1.0\"\n",
+        );
+        assert_eq!(
+            cargo_publish_evidence(repo(), &fs)[0].policy,
+            CargoPublishPolicy::Allowed
+        );
+    }
+
+    /// `publish.workspace = true` is RESOLVED against `[workspace.package]`, in both
+    /// directions — the modern single-place layout must not be misread as unguarded.
+    #[test]
+    fn cargo_publish_evidence_resolves_workspace_inheritance() {
+        let member = "[package]\nname = \"a\"\nversion = \"1.0.0\"\npublish.workspace = true\n";
+        for (ws_publish, expected) in [
+            ("publish = false\n", CargoPublishPolicy::Forbidden),
+            ("publish = true\n", CargoPublishPolicy::Allowed),
+            ("", CargoPublishPolicy::Allowed), // inherits the permissive default
+        ] {
+            let fs = FakeFs::default()
+                .file(
+                    "/repo/Cargo.toml",
+                    &format!(
+                        "[workspace]\nmembers = [\"a\"]\n\n[workspace.package]\nversion = \"1.0.0\"\n{ws_publish}"
+                    ),
+                )
+                .file("/repo/a/Cargo.toml", member);
+            assert_eq!(
+                cargo_publish_evidence(repo(), &fs)[0].policy,
+                expected,
+                "[workspace.package] {ws_publish:?}"
+            );
+        }
+
+        // Inheriting with NO `[workspace.package]` to inherit from resolves to
+        // Unknown — never a verdict either way.
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", "[workspace]\nmembers = [\"a\"]\n")
+            .file("/repo/a/Cargo.toml", member);
+        assert_eq!(
+            cargo_publish_evidence(repo(), &fs)[0].policy,
+            CargoPublishPolicy::Unknown
         );
     }
 
@@ -1860,6 +2067,14 @@ mod tests {
     fn cargo_publish_evidence_is_empty_without_a_manifest() {
         // No `Cargo.toml` ⇒ no evidence at all (never "nothing is publishable").
         assert!(cargo_publish_evidence(repo(), &FakeFs::default()).is_empty());
+    }
+
+    /// `(manifest, policy)` rows of the evidence read, for readable assertions.
+    fn policies(fs: &FakeFs) -> Vec<(String, CargoPublishPolicy)> {
+        cargo_publish_evidence(repo(), fs)
+            .into_iter()
+            .map(|m| (m.manifest, m.policy))
+            .collect()
     }
 
     #[test]

@@ -24,7 +24,7 @@ use crate::contract::schema::{
     VersioningBase, DEFAULT_CROSS_PLATFORM_TARGETS, DEFAULT_FRAGMENT_DIR, KNOWN_SCHEMA_VERSION,
 };
 use crate::contract::spdx::spdx_valid;
-use crate::facts::detect_distribution_surface;
+use crate::facts::{detect_distribution_surface, CargoPublishPolicy};
 use crate::ports::Fs;
 use crate::release::distribution::{
     find_undeclared_distribution, undeclared_distribution_warnings,
@@ -485,6 +485,26 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
             .any(|d| d.homebrew_tap.is_some() && !d.installers.contains(&Installer::Homebrew)),
     )) {
         p.warn(warning);
+    }
+    // Publish-none must mean NOTHING is published, by anyone. A distribution block is
+    // a second, independent publish surface (GH-Release binaries, an installer, a tap
+    // formula) produced by a tag-triggered workflow — so `targets: []` next to a
+    // declared distribution is a self-contradiction with real consequences: the engine
+    // reads the empty target set as a TAG-ONLY cut, pushes the tag, and reports
+    // "published nothing" while that very tag triggers cargo-dist/goreleaser to publish
+    // binaries the run never planned, journalled, or verified. This floor is what makes
+    // `targets.is_empty()` a sound publish-none discriminator for the coordinator.
+    if targets.is_empty() && !distributions.is_empty() {
+        p.err(
+            "floor: a distribution block declares a binary publish surface (GitHub Release \
+             artifacts / installers / a tap formula) but targets is empty — the two contradict \
+             each other: the release engine would treat the empty target set as publish-none and \
+             cut a TAG-ONLY release, while the pushed tag triggers the distribution's workflow to \
+             publish anyway, unplanned and unverified. Declare the distribution's target (e.g. \
+             {ecosystem, package, registry: gh-releases, adapter: cargo-dist}) or drop the \
+             distribution block for a genuine publish-none contract"
+                .to_string(),
+        );
     }
     // A distribution block ships public binaries (GH-Release artifacts, a curl-pipe
     // installer, a Homebrew tap PR) — that is publishing, and a spike is not being
@@ -1456,31 +1476,37 @@ fn check_publisher_conflicts(targets: &[Target], p: &mut Problems) {
 /// one nothing prevents), which is exactly the silent-wrong-result the machine
 /// contract must not carry, so each direction is diagnosed here:
 ///
-/// - **Contradiction (hard error).** A declared crates.io target whose crate sets
-///   `publish = false` (or an allow-list without `crates-io`) can never publish.
-///   Refusing at normalization keeps that failure *before* the irreversible tag:
-///   the engine-run form would die in `cargo publish`, and the CI-delegated form
+/// - **Contradiction (hard error).** A declared crates.io target whose crate
+///   [forbids](CargoPublishPolicy::Forbidden) publishing can never publish. Refusing
+///   at normalization keeps that failure *before* the irreversible tag: the
+///   engine-run form would die in `cargo publish`, and the CI-delegated form
 ///   (`cargo-publish-ci`) is worse — publish-all skips it, so the first symptom
 ///   would be a red workflow after the tag, with verify then reporting the crate
 ///   Missing at its destination.
-/// - **Unsupported publish-none (warning).** A rust contract with **no** crates.io
-///   target is the authored publish-none shape (an explicit `targets: []`; the
+/// - **Unguarded publish-none (warning).** A contract with **no publish targets at
+///   all** is the authored publish-none shape (an explicit `targets: []`; the
 ///   normalizer never expands an empty list back into a phantom target). That is a
-///   valid, honored state — but if nothing in the tree sets `publish = false`, the
-///   declaration rests on the contract alone and a stray `cargo publish` would
-///   still succeed. Non-fatal: the contract is the truth, this only names the
-///   missing belt-and-braces.
+///   valid, honored state — but if nothing in the tree forbids publishing, the
+///   declaration rests on the contract alone and a stray `cargo publish` would still
+///   succeed. Non-fatal: the contract is the truth, this only names the missing
+///   belt-and-braces.
 ///
-/// Evidence-gated in both directions: no readable `Cargo.toml` (or a target naming
-/// a package no manifest declares) yields no diagnostic — absence of evidence is
-/// never treated as evidence, and every blind spot in the `publish` read errs
-/// toward *publishable* ([`cargo_publish_evidence`]), so the error never fires on a
-/// guess.
+/// The warning deliberately keys on `targets` being **entirely** empty, not on the
+/// absence of a *crates.io* target: a repo that ships binaries through a
+/// `gh-releases`/`homebrew` target publishes plenty and is not publish-none, so
+/// telling it to set `publish = false` would be both wrong and (for a cargo-dist
+/// repo) actively bad advice.
+///
+/// Evidence-gated in every direction. No readable `Cargo.toml`, a target naming a
+/// package no manifest declares, or a manifest whose `publish` key the reader could
+/// not resolve ([`Unknown`](CargoPublishPolicy::Unknown) — inheritance with no
+/// `[workspace.package]`, an inline table) all yield **no** diagnostic: absence of
+/// evidence is never evidence, in either direction. Only an explicit `Forbidden`
+/// errors and only an explicit `Allowed` warns.
 ///
 /// Scoped to rust/crates.io on purpose: it is the one ecosystem whose manifest
-/// carries a machine-readable publish veto. `publish = false` in a non-rust
-/// ecosystem has no analogue, and a non-crates.io registry target is governed by
-/// its own allow-list semantics, not by this key.
+/// carries a machine-readable publish veto. A non-crates.io registry target is
+/// governed by its own allow-list semantics, not by this key.
 fn check_cargo_publish_evidence(
     ecosystems: &[Ecosystem],
     targets: &[Target],
@@ -1495,30 +1521,22 @@ fn check_cargo_publish_evidence(
     if evidence.is_empty() {
         return;
     }
-    let crates_io_targets: Vec<&Target> = targets
-        .iter()
-        .filter(|t| {
-            t.ecosystem == Ecosystem::Rust
-                && t.registry == Registry::CratesIo
-                && matches!(t.adapter, Adapter::CargoPublish | Adapter::CargoPublishCi)
-        })
-        .collect();
 
-    if crates_io_targets.is_empty() {
-        // Publish-none (for rust). Distinct from CI-DELEGATION: a `cargo-publish-ci`
-        // target still publishes — it is just CI that runs it — so it is filtered in
-        // above, and such a contract never reaches this branch.
-        let unguarded: Vec<&str> = evidence
+    // Publish-none: NO target of any kind. Distinct from CI-DELEGATION (a
+    // `cargo-publish-ci` target still publishes, just from CI) and from a
+    // binary-only repo (a gh-releases/homebrew target publishes too) — neither
+    // reaches this branch.
+    if targets.is_empty() {
+        let unguarded: Vec<String> = evidence
             .iter()
-            .filter(|m| m.publishable)
-            .map(|m| m.manifest.as_str())
+            .filter(|m| m.policy == CargoPublishPolicy::Allowed)
+            .map(|m| quote_for_diagnostic(&m.manifest))
             .collect();
         if !unguarded.is_empty() {
             p.warn(format!(
-                "the contract declares no crates.io publish target (publish-none), but {} \
-                 {} not set 'publish = false' — the intent holds in the contract, yet nothing \
-                 in the tree stops an accidental 'cargo publish'. Set publish = false to make \
-                 it enforceable",
+                "the contract declares no publish targets (publish-none), but {} {} not forbid \
+                 publishing — the intent holds in the contract, yet nothing in the tree stops an \
+                 accidental 'cargo publish'. Set publish = false to make it enforceable",
                 unguarded.join(", "),
                 if unguarded.len() == 1 { "does" } else { "do" }
             ));
@@ -1526,33 +1544,43 @@ fn check_cargo_publish_evidence(
         return;
     }
 
-    for target in crates_io_targets {
+    for target in targets.iter().filter(|t| {
+        t.ecosystem == Ecosystem::Rust
+            && t.registry == Registry::CratesIo
+            && matches!(t.adapter, Adapter::CargoPublish | Adapter::CargoPublishCi)
+    }) {
+        let forbidden =
+            |m: &&crate::facts::CargoPublishFlag| m.policy == CargoPublishPolicy::Forbidden;
         // An unresolved (`null`) package cannot be matched to one manifest, so it is
-        // contradicted only when NO manifest in the tree could satisfy it.
-        let blocked_by = match target.package.as_deref() {
+        // contradicted only when EVERY manifest in the tree forbids the publish (a
+        // single `Unknown` or `Allowed` is enough to withhold the verdict). The
+        // message then names them all — an arbitrary "first" would send the author to
+        // one of several equally-blocking manifests.
+        let blocking: Vec<&crate::facts::CargoPublishFlag> = match target.package.as_deref() {
             Some(package) => evidence
                 .iter()
-                .find(|m| m.package.as_deref() == Some(package))
-                .filter(|m| !m.publishable),
-            None => {
-                if evidence.iter().any(|m| m.publishable) {
-                    None
-                } else {
-                    evidence.first()
-                }
-            }
+                .filter(|m| m.package.as_deref() == Some(package))
+                .filter(forbidden)
+                .collect(),
+            None if evidence.iter().all(|m| forbidden(&m)) => evidence.iter().collect(),
+            None => Vec::new(),
         };
-        if let Some(manifest) = blocked_by {
-            p.err(format!(
-                "floor: targets declares a crates.io publish for {} with adapter {}, but {} \
-                 forbids publishing ('publish = false', or an allow-list without 'crates-io') — \
-                 the publish can never succeed. Drop the target (an explicit 'targets: []' is the \
-                 publish-none contract) or allow the publish in the manifest",
-                quote_for_diagnostic(target.package.as_deref().unwrap_or("this repo's crate")),
-                quote_for_diagnostic(target.adapter.as_str()),
-                quote_for_diagnostic(&manifest.manifest)
-            ));
+        if blocking.is_empty() {
+            continue;
         }
+        p.err(format!(
+            "floor: targets declares a crates.io publish for {} with adapter {}, but {} \
+             forbids publishing ('publish = false', 'publish = []', or an allow-list without \
+             'crates-io') — the publish can never succeed. Drop the target (an explicit \
+             'targets: []' is the publish-none contract) or allow the publish in the manifest",
+            quote_for_diagnostic(target.package.as_deref().unwrap_or("this repo's crate")),
+            target.adapter.as_str(),
+            blocking
+                .iter()
+                .map(|m| quote_for_diagnostic(&m.manifest))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 }
 
@@ -2452,6 +2480,130 @@ mod tests {
             "a delegated publish is not publish-none: {:?}",
             n.problems.warnings
         );
+    }
+
+    /// Publish-none must mean nothing is published by ANYONE: a distribution block
+    /// alongside an empty target set is floored, because the engine would cut it as
+    /// tag-only while the pushed tag triggers cargo-dist to publish binaries the run
+    /// never planned or verified. This floor is what makes an empty target set a
+    /// sound publish-none signal for the coordinator.
+    #[test]
+    fn publish_none_with_a_distribution_block_is_a_floor_error() {
+        let n = norm(
+            "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets: []\n\
+             distribution:\n  adapter: cargo-dist\n  gh_releases: true\n---\n",
+        );
+        assert_error_contains(&n, "but targets is empty");
+    }
+
+    /// The same floor catches the shape that has no ecosystems either — an empty
+    /// target set from ANY route is incompatible with a declared binary surface.
+    #[test]
+    fn a_distribution_block_without_any_target_is_a_floor_error() {
+        let n = norm(
+            "---\nstatus: approved\nmaturity: mvp\n\
+             distribution:\n  adapter: cargo-dist\n  gh_releases: true\n---\n",
+        );
+        assert_error_contains(&n, "but targets is empty");
+    }
+
+    /// A repo that publishes BINARIES but not crates (a `gh-releases`/`cargo-dist`
+    /// target) is not publish-none: it must not be told to set `publish = false`,
+    /// which would be wrong advice and can break cargo-dist packaging.
+    #[test]
+    fn a_binary_only_rust_repo_gets_no_publish_none_warning() {
+        let fs = FakeFs::with_file(
+            "/repo/Cargo.toml",
+            "[package]\nname = \"tool\"\nversion = \"1.0.0\"\n",
+        );
+        let text = "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets:\n  \
+                    - ecosystem: rust\n    package: tool\n    registry: gh-releases\n    \
+                    adapter: cargo-dist\n---\ndistribution:\n";
+        let n = norm_with(text, &fs);
+        assert!(
+            !n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("publish-none")),
+            "a binary-publishing repo was called publish-none: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// A manifest whose `publish` the reader could not resolve is NOT evidence.
+    /// `publish.workspace = true` with no `[workspace.package]` to inherit from is
+    /// `Unknown`: it neither contradicts a declared target nor counts as "unguarded".
+    #[test]
+    fn an_unresolvable_publish_key_produces_no_diagnostic_in_either_direction() {
+        let fs = FakeFs::with_files([
+            ("/repo/Cargo.toml", "[workspace]\nmembers = [\"a\"]\n"),
+            (
+                "/repo/a/Cargo.toml",
+                "[package]\nname = \"a\"\nversion = \"1.0.0\"\npublish.workspace = true\n",
+            ),
+        ]);
+        // Declared target: not contradicted (Unknown is not Forbidden).
+        let declared = "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets:\n  \
+                        - ecosystem: rust\n    package: a\n    registry: crates.io\n---\n";
+        let n = norm_with(declared, &fs);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        // Publish-none: not warned about (Unknown is not Allowed).
+        let n_none = norm_with(PUBLISH_NONE, &fs);
+        assert!(
+            !n_none
+                .problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("publish-none")),
+            "an unresolved publish key was reported as unguarded: {:?}",
+            n_none.problems.warnings
+        );
+    }
+
+    /// Inherited `publish = false` (the modern single-place layout) IS resolved, so
+    /// a publish-none repo using it is confirmed rather than falsely warned.
+    #[test]
+    fn inherited_publish_false_is_supporting_evidence_for_publish_none() {
+        let fs = FakeFs::with_files([
+            (
+                "/repo/Cargo.toml",
+                "[workspace]\nmembers = [\"a\"]\n\n[workspace.package]\npublish = false\n",
+            ),
+            (
+                "/repo/a/Cargo.toml",
+                "[package]\nname = \"a\"\nversion = \"1.0.0\"\npublish.workspace = true\n",
+            ),
+        ]);
+        let n = norm_with(PUBLISH_NONE, &fs);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            !n.problems
+                .warnings
+                .iter()
+                .any(|w| w.contains("publish-none")),
+            "inherited publish = false was not read as evidence: {:?}",
+            n.problems.warnings
+        );
+    }
+
+    /// A member's `publish = false` behind a publishable HYBRID root is still seen:
+    /// the evidence read covers the root package AND the members.
+    #[test]
+    fn a_blocked_member_under_a_hybrid_root_still_contradicts_its_target() {
+        let fs = FakeFs::with_files([
+            (
+                "/repo/Cargo.toml",
+                "[package]\nname = \"root\"\nversion = \"1.0.0\"\n\n\
+                 [workspace]\nmembers = [\"cli\"]\n",
+            ),
+            (
+                "/repo/cli/Cargo.toml",
+                "[package]\nname = \"cli\"\nversion = \"1.0.0\"\npublish = false\n",
+            ),
+        ]);
+        let text = "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets:\n  \
+                    - ecosystem: rust\n    package: cli\n    registry: crates.io\n---\n";
+        assert_error_contains(&norm_with(text, &fs), "cli/Cargo.toml");
     }
 
     /// Evidence-gated: no readable `Cargo.toml` means no evidence, so neither
@@ -4190,7 +4342,9 @@ mod tests {
     /// time and a hard refusal at cut time, so the author can see the remediation.
     #[test]
     fn distribution_tap_without_target_warns() {
-        let text = "---\nstatus: approved\nmaturity: mvp\n\
+        // `ecosystems` is declared so `targets` expands: a distribution block next to
+        // an EMPTY target set is its own floor (publish-none cannot ship binaries).
+        let text = "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\n\
                     distribution:\n  adapter: cargo-dist\n  installers: [shell]\n  \
                     homebrew_tap: owner/tap\n---\n";
         let n = norm(text);

@@ -223,6 +223,18 @@ none ⇒ `Undeterminable`), because there is no target to project it through. Th
 
 The verify barrier passes **vacuously**: with no declared destination there is nothing
 to observe. That is not `Unknown` ("a declared destination could not be read"), which
-remains red. The emptiness is authored, never inferred — the normalizer honors only an
-explicit `targets: []` — so a dropped `targets` block cannot reach verify as a silent
-green.
+remains red. Three upstream gates — not the vacuous pass itself — are what keep an
+empty target set from being an accident that reports green: the normalizer re-expands
+an omitted `targets` into the ecosystem default; every malformed `targets` shape that
+falls back to an empty vector also records a normalization error, and the CLI refuses
+to plan or cut an invalid contract; and a declared `distribution` block alongside an
+empty target set is a floor (ADR-0003), so "no targets" cannot coexist with a
+CI-published binary surface this barrier would then not observe.
+
+`SEAL_VERSION` is deliberately **not** bumped for the new disposition. No earlier
+binary could have sealed a zero-target plan at all: version resolution projected the
+release version *through* the targets, so every publish-none contract was refused with
+`version_undeterminable`. The set of stored plans whose execution semantics this
+changes is empty. The tag phase still refuses a contradictory already-journalled
+disposition in all three directions, including a tag-only plan over a tag that already
+carries a created or delegated Release.
