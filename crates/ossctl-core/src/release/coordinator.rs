@@ -119,7 +119,7 @@ use crate::protocol::journal::{
     JOURNAL_SCHEMA_VERSION,
 };
 use crate::protocol::plan::ReleasePlan;
-use crate::protocol::release::PublishReceipt as AdapterReceipt;
+use crate::protocol::release::{PublishReceipt as AdapterReceipt, VerifyOutcome};
 
 use super::adapters::{
     hash_file, resolve, AdapterTarget, EcosystemAdapter, EffectCtx, HomebrewAsset, HomebrewFormula,
@@ -416,6 +416,14 @@ pub fn execute(
         &targets,
         plan,
         artifacts.repo_slug.as_deref(),
+        artifacts.homebrew.as_ref(),
+    )?;
+    verify_phase(
+        journal,
+        sink,
+        ctx,
+        &targets,
+        plan,
         artifacts.homebrew.as_ref(),
     )?;
 
@@ -747,6 +755,7 @@ fn homebrew_inputs(plan: &ReleasePlan, targets: &[TargetPlan]) -> Option<Homebre
         tap: plan.homebrew_tap.clone(),
         license: plan.license.clone(),
         description: plan.description.clone(),
+        version: plan.version.clone(),
         platforms: plan.homebrew_platforms.clone(),
     })
 }
@@ -784,7 +793,7 @@ fn reversible_phase(
                     sink.extend(built.artifacts);
                 }
             }),
-            Phase::Bump | Phase::Publish | Phase::Tag | Phase::Dist => {
+            Phase::Bump | Phase::Publish | Phase::Tag | Phase::Dist | Phase::Verify => {
                 unreachable!("reversible_phase only runs dry_run/build")
             }
         };
@@ -1215,6 +1224,157 @@ fn dist_phase(
     Ok(())
 }
 
+/// Maximum time the verify barrier waits for cargo-dist to create its delegated
+/// GitHub Release and upload its cross-platform archives.
+const DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS: u64 = 20 * 60;
+/// Delay between delegated GitHub Release observation attempts. Routed through
+/// [`Clock::sleep`](crate::ports::Clock::sleep) so tests advance virtual time.
+const DELEGATED_RELEASE_VERIFY_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(15);
+
+/// Observe every destination after dist. A v5 cut is not complete until each
+/// receipt or CI-delegation has an observed-good result; Unknown is deliberately
+/// a barrier failure, never an implicit success.
+fn verify_phase(
+    journal: &mut Journal<'_>,
+    sink: &mut dyn ProgressSink,
+    ctx: &EffectCtx<'_>,
+    targets: &[TargetPlan],
+    plan: &ReleasePlan,
+    homebrew: Option<&HomebrewFormula>,
+) -> Result<(), CutError> {
+    let phase = Phase::Verify;
+    if phase_completed_ok(journal.state(), phase) {
+        return Ok(());
+    }
+    let verification_artifacts = ReleaseArtifacts {
+        homebrew: homebrew.cloned(),
+        ..ReleaseArtifacts::default()
+    };
+    let verify_ctx = ctx.with_artifacts(&verification_artifacts);
+    record(journal, sink, EventKind::PhaseEntered { phase })?;
+    for tp in targets {
+        if journal.state().verified.get(&tp.id) == Some(&VerifyOutcome::Matches) {
+            continue;
+        }
+        let outcome = if journal.state().delegated.contains(&tp.id) {
+            verify_delegated_release(&verify_ctx, plan, &tp.input.package)
+        } else if let Some(receipt) = journal.state().published.get(&tp.id) {
+            let receipt = AdapterReceipt {
+                adapter: tp.input.target.adapter,
+                ecosystem: tp.input.target.ecosystem,
+                package: tp.input.package.clone(),
+                version: receipt.version.clone(),
+                canonical_ref: tp.input.canonical_ref(),
+                digest: receipt.digest.clone(),
+                remote_url: receipt.registry_url.clone(),
+                timestamp: 0,
+            };
+            tp.adapter
+                .verify(&verify_ctx, &receipt)
+                .unwrap_or(VerifyOutcome::Unknown)
+        } else {
+            VerifyOutcome::Missing
+        };
+        record(
+            journal,
+            sink,
+            EventKind::TargetVerified {
+                target: tp.id.clone(),
+                outcome,
+            },
+        )?;
+        match outcome {
+            VerifyOutcome::Matches => {}
+            VerifyOutcome::Unknown => {
+                return fail_phase(
+                    journal,
+                    sink,
+                    phase,
+                    Some(tp.id.clone()),
+                    format!("could not observe {} at its destination", tp.id),
+                )
+            }
+            VerifyOutcome::Missing => {
+                return fail_phase(
+                    journal,
+                    sink,
+                    phase,
+                    Some(tp.id.clone()),
+                    format!("{} is missing at its destination", tp.id),
+                )
+            }
+            VerifyOutcome::Conflicts => {
+                return fail_phase(
+                    journal,
+                    sink,
+                    phase,
+                    Some(tp.id.clone()),
+                    format!("{} conflicts with its recorded receipt", tp.id),
+                )
+            }
+        }
+    }
+    record(
+        journal,
+        sink,
+        EventKind::PhaseCompleted {
+            phase,
+            outcome: PhaseOutcome::Ok,
+        },
+    )?;
+    Ok(())
+}
+
+/// Poll a cargo-dist owned GitHub Release until its expected platform archives are
+/// visible. A failed `gh release view` is treated as not-yet-visible while within
+/// the bounded window: CI can create the Release after the tag push.
+fn verify_delegated_release(
+    ctx: &EffectCtx<'_>,
+    plan: &ReleasePlan,
+    package: &str,
+) -> VerifyOutcome {
+    let tag = format!("v{}", plan.version);
+    let expected: Vec<String> = plan
+        .homebrew_platforms
+        .iter()
+        .map(|triple| format!("{package}-{triple}.tar.xz"))
+        .collect();
+    let start = ctx.clock.now_unix();
+    loop {
+        if let Ok(out) = ctx.runner.run(
+            "gh",
+            &["release", "view", &tag, "--json", "assets"],
+            ctx.repo_root,
+        ) {
+            if out.status == Some(0) {
+                let observed = serde_json::from_str::<serde_json::Value>(&out.stdout)
+                    .ok()
+                    .and_then(|v| v.get("assets").and_then(|a| a.as_array()).cloned())
+                    .map(|assets| {
+                        assets
+                            .into_iter()
+                            .filter_map(|a| {
+                                a.get("name").and_then(|n| n.as_str()).map(str::to_owned)
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                if observed.as_ref().is_some_and(|names| {
+                    expected
+                        .iter()
+                        .all(|wanted| names.iter().any(|name| name == wanted))
+                }) {
+                    return VerifyOutcome::Matches;
+                }
+            }
+        }
+        if ctx.clock.now_unix().saturating_sub(start) >= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS {
+            return VerifyOutcome::Missing;
+        }
+        ctx.clock.sleep(DELEGATED_RELEASE_VERIFY_POLL_INTERVAL);
+    }
+}
+
 /// The deterministic GitHub source-archive URL for `version`'s tag — the `url` a
 /// downstream Homebrew formula points at, and the bytes whose `sha256` the dist
 /// phase computes once the tag is pushed. Matches the pre-tag preview
@@ -1449,6 +1609,7 @@ fn target_cleared(state: &RunState, phase: Phase, target: &str) -> bool {
         Phase::DryRun => state.dry_run.contains(target),
         Phase::Build => state.built.contains(target),
         Phase::Publish | Phase::Dist => state.published.contains_key(target),
+        Phase::Verify => state.verified.get(target) == Some(&VerifyOutcome::Matches),
         Phase::Bump | Phase::Tag => false,
     }
 }

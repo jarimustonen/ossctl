@@ -25,7 +25,7 @@
 //! not land" — that is the one classification that would drive a dangerous
 //! re-publish of an already-published version.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::contract::schema::{Adapter, Ecosystem};
 
@@ -139,7 +139,7 @@ pub struct PublishReceipt {
 /// target as landed, `Conflicts` and `Missing` surface a human-recoverable
 /// discrepancy, and `Unknown` says the check could not be performed and must not
 /// be treated as `Missing`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VerifyOutcome {
     /// The registry holds the receipt's version and (where a digest is

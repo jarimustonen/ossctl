@@ -2171,6 +2171,9 @@ fn render_event_line(event: &JournalEvent) -> String {
         EventKind::TargetDelegated { target, adapter } => {
             format!("  delegated to CI: {target} ({adapter})")
         }
+        EventKind::TargetVerified { target, outcome } => {
+            format!("  verified: {target} ({})", outcome.as_str())
+        }
         EventKind::TagCreatedLocal { tag } => format!("  tag created: {tag}"),
         EventKind::TagPushedRemote { tag } => format!("  tag pushed: {tag}"),
         EventKind::GithubReleaseCreated { tag, url } => match url {

@@ -143,3 +143,20 @@ The Decision above states the phase barrier as **build ALL → publish ALL**: ev
 **Resumability (ADR-0003, remote-is-ground-truth).** The interleave adds no new journal event and does not change the per-target skip logic, so `resume`/`reconcile` are unaffected. A cut that dies after publishing `ossctl-core` but before `ossctl` resumes correctly: publish-all skips the already-recorded `ossctl-core` (never re-publishing an irreversible crate) and completes `ossctl` (whose deferred packaging now succeeds, its dependency being on the index). Covered by `resume_after_core_publish_completes_the_dependent_without_republishing_core` (coordinator) and the adapter-level `target_skips_its_own_publish_when_already_published_on_resume`.
 
 **Residual risk (documented, and now narrowed).** For a dependent whose workspace dep is **genuinely not yet on the index** (the normal lockstep cut), its *manifest/packaging* validity (bad `license`, an excluded required file) can only be checked by `cargo package`/`cargo publish`, which cannot run until the dependency is on the index — so such an error surfaces at the dependent's `cargo publish`, **after** its dependency has published (a torn release the engine journals but cannot roll back). This window is **inherent to cargo's model** for that case — the manual fallback recipe carries the identical risk — and it is bounded by the index-independent `cargo check` (a default-host compile check, not full package verification). The registry-aware predicate **removes the avoidable part**: a dependent whose deps are already indexed is *not* deferred, so it keeps its full build-all `cargo package` manifest validation. Two further narrowings are follow-ups, not owned here: (a) a plan-time coverage/packaging preflight (e.g. a build-time `cargo package` against a `path`-rewritten manifest, if that can be made not to resolve the `=`-pin against the index — unverified) to catch a genuinely-deferred dependent's manifest errors before its dependency publishes; and (b) rejecting a workspace path-dependency with no publishable version requirement up front rather than at `cargo publish`.
+
+---
+
+## Amendment (2026-08-17) — mandatory post-cut verification: green means observed
+
+The coordinator runs a final `verify` barrier after `dist`. A v5 journal reaches
+`Completed` only after every published receipt and CI-delegated target has an
+observed-good result at its destination. A v1–v4 journal remains compatible: its
+successful `dist` event is terminal.
+
+A publish target that cannot be observed after the fact is not a publish target.
+Registry receipts are re-checked through the registry seam; Homebrew formulas are
+fetched from the tap and checked for the ossctl marker, sealed version, and platform
+stanzas; cargo-dist GitHub Releases are polled through the command seam for their
+expected archives. `Unknown` is not green: it journals an honest observation but
+fails the barrier alongside `Missing` and `Conflicts`. `--allow-unverified` remains
+resume-only and never makes an unobserved fresh cut complete.

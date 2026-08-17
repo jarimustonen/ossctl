@@ -2320,6 +2320,7 @@ fn homebrew_artifacts(
             tap: Some(tap.to_string()),
             license: license.map(str::to_string),
             description: Some("Test release tool".into()),
+            version: "1.0.0".into(),
             platforms: vec!["aarch64-apple-darwin".into()],
         }),
         homebrew_assets: vec![HomebrewAsset {
@@ -2362,6 +2363,7 @@ fn rendered_formula(name: &str, url: &str, sha256: &str, license: Option<&str>) 
     }];
     super::homebrew::render_formula(
         name,
+        "1.0.0",
         Some("o/r"),
         Some("Test release tool"),
         &assets,
@@ -3413,6 +3415,7 @@ fn homebrew_prebuilt_formula_renders_each_supported_platform_without_rust() {
     ];
     let formula = super::homebrew::render_formula(
         "tool",
+        "1.0.0",
         Some("o/r"),
         Some("A real tool"),
         &assets,
@@ -3450,6 +3453,7 @@ fn homebrew_render_formula_neutralizes_ruby_interpolation() {
     let malicious = "MIT #{system('touch /tmp/pwned')}";
     let formula = super::homebrew::render_formula(
         "tool",
+        "1.0.0",
         Some("o/r"),
         Some("tool"),
         &[HomebrewAsset {
@@ -3563,9 +3567,9 @@ fn verify_unknown_on_registry_outage() {
 }
 
 #[test]
-fn homebrew_and_binary_verify_is_always_unknown() {
-    // Even with a registry that *would* answer, these adapters report Unknown
-    // because their destination is not observable through RegistryQuery.
+fn homebrew_and_binary_verify_use_their_destination_observers() {
+    // Homebrew cannot locate a tap without a receipt URL; manual GitHub Release
+    // verification sees the fake release as present but asset-less.
     let cmd = FakeCmd::new();
     let clock = FakeClock(1);
     let reg = FakeRegistry::new().with("binary", "tool", &["1.0.0"]);
@@ -3573,13 +3577,13 @@ fn homebrew_and_binary_verify_is_always_unknown() {
     let c = ctx(&cmd, &clock, &reg, root);
 
     let r = receipt(Ecosystem::Binary, "1.0.0", None);
-    for id in [Adapter::HomebrewTap, Adapter::HomebrewCore, Adapter::Manual] {
-        assert_eq!(
-            resolve(id).verify(&c, &r).unwrap(),
-            VerifyOutcome::Unknown,
-            "{id:?} must report Unknown"
-        );
+    for id in [Adapter::HomebrewTap, Adapter::HomebrewCore] {
+        assert_eq!(resolve(id).verify(&c, &r).unwrap(), VerifyOutcome::Unknown);
     }
+    assert_eq!(
+        resolve(Adapter::Manual).verify(&c, &r).unwrap(),
+        VerifyOutcome::Missing
+    );
 }
 
 // ── Wire parity: as_str() must equal the serde form (they must never drift) ──

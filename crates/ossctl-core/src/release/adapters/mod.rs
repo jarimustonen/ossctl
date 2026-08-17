@@ -191,6 +191,9 @@ pub struct HomebrewFormula {
     pub license: Option<String>,
     /// Package metadata description, surfaced by `brew search`.
     pub description: Option<String>,
+    /// Version sealed into the release plan, rendered explicitly so post-cut
+    /// verification can distinguish a stale tap from a current one.
+    pub version: String,
     /// Release archive triples cargo-dist publishes for this package.
     pub platforms: Vec<String>,
 }

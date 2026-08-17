@@ -232,7 +232,11 @@ pub fn apply(state: &mut RunState, event: &JournalEvent) {
             // always follows it, and completing early would freeze the projection
             // before Dist runs.
             let completes = match phase {
-                Phase::Dist => true,
+                // v1–v4 runs predate the mandatory verify barrier, so their
+                // successful dist completion remains terminal on replay.
+                Phase::Dist => event.schema_version < 5,
+                // v5 runs are terminal only after every target is observed.
+                Phase::Verify => true,
                 Phase::Tag => event.schema_version < 2,
                 _ => false,
             };
@@ -254,6 +258,9 @@ pub fn apply(state: &mut RunState, event: &JournalEvent) {
         }
         EventKind::TargetDelegated { target, .. } => {
             state.delegated.insert(target.clone());
+        }
+        EventKind::TargetVerified { target, outcome } => {
+            state.verified.insert(target.clone(), *outcome);
         }
         EventKind::TagCreatedLocal { tag } => {
             state.tags.entry(tag.clone()).or_default().created_local = true;
@@ -1143,7 +1150,7 @@ mod tests {
     }
 
     #[test]
-    fn dist_phase_ok_completes_the_run_tag_ok_alone_does_not() {
+    fn verify_phase_ok_completes_a_v5_run_dist_ok_alone_does_not() {
         let mut state = reduce(&sample_events());
         assert_eq!(state.status, RunStatus::InProgress);
         let mut seq = state.applied_seq;
@@ -1167,6 +1174,8 @@ mod tests {
         push(&mut state, Phase::Tag);
         assert_eq!(state.status, RunStatus::InProgress);
         push(&mut state, Phase::Dist);
+        assert_eq!(state.status, RunStatus::InProgress);
+        push(&mut state, Phase::Verify);
         assert_eq!(state.status, RunStatus::Completed);
     }
 

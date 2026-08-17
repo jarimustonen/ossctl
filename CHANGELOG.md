@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Missing `OSS-RELEASE.md` contracts now exit `1` rather than `2`; agents branching on
   ossctl's exit status can reliably treat `1` as an input/current-state problem and `2` as
   a retry-or-escalate fault (`cli-canon-exit-codes`).
+- **Release completion now means every publish target was observed at its destination.** A new mandatory `verify` barrier checks registry receipts, Homebrew tap formulas, and GitHub Release assets after `dist`; missing, conflicting, and unobservable targets leave a resumable failed run instead of a false-green cut.
 - **`release abandon` now recovers a hard-killed release run's stale lock.** Lock files record
   their PID, hostname, and start time. `abandon` removes one only when the same-host holder is
   provably gone (`kill -0` reports `ESRCH`), then retries once and records what it did. Live,

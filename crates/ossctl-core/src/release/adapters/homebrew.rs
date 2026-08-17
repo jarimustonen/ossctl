@@ -354,7 +354,14 @@ impl HomebrewAdapter {
         let license = homebrew.and_then(|h| h.license.as_deref());
         let description = homebrew.and_then(|h| h.description.as_deref());
         let homepage_slug = ctx.artifacts.repo_slug.as_deref();
-        let formula = render_formula(&t.package, homepage_slug, description, assets, license);
+        let formula = render_formula(
+            &t.package,
+            &t.version,
+            homepage_slug,
+            description,
+            assets,
+            license,
+        );
 
         // One workdir, computed once, used by both the clone and the write.
         let workdir = Self::fresh_workdir(&t.package, &t.version);
@@ -502,7 +509,14 @@ impl HomebrewAdapter {
         //    hand. A newly *created* formula always carries the marker, so this only
         //    affects formulas that predate the marker.
         let updated = if formula_carries_marker(&current) {
-            render_formula(&t.package, homepage_slug, description, assets, license)
+            render_formula(
+                &t.package,
+                &t.version,
+                homepage_slug,
+                description,
+                assets,
+                license,
+            )
         } else {
             return Err(AdapterError::Command {
                 command: "homebrew formula update".into(),
@@ -760,12 +774,60 @@ impl ReleaseAdapter for HomebrewAdapter {
 
     fn verify(
         &self,
-        _ctx: &EffectCtx<'_>,
-        _receipt: &PublishReceipt,
+        ctx: &EffectCtx<'_>,
+        receipt: &PublishReceipt,
     ) -> Result<VerifyOutcome, AdapterError> {
-        // A tap/core formula is not observable through RegistryQuery; report the
-        // honest "cannot check" rather than a false Missing (ADR-0002 §1).
-        Ok(VerifyOutcome::Unknown)
+        // The receipt records the tap URL produced by the publish path; use it,
+        // rather than re-reading the mutable contract, to locate the artifact.
+        let Some(url) = receipt.remote_url.as_deref() else {
+            return Ok(VerifyOutcome::Unknown);
+        };
+        let parts: Vec<_> = url.split('/').collect();
+        let Some(github) = parts.iter().position(|part| *part == "github.com") else {
+            return Ok(VerifyOutcome::Unknown);
+        };
+        let (Some(owner), Some(repo)) = (parts.get(github + 1), parts.get(github + 2)) else {
+            return Ok(VerifyOutcome::Unknown);
+        };
+        let raw = format!(
+            "https://raw.githubusercontent.com/{owner}/{repo}/HEAD/Formula/{}.rb",
+            receipt.package
+        );
+        let out = match ctx
+            .runner
+            .run("curl", &["-sSfL", "--", &raw], ctx.repo_root)
+        {
+            Ok(out) if out.status == Some(0) => out,
+            Ok(_) | Err(_) => return Ok(VerifyOutcome::Unknown),
+        };
+        let formula = out.stdout;
+        if !formula_carries_marker(formula.as_bytes()) {
+            return Ok(VerifyOutcome::Missing);
+        }
+        if !formula
+            .lines()
+            .any(|line| line.trim() == format!("version \"{}\"", receipt.version))
+        {
+            return Ok(VerifyOutcome::Missing);
+        }
+        // Every Homebrew-servable platform declared for this cut must retain a
+        // URL+sha stanza. The plan data is carried as artifacts by the coordinator.
+        let Some(homebrew) = ctx.artifacts.homebrew.as_ref() else {
+            return Ok(VerifyOutcome::Unknown);
+        };
+        for triple in &homebrew.platforms {
+            let Some(condition) = homebrew_platform_condition(triple) else {
+                continue;
+            };
+            let Some(start) = formula.find(condition) else {
+                return Ok(VerifyOutcome::Missing);
+            };
+            let stanza = &formula[start..];
+            if !stanza.contains("url \"") || !stanza.contains("sha256 \"") {
+                return Ok(VerifyOutcome::Missing);
+            }
+        }
+        Ok(VerifyOutcome::Matches)
     }
 
     fn timeout(&self) -> Duration {
@@ -778,6 +840,7 @@ impl ReleaseAdapter for HomebrewAdapter {
 /// no source-build fallback.
 pub(super) fn render_formula(
     name: &str,
+    version: &str,
     homepage_slug: Option<&str>,
     description: Option<&str>,
     assets: &[HomebrewAsset],
@@ -806,7 +869,7 @@ pub(super) fn render_formula(
         .map(|l| format!("  license \"{}\"\n", ruby_escape(l)))
         .unwrap_or_default();
     let marker = format!("{FORMULA_MARKER_PREFIX} {FORMULA_TEMPLATE_VERSION})");
-    format!("{marker}\nclass {class} < Formula\n  desc \"{desc}\"\n  homepage \"{}\"\n{platforms}{license_line}\n  def install\n    bin.install \"{name_lit}\"\n  end\n\n  test do\n    system bin/\"{name_lit}\", \"version\"\n  end\nend\n", ruby_escape(&homepage))
+    format!("{marker}\nclass {class} < Formula\n  desc \"{desc}\"\n  homepage \"{}\"\n  version \"{}\"\n{platforms}{license_line}\n  def install\n    bin.install \"{name_lit}\"\n  end\n\n  test do\n    system bin/\"{name_lit}\", \"version\"\n  end\nend\n", ruby_escape(&homepage), ruby_escape(version))
 }
 
 /// Return the Homebrew formula condition for a cargo-dist target triple, if

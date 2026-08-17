@@ -66,7 +66,10 @@ use serde::{Deserialize, Serialize};
 /// migration rule requires its own bump: a v3 binary refuses a v4 line rather than
 /// misreading it. The reduce path stays backward-tolerant of v1–v3 logs (which lack
 /// the bump phase/event); the new `RunState` fields are `#[serde(default)]`.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 4;
+/// **v5** (2026-08-17): adds the mandatory post-cut [`Phase::Verify`] barrier
+/// and [`EventKind::TargetVerified`] observations. v4 journals remain complete at
+/// `dist ok`; v5 journals require `verify ok` before completion.
+pub const JOURNAL_SCHEMA_VERSION: u32 = 5;
 
 /// The coordinator phases, in barrier order (ADR-0002): the derived
 /// `PartialOrd`/`Ord` follows declaration order, so `Bump < DryRun < Build <
@@ -98,6 +101,9 @@ pub enum Phase {
     /// post-tag target still runs this barrier as a clean no-op so completion is
     /// uniform (ADR-0002 §2, extended by `release-engine-cut-cargo-dist-flow`).
     Dist,
+    /// Post-cut observation: every published or CI-delegated target is checked at
+    /// its destination. v5 runs complete only after this barrier succeeds.
+    Verify,
 }
 
 impl Phase {
@@ -112,6 +118,7 @@ impl Phase {
             Self::Publish => "publish",
             Self::Tag => "tag",
             Self::Dist => "dist",
+            Self::Verify => "verify",
         }
     }
 
@@ -125,7 +132,7 @@ impl Phase {
     pub fn is_publish_or_later(self) -> bool {
         match self {
             Self::Bump | Self::DryRun | Self::Build => false,
-            Self::Publish | Self::Tag | Self::Dist => true,
+            Self::Publish | Self::Tag | Self::Dist | Self::Verify => true,
         }
     }
 }
@@ -373,6 +380,13 @@ pub enum EventKind {
         /// string, e.g. `"cargo-dist"`), for the operator-facing record.
         adapter: String,
     },
+    /// A target's destination was observed after publish/delegation.
+    TargetVerified {
+        /// The target id.
+        target: String,
+        /// The typed observation outcome.
+        outcome: crate::protocol::release::VerifyOutcome,
+    },
     /// The release tag was created locally.
     TagCreatedLocal {
         /// The tag name.
@@ -474,6 +488,7 @@ impl EventKind {
             Self::TargetPublished { target, .. } => format!("published:{target}"),
             Self::TargetCancelled { target, .. } => format!("cancelled:{target}"),
             Self::TargetDelegated { target, .. } => format!("delegated:{target}"),
+            Self::TargetVerified { target, .. } => format!("verified:{target}"),
             Self::TagCreatedLocal { tag } => format!("tag_created_local:{tag}"),
             Self::TagPushedRemote { tag } => format!("tag_pushed_remote:{tag}"),
             Self::GithubReleaseCreated { tag, .. } => format!("github_release_created:{tag}"),
@@ -546,6 +561,9 @@ pub struct RunState {
     /// deserializes (the manifest is disposable and rebuilt from the log anyway).
     #[serde(default)]
     pub delegated: BTreeSet<String>,
+    /// Per-target destination observations from the mandatory v5 verify barrier.
+    #[serde(default)]
+    pub verified: BTreeMap<String, crate::protocol::release::VerifyOutcome>,
     /// Release tags → their landing progress.
     pub tags: BTreeMap<String, TagState>,
     /// The reason recorded by a `run_abandoned` event, if any.
@@ -580,6 +598,7 @@ impl RunState {
             published: BTreeMap::new(),
             cancelled: BTreeMap::new(),
             delegated: BTreeSet::new(),
+            verified: BTreeMap::new(),
             tags: BTreeMap::new(),
             abandon_reason: None,
             created_ts: 0,

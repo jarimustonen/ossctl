@@ -108,12 +108,34 @@ impl ReleaseAdapter for BinaryAdapter {
 
     fn verify(
         &self,
-        _ctx: &EffectCtx<'_>,
-        _receipt: &PublishReceipt,
+        ctx: &EffectCtx<'_>,
+        receipt: &PublishReceipt,
     ) -> Result<VerifyOutcome, AdapterError> {
-        // GitHub Releases are not observable through RegistryQuery; report the
-        // honest "cannot check" rather than a false Missing (ADR-0002 §1).
-        Ok(VerifyOutcome::Unknown)
+        let tag = format!("v{}", receipt.version);
+        let out = match ctx.runner.run(
+            "gh",
+            &["release", "view", &tag, "--json", "assets"],
+            ctx.repo_root,
+        ) {
+            Ok(out) if out.status == Some(0) => out,
+            Ok(_) => return Ok(VerifyOutcome::Missing),
+            Err(_) => return Ok(VerifyOutcome::Unknown),
+        };
+        // A release object without its uploaded assets is not an observed binary
+        // publish. The live coordinator additionally checks its known asset set.
+        let has_assets = serde_json::from_str::<serde_json::Value>(&out.stdout)
+            .ok()
+            .and_then(|v| {
+                v.get("assets")
+                    .and_then(|a| a.as_array())
+                    .map(|a| !a.is_empty())
+            })
+            .unwrap_or(false);
+        Ok(if has_assets {
+            VerifyOutcome::Matches
+        } else {
+            VerifyOutcome::Missing
+        })
     }
 
     fn timeout(&self) -> Duration {
