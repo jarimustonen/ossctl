@@ -2,13 +2,16 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: bug
-status: in-progress
+status: fixed
 priority: high
 lane: bump-exec
 lane_seq: 10
 commits:
 - hash: cfe2d84
   summary: fix bump plain crate manifests
+- hash: d6b9ebf
+  summary: test harden root manifest bump paths
+closed: 2026-08-17
 ---
 
 # release --bump cannot bump a single-crate manifest ([package] version)
