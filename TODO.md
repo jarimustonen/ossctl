@@ -68,7 +68,7 @@ _- `homebase/triage-catch-review-slop` — teach `/triage-unlaned-issues` to cat
 _- `homebase/triage-script-json-envelope` — **the unlaned-issue detector is BROKEN**: it reads the
   pre-envelope `issuectl dag --json` shape, exits 3, and `/wrap-up` treats that as "clean". Two real
   issues went undetected this round. Until it is fixed, compute the set by hand:
-  `comm -3 <(issuectl --json ls --status open | jq -r '.data[]|select(.type!="epic")|.slug'|sort -u) <(issuectl dag --json | jq -r '.data.lanes[].nodes[].slug'|sort -u)`_
+  `comm -3 <(issuectl --json ls --status open | jq -r '.data[]|select(.type!="epic")|.slug'|sort -u) <(issuectl dag --json | jq -r '.data.lanes[].issues[].slug'|sort -u)`_
 _- `orchestratectl/worktree-issue-provenance` — worktree-filed issues must land UNLANED with visible AI-review provenance._
 _- `project-canon/canon-verify-deferrals` — a deferral justification must be verified, not inherited.
   Root case: a config comment claimed Homebrew publishing was blocked on a token that had existed for
