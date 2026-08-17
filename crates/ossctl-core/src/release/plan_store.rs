@@ -197,6 +197,7 @@ fn decode_plan(v: &Value, id: &str) -> Result<ReleasePlan, PlanStoreError> {
             Some("publish-all") => Ok(PlanPhase::PublishAll),
             Some("tag") => Ok(PlanPhase::Tag),
             Some("dist") => Ok(PlanPhase::Dist),
+            Some("verify") => Ok(PlanPhase::Verify),
             _ => Err(corrupt(id, "invalid phase")),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -265,4 +266,31 @@ fn decode_plan(v: &Value, id: &str) -> Result<ReleasePlan, PlanStoreError> {
             })
             .collect::<Result<Vec<_>, _>>()?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_v5_plan_without_verify_remains_readable() {
+        // Existing v5 plans must load so an interrupted run can resume through the
+        // now-mandatory verify barrier. A fresh cut re-derives a v6 address and
+        // rejects this old approval as stale instead of silently extending it.
+        let plan = serde_json::json!({
+            "plan_id": "legacy",
+            "contract_schema_version": 1,
+            "head_sha": "abc",
+            "version": "1.0.0",
+            "targets": [],
+            "phases": ["dry-run-all", "build-all", "publish-all", "tag", "dist"],
+            "homebrew_tap": null,
+            "license": null,
+            "description": null,
+            "homebrew_platforms": []
+        });
+
+        let decoded = decode_plan(&plan, "legacy").expect("legacy plan is valid");
+        assert_eq!(decoded.phases, PlanPhase::SEQUENCE[..5]);
+    }
 }

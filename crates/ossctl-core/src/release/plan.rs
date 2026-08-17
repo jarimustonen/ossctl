@@ -972,7 +972,11 @@ const SEAL_DOMAIN: &str = "ossctl.release-plan";
 /// versions. Bump this (never silently) whenever the pre-image shape changes
 /// (e.g. once resolved adapter versions are folded in), so old and new plan ids
 /// are intentionally disjoint rather than accidentally colliding.
-const SEAL_VERSION: u32 = 5;
+// v6 adds the mandatory `verify` barrier to the sealed phase sequence. v5 plan
+// documents remain readable from the durable store, but a fresh cut deliberately
+// refuses their old address as `plan_stale`: their approval did not bind `verify`,
+// so the operator must create and approve a new plan.
+const SEAL_VERSION: u32 = 6;
 
 /// The canonical hashed pre-image (see the module docs for the exact contents).
 /// A dedicated struct rather than an ad-hoc byte concatenation so the field set

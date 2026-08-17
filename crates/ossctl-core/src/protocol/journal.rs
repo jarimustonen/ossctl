@@ -73,7 +73,7 @@ pub const JOURNAL_SCHEMA_VERSION: u32 = 5;
 
 /// The coordinator phases, in barrier order (ADR-0002): the derived
 /// `PartialOrd`/`Ord` follows declaration order, so `Bump < DryRun < Build <
-/// Publish < Tag < Dist` — the order the projection sorts phase records in.
+/// Publish < Tag < Dist < Verify` — the order the projection sorts phase records in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
@@ -107,6 +107,18 @@ pub enum Phase {
 }
 
 impl Phase {
+    /// The coordinator's invariant no-bump barrier sequence. This is the single
+    /// source for the plan's public phase list as well as the journal's ordering;
+    /// a bump-owning plan prepends [`Self::Bump`].
+    pub const CUT_SEQUENCE: [Self; 6] = [
+        Self::DryRun,
+        Self::Build,
+        Self::Publish,
+        Self::Tag,
+        Self::Dist,
+        Self::Verify,
+    ];
+
     /// The wire string for this phase (matches the `Serialize` derive), so text
     /// diagnostics and JSON never drift.
     #[must_use]
@@ -154,7 +166,7 @@ pub enum PhaseOutcome {
 pub enum RunStatus {
     /// The run is live (created, not yet completed or abandoned).
     InProgress,
-    /// The final [`Phase::Dist`] barrier completed [`PhaseOutcome::Ok`].
+    /// The final [`Phase::Verify`] barrier completed [`PhaseOutcome::Ok`].
     Completed,
     /// A `run_abandoned` event was recorded (see [`RunState::abandon_reason`]).
     Abandoned,

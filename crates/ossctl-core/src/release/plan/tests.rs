@@ -13,6 +13,7 @@ use crate::contract::schema::{
 use crate::protocol::facts::{
     DistributionSurface, Facts, MaturitySignals, Package, RustWorkspace, WorkspaceMember,
 };
+use crate::protocol::journal::Phase;
 use crate::protocol::plan::PlanPhase;
 
 // ── SHA-256 known-answer vectors (FIPS 180-4 / RFC 6234) ───────────────────
@@ -246,7 +247,7 @@ fn plan_id_golden_vector() {
     let plan = build(&rust_contract(), &rust_facts(), HEAD, "1.2.0");
     assert_eq!(
         plan.plan_id,
-        "5ee31eacdddd882dfb69bd63f7fcbeee98b00a4f7fd7a46f1dd78ff769ebf703"
+        "925f60b6d1d9827d85cead987d40fbaf1905d50853b461ae35ce36638238b9e2"
     );
 }
 
@@ -274,7 +275,7 @@ fn plan_id_golden_vector_with_distribution() {
     let plan = build(&contract, &rust_facts(), HEAD, "1.2.0");
     assert_eq!(
         plan.plan_id,
-        "d0a9b8debb288ad7b6b9fc96226fc1113220e4f77c283c005c1335be5e2b5e9d"
+        "f7ce6e1559d49fdef4e694c96ff65bde3e33543862ee44043b31536ced6ace05"
     );
     // The tap threads into the plan from the sole distribution.
     assert_eq!(plan.homebrew_tap.as_deref(), Some("acme/homebrew-acme"));
@@ -434,18 +435,14 @@ fn build_keeps_explicit_contract_package_over_facts() {
 }
 
 #[test]
-fn build_emits_the_invariant_phase_sequence() {
+fn build_emits_the_coordinator_phase_sequence() {
     let plan = build(&rust_contract(), &rust_facts(), HEAD, "1.2.0");
-    assert_eq!(
-        plan.phases,
-        vec![
-            PlanPhase::DryRunAll,
-            PlanPhase::BuildAll,
-            PlanPhase::PublishAll,
-            PlanPhase::Tag,
-            PlanPhase::Dist
-        ]
-    );
+    let coordinator_phases: Vec<PlanPhase> = Phase::CUT_SEQUENCE
+        .into_iter()
+        .map(PlanPhase::from_coordinator)
+        .collect();
+    assert_eq!(plan.phases, coordinator_phases);
+    assert_eq!(plan.phases.last(), Some(&PlanPhase::Verify));
     assert_eq!(plan.contract_schema_version, 1);
     assert_eq!(plan.head_sha, HEAD);
     assert_eq!(plan.version, "1.2.0");

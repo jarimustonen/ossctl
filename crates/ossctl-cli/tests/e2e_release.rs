@@ -21,7 +21,14 @@ fn plan_is_deterministic_and_has_the_release_shape() {
     assert_eq!(first["data"]["version"], "0.1.0");
     assert_eq!(
         first["data"]["phases"],
-        serde_json::json!(["dry-run-all", "build-all", "publish-all", "tag", "dist"])
+        serde_json::json!([
+            "dry-run-all",
+            "build-all",
+            "publish-all",
+            "tag",
+            "dist",
+            "verify"
+        ])
     );
     assert!(
         shims.log().is_empty(),

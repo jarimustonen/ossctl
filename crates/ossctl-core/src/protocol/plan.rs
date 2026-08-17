@@ -61,8 +61,9 @@ pub struct ReleasePlan {
     /// resolved from detected repo facts where possible.
     pub targets: Vec<PlanTarget>,
     /// The coordinator phase sequence a cut drives (ADR-0002 §2): dry-run-all →
-    /// build-all → publish-all → tag → dist (the post-tag distribution finalize,
-    /// e.g. the Homebrew formula whose tarball only exists after the tag). When the
+    /// build-all → publish-all → tag → dist → verify. The final verification barrier
+    /// observes every publish target at its destination before the run is complete.
+    /// When the
     /// plan owns a version bump ([`Self::bump`] is `Some`), a leading
     /// [`PlanPhase::Bump`] is prepended — the engine sets the workspace version,
     /// rewrites the intra-workspace pins, refreshes the lockfile, finalizes the
@@ -251,9 +252,33 @@ pub enum PlanPhase {
     /// tag (the Homebrew formula, whose `url` is the just-created tag archive) are
     /// finalized with the real, post-tag-computed `sha256`.
     Dist,
+    /// Post-cut verification: every published or CI-delegated target is observed at
+    /// its destination. A cut is complete only after this barrier succeeds.
+    Verify,
+}
+
+impl From<crate::protocol::journal::Phase> for PlanPhase {
+    /// Map a coordinator barrier to the self-describing plan phase it seals.
+    fn from(value: crate::protocol::journal::Phase) -> Self {
+        Self::from_coordinator(value)
+    }
 }
 
 impl PlanPhase {
+    /// Map a coordinator barrier to the self-describing plan phase it seals.
+    #[must_use]
+    pub const fn from_coordinator(value: crate::protocol::journal::Phase) -> Self {
+        match value {
+            crate::protocol::journal::Phase::Bump => Self::Bump,
+            crate::protocol::journal::Phase::DryRun => Self::DryRunAll,
+            crate::protocol::journal::Phase::Build => Self::BuildAll,
+            crate::protocol::journal::Phase::Publish => Self::PublishAll,
+            crate::protocol::journal::Phase::Tag => Self::Tag,
+            crate::protocol::journal::Phase::Dist => Self::Dist,
+            crate::protocol::journal::Phase::Verify => Self::Verify,
+        }
+    }
+
     /// The wire string for this phase (kebab-case; the single source the
     /// `Serialize` impl also emits, so text and JSON never drift).
     #[must_use]
@@ -265,20 +290,23 @@ impl PlanPhase {
             Self::PublishAll => "publish-all",
             Self::Tag => "tag",
             Self::Dist => "dist",
+            Self::Verify => "verify",
         }
     }
 
-    /// The invariant phase order a `--bump`-less cut drives, dry-run-all → dist. A
-    /// `--bump` plan prepends [`PlanPhase::Bump`] (see [`ReleasePlan::phases`]).
-    pub const SEQUENCE: [PlanPhase; 5] = [
-        Self::DryRunAll,
-        Self::BuildAll,
-        Self::PublishAll,
-        Self::Tag,
-        Self::Dist,
+    /// The invariant phase order a `--bump`-less cut drives, derived from the
+    /// coordinator's own barrier sequence. A `--bump` plan prepends
+    /// [`PlanPhase::Bump`] (see [`ReleasePlan::phases`]).
+    pub const SEQUENCE: [PlanPhase; crate::protocol::journal::Phase::CUT_SEQUENCE.len()] = [
+        Self::from_coordinator(crate::protocol::journal::Phase::CUT_SEQUENCE[0]),
+        Self::from_coordinator(crate::protocol::journal::Phase::CUT_SEQUENCE[1]),
+        Self::from_coordinator(crate::protocol::journal::Phase::CUT_SEQUENCE[2]),
+        Self::from_coordinator(crate::protocol::journal::Phase::CUT_SEQUENCE[3]),
+        Self::from_coordinator(crate::protocol::journal::Phase::CUT_SEQUENCE[4]),
+        Self::from_coordinator(crate::protocol::journal::Phase::CUT_SEQUENCE[5]),
     ];
 
-    /// The invariant phase order a cut drives, dry-run-all → dist (borrowed view
+    /// The invariant phase order a cut drives, dry-run-all → verify (borrowed view
     /// of [`Self::SEQUENCE`]; no allocation).
     #[must_use]
     pub fn sequence() -> &'static [PlanPhase] {
