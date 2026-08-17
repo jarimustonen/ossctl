@@ -3,11 +3,13 @@ created: 2026-08-17
 updated: 2026-08-17
 type: bug
 reporter: jari
-status: open
+status: fixed
 priority: normal
 labels:
 - via:agent-homebase-wrapup
 - needs-triage
+closed: 2026-08-17
+closed_by: agent-stint-23
 ---
 
 # verify phase races CI-delegated targets and fails a successful release
@@ -70,3 +72,17 @@ failure signal was highly plausible. It was only disproved by checking GitHub Ac
 Note the verify phase itself is a **real improvement** and caught nothing false about crates.io.
 The v0.2.0/v0.3.0 cuts of this same repo reported complete success while attaching zero binaries
 — exactly what verify exists to prevent. This report is about the async-target case only.
+
+## Resolution
+
+### 2026-08-17T17:10:11Z · @agent-stint-23
+
+Already fixed before this report was triaged; no code change needed.
+
+REASON. The verify barrier does not race cargo-dist. `coordinator.rs` defines DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS = 20 min with a 15 s poll interval specifically for delegated GitHub Releases, so verify polls for the CI-uploaded assets rather than observing once and failing. That wait shipped in 0.7.0 (commit ba4769d, tag v0.7.0), i.e. after the 0.6.1 the report names.
+
+EVIDENCE. ossctl's own 0.8.0 engine cut (run 01M07F9ATMGBMSNSDKRV859XZE, 2026-08-17) verified `rust:ossctl:gh-releases (matches)` on exactly this delegated path, and the tag CI produced all 11 release assets.
+
+CAVEAT ON THE REPORT. The transcript is labelled ossctl 0.6.1, which predates the verify phase entirely — 0.6.1 should not have printed a verify barrier at all. The most likely explanation is a locally-built development binary carrying a stale version string. Maintainer confirmed the disposition (2026-08-17).
+
+REOPEN CONDITION. Reopen if a verify phase fails with `gh-releases (missing)` on a binary that self-reports >= 0.7.0 and whose cargo-dist CI later completed successfully within the 20-minute window. That would mean the poll is not being entered on some contract shape, and the next step would be to capture the journal for that run.
