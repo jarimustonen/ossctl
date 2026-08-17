@@ -5,21 +5,53 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-08-17 (stint #21). New agent: read this, then continue with a fresh
-`/stint-start`. Main is clean + pushed. Live: **0.6.1** on all four channels. The DAG frontier is
-**FULL and the head is HIGH**: `release-tag-preempts-cargo-dist`, then `release-bump-plan-uncuttable`
-— two field-confirmed bugs from the issuectl 0.14.1 cut. Start there; do not go looking for work._
+_Handoff written 2026-08-17 (stint #22, Fable-orchestrated). New agent: read this, then continue
+with a fresh `/stint-start`. Main is clean + pushed._
 
-_**⭐ THE THEME — read this before picking anything up.** Four open issues in `release-safety` are
-the same defect wearing different clothes: **the engine reports success without verifying the
-artifact.** `release-tag-preempts-cargo-dist` (green cut, zero binaries, no formula),
-`release-verify-homebrew-tap` (nothing checks the tap carries the released version),
-`release-verify-delegated-github-release` (nothing checks CI made the Release), and the dist
-phase's own `✓ dist complete` which checks nothing. This round found the Homebrew leg had been
-shipping an **uninstallable formula for six releases** while every cut reported green. Treat these
-as one design problem — a publish target that cannot be observed after the fact is not a publish
-target — rather than four tickets. The engine already does this right for crates.io (it confirms
-the version reached the index before journaling a receipt); that is the pattern to copy._
+_**Stint #22 (2026-08-17) — the release-safety cluster is CLOSED as one design.** Stint #21's ⭐
+THEME (the engine reports success without verifying the artifact) plus the two HIGH field bugs
+were resolved by one design doc (`issues/release-tag-preempts-cargo-dist/design.md`, D1–D6) and
+six worktree units, all landed + green:_
+_- **D1+D2 plan store** — `release plan` persists the sealed plan under
+  `git-common-dir/ossctl/plans/<plan_id>.json`; `cut` recovers an omitted `--bump` from it
+  (field-verified: the exact issuectl repro now cuts), `resume` survives a code fix moving HEAD,
+  and `plan_stale` never again recommends a republishing plan id. ⚠️ Mechanism correction: the
+  `--bump` staleness hash was NEVER broken — the operator had to repeat `--bump` at cut and the
+  error steered them to the no-bump plan. Closed: `release-bump-plan-uncuttable`,
+  `resume-drift-after-fix`._
+_- **D3 mandatory verify phase** — a new final coordinator barrier: a run is `Completed` only
+  when every target is OBSERVED at its destination (crates.io index, tap formula content,
+  GitHub Release assets; journal v4→v5; `Unknown` is not green). Closed:
+  `release-verify-homebrew-tap`, `release-verify-delegated-github-release`,
+  `release-tag-preempts-cargo-dist`._
+_- **D4 undeclared-distribution refusal** — facts detect cargo-dist/tag-workflows; `cut` refuses
+  `undeclared_distribution` before creating a run when the contract under-declares (the issuectl
+  0.14.1 accident shape). **D5** stale-lock recovery in `abandon` (closed
+  `release-abandon-break-stale-lock`). **D6** hermetic e2e harness
+  (`crates/ossctl-cli/tests/e2e/`) — the cut is now testable without cutting. Plus cli-canon §2
+  exit codes (closed `cli-canon-exit-codes`)._
+
+_**🌍 CROSS-REPO AUDIT (maintainer request) — full report:
+`homebase/issues/cross-repo-release-standardisation/audit-2026-08-17.md`.** The fleet had FOUR
+release doctrines; contracts normalized + pushed in issuectl (Windows dropped, gh-releases
+declared), orchestratectl (gh-releases declared), project-canon (orphaned tap fixed: cargo-dist
+homebrew publisher enabled — its token had existed since 08-15), glasspad (engine-owned homebrew
+target removed — it was a double-writer landmine). intakectl is deliberately publish-none
+(deploy.sh → haapa). New issues filed here: `homebrew-ci-delegated-adapter` (lets the other
+repos declare their CI-owned tap; also fixes `dist generate` under-generating),
+`publish-none-unrepresentable` (intakectl's blocker), plus audit evidence on
+`release-ci-publish-mode` (glasspad forbids engine publish — this mode is its path onto the
+engine)._
+
+_**⚠️ MARKER GUIDANCE CORRECTED.** The old instruction "prepend the ossctl ownership marker to
+every tap before cutting" applies ONLY to engine-written taps (ossctl's own). The
+glasspad/orchestratectl/issuectl/project-canon taps are written by cargo-dist CI on every tag —
+a marker there is pointless and would vanish on the next release. Do not add markers to them._
+
+_**Worker-model note (for the orchestrator).** A pi/gpt-5.6-terra worker gave up twice on the
+verify-phase unit (large semantic seam). Salvage-commit + a fresh worker on gpt-5.6-sol (pi
+default model temporarily switched via `~/.pi/agent/settings.json`, restored after spawn)
+finished it cleanly. For coordinator-seam units, prefer the stronger model up front._
 
 _**Stint #21 (2026-08-16→17) — shipped 0.6.0 + 0.6.1, unbroke Homebrew, pruned 40% of the issue base.**_
 
@@ -30,13 +62,13 @@ install; the maintainer's machine sat on **0.2.2** and it was mistaken for a sta
 formula now carries an ownership marker, per-platform prebuilt archive URLs with checksums,
 `bin.install`, and no Rust toolchain dependency. **Verified: `brew upgrade ossctl` 0.2.2 → 0.6.1.**_
 
-_**⚠️ EVERY OTHER TAP NEEDS A ONE-TIME MANUAL MARKER.** The tap-write path refuses to replace an
-unmarked formula (it cannot tell its own pre-marker output from a hand-maintained one). None of the
-issuectl / glasspad / orchestratectl / project-canon taps carry the marker, so each will fail its
-next cut **at the dist phase — after crates.io and the tag have already landed**. Prepend this as the
-formula's first line before cutting, or add it after the failure and `release resume --allow-unverified`:_
-
-    # Generated by ossctl; do not edit by hand (template-version: 1)
+_**⚠️ ~~EVERY OTHER TAP NEEDS A ONE-TIME MANUAL MARKER~~ — SUPERSEDED by the stint #22 audit.**
+The issuectl / glasspad / orchestratectl / project-canon taps are written by **cargo-dist CI**
+on every tag, not by the engine's tap-write, so the ossctl ownership marker does not apply to
+them (it would vanish on the next release). The marker concerns ONLY engine-written taps
+(ossctl's own, already marked). Their contracts also no longer declare engine-owned homebrew
+targets, so an engine cut cannot reach the tap-write refusal there. See the #22 handoff block
+and `homebase/issues/cross-repo-release-standardisation/audit-2026-08-17.md`._
 
 _**Releases: 0.6.0 then 0.6.1, both engine-cut.** 0.6.0 (`ffcef9c`) shipped the installable formula,
 the downstream-safe stale-binary guard, `config path`/`config show`, the contract never-drop fix, the
