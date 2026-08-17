@@ -428,6 +428,24 @@ pub enum AdapterError {
         /// The registry-recorded checksum (crates.io sparse-index `cksum`).
         remote: String,
     },
+    /// A **CI-delegated** publish was planned for a version that is ALREADY on the
+    /// registry, so the cut's post-tag observation could not distinguish CI's publish
+    /// from the pre-existing one.
+    ///
+    /// Raised by the [`cargo`] adapter's `cargo-publish-ci` dry-run (pre-tag, before
+    /// any irreversible step). An engine-owned publish cannot hit this — its publish
+    /// path probes and digest-authenticates the registry before uploading — but a
+    /// delegated target is skipped in publish-all, so `verify`'s presence check is the
+    /// only gate, and presence is satisfied by an upload that predates the cut. Cutting
+    /// an already-published version would therefore end GREEN while CI's `cargo
+    /// publish` failed with "crate version already uploaded": a silent false green,
+    /// which is the one outcome the verify barrier exists to prevent.
+    DelegatedVersionAlreadyPublished {
+        /// The package whose sealed version is already on the registry.
+        package: String,
+        /// The version that is already published.
+        version: String,
+    },
     /// An adapter was handed a target whose declared [`registry`](Target::registry)
     /// it does not support, so it refuses the target **before any external action**
     /// rather than risk publishing to an unexpected destination. Raised by the
@@ -514,6 +532,15 @@ impl std::fmt::Display for AdapterError {
                  non-reproducible build/toolchain, or a supply-chain substitution) before \
                  proceeding. The cut fails here rather than skip and record a receipt for a crate \
                  it did not publish"
+            ),
+            Self::DelegatedVersionAlreadyPublished { package, version } => write!(
+                f,
+                "`{package}@{version}` is already published on the registry, and this target's \
+                 publish is CI-delegated (`cargo-publish-ci`). The tag-triggered workflow would \
+                 fail with `crate version already uploaded`, while the engine's post-cut verify \
+                 would observe the ALREADY-published version and report the cut green — a publish \
+                 that never happened. Bump the version (or drop the target) and re-plan; refusing \
+                 now, before the tag is pushed"
             ),
             Self::UnsupportedRegistry { adapter, registry } => write!(
                 f,

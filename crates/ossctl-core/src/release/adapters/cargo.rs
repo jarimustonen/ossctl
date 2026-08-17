@@ -250,6 +250,29 @@ impl ReleaseAdapter for CargoAdapter {
         // effect (ADR-0002). One plan target = one publish unit: exactly this target's
         // own package.
         let deps = target_workspace_deps(ctx, t)?;
+        // PRE-TAG BASELINE for a CI-delegated publish. The engine's own publish path
+        // probes the registry before uploading (`is_published` → skip / digest-
+        // authenticate), which also means a version that is ALREADY on crates.io can
+        // never be silently re-published by the engine. A delegated target has no such
+        // probe: publish-all skips it, so nothing checks the version until verify —
+        // and verify observes *presence*, which a pre-existing upload satisfies. The
+        // reachable failure that closes: cutting a version that is already published
+        // (a re-cut, or a manifest that was never bumped). CI's `cargo publish` fails
+        // with "crate version already uploaded", the engine observes the OLD upload,
+        // and the run goes green over a publish that never happened — silently.
+        //
+        // So establish the baseline here, in dry-run-all: pre-tag, side-effect-free,
+        // and before anything irreversible. Fail-closed on an unreachable registry
+        // (`is_published`'s own discipline): if we cannot prove the version is absent
+        // now, a later "present" observation proves nothing about this cut.
+        if self.adapter == Adapter::CargoPublishCi
+            && is_published(ctx, t.ecosystem(), &t.package, &t.version)?
+        {
+            return Err(AdapterError::DelegatedVersionAlreadyPublished {
+                package: t.package.clone(),
+                version: t.version.clone(),
+            });
+        }
         let deferred = unpublished_workspace_deps(ctx, t.ecosystem(), &deps);
         let defer_packaging = !deferred.is_empty();
         let (planned_commands, _artifacts) =
@@ -260,7 +283,13 @@ impl ReleaseAdapter for CargoAdapter {
         // CI-delegated `cargo-publish-ci` (whose publish-all entry is a journalled
         // skip). An approver reading the dry-run must not be told the engine will run
         // a publish it will never run.
-        let mut notes = vec![if self.is_ci_delegated() {
+        //
+        // Keyed on the IDENTITY, not on `is_ci_delegated()`: that capability is also
+        // true for `cargo-dist`, whose CI runs no `cargo publish` and is verified on
+        // its GitHub Release. `cargo-dist` returns from its own arm above and never
+        // reaches here, so the broad flag reads correctly today — but only by accident
+        // of control flow, and this note is what an approver trusts.
+        let mut notes = vec![if self.adapter == Adapter::CargoPublishCi {
             format!(
                 "publish is CI-delegated: the tag push triggers the workflow that runs \
                  `cargo publish` for `{}`; the engine skips it in publish-all and observes \
@@ -288,7 +317,7 @@ impl ReleaseAdapter for CargoAdapter {
             // The index-wait is the ENGINE's between-publishes wait; a CI-delegated
             // target never runs it (its whole publish happens in the workflow, which
             // owns its own ordering), so promising it would misdescribe the cut.
-            notes.push(if self.is_ci_delegated() {
+            notes.push(if self.adapter == Adapter::CargoPublishCi {
                 format!(
                     "the CI publish workflow must publish these workspace dependencies of \
                      `{}` first — the engine does not order a delegated publish: {chain}",

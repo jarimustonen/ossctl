@@ -3625,11 +3625,14 @@ fn ci_delegation_matches_the_unsupported_publishers() {
         Adapter::GhActionPypiPublish,
     ];
     // Derived from the wire enum itself, so a NEW adapter identity is covered the
-    // moment it is added — the list can never silently fall behind the enum.
+    // moment it is added — the list can never silently fall behind the enum. `map` +
+    // panic, not `filter_map`: silently dropping an unparseable entry is exactly the
+    // gap this derivation exists to close.
     let all: Vec<Adapter> = Adapter::VALID
         .iter()
-        .filter_map(|s| Adapter::parse(s))
+        .map(|s| Adapter::parse(s).unwrap_or_else(|| panic!("VALID entry {s:?} does not parse")))
         .collect();
+    assert_eq!(all.len(), Adapter::VALID.len());
     // 1. The capability flag is set for exactly the delegated set.
     for id in all {
         assert_eq!(
@@ -3671,11 +3674,14 @@ fn ci_delegation_matches_the_unsupported_publishers() {
 #[test]
 fn only_cargo_dist_owns_the_github_release_and_it_is_a_subset_of_ci_delegation() {
     // Derived from the wire enum itself, so a NEW adapter identity is covered the
-    // moment it is added — the list can never silently fall behind the enum.
+    // moment it is added — the list can never silently fall behind the enum. `map` +
+    // panic, not `filter_map`: silently dropping an unparseable entry is exactly the
+    // gap this derivation exists to close.
     let all: Vec<Adapter> = Adapter::VALID
         .iter()
-        .filter_map(|s| Adapter::parse(s))
+        .map(|s| Adapter::parse(s).unwrap_or_else(|| panic!("VALID entry {s:?} does not parse")))
         .collect();
+    assert_eq!(all.len(), Adapter::VALID.len());
     for id in all {
         let owns = resolve(id).ci_owns_github_release();
         assert_eq!(
@@ -3768,4 +3774,75 @@ fn cargo_publish_ci_does_not_claim_the_github_release() {
     // (`coordinator-release-vs-cargo-dist-ownership`).
     assert!(resolve(Adapter::CargoPublishCi).is_ci_delegated());
     assert!(!resolve(Adapter::CargoPublishCi).ci_owns_github_release());
+}
+
+#[test]
+fn cargo_publish_ci_refuses_a_version_that_is_already_on_the_registry() {
+    // The pre-tag baseline. A delegated target is skipped in publish-all, so nothing
+    // probes the registry before the tag — and `verify` observes PRESENCE, which a
+    // pre-existing upload satisfies. Cutting an already-published version would end
+    // green while CI's `cargo publish` failed with "already uploaded". Refuse in
+    // dry-run, where nothing has happened yet.
+    let cmd = FakeCmd::new().with_metadata(&metadata_single("tool", "1.2.3"));
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new().with("rust", "tool", &["1.2.3"]);
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublishCi,
+        "1.2.3",
+    );
+    let err = resolve(Adapter::CargoPublishCi)
+        .dry_run(&c, &t)
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AdapterError::DelegatedVersionAlreadyPublished { ref version, .. } if version == "1.2.3"
+        ),
+        "expected the already-published refusal, got: {err}"
+    );
+
+    // The ENGINE-owned identity is unaffected: its own publish path probes and
+    // digest-authenticates an already-published version, so a re-cut still resumes
+    // cleanly rather than being refused at dry-run.
+    let cmd = FakeCmd::new().with_metadata(&metadata_single("tool", "1.2.3"));
+    let c = ctx(&cmd, &clock, &reg, root);
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+        "1.2.3",
+    );
+    assert!(resolve(Adapter::CargoPublish).dry_run(&c, &t).is_ok());
+}
+
+#[test]
+fn cargo_publish_ci_fails_closed_when_the_registry_cannot_be_probed() {
+    // The baseline is only meaningful if it is trustworthy: an unreachable registry
+    // cannot prove the version absent, and a later "present" observation would then
+    // prove nothing about this cut. Fail closed, pre-tag — the same discipline the
+    // engine's own publish probe follows.
+    let cmd = FakeCmd::new().with_metadata(&metadata_single("tool", "1.2.3"));
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::erroring();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublishCi,
+        "1.2.3",
+    );
+    let err = resolve(Adapter::CargoPublishCi)
+        .dry_run(&c, &t)
+        .unwrap_err();
+    assert!(
+        matches!(err, AdapterError::RegistryUnavailable { .. }),
+        "expected a fail-closed registry error, got: {err}"
+    );
 }

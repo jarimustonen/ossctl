@@ -358,6 +358,13 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
                 .to_string(),
         );
     }
+    // A plan whose engine-published crate depends on a CI-delegated one can never be
+    // cut (publish-all runs before the tag that triggers CI). Warn here — `cut`
+    // refuses it — so the approver fixes the contract rather than discovering it
+    // mid-cut.
+    warnings.extend(ossctl_core::release::plan::delegated_dependency_messages(
+        &ossctl_core::release::plan::delegated_dependency_conflicts(&plan, &facts),
+    ));
     // A target whose package is still null after facts-resolution is ambiguous
     // (a monorepo with several crates of one ecosystem): the executor will infer
     // it at cut time. Name it so the approver knows the plan is not fully
@@ -1708,6 +1715,11 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     // unresolved package, a duplicate-ecosystem target) is refused up front rather
     // than leaving an orphaned `run_created` run behind.
     coordinator::validate_plan(&current).map_err(|e| cut_error_to_cli("(not created)", e))?;
+    // …including the phase-ordering conflict a mixed engine/CI-published workspace can
+    // declare: publish-all runs BEFORE the tag that triggers the delegated publish, so
+    // an engine-published crate depending on a CI-delegated one can never be satisfied.
+    // No retry or resume fixes it — only a contract edit — so refuse before the run.
+    ensure_no_delegated_dependency_conflict(&current, &facts)?;
 
     for warning in provenance_warnings {
         eprintln!("warning: {warning}");
@@ -2371,6 +2383,25 @@ fn ensure_declared_distribution(
         UndeclaredDistribution::Homebrew => "distribution.homebrew_tap is set, but OSS-RELEASE.md targets: has no registry: homebrew target. Add {ecosystem, package, registry: homebrew, adapter: homebrew-tap} to OSS-RELEASE.md's targets: and re-plan; otherwise the tap leg would be silently skipped".to_string(),
     };
     Err(CliError::user("undeclared_distribution", message))
+}
+
+/// Refuse a cut whose engine-published crates.io target depends on a CI-delegated
+/// crate in the same workspace (`release-ci-publish-mode`). The engine publishes in
+/// publish-all, before the tag push that triggers CI, so the dependency can never be
+/// index-visible in time; the cut would burn the cargo adapter's index-wait and fail.
+fn ensure_no_delegated_dependency_conflict(
+    plan: &ossctl_core::protocol::plan::ReleasePlan,
+    facts: &ossctl_core::protocol::facts::Facts,
+) -> Result<(), CliError> {
+    let conflicts = ossctl_core::release::plan::delegated_dependency_conflicts(plan, facts);
+    let messages = ossctl_core::release::plan::delegated_dependency_messages(&conflicts);
+    match messages.first() {
+        None => Ok(()),
+        Some(message) => Err(CliError::user(
+            "delegated_dependency_conflict",
+            message.clone(),
+        )),
+    }
 }
 
 fn ensure_single_distribution(contract: &Contract) -> Result<(), CliError> {

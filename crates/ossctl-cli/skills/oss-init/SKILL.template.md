@@ -215,7 +215,12 @@ docs_site: none
 
 Adapter values for a `crates.io` target: `cargo-publish` (the engine runs the publish)
 or `cargo-publish-ci` (a tag-triggered CI workflow runs it; the engine skips the publish
-and verifies the crate on the index afterwards).
+and verifies the crate on the index afterwards). With `cargo-publish-ci`, declare **every**
+crate the workflow publishes as its own target — the engine derives no publish order for a
+delegated crate, so it verifies exactly the crates you declare and an undeclared one is
+released unobserved. Do not mix publishers inside one workspace: an engine-published crate
+that depends on a `cargo-publish-ci` crate cannot be cut (the engine publishes before the
+tag that triggers CI), and `ossctl release cut` refuses it.
 
 **Default `targets` expansion** (one per ecosystem): `rust`→`crates.io`/`cargo-publish`,
 `node`→`npm`/`release-please` (single) or `changesets` (monorepo), `python`→`pypi`/`gh-action-pypi-publish`,

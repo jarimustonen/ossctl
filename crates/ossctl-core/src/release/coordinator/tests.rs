@@ -3535,23 +3535,69 @@ fn a_resumed_bump_run_does_not_double_bump() {
 struct LaggingRegistry {
     version: String,
     appear_after: Cell<u32>,
+    /// Total lookups served — lets a test pin the POLL discipline (one lookup per
+    /// interval), not merely the final outcome.
+    calls: Cell<u32>,
 }
 impl LaggingRegistry {
     fn new(version: &str, appear_after: u32) -> Self {
         Self {
             version: version.to_string(),
             appear_after: Cell::new(appear_after),
+            calls: Cell::new(0),
         }
     }
 }
 impl RegistryQuery for LaggingRegistry {
     fn published_versions(&self, _ecosystem: &str, _package: &str) -> io::Result<Vec<String>> {
+        self.calls.set(self.calls.get() + 1);
         let remaining = self.appear_after.get();
         if remaining == 0 {
             return Ok(vec![self.version.clone()]);
         }
         self.appear_after.set(remaining - 1);
         Ok(Vec::new())
+    }
+}
+
+/// A registry that answers "absent" for `answers` lookups and then fails forever —
+/// the transient-outage-at-the-deadline shape. The verdict must accumulate over the
+/// window (it ANSWERED, so the version really is absent), not sample the last poll.
+struct FlakyRegistry {
+    answers: Cell<u32>,
+}
+impl RegistryQuery for FlakyRegistry {
+    fn published_versions(&self, _ecosystem: &str, _package: &str) -> io::Result<Vec<String>> {
+        let remaining = self.answers.get();
+        if remaining == 0 {
+            return Err(io::Error::other("registry unreachable"));
+        }
+        self.answers.set(remaining - 1);
+        Ok(Vec::new())
+    }
+}
+
+/// A registry that reports one package as published only after `after` lookups, and
+/// otherwise mirrors a [`FakeRegistry`] — the faithful shape of a CI-delegated cut:
+/// the pre-tag dry-run probe must see the version ABSENT (else the engine refuses the
+/// cut), and verify must see it PRESENT once the workflow has run.
+struct CiPublishRegistry {
+    inner: FakeRegistry,
+    package: String,
+    version: String,
+    after: Cell<u32>,
+}
+impl RegistryQuery for CiPublishRegistry {
+    fn published_versions(&self, ecosystem: &str, package: &str) -> io::Result<Vec<String>> {
+        if ecosystem == "rust" && package == self.package {
+            let remaining = self.after.get();
+            if remaining > 0 {
+                self.after.set(remaining - 1);
+                return Ok(Vec::new());
+            }
+            return Ok(vec![self.version.clone()]);
+        }
+        self.inner.published_versions(ecosystem, package)
     }
 }
 
@@ -3724,7 +3770,6 @@ fn a_registry_outage_leaves_a_delegated_publish_unknown_never_missing() {
         repo_root: &root,
         artifacts: &EMPTY_ARTIFACTS,
     };
-    let plan = ci_publish_plan();
     let target = AdapterTarget {
         target: crate::contract::schema::Target {
             ecosystem: Ecosystem::Rust,
@@ -3736,7 +3781,7 @@ fn a_registry_outage_leaves_a_delegated_publish_unknown_never_missing() {
         version: "1.0.0".into(),
     };
     assert_eq!(
-        verify_delegated_registry(&ctx, &plan, &target),
+        verify_delegated_registry(&ctx, &target),
         VerifyOutcome::Unknown
     );
 }
@@ -3749,12 +3794,15 @@ fn a_mixed_plan_publishes_the_engine_target_and_delegates_the_ci_one() {
     let clock = FakeClock(Cell::new(1000));
     let idgen = FakeIdGen("RUN01".into());
     let cmd = FakeCmd::new().crate_version("1.0.0");
-    // The engine's own publish lands in this map; the delegated crate is seeded as
-    // already-on-the-index (CI published it), so both verify green.
-    let reg = cmd.registry();
-    reg.published
-        .borrow_mut()
-        .insert(("rust".into(), "tool".into()), "1.0.0".into());
+    // The engine's own npm publish lands in the inner map; the delegated crate is
+    // absent for the pre-tag probe and present from the first verify poll onward —
+    // i.e. CI published it after the tag push.
+    let reg = CiPublishRegistry {
+        inner: cmd.registry(),
+        package: "tool".into(),
+        version: "1.0.0".into(),
+        after: Cell::new(1),
+    };
     let tagger = FakeTagger::new();
     let root = PathBuf::from("/repo");
     let ctx = EffectCtx {
@@ -3867,4 +3915,122 @@ fn a_delegated_cargo_dist_target_is_still_observed_as_a_github_release() {
         "a delegated cargo-dist target must be observed as a GitHub Release: {:?}",
         cmd.calls()
     );
+}
+
+/// The delegated target fixture the observer-level tests poll for.
+fn ci_adapter_target() -> AdapterTarget {
+    AdapterTarget {
+        target: crate::contract::schema::Target {
+            ecosystem: Ecosystem::Rust,
+            package: Some("tool".into()),
+            registry: Registry::CratesIo,
+            adapter: Adapter::CargoPublishCi,
+        },
+        package: "tool".into(),
+        version: "1.0.0".into(),
+    }
+}
+
+#[test]
+fn the_delegated_index_observer_polls_through_the_injected_clock() {
+    // Pins the POLL discipline, not just the outcome: one lookup per interval,
+    // sleeping through the injected Clock between them, and no sleep after the match.
+    // Without this, deleting the `sleep` would leave every other test green while the
+    // engine hot-spun on crates.io for twenty minutes.
+    let clock = FakeClock(Cell::new(1000));
+    let cmd = FakeCmd::new();
+    let reg = LaggingRegistry::new("1.0.0", 3);
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let before = clock.0.get();
+    assert_eq!(
+        verify_delegated_registry(&ctx, &ci_adapter_target()),
+        VerifyOutcome::Matches
+    );
+    assert_eq!(reg.calls.get(), 4, "three absent answers, then the match");
+    // Three sleeps of 15s (the fourth lookup matched and returned immediately); the
+    // remaining advance is the clock reads themselves, so assert the sleep floor.
+    assert!(
+        clock.0.get() - before >= 3 * DELEGATED_RELEASE_VERIFY_POLL_INTERVAL.as_secs(),
+        "the observer did not sleep between polls"
+    );
+}
+
+#[test]
+fn an_outage_at_the_deadline_does_not_erase_an_answered_absence() {
+    // The Missing/Unknown split is an operator-triage signal: "CI did not publish"
+    // vs "we could not look". A registry that answered `absent` for most of the
+    // window and then blipped at the deadline is the FORMER — sampling only the last
+    // poll would send the operator chasing a phantom outage.
+    let clock = FakeClock(Cell::new(1000));
+    let cmd = FakeCmd::new();
+    let reg = FlakyRegistry {
+        answers: Cell::new(5),
+    };
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    assert_eq!(
+        verify_delegated_registry(&ctx, &ci_adapter_target()),
+        VerifyOutcome::Missing
+    );
+}
+
+#[test]
+fn a_full_cut_against_an_unreachable_registry_fails_verify_as_unknown() {
+    // The execute-level half of the outage path: the run must end FAILED with the
+    // verify barrier failed and the honest Unknown journalled — never Completed, and
+    // never a false Missing.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::new().crate_version("1.0.0");
+    let reg = UnreachableRegistry;
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = RecordingSink::default();
+    let plan = ci_publish_plan();
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "p".into(),
+        "1.0.0".into(),
+        ids.clone(),
+    )
+    .unwrap();
+    let err = execute(&mut journal, &plan, &ctx, &tagger, &mut sink)
+        .expect_err("an unobservable delegated target cannot complete");
+    // The pre-tag probe fails closed on an unreachable registry — the cut stops in
+    // dry-run, before the tag, which is strictly better than reaching verify.
+    assert!(
+        err.to_string().contains("cannot reach the registry"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        tagger.calls().is_empty(),
+        "a tag was pushed: {:?}",
+        tagger.calls()
+    );
+    assert_ne!(journal.state().status, RunStatus::Completed);
 }

@@ -1242,7 +1242,8 @@ fn dist_phase(
 /// its Homebrew job writing the tap formula, or a `cargo-publish-ci` workflow
 /// publishing the crate to the registry index.
 const DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS: u64 = 20 * 60;
-/// Delay between delegated GitHub Release observation attempts. Routed through
+/// Delay between observation attempts on any delegated destination (GitHub Release,
+/// tap formula, registry index). Routed through
 /// [`Clock::sleep`](crate::ports::Clock::sleep) so tests advance virtual time.
 const DELEGATED_RELEASE_VERIFY_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(15);
@@ -1281,9 +1282,7 @@ fn verify_phase(
             // `{registry: crates.io, adapter: cargo-dist}` — observed exactly where it
             // was observed before.
             match (tp.input.target.adapter, tp.input.target.registry) {
-                (Adapter::CargoPublishCi, _) => {
-                    verify_delegated_registry(&verify_ctx, plan, &tp.input)
-                }
+                (Adapter::CargoPublishCi, _) => verify_delegated_registry(&verify_ctx, &tp.input),
                 (_, Registry::Homebrew) => {
                     verify_delegated_homebrew(&verify_ctx, plan, &tp.input.package)
                 }
@@ -1400,33 +1399,44 @@ fn verify_delegated_homebrew(
 ///
 /// Outcome discipline (ADR-0002's verify amendment, the reconcile table's
 /// never-guess rule):
-/// - the version appears in the registry's published set ⇒ [`VerifyOutcome::Matches`]
-/// - the window elapses with the registry **answering** and the version absent ⇒
-///   [`VerifyOutcome::Missing`] (CI did not publish it — a real, actionable failure)
-/// - the window elapses with every lookup **failing** (an outage, or an ecosystem the
+/// - the target's sealed version appears in the registry's published set ⇒
+///   [`VerifyOutcome::Matches`]
+/// - the window elapses with the registry having **answered at least once** and the
+///   version absent ⇒ [`VerifyOutcome::Missing`] (CI did not publish it — a real,
+///   actionable failure)
+/// - the window elapses with **every** lookup failing (an outage, or an ecosystem the
 ///   [`RegistryQuery`](crate::ports::RegistryQuery) port has no client for) ⇒
 ///   [`VerifyOutcome::Unknown`] — never a false `Missing`. Both are barrier failures,
-///   but the operator needs to know which one happened.
+///   but the operator needs to know which one happened, so the verdict accumulates
+///   over the whole window rather than sampling the final poll.
 ///
 /// No digest comparison: there is no engine receipt for a delegated publish (nothing
 /// was uploaded from here), so presence at the sealed version is the strongest
 /// available observation. That is the same bar the delegated Release/tap observers
-/// meet.
-fn verify_delegated_registry(
-    ctx: &EffectCtx<'_>,
-    plan: &ReleasePlan,
-    target: &AdapterTarget,
-) -> VerifyOutcome {
+/// meet. Presence alone would be weak evidence if the version could pre-date the cut —
+/// which is why the cargo adapter's dry-run REFUSES a delegated target whose version is
+/// already on the registry ([`AdapterError::DelegatedVersionAlreadyPublished`]), pre-tag.
+/// Together the two make "present after the tag" mean "CI published it".
+///
+/// [`AdapterError::DelegatedVersionAlreadyPublished`]: super::adapters::AdapterError::DelegatedVersionAlreadyPublished
+fn verify_delegated_registry(ctx: &EffectCtx<'_>, target: &AdapterTarget) -> VerifyOutcome {
     let ecosystem = target.ecosystem().as_str();
     let start = ctx.clock.now_unix();
+    // ACCUMULATED, not sampled: the Missing-vs-Unknown verdict is about the whole
+    // window, not the last poll. A single transient failure on the final request of a
+    // 20-minute window in which the registry answered "absent" throughout would
+    // otherwise be reported as an outage — sending the operator to re-run verify when
+    // the real answer is "CI never published it".
+    let mut ever_reachable = false;
     loop {
-        let observed = ctx.registry.published_versions(ecosystem, &target.package);
-        let reachable = observed.is_ok();
-        if observed.is_ok_and(|versions| versions.iter().any(|v| v == &plan.version)) {
-            return VerifyOutcome::Matches;
+        if let Ok(versions) = ctx.registry.published_versions(ecosystem, &target.package) {
+            ever_reachable = true;
+            if versions.iter().any(|v| v == &target.version) {
+                return VerifyOutcome::Matches;
+            }
         }
         if ctx.clock.now_unix().saturating_sub(start) >= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS {
-            return if reachable {
+            return if ever_reachable {
                 VerifyOutcome::Missing
             } else {
                 VerifyOutcome::Unknown

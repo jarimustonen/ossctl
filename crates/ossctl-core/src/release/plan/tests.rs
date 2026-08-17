@@ -1435,3 +1435,138 @@ fn a_declared_bump_hook_changes_the_bump_plan_id() {
     };
     assert_ne!(without.plan_id, with.plan_id);
 }
+
+// ── mixed engine/CI-delegated workspace ordering (release-ci-publish-mode) ────
+
+#[test]
+fn an_engine_target_depending_on_a_ci_delegated_crate_is_a_conflict() {
+    // The unsatisfiable shape: `bin` (engine-published) depends on `lib`, whose
+    // publish is CI-delegated. publish-all runs BEFORE the tag push that triggers CI,
+    // so `lib` can never be on the index when `bin` needs it — the cut would burn the
+    // index-wait and fail, and no retry or resume could ever fix it.
+    let mut c = rust_contract();
+    c.targets = vec![
+        target(
+            Ecosystem::Rust,
+            "octl-core",
+            Registry::CratesIo,
+            Adapter::CargoPublishCi,
+        ),
+        target(
+            Ecosystem::Rust,
+            "orchestratectl",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
+    ];
+    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+
+    let plan = build(&c, &f, HEAD, "0.1.6");
+    let conflicts = delegated_dependency_conflicts(&plan, &f);
+    assert_eq!(
+        conflicts,
+        vec![DelegatedDependencyConflict {
+            engine_package: "orchestratectl".to_string(),
+            delegated_package: "octl-core".to_string(),
+        }]
+    );
+    let message = &delegated_dependency_messages(&conflicts)[0];
+    assert!(message.contains("orchestratectl") && message.contains("octl-core"));
+}
+
+#[test]
+fn the_reverse_dependency_direction_is_not_a_conflict() {
+    // Engine-published dependency, CI-published dependent: the engine publishes `lib`
+    // in publish-all, then the tag triggers CI to publish `bin`. That ordering works,
+    // and refusing it would block the mode's most natural migration path.
+    let mut c = rust_contract();
+    c.targets = vec![
+        target(
+            Ecosystem::Rust,
+            "octl-core",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
+        target(
+            Ecosystem::Rust,
+            "orchestratectl",
+            Registry::CratesIo,
+            Adapter::CargoPublishCi,
+        ),
+    ];
+    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+
+    let plan = build(&c, &f, HEAD, "0.1.6");
+    assert!(delegated_dependency_conflicts(&plan, &f).is_empty());
+}
+
+#[test]
+fn an_all_delegated_workspace_has_no_conflict() {
+    // Nothing the engine publishes ⇒ nothing that can wait on a delegated crate. CI
+    // owns the whole ordering, which is exactly what the mode delegates to it.
+    let mut c = rust_contract();
+    c.targets = vec![
+        target(
+            Ecosystem::Rust,
+            "octl-core",
+            Registry::CratesIo,
+            Adapter::CargoPublishCi,
+        ),
+        target(
+            Ecosystem::Rust,
+            "orchestratectl",
+            Registry::CratesIo,
+            Adapter::CargoPublishCi,
+        ),
+    ];
+    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+
+    let plan = build(&c, &f, HEAD, "0.1.6");
+    assert!(delegated_dependency_conflicts(&plan, &f).is_empty());
+}
+
+#[test]
+fn a_transitive_delegated_dependency_is_still_a_conflict() {
+    // The walk is a closure, not one hop: bin → mid → core, with only `core`
+    // delegated, is the same unsatisfiable wait one level deeper. `mid` is reported
+    // too — the engine's own workspace-closure expansion derives it as an
+    // engine-published target, and it depends on the delegated crate directly.
+    let mut c = rust_contract();
+    c.targets = vec![
+        target(
+            Ecosystem::Rust,
+            "core",
+            Registry::CratesIo,
+            Adapter::CargoPublishCi,
+        ),
+        target(
+            Ecosystem::Rust,
+            "bin",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
+    ];
+    let mut f = rust_facts();
+    f.rust_workspace = Some(RustWorkspace {
+        members: vec![
+            member("core", "0.1.6", &[]),
+            member("mid", "0.1.6", &["core"]),
+            member("bin", "0.1.6", &["mid"]),
+        ],
+    });
+
+    let plan = build(&c, &f, HEAD, "0.1.6");
+    assert_eq!(
+        delegated_dependency_conflicts(&plan, &f),
+        vec![
+            DelegatedDependencyConflict {
+                engine_package: "bin".to_string(),
+                delegated_package: "core".to_string(),
+            },
+            DelegatedDependencyConflict {
+                engine_package: "mid".to_string(),
+                delegated_package: "core".to_string(),
+            },
+        ]
+    );
+}

@@ -473,6 +473,7 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
     // Homebrew cross-field consistency: missing-tap (either producer), the
     // double-publish collision, and the dead-tap advisory — the full truth table.
     check_homebrew_configuration(&targets, &distributions, p);
+    check_publisher_conflicts(&targets, p);
     check_dist_workspace_homebrew(&targets, &distributions, repo_root, fs, p);
     let distribution_surface = detect_distribution_surface(repo_root, fs);
     for warning in undeclared_distribution_warnings(&find_undeclared_distribution(
@@ -1406,6 +1407,41 @@ fn check_badge_producers(
                 maturity.as_str()
             )),
             _ => {}
+        }
+    }
+}
+
+/// Floor a package declared with **two different crates.io publishers** — one
+/// engine-run (`cargo-publish`) and one CI-delegated (`cargo-publish-ci`).
+///
+/// The two identities are mutually exclusive statements about who runs `cargo
+/// publish` for that crate, and the per-target journal id keeps them distinct, so
+/// both would plan: the engine would publish the crate in publish-all AND the tag
+/// push would trigger CI to publish it again. crates.io rejects the duplicate, so
+/// the damage is a red CI job rather than a corrupted release — but the contract is
+/// self-contradictory and the cut would report green over a failed workflow. Only
+/// reachable since `cargo-publish-ci` exists, hence floored with it.
+fn check_publisher_conflicts(targets: &[Target], p: &mut Problems) {
+    for target in targets
+        .iter()
+        .filter(|t| t.adapter == Adapter::CargoPublishCi)
+    {
+        let Some(package) = target.package.as_deref() else {
+            continue;
+        };
+        if targets.iter().any(|other| {
+            other.adapter == Adapter::CargoPublish
+                && other.registry == target.registry
+                && other.package.as_deref() == Some(package)
+        }) {
+            p.err(format!(
+                "floor: package {} is declared for {} twice, once with adapter 'cargo-publish' \
+                 (the engine publishes it) and once with 'cargo-publish-ci' (CI publishes it) — \
+                 the engine would publish it AND the tag would trigger CI to publish it again. \
+                 Keep exactly one publisher for a package",
+                quote_for_diagnostic(package),
+                quote_for_diagnostic(target.registry.as_str())
+            ));
         }
     }
 }
@@ -2871,6 +2907,16 @@ mod tests {
         assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
         assert_eq!(n.contract.targets[0].adapter, Adapter::CargoPublish);
         assert_eq!(n.contract.targets[1].adapter, Adapter::CargoPublishCi);
+    }
+
+    /// One package, two publishers is a floor: the engine would publish it in
+    /// publish-all and the tag push would trigger CI to publish it again.
+    #[test]
+    fn a_package_cannot_be_declared_with_both_publishers() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\ntargets:\n  \
+                    - {ecosystem: rust, package: tool, registry: crates.io, adapter: cargo-publish}\n  \
+                    - {ecosystem: rust, package: tool, registry: crates.io, adapter: cargo-publish-ci}\n---\n";
+        assert_error_contains(&norm(text), "Keep exactly one publisher for a package");
     }
 
     /// `cargo-publish-ci` on a non-crates.io registry is a floor: the delegated

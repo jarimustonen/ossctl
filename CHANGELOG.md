@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Delegation is per target, so a contract may mix engine-published and CI-published
   targets (`release-ci-publish-mode`).
 
+  Three refusals keep the mode honest, all of them before the irreversible tag push:
+  a delegated target whose version is **already** on the registry is rejected in
+  dry-run (post-tag, verify would otherwise observe the pre-existing upload and go
+  green over a CI publish that failed); a package declared with both publishers is a
+  contract floor; and an engine-published crate that depends on a CI-delegated crate
+  in the same workspace is refused by `release cut`, because publish-all runs before
+  the tag that triggers CI and that wait can never be satisfied.
+
 ## [0.8.0] - 2026-08-17
 
 ### Fixed

@@ -703,6 +703,112 @@ fn derive_pin_rewrites(facts: &Facts, from_version: &str, to_version: &str) -> V
     rewrites
 }
 
+/// One engine-published crate whose release is blocked by a CI-delegated workspace
+/// dependency — the phase-ordering conflict [`delegated_dependency_conflicts`] finds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegatedDependencyConflict {
+    /// The crate the ENGINE would publish in publish-all.
+    pub engine_package: String,
+    /// The workspace crate it depends on, whose publish is CI-delegated and therefore
+    /// cannot happen until the tag — which is pushed after publish-all.
+    pub delegated_package: String,
+}
+
+/// Find engine-published crates.io targets that depend on a **CI-delegated** crate in
+/// the same workspace — a plan that can never complete, detected before it is cut.
+///
+/// The barrier order is `publish-all → tag`, and a `cargo-publish-ci` crate is
+/// published by the workflow the **tag push** triggers. So if an engine-published
+/// crate depends on a delegated one, publish-all reaches the dependent, the cargo
+/// adapter waits for the dependency to become index-visible (it cannot be — its tag
+/// has not been pushed), and the cut fails on a timeout with no ordering that could
+/// ever satisfy it. Retrying does not help; only editing the contract does.
+///
+/// The reverse edge is fine and deliberately allowed: the engine publishes the
+/// dependency in publish-all, then the tag triggers CI to publish the dependent.
+///
+/// Read-only and derived — it never mutates the plan and is not part of the sealed
+/// pre-image. Returns an empty vec when the repo is not a multi-crate workspace, when
+/// the closure touches no delegated crate, or when a target's package is unresolved
+/// (an ambiguous plan is refused by its own guard, and guessing here could invent a
+/// conflict that does not exist).
+#[must_use]
+pub fn delegated_dependency_conflicts(
+    plan: &ReleasePlan,
+    facts: &Facts,
+) -> Vec<DelegatedDependencyConflict> {
+    let Some(workspace) = facts.rust_workspace.as_ref() else {
+        return Vec::new();
+    };
+    let delegated: BTreeSet<&str> = plan
+        .targets
+        .iter()
+        .filter(|t| t.adapter == crate::contract::schema::Adapter::CargoPublishCi)
+        .filter_map(|t| t.package.as_deref())
+        .collect();
+    if delegated.is_empty() {
+        return Vec::new();
+    }
+    let deps: std::collections::BTreeMap<&str, &[String]> = workspace
+        .members
+        .iter()
+        .map(|m| (m.package.as_str(), m.workspace_deps.as_slice()))
+        .collect();
+
+    let mut conflicts = Vec::new();
+    for engine in plan.targets.iter().filter(|t| is_rust_crates_io_publish(t)) {
+        let Some(root) = engine.package.as_deref() else {
+            continue;
+        };
+        // Transitive closure over intra-workspace edges. The graph is small (workspace
+        // members) and `seen` makes a cyclic/diamond graph terminate.
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut stack: Vec<&str> = deps.get(root).map(|d| collect(d)).unwrap_or_default();
+        while let Some(pkg) = stack.pop() {
+            if !seen.insert(pkg) {
+                continue;
+            }
+            if delegated.contains(pkg) {
+                conflicts.push(DelegatedDependencyConflict {
+                    engine_package: root.to_string(),
+                    delegated_package: pkg.to_string(),
+                });
+            }
+            if let Some(next) = deps.get(pkg) {
+                stack.extend(collect(next));
+            }
+        }
+    }
+    conflicts.sort_by(|a, b| {
+        (&a.engine_package, &a.delegated_package).cmp(&(&b.engine_package, &b.delegated_package))
+    });
+    conflicts.dedup();
+    conflicts
+}
+
+/// Borrow a member's dependency names as `&str`s for the closure walk.
+fn collect(deps: &[String]) -> Vec<&str> {
+    deps.iter().map(String::as_str).collect()
+}
+
+/// Render [`delegated_dependency_conflicts`] as operator-facing messages.
+#[must_use]
+pub fn delegated_dependency_messages(conflicts: &[DelegatedDependencyConflict]) -> Vec<String> {
+    conflicts
+        .iter()
+        .map(|c| {
+            format!(
+                "target '{}' is published by the engine but depends on workspace crate '{}', whose                  publish is CI-delegated (adapter 'cargo-publish-ci'). The engine publishes in                  publish-all, BEFORE the tag push that triggers CI — so '{}' could never be on the                  index in time and the cut would fail waiting for it. Declare '{}' as                  'cargo-publish-ci' too (let CI publish both, in its own order), or publish '{}'                  with the engine ('cargo-publish')",
+                c.engine_package,
+                c.delegated_package,
+                c.delegated_package,
+                c.engine_package,
+                c.delegated_package
+            )
+        })
+        .collect()
+}
+
 fn resolve_targets(contract: &Contract, facts: &Facts) -> Vec<PlanTarget> {
     let base: Vec<PlanTarget> = contract
         .targets
