@@ -13,6 +13,7 @@ use crate::error::{CliError, ExitKind};
 use crate::output::OutputFormat;
 
 pub(crate) const GIT_COMMIT: &str = env!("OSSCTL_GIT_COMMIT");
+pub(crate) const SOURCE_REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const CARGO_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser, Debug)]

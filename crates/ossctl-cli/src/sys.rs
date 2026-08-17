@@ -143,6 +143,14 @@ impl RealGitRepo {
 }
 
 impl RealGitRepo {
+    /// The configured `origin` URL for this repository.
+    pub fn origin_url(&self) -> io::Result<String> {
+        Ok(self
+            .git_stdout(&["remote", "get-url", "origin"])?
+            .trim()
+            .to_string())
+    }
+
     /// Whether the work tree has changes to tracked files.
     pub fn is_dirty(&self) -> io::Result<bool> {
         Ok(!self

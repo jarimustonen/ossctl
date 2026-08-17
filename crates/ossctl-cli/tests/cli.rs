@@ -1448,14 +1448,24 @@ fn approved_git_repo() -> tempfile::TempDir {
     dir
 }
 
-/// A synthetic repository's HEAD intentionally differs from the test executable's
-/// compiled commit, proving the CLI wire-up refuses a stale binary before planning.
+fn set_origin(dir: &tempfile::TempDir, url: &str) {
+    let status = std::process::Command::new("git")
+        .current_dir(dir.path())
+        .args(["remote", "add", "origin", url])
+        .status()
+        .expect("git runs");
+    assert!(status.success());
+}
+
+/// A synthetic canonical ossctl tree's HEAD intentionally differs from the test
+/// executable's compiled commit, proving the CLI wire-up refuses a stale self-cut.
 #[test]
-fn release_plan_refuses_a_stale_binary_by_default() {
+fn release_plan_refuses_a_stale_self_cut_by_default() {
     if !test_binary_has_git_provenance() {
         return;
     }
     let dir = approved_git_repo();
+    set_origin(&dir, "https://github.com/jarimustonen/ossctl.git");
     let out = ossctl()
         .args(["release", "plan", "--json", "--repo-root"])
         .arg(dir.path())
@@ -1470,14 +1480,15 @@ fn release_plan_refuses_a_stale_binary_by_default() {
     assert!(message.contains("cargo build --release -p ossctl"));
 }
 
-/// `release cut` refuses the same stale executable before it derives or executes
-/// the supplied plan.
+/// `release cut` refuses the same stale self-cut executable before it derives or
+/// executes the supplied plan.
 #[test]
-fn release_cut_refuses_a_stale_binary_by_default() {
+fn release_cut_refuses_a_stale_self_cut_by_default() {
     if !test_binary_has_git_provenance() {
         return;
     }
     let dir = approved_git_repo();
+    set_origin(&dir, "https://github.com/jarimustonen/ossctl.git");
     let out = ossctl()
         .args(["release", "cut", "--plan", "not-a-plan", "--repo-root"])
         .arg(dir.path())
@@ -1487,6 +1498,41 @@ fn release_cut_refuses_a_stale_binary_by_default() {
     assert_eq!(out.status.code(), Some(1));
     let value: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
     assert_eq!(value["error"]["code"], "stale_binary");
+}
+
+/// A downstream release tree has unrelated commits, so it must not see a stale
+/// binary error or provenance warning. A fork proves source identity is based on
+/// the canonical origin rather than its package name or filesystem path.
+#[test]
+fn release_plan_allows_downstream_and_forked_ossctl_trees_without_escape_hatch() {
+    let dir = approved_git_repo();
+    set_origin(&dir, "https://github.com/someone/ossctl.git");
+    // Dirty a tracked file: downstream provenance handling must neither inspect
+    // nor report this unrelated commit state.
+    let contract_path = dir.path().join("OSS-RELEASE.md");
+    let contract = std::fs::read_to_string(&contract_path).unwrap();
+    std::fs::write(contract_path, format!("{contract}\n")).unwrap();
+    let out = ossctl()
+        .args(["release", "plan", "--json", "--repo-root"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "downstream plan should succeed: {out:?}"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        value["warnings"].as_array().unwrap().iter().all(|warning| {
+            let warning = warning.as_str().unwrap();
+            !warning.contains("BINARY")
+                && !warning.contains("provenance check")
+                && !warning.contains("uncommitted changes")
+        }),
+        "downstream plan must not emit a commit/provenance warning: {value}"
+    );
 }
 
 /// `release cut` on a `draft` contract is refused (a cut mutates external state,
@@ -1522,7 +1568,6 @@ fn release_cut_refuses_a_stale_plan_id() {
         .args([
             "release",
             "cut",
-            "--allow-stale-binary",
             "--plan",
             "0000000000000000",
             "--repo-root",
@@ -1661,11 +1706,12 @@ fn release_plan_without_bump_omits_the_bump_field() {
     assert!(v["data"].get("bump").is_none(), "no --bump ⇒ no bump key");
     assert_eq!(v["data"]["phases"][0], "dry-run-all");
     assert!(
-        v["warnings"].as_array().unwrap().iter().any(|warning| {
-            warning.as_str().unwrap().contains("provenance")
-                || warning.as_str().unwrap().contains("STALE BINARY")
-        }),
-        "the provenance diagnostic must remain visible: {v}"
+        v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|warning| !warning.as_str().unwrap().contains("BINARY")),
+        "a downstream plan must not emit a provenance diagnostic: {v}"
     );
 }
 

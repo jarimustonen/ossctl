@@ -56,8 +56,8 @@ pub struct PlanArgs {
     /// the default path that publishes the version already in the manifest.
     #[arg(long, value_name = "LEVEL")]
     pub bump: Option<String>,
-    /// Permit planning with a binary built from a different commit than this tree.
-    /// This is an explicit escape hatch for intentional cross-tree invocations.
+    /// Permit planning ossctl itself with a binary built from a different commit.
+    /// This is an explicit escape hatch for a deliberate ossctl self-cut.
     #[arg(long)]
     pub allow_stale_binary: bool,
 }
@@ -89,8 +89,8 @@ pub struct CutArgs {
     /// without a bump). Omit for a `--bump`-less plan.
     #[arg(long, value_name = "LEVEL")]
     pub bump: Option<String>,
-    /// Permit cutting with a binary built from a different commit than this tree.
-    /// This is an explicit escape hatch for intentional cross-tree invocations.
+    /// Permit cutting ossctl itself with a binary built from a different commit.
+    /// This is an explicit escape hatch for a deliberate ossctl self-cut.
     #[arg(long)]
     pub allow_stale_binary: bool,
 }
@@ -191,20 +191,28 @@ pub fn dispatch(action: ReleaseAction, format: OutputFormat) -> Result<(), CliEr
     }
 }
 
-/// Check that the executable's build provenance matches the release tree.
+/// Check a self-cut's executable provenance against its release tree.
 ///
-/// A release plan derives its version and targets from the live tree, so a binary
-/// built from an older commit can otherwise produce a convincing plan while running
-/// obsolete release-engine code. Mismatch is therefore refused by default; the
-/// escape hatch exists only for deliberate cross-tree invocations.
+/// A release plan derives its version and targets from the live tree, so an ossctl
+/// binary built from an older commit can otherwise produce a convincing *self-cut*
+/// plan while running obsolete release-engine code. The commits of a downstream
+/// release tree have no relationship to this binary, so this guard applies only
+/// when that tree's `origin` identifies the canonical ossctl repository.
 fn release_binary_warnings(
     git: &RealGitRepo,
     head_sha: &str,
     allow_stale_binary: bool,
 ) -> Result<Vec<String>, CliError> {
     let mut warnings = Vec::new();
+    let is_ossctl_source_tree = git
+        .origin_url()
+        .ok()
+        .is_some_and(|origin| is_ossctl_source_tree(&origin));
+    if !is_ossctl_source_tree {
+        return Ok(warnings);
+    }
     if let Some(warning) =
-        compiled_provenance_warning(crate::cli::GIT_COMMIT, head_sha, allow_stale_binary)?
+        compiled_provenance_warning(true, crate::cli::GIT_COMMIT, head_sha, allow_stale_binary)?
     {
         warnings.push(warning);
     }
@@ -222,14 +230,26 @@ fn release_binary_warnings(
     Ok(warnings)
 }
 
+fn is_ossctl_source_tree(origin: &str) -> bool {
+    ossctl_core::vcs::parse_github_slug(origin).is_some_and(|slug| {
+        ossctl_core::vcs::parse_github_slug(crate::cli::SOURCE_REPOSITORY)
+            .is_some_and(|source| slug.eq_ignore_ascii_case(&source))
+    })
+}
+
 fn compiled_provenance_warning(
+    is_ossctl_source_tree: bool,
     compiled_commit: &str,
     head_sha: &str,
     allow_stale_binary: bool,
 ) -> Result<Option<String>, CliError> {
+    if !is_ossctl_source_tree {
+        return Ok(None);
+    }
     if !has_git_commit_provenance(compiled_commit) {
-        return Ok(Some(
-            "cannot verify that this ossctl binary matches the release tree: it was built without git commit provenance. Rebuild from a git checkout with `cargo build --release -p ossctl` before cutting a release".to_string(),
+        return Err(CliError::user(
+            "unverifiable_binary_provenance",
+            "CANNOT VERIFY BINARY: this ossctl executable was built without git commit provenance, so it cannot safely cut ossctl itself. Build this ossctl checkout with `cargo build --release -p ossctl` before planning or cutting a self-release",
         ));
     }
     if compiled_commit.eq_ignore_ascii_case(head_sha) {
@@ -237,7 +257,7 @@ fn compiled_provenance_warning(
     }
 
     let message = format!(
-        "STALE BINARY: this ossctl executable was built from commit {compiled_commit}, but the release tree is at {head_sha}. Rebuild the current tree with `cargo build --release -p ossctl` before planning or cutting a release"
+        "STALE BINARY: this ossctl executable was built from commit {compiled_commit}, but ossctl's release tree is at {head_sha}. Rebuild this ossctl checkout with `cargo build --release -p ossctl` before planning or cutting a self-release"
     );
     if allow_stale_binary {
         Ok(Some(format!(
@@ -2332,25 +2352,33 @@ mod tests {
     const COMMIT_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     #[test]
-    fn matching_binary_provenance_passes_silently() {
+    fn downstream_tree_skips_provenance_check_silently() {
         assert_eq!(
-            compiled_provenance_warning(COMMIT_A, COMMIT_A, false).unwrap(),
+            compiled_provenance_warning(false, COMMIT_A, COMMIT_B, false).unwrap(),
             None
         );
     }
 
     #[test]
-    fn mismatched_binary_provenance_refuses_without_escape_hatch() {
-        let error = compiled_provenance_warning(COMMIT_A, COMMIT_B, false).unwrap_err();
-        assert_eq!(error.code, "stale_binary");
-        assert!(error.message.contains(COMMIT_A));
-        assert!(error.message.contains(COMMIT_B));
-        assert!(error.message.contains("cargo build --release -p ossctl"));
+    fn matching_self_cut_binary_provenance_passes_silently() {
+        assert_eq!(
+            compiled_provenance_warning(true, COMMIT_A, COMMIT_A, false).unwrap(),
+            None
+        );
     }
 
     #[test]
-    fn stale_binary_escape_hatch_emits_a_loud_warning() {
-        let warning = compiled_provenance_warning(COMMIT_A, COMMIT_B, true)
+    fn mismatched_self_cut_binary_provenance_refuses_without_escape_hatch() {
+        let error = compiled_provenance_warning(true, COMMIT_A, COMMIT_B, false).unwrap_err();
+        assert_eq!(error.code, "stale_binary");
+        assert!(error.message.contains(COMMIT_A));
+        assert!(error.message.contains(COMMIT_B));
+        assert!(error.message.contains("this ossctl checkout"));
+    }
+
+    #[test]
+    fn stale_self_cut_binary_escape_hatch_emits_a_loud_warning() {
+        let warning = compiled_provenance_warning(true, COMMIT_A, COMMIT_B, true)
             .unwrap()
             .expect("escape hatch must remain visible");
         assert!(warning.contains("STALE BINARY"));
@@ -2358,11 +2386,27 @@ mod tests {
     }
 
     #[test]
-    fn missing_binary_provenance_warns_without_refusing() {
-        let warning = compiled_provenance_warning("unknown", COMMIT_A, false)
-            .unwrap()
-            .expect("missing provenance should degrade gracefully");
-        assert!(warning.contains("cannot verify"));
+    fn unknown_provenance_refuses_for_a_self_cut() {
+        let error = compiled_provenance_warning(true, "unknown", COMMIT_A, false).unwrap_err();
+        assert_eq!(error.code, "unverifiable_binary_provenance");
+        assert!(error.message.contains("CANNOT VERIFY BINARY"));
+        assert!(error.message.contains("cargo build --release -p ossctl"));
+    }
+
+    #[test]
+    fn canonical_origin_identifies_only_ossctl_source_trees() {
+        assert!(is_ossctl_source_tree(
+            "git@github.com:jarimustonen/ossctl.git"
+        ));
+        assert!(is_ossctl_source_tree(
+            "https://github.com/jarimustonen/ossctl"
+        ));
+        assert!(!is_ossctl_source_tree(
+            "https://github.com/someone/ossctl.git"
+        ));
+        assert!(!is_ossctl_source_tree(
+            "https://github.com/jarimustonen/other.git"
+        ));
     }
 
     fn contract_with_distributions(dists: Vec<Distribution>) -> Contract {
