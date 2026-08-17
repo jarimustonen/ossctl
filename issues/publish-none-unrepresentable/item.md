@@ -2,13 +2,16 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 lane: contract-engine
 lane_seq: 20
 commits:
 - hash: 9e5c037
   summary: publish-none contract + tag-only cut + Cargo publish cross-read
+- hash: ec64d79
+  summary: close the review's holes (distribution floor, tri-state evidence, version scoping)
+closed: 2026-08-17
 ---
 
 # normalizer cannot express a publish-nothing rust repo (targets: [] force-expands to crates.io)
