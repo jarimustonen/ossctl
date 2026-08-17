@@ -6,6 +6,9 @@ status: in-progress
 priority: high
 lane: release-safety
 lane_seq: 2
+commits:
+- hash: c990144
+  summary: 'feat(release): persist sealed plans for cut and resume'
 ---
 
 # release plan --bump seals an un-cuttable plan, and the staleness error steers the operator into republishing the current version
@@ -107,4 +110,9 @@ The most alarming part is not the staleness bug but the remedy the error offers:
 ### 2026-08-17T06:10:29Z · @claude
 
 MECHANISM CORRECTED (2026-08-17, controlled repro in a scratch repo — orchestrator session, stint #22). The staleness hash is NOT broken: 'release cut --plan <bump-plan-id> --bump patch' ACCEPTS the sealed --bump plan (verified: the cut passed the plan_stale gate and entered the bump phase). CutArgs has a --bump flag documented as 'the same --bump <level> passed to release plan'. The field failure's mechanism is operational: the operator must repeat --bump at cut time, nothing in the plan output or the error says so, and the plan_stale error offers the no-bump plan id (= republish the already-published version). So the Diagnosis section above is wrong about the hash; the Expected list's items 2-3 (never seal an uncuttable plan / never steer to a republishing plan id) remain the real fix, plus discoverability. The decided fix is the durable plan store: see ../release-tag-preempts-cargo-dist/design.md (D1) — cut reads the bump disposition from the stored sealed plan, making the flag an optional must-match; the plan_stale error is rewritten to diagnose the actual difference and never present another plan id as remedy. Same repro also found a NEW bug: bump_exec requires a [workspace.package] version line, so a single-crate repo ([package] version) cannot --bump at all — filed as @bump-single-crate-manifest.
+
+### 2026-08-17T06:21:46Z · @pi
+
+Shipped durable sealed-plan storage. release cut now obtains the bump disposition from a stored plan, so repeating --bump is optional and mismatch is rejected.
+
 

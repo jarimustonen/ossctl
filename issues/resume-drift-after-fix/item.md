@@ -6,6 +6,9 @@ status: in-progress
 priority: high
 lane: release-safety
 lane_seq: 3
+commits:
+- hash: c990144
+  summary: 'feat(release): persist sealed plans for cut and resume'
 ---
 
 # release resume is unusable after a code fix: the fix itself drifts the sealed plan
@@ -38,3 +41,9 @@ Whichever direction, decide it deliberately; today the limitation is undocumente
 - The behaviour after an engine-fix-then-resume is a recorded decision, not an accident.
 - If resume stays strict, its error names abandon-and-recut as the intended recovery.
 - If resume gains a re-seal path, published targets are digest-verified before any outstanding phase runs.
+
+## Comments
+
+### 2026-08-17T06:21:46Z · @pi
+
+Shipped durable sealed-plan storage. release resume loads the sealed stored plan and no longer re-derives from live HEAD when the plan is available, so it can resume after a code fix.

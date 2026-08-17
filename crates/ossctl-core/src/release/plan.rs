@@ -1016,7 +1016,7 @@ fn seal(
     ))
 }
 
-/// Produce the canonical seal pre-image bytes used by [`seal`]. The durable plan
+/// Produce the canonical seal pre-image bytes used by the internal sealing routine. The durable plan
 /// store persists these exact bytes and verifies them through this one seam.
 pub fn seal_bytes(
     contract: &Contract,
