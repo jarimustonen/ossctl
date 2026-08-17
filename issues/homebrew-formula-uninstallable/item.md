@@ -6,6 +6,9 @@ status: in-progress
 priority: high
 lane: release-safety
 lane_seq: 0
+commits:
+- hash: 50ade5e978569b947eaea56e2b4bc23c458afce2
+  summary: 'fix(homebrew): publish prebuilt formula archives'
 ---
 
 # Generated Homebrew formula cannot install: cargo install on a virtual workspace manifest
