@@ -1011,6 +1011,21 @@ fn seal(
     phases: &[PlanPhase],
     bump: Option<&BumpPlan>,
 ) -> String {
+    sha256::hex(&seal_bytes(
+        contract, targets, head_sha, version, phases, bump,
+    ))
+}
+
+/// Produce the canonical seal pre-image bytes used by [`seal`]. The durable plan
+/// store persists these exact bytes and verifies them through this one seam.
+pub fn seal_bytes(
+    contract: &Contract,
+    targets: &[PlanTarget],
+    head_sha: &str,
+    version: &str,
+    phases: &[PlanPhase],
+    bump: Option<&BumpPlan>,
+) -> Vec<u8> {
     let input = SealInput {
         domain: SEAL_DOMAIN,
         seal_version: SEAL_VERSION,
@@ -1028,9 +1043,14 @@ fn seal(
     // no float. It is also infallible for these concrete types; `expect` (never
     // `unwrap_or_default`, which would fail *open* by hashing an empty pre-image
     // and collide every failing plan on the empty-string digest).
-    let bytes =
-        serde_json::to_vec(&input).expect("release-plan pre-image is infallible to serialize");
-    sha256::hex(&bytes)
+    serde_json::to_vec(&input).expect("release-plan pre-image is infallible to serialize")
+}
+
+/// Hash stored canonical seal bytes through the same hashing implementation that
+/// seals newly-derived plans. Kept here so storage never grows its own hash.
+#[must_use]
+pub fn seal_id_from_bytes(bytes: &[u8]) -> String {
+    sha256::hex(bytes)
 }
 
 /// Short (first 12 hex chars) `HEAD` sha for drift messages; whole string if

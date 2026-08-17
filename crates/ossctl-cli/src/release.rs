@@ -337,6 +337,15 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
         &head_sha,
         args.bump.as_deref(),
     )?;
+    let paths = JournalPaths::from_git(&git, None).map_err(|e| {
+        CliError::system(
+            "plan_store_unavailable",
+            format!("cannot locate the durable plan store: {e}"),
+        )
+    })?;
+    ossctl_core::release::plan_store::PlanStore::new(paths)
+        .save(&plan, &normalized.contract)
+        .map_err(plan_store_error)?;
 
     let mut warnings = normalized.problems.warnings.clone();
     warnings.extend(provenance_warnings);
@@ -1317,9 +1326,15 @@ pub fn resume(args: &ResumeArgs, format: OutputFormat) -> Result<(), CliError> {
         RunStatus::InProgress => {}
     }
 
-    // Re-derive the approved plan from CURRENT repo state + the journal's sealed
-    // version, refusing on drift (the same discipline `cut` enforces).
-    let plan = derive_resume_plan(&root, &git, journal.state(), &args.run_id)?;
+    // Newer plans are durable: execution uses the sealed checkout, so a code fix
+    // after a failed cut must not invalidate the already-approved plan.
+    let plan = match ossctl_core::release::plan_store::PlanStore::new(journal.paths().clone())
+        .load(&journal.state().plan_id)
+        .map_err(plan_store_error)?
+    {
+        Some(plan) => plan,
+        None => derive_resume_plan(&root, &git, journal.state(), &args.run_id)?,
+    };
 
     let ctx = EffectCtx {
         runner: &runner,
@@ -1531,7 +1546,8 @@ fn resume_drift_error(
              change, or an uncommitted working-tree change occurred since the cut (the plan is \
              re-derived from the working tree, so a dirty tree drifts too). Restore the sealed \
              state (a clean checkout of the sealed commit), or plan and cut a new release; ossctl \
-             will not continue a different plan under this run",
+             will not continue a different plan under this run. Runs planned by this ossctl version or \
+             later persist their sealed plan and resume across code fixes; this run has no stored plan.",
             state.run_id,
             short_sha(&state.plan_id),
             short_sha(&current.head_sha),
@@ -1650,21 +1666,34 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     let provenance_warnings = release_binary_warnings(&git, &head_sha, args.allow_stale_binary)?;
     let facts = ossctl_core::facts::gather(&root, &RealFs, &git);
 
-    // Re-derive the plan the same way `plan` did — with `--bump` the release version
-    // is the current manifest version + the semantic level, else the manifest version
-    // as-is (single source of truth; no `--version` input, `release-drop-version-flag`).
-    // The drift check below (the recomputed `plan_id` must equal `--plan`) then catches
-    // a mismatched `--bump` (planned `minor`, cut `major`) as `plan_stale`.
+    // Resolve the sibling plan store before choosing the bump disposition. A stored
+    // plan is authoritative; legacy/machine-missing plans retain flag-driven fallback.
+    let paths = JournalPaths::from_git(&git, args.journal_dir.as_deref()).map_err(|e| {
+        CliError::system(
+            "io_error",
+            format!("cannot resolve the release-journal directory: {e}"),
+        )
+    })?;
+    let stored = ossctl_core::release::plan_store::PlanStore::new(paths.clone())
+        .load(&args.plan)
+        .map_err(plan_store_error)?;
+    let stored_bump = stored
+        .as_ref()
+        .and_then(|p| p.bump.as_ref())
+        .map(|b| b.level.as_str());
+    if let (Some(stored_level), Some(flag)) = (stored_bump, args.bump.as_deref()) {
+        if stored_level != flag {
+            return Err(CliError::user("bump_mismatch", format!("stored plan was sealed with --bump {stored_level}, but release cut received --bump {flag}")));
+        }
+    }
     let current = derive_release_plan(
         &normalized.contract,
         &facts,
         &head_sha,
-        args.bump.as_deref(),
+        stored_bump.or(args.bump.as_deref()),
     )?;
-    // Drift check: the current repo + resolved version must hash to the approved
-    // plan_id, or we refuse rather than publish a different release (§3).
     if current.plan_id != args.plan {
-        return Err(plan_stale_error(&args.plan, &current));
+        return Err(plan_stale_error(&args.plan, &current, stored.as_ref()));
     }
 
     // Preflight the plan *before* creating a run, so an unexecutable plan (an
@@ -1677,14 +1706,6 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
         // preflight diagnostic out of that stream.
         eprintln!("warning: {warning}");
     }
-
-    // Journal location (git-common-dir-local, or an explicit override).
-    let paths = JournalPaths::from_git(&git, args.journal_dir.as_deref()).map_err(|e| {
-        CliError::system(
-            "io_error",
-            format!("cannot resolve the release-journal directory: {e}"),
-        )
-    })?;
 
     let store = RealJournalStore;
     let clock = RealClock;
@@ -1768,19 +1789,44 @@ fn create_run_journal<'a>(
 
 /// The §10 `plan_stale` refusal: the current repo no longer hashes to the
 /// approved plan (ADR-0002 §3). Exit 1 — caller-fixable by re-planning.
-fn plan_stale_error(approved: &str, current: &ReleasePlan) -> CliError {
+fn plan_stale_error(
+    approved: &str,
+    current: &ReleasePlan,
+    stored: Option<&ReleasePlan>,
+) -> CliError {
+    let difference = match stored {
+        Some(plan) if plan.head_sha != current.head_sha => format!(
+            "HEAD moved from {} to {}",
+            short_sha(&plan.head_sha),
+            short_sha(&current.head_sha)
+        ),
+        Some(plan) if plan.version != current.version => format!(
+            "manifest version changed from {} to {}",
+            plan.version, current.version
+        ),
+        Some(_) => "the contract or detected facts changed".to_string(),
+        None => "the current repository differs from the plan".to_string(),
+    };
     CliError::user(
         "plan_stale",
         format!(
-            "the approved plan is stale: the current repository (HEAD {}, version {}) hashes to \
-             a different plan_id, so a commit, contract edit, or version change occurred since \
-             `release plan` — re-run `ossctl release plan` and approve the new plan_id before cutting",
-            short_sha(&current.head_sha),
-            current.version,
+            "the approved plan is stale: {difference}. Re-run `ossctl release plan` (with `--bump` if intended) and approve what it prints",
         ),
     )
     .with_invalid_value(approved.to_string())
-    .with_expected(serde_json::json!({ "current_plan_id": current.plan_id }))
+    .with_expected(serde_json::json!({ "recomputed_plan_id": current.plan_id }))
+}
+
+fn plan_store_error(error: ossctl_core::release::plan_store::PlanStoreError) -> CliError {
+    match error {
+        ossctl_core::release::plan_store::PlanStoreError::Corrupt { plan_id, detail } => {
+            CliError::system(
+                "plan_store_corrupt",
+                format!("stored plan {plan_id} is corrupt: {detail}"),
+            )
+        }
+        other => CliError::system("plan_store_error", other.to_string()),
+    }
 }
 
 /// Derive and seal the release plan the way `plan` and `cut` both need it: the

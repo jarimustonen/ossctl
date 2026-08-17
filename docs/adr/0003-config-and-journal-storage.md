@@ -84,6 +84,18 @@ Resume continues **from the first incomplete step**; "already-done and matching"
 - **Two representations** (event log + materialized manifest). Accepted: the manifest is strictly derived and disposable, so there is one source of truth; the cost buys O(1) status queries for `release show`.
 - **Reconciliation ambiguity** (`Missing` after a recorded publish) is resolved conservatively as a **hard stop + human surface**, never a blind re-publish — trading some automation for safety on irreversible steps.
 
+## Amendment — 2026-08-17: durable sealed plan store
+
+`release plan` also writes its content-addressed approval document to
+`$(git rev-parse --git-common-dir)/ossctl/plans/<plan_id>.json`, adjacent to
+`releases/`. Creation is immutable: an identical retry is a no-op and differing
+content at an existing address is refused. Each document retains the canonical
+seal pre-image and is re-hashed through the planner's sealing seam on load; a
+mismatch is `plan_store_corrupt`. This deliberately makes `release plan` no
+longer strictly side-effect-free, but the write is a git-common-dir cache only,
+never a repository file. It lets `cut` and `resume` execute the approved plan
+from its sealed checkout after later code fixes move the live tree.
+
 **Rejected alternatives**
 
 - **Home-dir / XDG state (`~/.ossctl/...`), as `orchestratectl` uses.** Rejected: `octl` keeps state in the home dir because *its* runs span multiple worktrees and repos; an `ossctl` release is intrinsically tied to **one** repo, so git-common-dir-local state co-locates the journal with the repo it mutates and avoids a home-dir hash-keyed lookup. (`--journal-dir` remains for the CI case.)

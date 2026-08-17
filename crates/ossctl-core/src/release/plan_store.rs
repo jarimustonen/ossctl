@@ -1,0 +1,268 @@
+//! Immutable, content-addressed storage for approved release plans (ADR-0003).
+//!
+//! Plan documents live beside release journals under `ossctl/plans`. The document
+//! retains both the public plan and the exact canonical seal pre-image, allowing a
+//! later cut or resume to authenticate it without consulting a changed worktree.
+
+use std::fs;
+use std::io;
+
+use serde::Serialize;
+use serde_json::Value;
+
+use crate::contract::schema::Contract;
+use crate::contract::schema::{Adapter, Ecosystem, Registry};
+use crate::protocol::plan::{BumpLevel, BumpPlan, PinRewrite, PlanPhase, PlanTarget, ReleasePlan};
+use crate::release::journal::JournalPaths;
+use crate::release::plan::{seal_bytes, seal_id_from_bytes};
+
+/// A plan-store failure. Corruption has a stable discriminator so CLI callers never
+/// mistake a damaged local approval artifact for a missing legacy plan.
+#[derive(Debug)]
+pub enum PlanStoreError {
+    /// Filesystem access failed.
+    Io(io::Error),
+    /// A stored document fails its content-address integrity check.
+    Corrupt {
+        /// Address requested by the caller.
+        plan_id: String,
+        /// Specific malformed or mismatching field.
+        detail: String,
+    },
+    /// An existing address contains bytes different from a retry's document.
+    ContentAddressViolation {
+        /// Address whose immutable content was contradicted.
+        plan_id: String,
+    },
+}
+
+impl std::fmt::Display for PlanStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "{e}"),
+            Self::Corrupt { plan_id, detail } => {
+                write!(f, "plan_store_corrupt: {plan_id}: {detail}")
+            }
+            Self::ContentAddressViolation { plan_id } => write!(
+                f,
+                "plan store already contains different content for {plan_id}"
+            ),
+        }
+    }
+}
+impl std::error::Error for PlanStoreError {}
+impl From<io::Error> for PlanStoreError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+#[derive(Serialize)]
+struct StoredPlan<'a> {
+    plan: &'a ReleasePlan,
+    seal_preimage: String,
+}
+
+/// Persist and authenticate sealed plans at paths derived from [`JournalPaths`].
+pub struct PlanStore {
+    paths: JournalPaths,
+}
+impl PlanStore {
+    /// Create a store rooted beside `paths`' release-journal root.
+    #[must_use]
+    pub fn new(paths: JournalPaths) -> Self {
+        Self { paths }
+    }
+
+    /// Create a document if absent. A same-byte retry is a no-op; any other
+    /// content under the same address is an integrity violation.
+    pub fn save(&self, plan: &ReleasePlan, contract: &Contract) -> Result<(), PlanStoreError> {
+        let preimage = seal_bytes(
+            contract,
+            &plan.targets,
+            &plan.head_sha,
+            &plan.version,
+            &plan.phases,
+            plan.bump.as_ref(),
+        );
+        let bytes = serde_json::to_vec(&StoredPlan {
+            plan,
+            seal_preimage: String::from_utf8(preimage).expect("canonical JSON is UTF-8"),
+        })
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let path = self.paths.plan_file(&plan.plan_id);
+        match fs::read(&path) {
+            Ok(existing) if existing == bytes => return Ok(()),
+            Ok(_) => {
+                return Err(PlanStoreError::ContentAddressViolation {
+                    plan_id: plan.plan_id.clone(),
+                })
+            }
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+            Err(_) => {}
+        }
+        fs::create_dir_all(self.paths.plans_dir())?;
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        fs::write(&tmp, &bytes)?;
+        // Do not replace a concurrent writer: inspect again immediately before rename.
+        match fs::hard_link(&tmp, &path) {
+            Ok(()) => {
+                fs::remove_file(tmp)?;
+                Ok(())
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                fs::remove_file(tmp)?;
+                if fs::read(&path)? == bytes {
+                    Ok(())
+                } else {
+                    Err(PlanStoreError::ContentAddressViolation {
+                        plan_id: plan.plan_id.clone(),
+                    })
+                }
+            }
+            Err(e) => {
+                let _ = fs::remove_file(tmp);
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Load and authenticate a plan. Missing plans are the compatibility path for
+    /// plans made by older binaries or on another machine.
+    pub fn load(&self, plan_id: &str) -> Result<Option<ReleasePlan>, PlanStoreError> {
+        let path = self.paths.plan_file(plan_id);
+        let bytes = match fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let doc: Value =
+            serde_json::from_slice(&bytes).map_err(|e| corrupt(plan_id, e.to_string()))?;
+        let preimage = doc
+            .get("seal_preimage")
+            .and_then(Value::as_str)
+            .ok_or_else(|| corrupt(plan_id, "missing seal_preimage"))?;
+        if seal_id_from_bytes(preimage.as_bytes()) != plan_id {
+            return Err(corrupt(plan_id, "seal hash does not match filename"));
+        }
+        let plan = decode_plan(
+            doc.get("plan")
+                .ok_or_else(|| corrupt(plan_id, "missing plan"))?,
+            plan_id,
+        )?;
+        if plan.plan_id != plan_id {
+            return Err(corrupt(plan_id, "plan_id does not match filename"));
+        }
+        Ok(Some(plan))
+    }
+}
+fn corrupt(id: &str, detail: impl Into<String>) -> PlanStoreError {
+    PlanStoreError::Corrupt {
+        plan_id: id.to_string(),
+        detail: detail.into(),
+    }
+}
+fn str_at<'a>(v: &'a Value, key: &str, id: &str) -> Result<&'a str, PlanStoreError> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| corrupt(id, format!("missing or invalid {key}")))
+}
+fn decode_plan(v: &Value, id: &str) -> Result<ReleasePlan, PlanStoreError> {
+    let targets = v
+        .get("targets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| corrupt(id, "invalid targets"))?
+        .iter()
+        .map(|t| {
+            Ok(PlanTarget {
+                ecosystem: Ecosystem::parse(str_at(t, "ecosystem", id)?)
+                    .ok_or_else(|| corrupt(id, "invalid ecosystem"))?,
+                package: t.get("package").and_then(Value::as_str).map(str::to_string),
+                registry: Registry::parse(str_at(t, "registry", id)?)
+                    .ok_or_else(|| corrupt(id, "invalid registry"))?,
+                adapter: Adapter::parse(str_at(t, "adapter", id)?)
+                    .ok_or_else(|| corrupt(id, "invalid adapter"))?,
+            })
+        })
+        .collect::<Result<Vec<_>, PlanStoreError>>()?;
+    let phases = v
+        .get("phases")
+        .and_then(Value::as_array)
+        .ok_or_else(|| corrupt(id, "invalid phases"))?
+        .iter()
+        .map(|p| match p.as_str() {
+            Some("bump") => Ok(PlanPhase::Bump),
+            Some("dry-run-all") => Ok(PlanPhase::DryRunAll),
+            Some("build-all") => Ok(PlanPhase::BuildAll),
+            Some("publish-all") => Ok(PlanPhase::PublishAll),
+            Some("tag") => Ok(PlanPhase::Tag),
+            Some("dist") => Ok(PlanPhase::Dist),
+            _ => Err(corrupt(id, "invalid phase")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let bump = match v.get("bump") {
+        None | Some(Value::Null) => None,
+        Some(b) => Some(BumpPlan {
+            level: BumpLevel::parse(str_at(b, "level", id)?)
+                .ok_or_else(|| corrupt(id, "invalid bump level"))?,
+            from_version: str_at(b, "from_version", id)?.into(),
+            to_version: str_at(b, "to_version", id)?.into(),
+            pin_rewrites: b
+                .get("pin_rewrites")
+                .and_then(Value::as_array)
+                .ok_or_else(|| corrupt(id, "invalid pin_rewrites"))?
+                .iter()
+                .map(|p| {
+                    Ok(PinRewrite {
+                        in_package: str_at(p, "in_package", id)?.into(),
+                        dependency: str_at(p, "dependency", id)?.into(),
+                        from: str_at(p, "from", id)?.into(),
+                        to: str_at(p, "to", id)?.into(),
+                    })
+                })
+                .collect::<Result<Vec<_>, PlanStoreError>>()?,
+            changelog_finalize: b
+                .get("changelog_finalize")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| corrupt(id, "invalid changelog_finalize"))?,
+            bump_hook: b
+                .get("bump_hook")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }),
+    };
+    Ok(ReleasePlan {
+        plan_id: str_at(v, "plan_id", id)?.into(),
+        contract_schema_version: u32::try_from(
+            v.get("contract_schema_version")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| corrupt(id, "invalid contract_schema_version"))?,
+        )
+        .map_err(|_| corrupt(id, "contract_schema_version exceeds u32"))?,
+        head_sha: str_at(v, "head_sha", id)?.into(),
+        version: str_at(v, "version", id)?.into(),
+        targets,
+        phases,
+        bump,
+        homebrew_tap: v
+            .get("homebrew_tap")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        license: v.get("license").and_then(Value::as_str).map(str::to_string),
+        description: v
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        homebrew_platforms: v
+            .get("homebrew_platforms")
+            .and_then(Value::as_array)
+            .ok_or_else(|| corrupt(id, "invalid homebrew_platforms"))?
+            .iter()
+            .map(|x| {
+                x.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| corrupt(id, "invalid platform"))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}

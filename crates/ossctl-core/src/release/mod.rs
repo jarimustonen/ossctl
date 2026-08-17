@@ -15,6 +15,7 @@ pub mod bump_exec;
 pub mod coordinator;
 pub mod journal;
 pub mod plan;
+pub mod plan_store;
 pub mod reconcile;
 pub mod resume;
 pub mod target_id;

@@ -98,6 +98,21 @@ impl JournalPaths {
         &self.releases_dir
     }
 
+    /// The immutable plan-store root (`…/ossctl/plans`), a sibling of releases.
+    #[must_use]
+    pub fn plans_dir(&self) -> PathBuf {
+        self.releases_dir
+            .parent()
+            .expect("release paths always have an ossctl parent")
+            .join("plans")
+    }
+
+    /// The content-addressed plan document for `plan_id`.
+    #[must_use]
+    pub fn plan_file(&self, plan_id: &str) -> PathBuf {
+        self.plans_dir().join(format!("{plan_id}.json"))
+    }
+
     /// The single-active-cut lock path (`…/releases/.lock`).
     #[must_use]
     pub fn lock_file(&self) -> PathBuf {
