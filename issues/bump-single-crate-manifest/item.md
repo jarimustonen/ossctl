@@ -3,9 +3,9 @@ created: 2026-08-17
 updated: 2026-08-17
 type: bug
 status: open
-priority: normal
-lane: release-safety
-lane_seq: 30
+priority: high
+lane: bump-exec
+lane_seq: 10
 ---
 
 # release --bump cannot bump a single-crate manifest ([package] version)

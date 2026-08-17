@@ -1,12 +1,12 @@
 ---
 created: 2026-08-16
-updated: 2026-08-16
+updated: 2026-08-17
 type: improvement
 status: open
 priority: normal
 labels: [cli-canon, tooling]
 lane: cli-canon
-lane_seq: 60
+lane_seq: 20
 ---
 
 # cli-canon: §14 --help --json machine-readable help

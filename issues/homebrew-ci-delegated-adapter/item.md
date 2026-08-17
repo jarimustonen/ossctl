@@ -3,8 +3,8 @@ created: 2026-08-17
 updated: 2026-08-17
 type: feature
 status: open
-priority: normal
-lane: release-safety
+priority: high
+lane: contract-engine
 lane_seq: 10
 ---
 

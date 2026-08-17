@@ -4,8 +4,8 @@ updated: 2026-08-17
 type: bug
 status: open
 priority: normal
-lane: release-safety
-lane_seq: 40
+lane: contract-engine
+lane_seq: 20
 ---
 
 # normalizer cannot express a publish-nothing rust repo (targets: [] force-expands to crates.io)

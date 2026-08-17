@@ -4,8 +4,8 @@ updated: 2026-08-17
 type: bug
 status: open
 priority: normal
-lane: release-safety
-lane_seq: 50
+lane: plan-seal
+lane_seq: 10
 ---
 
 # sealed plan's phases list omits the verify phase the coordinator always runs

@@ -8,7 +8,7 @@ priority: normal
 labels:
 - via:agent-homebase-wrapup
 lane: cli-canon
-lane_seq: 50
+lane_seq: 10
 ---
 
 # ossctl --version is rejected as an unknown flag; it should alias the ve…

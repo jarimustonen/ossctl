@@ -19,15 +19,41 @@ flag, seven phases green ending in verify (run `01M07BDD2RBRADH70DYR41JPBA`). De
 `issues/release-tag-preempts-cargo-dist/design.md` (D1–D6). Cross-repo audit + fleet
 normalization: `homebase/issues/cross-repo-release-standardisation/audit-2026-08-17.md`._
 
-_**GLOBAL HEAD-OF-LINE: `homebrew-ci-delegated-adapter`** — it unlocks fleet-wide contract
-uniformity (four repos' CI-owned taps become declarable + verify-observable) with less work
-than `release-ci-publish-mode` (second in lane; it is glasspad's and orchestratectl's path
-onto the engine). Parallel lane head: `intake-bug-ossctl-d9b2ec7bb6d9` (`--version` must
-alias the `version` verb; maintainer-acked 2026-08-17; project-canon filed the same class
-as its own `version-flag-alias`)._
+_**THE 1.0 PLAN (maintainer-directed re-plan, 2026-08-17 wrap).** Lanes were restructured
+by HOT-FILE FAMILY (not theme) so the waves parallelise correctly. **GLOBAL HEAD-OF-LINE:
+`homebrew-ci-delegated-adapter`.**_
+
+_**Wave A (next stint, 4 parallel workers → cut 0.8.0):**_
+_- `contract-engine` lane head: **`homebrew-ci-delegated-adapter`** (HIGH) — spans BOTH
+  strict seams (schema.rs + adapters), so it owns them alone this wave. Unlocks declaring
+  the four fleet repos' CI-owned taps._
+_- `bump-exec` lane: **`bump-single-crate-manifest`** (HIGH; bump_exec.rs only) — glasspad
+  is a single-crate repo, so this blocks its future engine `--bump` path._
+_- `plan-seal` lane: **`plan-phases-omit-verify`** (plan.rs only; mind the SEAL_VERSION
+  rule if the phase list is in the seal pre-image)._
+_- `cli-canon` lane head: **`intake-bug-ossctl-d9b2ec7bb6d9`** (`--version` alias)._
+_- Wave close: engine-cut **0.8.0**, then declare the homebrew target in
+  issuectl/glasspad/orchestratectl/project-canon contracts (cross-repo act, orchestrator)._
+
+_**Wave B (following stint, sequenced in `contract-engine` → cut 0.9.0):**_
+_- **`release-ci-publish-mode`** (HIGH) — glasspad's and orchestratectl's path onto the
+  engine (glasspad's AGENTS forbids local publish; see the audit). Alone on the
+  coordinator seam. NOTE: prefer the STRONGER worker model here (AGENTS worker-model note)._
+_- **`publish-none-unrepresentable`** — schema/normalizer; unblocks intakectl's contract
+  approval. Sequenced with the above (both touch schema.rs)._
+_- **`cli-canon-help-json`** in parallel (cli surface only)._
+_- Wave close: engine-cut **0.9.0**; move glasspad + orchestratectl release doctrines onto
+  the engine; flip intakectl's contract to approved._
+
+_**1.0 GATE (after Wave B):** issue base empty; one clean engine cut per fleet shape
+(multicrate ✓ ossctl, single-crate `--bump`, CI-publish, publish-none, CI-delegated tap
+verify); a ~2-week soak of routine fleet releases with zero new HIGH findings; then write
+the 1.0 stability contract (which JSON shapes / exit codes / store formats are frozen) and
+cut 1.0. Estimate at current pace: 2–4 weeks._
 
 _**Open questions for the maintainer:** none pending. The Dependabot `clap` PR remains
-open, untriaged._
+open, untriaged. Known issuectl quirk (filed `intake-bug-issuectl-fab0edad2e42`): within a
+lane, priority silently outranks `lane_seq` in the dag ordering._
 
 **Read first (the spec):** `docs/adr/000{1,2,3,4}-*.md` + the AGENTS.md operating policy
 (engine recipe, hot files, issue standard).

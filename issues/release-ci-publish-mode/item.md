@@ -3,9 +3,9 @@ created: 2026-08-10
 updated: 2026-08-17
 type: feature
 status: open
-priority: normal
-lane: release-safety
-lane_seq: 20
+priority: high
+lane: contract-engine
+lane_seq: 30
 ---
 
 # release engine: support a 'publish-in-CI / tag-only cut' release mode
