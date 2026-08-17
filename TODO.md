@@ -86,3 +86,4 @@ release-safety and cli-canon lanes drain). `issuectl list` for the live view.
 - Intake reviewed through 2026-08-17. Latest: `intake-bug-ossctl-d9b2ec7bb6d9`
   (`--version` alias) admitted at the #22 wrap, now head of lane `cli-canon`. Older
   dispositions live in the issues themselves.
+- [ ] 🐛 Piialiisan bugiraportti: verify phase races CI-delegated targets and fails a successful release — jari via Telegram ([`intake-bug-ossctl-03e1c1ce781b`](issues/intake-bug-ossctl-03e1c1ce781b/item.md))
