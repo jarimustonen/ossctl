@@ -368,19 +368,31 @@ fn contract_require_approved_refuses_draft() {
     assert_eq!(v["error"]["invalid_value"], "draft");
 }
 
-/// A missing `OSS-RELEASE.md` is a system-level (exit 2) error, distinct from an
-/// invalid one (exit 1).
+/// Exit-code routing follows §2: a missing contract is caller-actionable (1),
+/// an I/O fault is operational (2), and a successful command exits 0.
 #[test]
-fn contract_show_missing_file_is_system_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = ossctl()
+fn exit_codes_distinguish_not_found_operational_fault_and_success() {
+    let missing_contract = tempfile::tempdir().unwrap();
+    let not_found = ossctl()
         .args(["contract", "show", "--repo-root"])
-        .arg(dir.path())
+        .arg(missing_contract.path())
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(2), "missing file → exit 2");
-    let v: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(not_found.status.code(), Some(1), "missing config → exit 1");
+    let v: serde_json::Value = serde_json::from_slice(&not_found.stderr).unwrap();
     assert_eq!(v["error"]["code"], "contract_not_found");
+
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let operational = ossctl()
+        .args(["contract", "show", "--repo-root"])
+        .arg(file.path())
+        .output()
+        .unwrap();
+    assert_eq!(operational.status.code(), Some(2), "I/O fault → exit 2");
+    let v: serde_json::Value = serde_json::from_slice(&operational.stderr).unwrap();
+    assert_eq!(v["error"]["code"], "io_error");
+
+    ossctl().arg("version").assert().success();
 }
 
 /// The `/oss-init` skill's whole "stage → validate → install" lifecycle rests on
@@ -618,17 +630,17 @@ fn audit_json_reports_core_gaps_and_is_read_only() {
     );
 }
 
-/// `audit` over a repo without an `OSS-RELEASE.md` is a system-level (exit 2)
-/// error — the audit cannot score without the contract it reads.
+/// `audit` over a repo without an `OSS-RELEASE.md` has a caller-actionable
+/// not-found error (exit 1): create or point it at the contract first.
 #[test]
-fn audit_missing_contract_is_system_error() {
+fn audit_missing_contract_is_user_error() {
     let dir = tempfile::tempdir().unwrap();
     let out = ossctl()
         .args(["audit", "--repo-root"])
         .arg(dir.path())
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(2), "missing contract → exit 2");
+    assert_eq!(out.status.code(), Some(1), "missing contract → exit 1");
     let v: serde_json::Value = serde_json::from_slice(&out.stderr).expect("stderr JSON");
     assert_eq!(v["error"]["code"], "contract_not_found");
 }

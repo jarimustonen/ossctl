@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **CLI error exits now distinguish caller-actionable failures from operational faults.**
+  Missing `OSS-RELEASE.md` contracts now exit `1` rather than `2`; agents branching on
+  ossctl's exit status can reliably treat `1` as an input/current-state problem and `2` as
+  a retry-or-escalate fault (`cli-canon-exit-codes`).
 - **`release abandon` now recovers a hard-killed release run's stale lock.** Lock files record
   their PID, hostname, and start time. `abandon` removes one only when the same-host holder is
   provably gone (`kill -0` reports `ESRCH`), then retries once and records what it did. Live,

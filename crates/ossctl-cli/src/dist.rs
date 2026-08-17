@@ -360,15 +360,15 @@ fn resolve_and_canonicalize(flag: Option<&PathBuf>) -> Result<PathBuf, CliError>
     })
 }
 
-/// A failed contract load is a system-level (exit-2) error — the generator could
-/// not obtain the config it reads.
+/// Map an absent contract to the caller-actionable not-found class; failures
+/// reading an existing contract remain operational errors.
 fn load_error_to_cli(e: LoadError) -> CliError {
-    let code = match e {
-        LoadError::NotFound(_) => "contract_not_found",
-        LoadError::Io(..) => "io_error",
-        LoadError::Utf8(_) => "invalid_encoding",
-    };
-    CliError::system(code, e.to_string())
+    let message = e.to_string();
+    match e {
+        LoadError::NotFound(_) => CliError::user("contract_not_found", message),
+        LoadError::Io(..) => CliError::system("io_error", message),
+        LoadError::Utf8(_) => CliError::system("invalid_encoding", message),
+    }
 }
 
 /// An invalid contract is a caller-fixable (exit-1) error carrying every problem.
