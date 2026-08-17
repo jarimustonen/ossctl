@@ -122,3 +122,8 @@ This means fix options (1) and (2) as written cannot work on their own: they ass
 Note the family resemblance: this is the same defect shape as @intake-feature-ossctl-73e870268475 (a tap declared in the distribution block but absent from targets, silently dropped) and @contract-validate-warn. A contract that under-declares its real distribution surface produces a green cut that quietly does the wrong thing. A validation warning for 'this repo has a cargo-dist workflow but no gh-releases target' would have caught this before the cut, and is probably the cheapest half of the fix.
 
 EXPOSURE CHECK for the pending release queue: glasspad's contract DOES declare both the gh-releases/cargo-dist and homebrew targets, matching ossctl's shape — so glasspad is NOT exposed to this bug and its planned 0.15.0 cut is safe on this axis. issuectl's contract needs its gh-releases and homebrew targets added; that is an issuectl-repo task, separate from this fix.
+
+### 2026-08-17T06:10:29Z · @claude
+
+DESIGN LANDED (2026-08-17): design.md in this issue directory covers the whole release-safety cluster. This issue's fix is D4 (facts-to-contract distribution cross-check: warn at plan, hard-refuse at cut when the repo has a cargo-dist release workflow or a declared homebrew_tap that the targets list omits) + D3 (mandatory post-cut verify phase, so a dropped leg can never report green). Option (1) of the Expected list is unreachable for this contract shape (the engine cannot know about an undeclared delegation), confirming the 2026-08-17 trigger comment.
+
