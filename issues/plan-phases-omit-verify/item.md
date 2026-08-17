@@ -2,10 +2,14 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: bug
-status: in-progress
+status: fixed
 priority: normal
 lane: plan-seal
 lane_seq: 10
+commits:
+- hash: f37ad39
+  summary: 'fix: seal the verify release barrier'
+closed: 2026-08-17
 ---
 
 # sealed plan's phases list omits the verify phase the coordinator always runs
