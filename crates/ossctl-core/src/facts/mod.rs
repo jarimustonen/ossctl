@@ -37,7 +37,9 @@ use std::path::Path;
 
 use crate::contract::schema::{Ecosystem, Maturity};
 use crate::ports::{Fs, GitRepo};
-use crate::protocol::facts::{Facts, MaturitySignals, Package, RustWorkspace, WorkspaceMember};
+use crate::protocol::facts::{
+    DistributionSurface, Facts, MaturitySignals, Package, RustWorkspace, WorkspaceMember,
+};
 
 /// Root-level manifests, in the canonical probe order. The ecosystem order here
 /// also fixes the order `ecosystems` and `packages` are emitted in.
@@ -107,6 +109,7 @@ pub fn gather(repo_root: &Path, fs: &dyn Fs, git: &dyn GitRepo) -> Facts {
     // omits, so a downstream repo that declares only its bin crate still gets its lib
     // crate planned, lib-before-bin (`release-rust-workspace-multicrate`).
     let rust_workspace = detect_rust_workspace(repo_root, fs);
+    let distribution_surface = detect_distribution_surface(repo_root, fs);
 
     // ── committers (mailmap-aware, whole `--all` history) ──
     let (committers_total, committers_recent_year) = if has_commits {
@@ -239,8 +242,86 @@ pub fn gather(repo_root: &Path, fs: &dyn Fs, git: &dyn GitRepo) -> Facts {
         description,
         maturity_signals: MaturitySignals { production, spike },
         inferred_maturity,
+        distribution_surface,
         rust_workspace,
     }
+}
+
+/// Detect cargo-dist configuration and tag-triggered GitHub workflows through the
+/// injected filesystem port. The line scanner intentionally recognizes only the
+/// ordinary nested `on: push: tags:` shape: missing an exotic YAML spelling is safe,
+/// while treating an unrelated `tags:` key as release infrastructure is not.
+pub fn detect_distribution_surface(repo_root: &Path, fs: &dyn Fs) -> DistributionSurface {
+    let mut cargo_dist_evidence = Vec::new();
+    if fs.is_file(&repo_root.join("dist-workspace.toml")) {
+        cargo_dist_evidence.push("dist-workspace.toml".to_string());
+    }
+    if read_text(fs, &repo_root.join("Cargo.toml"), MANIFEST_LIMIT).is_some_and(|text| {
+        text.lines()
+            .any(|line| line.trim() == "[workspace.metadata.dist]")
+    }) {
+        cargo_dist_evidence.push("Cargo.toml ([workspace.metadata.dist])".to_string());
+    }
+
+    let workflows = repo_root.join(".github/workflows");
+    let mut tag_triggered_workflows = fs
+        .read_dir(&workflows)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| {
+            Path::new(name).extension().is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("yml") || extension.eq_ignore_ascii_case("yaml")
+            })
+        })
+        .filter(|name| {
+            read_text(fs, &workflows.join(name), MANIFEST_LIMIT)
+                .is_some_and(|text| workflow_pushes_tags(&text))
+        })
+        .collect::<Vec<_>>();
+    tag_triggered_workflows.sort();
+
+    DistributionSurface {
+        has_cargo_dist: !cargo_dist_evidence.is_empty(),
+        cargo_dist_evidence,
+        tag_triggered_workflows,
+    }
+}
+
+fn workflow_pushes_tags(text: &str) -> bool {
+    let mut on_indent = None;
+    let mut push_indent = None;
+    for line in text.lines() {
+        let uncommented = line.split('#').next().unwrap_or("");
+        if uncommented.trim().is_empty() {
+            continue;
+        }
+        let indent = uncommented.len() - uncommented.trim_start().len();
+        let key = uncommented.trim();
+        if key == "on:" {
+            on_indent = Some(indent);
+            push_indent = None;
+            continue;
+        }
+        if let Some(on) = on_indent {
+            if indent <= on {
+                on_indent = None;
+                push_indent = None;
+                continue;
+            }
+            if key == "push:" {
+                push_indent = Some(indent);
+                continue;
+            }
+        }
+        if let Some(push) = push_indent {
+            if indent <= push {
+                push_indent = None;
+            } else if key == "tags:" {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Sniff root-level manifests into the ordered `ecosystems` + `packages` lists.
@@ -2212,6 +2293,45 @@ mod tests {
                 "{name} should count as CI"
             );
         }
+    }
+
+    #[test]
+    fn distribution_surface_detects_cargo_dist_and_only_tag_push_workflows() {
+        let fs = FakeFs::default()
+            .file("/repo/dist-workspace.toml", "[dist]\nci = \"github\"\n")
+            .file("/repo/Cargo.toml", "[workspace.metadata.dist]\ndist = true\n")
+            .file(
+                "/repo/.github/workflows/release.yml",
+                "on:\n  push:\n    tags:\n      - 'v*'\n",
+            )
+            .file(
+                "/repo/.github/workflows/ci.yml",
+                "on:\n  push:\n    branches: [main]\n  pull_request:\n    tags: [never-a-trigger]\n",
+            );
+        let surface = gather(repo(), &fs, &FakeGit::default()).distribution_surface;
+        assert!(surface.has_cargo_dist);
+        assert_eq!(
+            surface.cargo_dist_evidence,
+            vec![
+                "dist-workspace.toml".to_string(),
+                "Cargo.toml ([workspace.metadata.dist])".to_string()
+            ]
+        );
+        assert_eq!(surface.tag_triggered_workflows, vec!["release.yml"]);
+    }
+
+    #[test]
+    fn distribution_surface_is_empty_without_dist_or_tag_push() {
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", "[package]\nname = \"plain\"\n")
+            .file(
+                "/repo/.github/workflows/ci.yaml",
+                "on:\n  push:\n    branches: [main]\n",
+            );
+        let surface = gather(repo(), &fs, &FakeGit::default()).distribution_surface;
+        assert!(!surface.has_cargo_dist);
+        assert!(surface.cargo_dist_evidence.is_empty());
+        assert!(surface.tag_triggered_workflows.is_empty());
     }
 
     #[test]

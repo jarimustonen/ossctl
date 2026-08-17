@@ -13,7 +13,7 @@ use crate::contract::schema::{
     Registry, Release, ReleaseLayout, ReleaseModel, Status, Target, VersioningBase,
 };
 use crate::ports::{CommandOutput, CommandRunner};
-use crate::protocol::facts::{Facts, MaturitySignals};
+use crate::protocol::facts::{DistributionSurface, Facts, MaturitySignals};
 
 // ── In-memory Fs fake (mirrors the facts module's) ─────────────────────────
 
@@ -247,6 +247,11 @@ fn facts_with(maturity: Maturity, has_ci: bool, bot: Option<&str>) -> Facts {
             spike: false,
         },
         inferred_maturity: maturity,
+        distribution_surface: DistributionSurface {
+            has_cargo_dist: false,
+            cargo_dist_evidence: vec![],
+            tag_triggered_workflows: vec![],
+        },
         rust_workspace: None,
     }
 }

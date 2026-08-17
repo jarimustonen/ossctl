@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   malformed/legacy, unidentifiable, and other-host locks still fail with an actionable
   `cut_in_progress` error (`release-abandon-break-stale-lock`).
 - **Release plans are now durable approvals.** `release plan` saves its sealed plan under the git common directory; `cut` recovers an omitted `--bump` from it, and `resume` can continue a failed run after a code fix moved HEAD. The `plan_stale` error now reports `recomputed_plan_id` rather than `current_plan_id` and never recommends a replacement plan id.
+- **Release cuts now refuse under-declared distribution surfaces before creating a run.** Facts
+  detect cargo-dist configuration and tag-triggered workflows, validation and planning warn when
+  their GitHub Release target is missing, and `release cut` returns
+  `undeclared_distribution` until the contract declares the delegated GitHub Release and any
+  unserved Homebrew tap target.
 
 ### Internal
 - Add a hermetic end-to-end release harness that drives the compiled `ossctl` binary through planning, failed cuts, journal inspection, abandonment, and lock refusal without invoking real publish tooling.

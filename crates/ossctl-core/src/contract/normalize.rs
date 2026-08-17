@@ -24,7 +24,11 @@ use crate::contract::schema::{
     VersioningBase, DEFAULT_CROSS_PLATFORM_TARGETS, DEFAULT_FRAGMENT_DIR, KNOWN_SCHEMA_VERSION,
 };
 use crate::contract::spdx::spdx_valid;
+use crate::facts::detect_distribution_surface;
 use crate::ports::Fs;
+use crate::release::distribution::{
+    find_undeclared_distribution, undeclared_distribution_warnings,
+};
 
 /// The contract file the normalizer reads, relative to the repo root.
 pub const CONTRACT_FILENAME: &str = "OSS-RELEASE.md";
@@ -470,6 +474,16 @@ fn build(map: &Mapping, p: &mut Problems, repo_root: &Path, fs: &dyn Fs) -> Cont
     // double-publish collision, and the dead-tap advisory — the full truth table.
     check_homebrew_configuration(&targets, &distributions, p);
     check_dist_workspace_homebrew(&distributions, repo_root, fs, p);
+    let distribution_surface = detect_distribution_surface(repo_root, fs);
+    for warning in undeclared_distribution_warnings(&find_undeclared_distribution(
+        &targets,
+        &distribution_surface,
+        distributions
+            .iter()
+            .any(|d| d.homebrew_tap.is_some() && !d.installers.contains(&Installer::Homebrew)),
+    )) {
+        p.warn(warning);
+    }
     // A distribution block ships public binaries (GH-Release artifacts, a curl-pipe
     // installer, a Homebrew tap PR) — that is publishing, and a spike is not being
     // published. Mirrors the `release.model: auto` floor: raise maturity or drop the
@@ -1399,20 +1413,9 @@ fn check_homebrew_configuration(
         );
     }
 
-    // Floor: a tap with no formula producer would otherwise make a green release
-    // silently skip Homebrew. Do not derive a target here: `distribution.package`
-    // is optional, so a single-distribution multi-crate workspace may not identify
-    // which package/formula the irreversible Homebrew write should use.
-    if has_tap && !installer_producer && !tap_target_producer {
-        p.err(
-            "floor: distribution.homebrew_tap is set but there is neither a 'homebrew' installer \
-             in distribution.installers nor a 'homebrew'-registry target with adapter \
-             'homebrew-tap' — release plan/cut would silently skip the tap. Add an explicit \
-             homebrew target (registry: homebrew, adapter: homebrew-tap) for the formula package, \
-             or declare the homebrew installer that owns publishing it"
-                .to_string(),
-        );
-    }
+    // A tap without an engine-owned target is diagnosed by the facts-to-contract
+    // advisory after this structural pass. It remains a warning so validation and
+    // planning can explain the exact missing release surface before `cut` refuses.
 }
 
 // ── Frontmatter extraction + parse ───────────────────────────────────────────
@@ -2472,8 +2475,11 @@ mod tests {
             "[dist]\ntap = \"owner/homebrew-tool\"\n",
         );
         let n = norm_with(
-            "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ndistribution:\n  \
-             adapter: cargo-dist\n  installers: [homebrew]\n  homebrew_tap: owner/homebrew-tool\n---\n",
+            "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets:\n  \
+             - {ecosystem: rust, package: tool, registry: crates.io, adapter: cargo-publish}\n  \
+             - {ecosystem: rust, package: tool, registry: gh-releases, adapter: cargo-dist}\n  \
+             - {ecosystem: rust, package: tool, registry: homebrew, adapter: homebrew-tap}\n\
+             distribution:\n  adapter: cargo-dist\n  installers: [shell]\n  homebrew_tap: owner/homebrew-tool\n---\n",
             &fs,
         );
         assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
@@ -2496,9 +2502,11 @@ mod tests {
         );
     }
 
-    /// cargo-dist config is advisory, so malformed TOML does not fail validation.
+    /// A malformed cargo-dist file still proves that distribution infrastructure
+    /// exists, so it is advisory rather than fatal but warns when GH Releases is
+    /// absent from the contract.
     #[test]
-    fn unparseable_dist_workspace_is_silent() {
+    fn unparseable_dist_workspace_warns_about_missing_gh_releases() {
         let fs = FakeFs::with_file("/repo/dist-workspace.toml", "[dist\ntap = \"owner/tap\"");
         let n = norm_with(
             "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\n---\n",
@@ -2506,7 +2514,10 @@ mod tests {
         );
         assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
         assert!(
-            n.problems.warnings.is_empty(),
+            n.problems
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("no 'gh-releases' target")),
             "warnings: {:?}",
             n.problems.warnings
         );
@@ -2557,7 +2568,7 @@ mod tests {
             (false, false, true, false), // 2: tap-target, no tap → missing-tap floor
             (false, true, false, false), // 3: installer, no tap → per-block floor
             (false, true, true, false),  // 4: both producers, no tap → floors
-            (true, false, false, false), // 5: tap, no producer → silent-release-skip floor
+            (true, false, false, true),  // 5: tap, no producer → cut-time refusal
             (true, false, true, true),   // 6: tap + tap-target → well-formed (ossctl's case)
             (true, true, false, true),   // 7: tap + installer → well-formed (cargo-dist)
             (true, true, true, false),   // 8: tap + both producers → double-publish floor
@@ -2596,10 +2607,10 @@ mod tests {
 
     /// Regression for `intake-feature-ossctl-73e870268475`: the field-reported
     /// shape had two crates.io targets and a distribution tap, but no Homebrew
-    /// formula producer. It must fail validation and therefore cannot seal a green
-    /// plan that omits the tap.
+    /// target. Validation warns and the cut preflight refuses before it can omit
+    /// the tap leg.
     #[test]
-    fn distribution_tap_without_formula_producer_is_a_floor() {
+    fn distribution_tap_without_formula_producer_warns() {
         let text = concat!(
             "---\n",
             "status: approved\n",
@@ -2614,7 +2625,13 @@ mod tests {
             "  homebrew_tap: owner/homebrew-project-canon\n",
             "---\n",
         );
-        assert_error_contains(&norm(text), "release plan/cut would silently skip the tap");
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(n
+            .problems
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("tap leg would be silently skipped")));
     }
 
     /// Row 6: a `homebrew-tap` target with a configured tap and no installer
@@ -3611,14 +3628,20 @@ mod tests {
         assert_error_contains(&norm(text), "not allowed on maturity 'spike'");
     }
 
-    /// A `homebrew_tap` without either supported formula producer fails closed:
-    /// otherwise a green release would omit the declared tap.
+    /// A `homebrew_tap` without an engine-owned target is a warning at validation
+    /// time and a hard refusal at cut time, so the author can see the remediation.
     #[test]
-    fn distribution_tap_without_installer_or_target_fails_closed() {
+    fn distribution_tap_without_target_warns() {
         let text = "---\nstatus: approved\nmaturity: mvp\n\
                     distribution:\n  adapter: cargo-dist\n  installers: [shell]\n  \
                     homebrew_tap: owner/tap\n---\n";
-        assert_error_contains(&norm(text), "release plan/cut would silently skip the tap");
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(n
+            .problems
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("no 'homebrew' target")));
     }
 
     /// A `homebrew_tap` set with NO `homebrew` installer but WITH a

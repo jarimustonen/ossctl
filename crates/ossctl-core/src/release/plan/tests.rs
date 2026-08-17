@@ -10,7 +10,9 @@ use crate::contract::schema::{
     ProvenanceLevel, Registry, Release, ReleaseLayout, ReleaseModel, Status, Target,
     VersioningBase,
 };
-use crate::protocol::facts::{Facts, MaturitySignals, Package, RustWorkspace, WorkspaceMember};
+use crate::protocol::facts::{
+    DistributionSurface, Facts, MaturitySignals, Package, RustWorkspace, WorkspaceMember,
+};
 use crate::protocol::plan::PlanPhase;
 
 // ── SHA-256 known-answer vectors (FIPS 180-4 / RFC 6234) ───────────────────
@@ -139,6 +141,11 @@ fn rust_facts() -> Facts {
             spike: false,
         },
         inferred_maturity: Maturity::Mvp,
+        distribution_surface: DistributionSurface {
+            has_cargo_dist: false,
+            cargo_dist_evidence: vec![],
+            tag_triggered_workflows: vec![],
+        },
         rust_workspace: None,
     }
 }

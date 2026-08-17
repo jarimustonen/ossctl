@@ -95,6 +95,9 @@ pub fn validate(args: &ValidateArgs, format: OutputFormat) -> Result<(), CliErro
                 doc.maturity.as_str(),
                 doc.targets.len()
             );
+            for warning in &doc.warnings {
+                println!("warning: {warning}");
+            }
         }
     }
     Ok(())

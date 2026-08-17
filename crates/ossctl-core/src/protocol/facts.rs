@@ -24,6 +24,17 @@ use serde::Serialize;
 
 use crate::contract::schema::{Ecosystem, Maturity};
 
+/// Distribution infrastructure discovered in the repository tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DistributionSurface {
+    /// Whether cargo-dist configuration is present at the repository root.
+    pub has_cargo_dist: bool,
+    /// Root configuration files that establish cargo-dist use.
+    pub cargo_dist_evidence: Vec<String>,
+    /// GitHub workflow filenames whose `push` trigger includes tags.
+    pub tag_triggered_workflows: Vec<String>,
+}
+
 /// The deterministic repo-fact report — a pure function of `(repo tree, git
 /// HEAD)`, emitted by `ossctl facts` and consumed by `/oss-init` and `audit`.
 ///
@@ -76,6 +87,8 @@ pub struct Facts {
     pub maturity_signals: MaturitySignals,
     /// The inferred maturity (SCHEMA.md §4 truth table, tie → `mvp`).
     pub inferred_maturity: Maturity,
+    /// Detected binary-distribution infrastructure and tag-triggered workflows.
+    pub distribution_surface: DistributionSurface,
     /// The Rust workspace's publishable member graph — derived plumbing the
     /// release planner needs, deliberately kept **off the JSON wire**
     /// (`#[serde(skip)]`), `None` for a repo with no multi-crate Cargo workspace.

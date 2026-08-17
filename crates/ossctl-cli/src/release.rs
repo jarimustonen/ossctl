@@ -21,6 +21,7 @@ use ossctl_core::protocol::plan::ReleasePlan;
 use ossctl_core::protocol::reconcile::ReconcileReport;
 use ossctl_core::release::adapters::{EffectCtx, EMPTY_ARTIFACTS};
 use ossctl_core::release::coordinator::{self, CutError, ProgressSink};
+use ossctl_core::release::distribution::{find_undeclared_distribution, UndeclaredDistribution};
 use ossctl_core::release::journal::{self, Journal, JournalPaths};
 
 use crate::cli::ReleaseAction;
@@ -1665,6 +1666,7 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     })?;
     let provenance_warnings = release_binary_warnings(&git, &head_sha, args.allow_stale_binary)?;
     let facts = ossctl_core::facts::gather(&root, &RealFs, &git);
+    ensure_declared_distribution(&normalized.contract, &facts)?;
 
     // Resolve the sibling plan store before choosing the bump disposition. A stored
     // plan is authoritative; legacy/machine-missing plans retain flag-driven fallback.
@@ -2334,6 +2336,36 @@ fn load_error_to_cli(e: LoadError) -> CliError {
 /// release lands, mirroring `dist generate`'s `multiple_distributions`. The
 /// single-distribution common case (`len <= 1`, incl. ossctl itself) is
 /// unaffected.
+/// Refuse a cut whose repository distribution surface is absent from its contract.
+/// This is deliberately before journal creation: proceeding could create an empty
+/// GitHub Release that prevents cargo-dist from publishing its artifacts.
+fn ensure_declared_distribution(
+    contract: &Contract,
+    facts: &ossctl_core::protocol::facts::Facts,
+) -> Result<(), CliError> {
+    let findings = find_undeclared_distribution(
+        &contract.targets,
+        &facts.distribution_surface,
+        contract.distributions.iter().any(|distribution| {
+            distribution.homebrew_tap.is_some()
+                && !distribution
+                    .installers
+                    .contains(&ossctl_core::contract::schema::Installer::Homebrew)
+        }),
+    );
+    let Some(finding) = findings.first() else {
+        return Ok(());
+    };
+    let message = match finding {
+        UndeclaredDistribution::GhReleases { evidence } => format!(
+            "{} detected, but OSS-RELEASE.md targets: has no registry: gh-releases target. Add {{ecosystem, package, registry: gh-releases, adapter: cargo-dist}} to OSS-RELEASE.md's targets: and re-plan; otherwise the tag phase would collide with cargo-dist and drop its binaries and Homebrew publish",
+            evidence.join(", ")
+        ),
+        UndeclaredDistribution::Homebrew => "distribution.homebrew_tap is set, but OSS-RELEASE.md targets: has no registry: homebrew target. Add {ecosystem, package, registry: homebrew, adapter: homebrew-tap} to OSS-RELEASE.md's targets: and re-plan; otherwise the tap leg would be silently skipped".to_string(),
+    };
+    Err(CliError::user("undeclared_distribution", message))
+}
+
 fn ensure_single_distribution(contract: &Contract) -> Result<(), CliError> {
     if contract.distributions.len() > 1 {
         let packages: Vec<&str> = contract
@@ -2422,10 +2454,11 @@ mod tests {
     use super::*;
     use clap::Parser as _;
     use ossctl_core::contract::schema::{
-        Changelog, ChangelogMode, ChangelogSource, ContributionProvenance, DependencyBot,
-        Distribution, DistributionAdapter, DocsSite, Ecosystem, Maturity, ProvenanceLevel, Release,
-        ReleaseLayout, ReleaseModel, VersioningBase,
+        Adapter, Changelog, ChangelogMode, ChangelogSource, ContributionProvenance, DependencyBot,
+        Distribution, DistributionAdapter, DocsSite, Ecosystem, Maturity, ProvenanceLevel,
+        Registry, Release, ReleaseLayout, ReleaseModel, Target, VersioningBase,
     };
+    use ossctl_core::protocol::facts::{DistributionSurface, Facts, MaturitySignals};
     use ossctl_core::protocol::journal::EventKind;
 
     /// A minimal approved `Contract` carrying the given distributions — enough to
@@ -2554,6 +2587,68 @@ mod tests {
         let err = ensure_single_distribution(&c).unwrap_err();
         assert_eq!(err.code, "multiple_distributions");
         assert!(err.message.contains("alpha") && err.message.contains("beta"));
+    }
+
+    fn facts_with_surface(surface: DistributionSurface) -> Facts {
+        Facts {
+            repo_root: "/repo".to_string(),
+            is_git: true,
+            has_commits: true,
+            ecosystems: vec![Ecosystem::Rust],
+            packages: vec![],
+            committers_total: 1,
+            committers_recent_year: 1,
+            tags: vec![],
+            has_semver_tag: false,
+            has_ge_1_0_release: false,
+            has_ci: true,
+            dependency_bot: None,
+            has_issues_dir: false,
+            readme_self_label: None,
+            description: None,
+            maturity_signals: MaturitySignals {
+                production: false,
+                spike: false,
+            },
+            inferred_maturity: Maturity::Mvp,
+            distribution_surface: surface,
+            rust_workspace: None,
+        }
+    }
+
+    #[test]
+    fn undeclared_distribution_preflight_refuses_both_missing_targets() {
+        let mut contract = contract_with_distributions(vec![Distribution {
+            homebrew_tap: Some("owner/tap".to_string()),
+            ..dist("solo")
+        }]);
+        let facts = facts_with_surface(DistributionSurface {
+            has_cargo_dist: true,
+            cargo_dist_evidence: vec!["dist-workspace.toml".to_string()],
+            tag_triggered_workflows: vec!["release.yml".to_string()],
+        });
+        let err = ensure_declared_distribution(&contract, &facts).unwrap_err();
+        assert_eq!(err.code, "undeclared_distribution");
+        assert!(err.message.contains("dist-workspace.toml"));
+        assert!(err.message.contains("gh-releases"));
+
+        contract.targets.push(Target {
+            ecosystem: Ecosystem::Rust,
+            package: Some("solo".to_string()),
+            registry: Registry::GhReleases,
+            adapter: Adapter::CargoDist,
+        });
+        let err = ensure_declared_distribution(&contract, &facts).unwrap_err();
+        assert_eq!(err.code, "undeclared_distribution");
+        assert!(err.message.contains("homebrew"));
+
+        contract.targets.push(Target {
+            ecosystem: Ecosystem::Rust,
+            package: Some("solo".to_string()),
+            registry: Registry::Homebrew,
+            adapter: Adapter::HomebrewTap,
+        });
+        assert!(ensure_declared_distribution(&contract, &facts).is_ok());
     }
 
     /// A `Write` that always fails, counting attempts — models a reader that
