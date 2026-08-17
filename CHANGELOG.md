@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 <!-- oss-changelog:unreleased-end -->
 
+## [0.6.0] - 2026-08-17
+
+### Fixed
+- **The generated Homebrew formula could not be installed at all.** Every formula the engine wrote
+  since 0.2.3 ran `cargo install` against the extracted tarball root, which fails on a virtual
+  workspace manifest (`found a virtual manifest ... instead of a package manifest`). Six releases
+  reported their Homebrew leg green while publishing an uninstallable formula. The formula now
+  renders per-platform archive URLs with their checksums, installs the prebuilt binary, carries the
+  real package description, and smoke-tests a command that exists (`homebrew-formula-uninstallable`).
+- **The Homebrew leg no longer builds from source.** The post-tag dist phase waits (bounded, 300s)
+  for the cargo-dist release assets, fetches and hashes them, and renders the formula against the
+  published binaries. It **fails closed** if the assets do not appear — there is no source-build
+  fallback and no placeholder checksum, because a tap silently left on an older version is the
+  defect this replaces. Homebrew is the family's primary install channel and no longer requires a
+  Rust toolchain.
+- **The stale-binary guard no longer blocks downstream releases.** As shipped earlier the guard
+  compared the binary's compiled commit against the *release tree's* HEAD, which a downstream
+  repository can never satisfy — so `release plan`/`cut` refused everywhere except this repository,
+  and `--allow-stale-binary` became a reflex that would have hollowed out the guard for the self-cut
+  too. The check is now scoped to canonical self-cuts (`stale-binary-guard-downstream`).
+- **Preserved contract fields no longer drop values silently.** `yaml_to_json` coerced non-string
+  mapping keys inside preserved content, so `42:` and `"42":` in one mapping collapsed and one value
+  was lost with no warning. Non-string keys now produce a path-carrying error. The canonical JSON
+  shape for valid contracts is unchanged, so `schema_version` is unchanged
+  (`extra-fields-nested-nonstring-yaml`).
+- **Flaky macOS CI.** Test fixture workspaces were named from the process id plus a clock reading, so
+  sibling tests sharing a process could collide and overwrite each other's manifests. Fixtures are now
+  uniquely allocated and cleaned up on drop (`temp-workspace-dir-collision`).
+
+### Added
+- **`ossctl config path` and `ossctl config show --json`.** Report where the effective configuration
+  lives and what each value resolves to, with its provenance (default, file, environment, flag), so an
+  agent can answer "why is this value what it is" without scraping prose (`cli-canon-config`, canon §8).
+- **`/oss-dist` — the distribution generator.** The `/oss-*` family had no member for the
+  `gh-releases`/`cargo-dist` and `homebrew` channels, so a contract declaring a binary or Homebrew
+  channel had to be hand-wired per repository. The new member emits the cargo-dist configuration,
+  wraps `ossctl dist generate`, ensures the dist profile, and documents the tap and token setup, with
+  macOS arm64/x86_64 and Linux musl arm64/x86_64 coverage enforced (`oss-dist-channel-generator`).
+
+### Changed
+- **`contract validate` warns when a Homebrew tap is declared only in `dist-workspace.toml`.** The
+  contract remains the single source of truth, so a tap the contract does not carry is not planned —
+  previously in silence. Absent or unparseable cargo-dist configuration stays silent
+  (`contract-validate-warn`).
+- **A contract that declares `distribution.homebrew_tap` with nothing to produce the formula is now
+  rejected** rather than planned as a green cut that skips the tap. Deriving the target implicitly was
+  considered and rejected: a distribution block cannot safely identify which package of a multi-crate
+  workspace the formula is built from.
+
 ## [0.5.0] - 2026-08-13
 
 ### Added
