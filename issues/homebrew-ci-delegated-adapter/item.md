@@ -2,10 +2,16 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: feature
-status: in-progress
+status: done
 priority: high
 lane: contract-engine
 lane_seq: 10
+commits:
+- hash: 7427a84
+  summary: 'feat: support CI-delegated Homebrew targets'
+- hash: 7dbd724
+  summary: 'feat: support CI-delegated Homebrew targets'
+closed: 2026-08-17
 ---
 
 # homebrew target needs a CI-delegated adapter (cargo-dist publish-jobs owns the tap)
