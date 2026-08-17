@@ -73,12 +73,30 @@ app beyond what the ADRs already fix.
   `dry-run-all` before any publish, `ossctl-core`→`ossctl` ordering + index-wait guard the
   crates.io partial-publish case, and `ossctl release resume`/`abandon` recover an interrupted
   run. Still: green gate first, dry-run/plan first, never publish red, report each phase.
+  - **⚠️ The limit of that structural safety (learned 2026-08-17): it covers what the engine
+    DOES, not what it REPORTS.** Every fail-closed refusal above works — three of them fired
+    correctly across the 0.6.0/0.6.1 cuts and nothing wrong was written anywhere. But the same
+    engine had been reporting a **green Homebrew leg for six consecutive releases** while
+    publishing a formula that could not be installed, because no phase verified its own artifact
+    after the fact. **Trust the refusals; do not trust the green.** A publish target that cannot
+    be observed after the fact is not a publish target. Four open `release-safety` issues are the
+    same defect in different clothes — treat them as one design problem, and copy the pattern the
+    crates.io path already gets right (confirm the version reached the index before journaling a
+    receipt).
   - **Shipped: 0.1.0 (2026-08-04), 0.1.1 (2026-08-05), 0.1.2 (2026-08-05), 0.2.0 (2026-08-06),
     0.2.1 (2026-08-06), 0.2.2 (2026-08-06), 0.2.3 (2026-08-07), 0.2.4 (2026-08-10), 0.2.5 (2026-08-10),
-    0.3.0 (2026-08-11), 0.4.0 (2026-08-11), 0.5.0 (2026-08-13).**
+    0.3.0 (2026-08-11), 0.4.0 (2026-08-11), 0.5.0 (2026-08-13), 0.6.0 + 0.6.1 (2026-08-17).**
     All on crates.io (`ossctl` + `ossctl-core`), GitHub Releases (cross-platform: macOS aarch64,
-    Linux musl x86_64+aarch64, Windows, `.sh`+`.ps1` installers), and its configured
-    Homebrew tap. Repo is **public**. 0.1.2 added `ossctl dist generate`. 0.2.0
+    Linux musl x86_64+aarch64, `.sh` installer), and its configured
+    Homebrew tap. Repo is **public**. **No Windows** — the `x86_64-pc-windows-msvc` target and the
+    PowerShell installer were dropped 2026-08-17 (maintainer decision: CI time spent on a platform
+    this fleet does not use). Windows was never in the normalizer's *default* platform set — that
+    omission is deliberate and documented in `DEFAULT_CROSS_PLATFORM_TARGETS`; this repo had simply
+    opted in, and the opt-in is withdrawn. 0.6.0/0.6.1 fixed the **uninstallable Homebrew formula**
+    (the engine emitted `cargo install` against a virtual workspace manifest, which cannot work) —
+    the formula is now a marker-carrying, per-platform prebuilt-archive formula with no toolchain
+    dependency — plus a downstream-safe stale-binary guard, `config path`/`config show`, the
+    contract never-drop fix, and the `/oss-dist` skill. 0.1.2 added `ossctl dist generate`. 0.2.0
     made the engine drive a multi-target cut (multi-target/ecosystem in dep order, one-target-one-
     publish-unit/ADR-0004, CI-delegated skip, GH-Release-to-CI, post-tag homebrew, crates.io-pin)
     + `release list`/`abandon`. 0.2.1 landed the INTERLEAVE fix (adapter defers a `=`-pinned
@@ -117,8 +135,18 @@ app beyond what the ADRs already fix.
     `rust`, fixed by `release-publish-registry-query-not-wired`, 0.2.2); the 0.2.2 cut failed SAFELY
     at DIST on the homebrew `brew audit` (fixed by `homebrew-dist-brew-audit-fails`, 0.2.3). Each
     blocker fell in turn, always failing closed/safe. **0.2.0 and 0.2.1 were cut manually; 0.2.2 was
-    cut by the engine except its homebrew leg (done by hand); 0.2.3 was fully engine-cut.** No HIGH
-    blocker remains.
+    cut by the engine except its homebrew leg (done by hand); 0.2.3 was fully engine-cut.**
+    - **⚠️ HIGH blockers DO exist again (2026-08-17) — this section said "no HIGH blocker remains"
+      and that is no longer true.** Cutting `issuectl` 0.14.1 surfaced two field-confirmed HIGH bugs,
+      now at the head of `release-safety`: `release-tag-preempts-cargo-dist` (in a repo whose
+      contract omits the gh-releases/cargo-dist target, the tag phase creates the GitHub Release
+      itself, collides with cargo-dist's workflow, and **silently drops the binaries and the
+      Homebrew formula while reporting a complete release**) and `release-bump-plan-uncuttable`
+      (`release plan --bump` seals a plan the cut always rejects as stale, and its error steers the
+      operator toward republishing the version already on the registry). **`--bump` has never worked
+      end-to-end** — stint #20's refusal to dogfood it on an irreversible path was vindicated. The
+      dogfood claim above still holds for *ossctl's own* cut; it does not generalise to downstream
+      repos whose contracts under-declare their distribution surface.
   - **The ENGINE recipe (`ossctl release cut`) is the PRIMARY and PROVEN path** — the 4-step manual
     fallback is RETIRED for ossctl's own cut (kept below only as partial-failure insurance). ossctl's
     own `OSS-RELEASE.md` declares the
@@ -154,6 +182,31 @@ app beyond what the ADRs already fix.
        `release-macos-hauis-coupling`.)
     4. Post-cut, verify the delegated Release exists: `gh release view vX.Y.Z` (until
        `release-verify-delegated-github-release` automates it into `ossctl release verify`).
+    5. **Post-cut, verify the TAP actually moved** — `curl -s https://raw.githubusercontent.com/<tap>/main/Formula/<name>.rb | head -1`
+       and check the version. `✓ dist complete` does **not** mean the formula is correct or even
+       installable; that is exactly how six releases shipped a broken formula unnoticed
+       (`release-verify-homebrew-tap` will automate this).
+  - **⚠️ CUTTING ANY REPO WHOSE TAP PREDATES THE OWNERSHIP MARKER — read before you cut.** Since
+    0.6.0 the tap-write refuses to replace a formula that does not carry ossctl's ownership marker
+    on its **first line**: it cannot distinguish its own pre-marker output from a hand-maintained
+    formula, so it fails closed rather than clobbering. That refusal lands **in the dist phase —
+    after crates.io and the tag have already published**, which is the worst possible moment. As of
+    2026-08-17 the `issuectl`, `glasspad`, `orchestratectl`, and `project-canon` taps are all
+    unmarked. **Prepend this line to the tap's formula and push, before cutting:**
+
+    ```
+    # Generated by ossctl; do not edit by hand (template-version: 1)
+    ```
+
+    If you only discover it after the failure, add the marker and then
+    `ossctl release resume <run> --allow-unverified` (homebrew is structurally unverifiable, so the
+    flag is required and appropriate here). **But that only works if HEAD has not moved** — see the
+    next bullet.
+  - **⚠️ `release resume` cannot recover from a CODE FIX.** The sealed plan is re-derived from the
+    working tree, so fixing the very defect that stopped the cut moves HEAD and makes the run
+    permanently unresumable (`resume_drift`). Resume therefore only recovers *transient* failures.
+    After an engine-defect failure the real path is: `release abandon <run>`, fix, bump, and cut a
+    new version — the already-published targets stay published. Tracked in `resume-drift-after-fix`.
   - **Fallback (manual recipe), if an engine cut fails partway:** the old hand-driven path
     still works — `gh workflow run publish-crates.yml` for crates, a hand `brew bump-formula-pr`
     for the tap — and `ossctl release resume <run>` / `abandon <run>` recover an interrupted
@@ -221,6 +274,22 @@ app beyond what the ADRs already fix.
 - **Migration rule:** the canonical-JSON output shape is a schema-versioned compatibility
   contract (§10). Preserve it; bump `schema_version` on a breaking change, never silently.
 - **Test-account reset:** n/a (no external test accounts).
+- **Issue standard: a finding earns a place in the tracker only if its failure can actually occur
+  here** (maintainer decision, 2026-08-17). Judge the **content**: does this describe a failure
+  reachable in this project, for this user, on this path — and what is the damage beyond an error
+  message? Provenance (an `/llm-review` panel, several models agreeing) is a *supporting signal*
+  only, never the verdict; models share priors and correlate hardest on plausible-sounding generic
+  advice, so "all four flagged it" is not independent confirmation. **Reject** cosmic-ray
+  scenarios, checks duplicating checks that already exist elsewhere, and hostile-input hardening on
+  paths where the only actor is the maintainer's own machine. **Keep** a finding with no observed
+  occurrence when the failure would be *silent* (wrong result, no error), the consequence is
+  *irreversible*, it is reachable by a *downstream user* of a shipped tool, or it contradicts a
+  documented guarantee. When closing one of these, record the reason **and a reopen condition**, so
+  the next reviewer does not re-file the same ground. Applied 2026-08-17: ~40% of the open issue
+  base was this class and was closed; two worker rounds had already been spent on it. Also applies
+  to **deferral justifications** — a comment claiming work is blocked must have its blocker
+  verified, not inherited from the previous agent (a stale one froze a Homebrew tap for three
+  releases).
 
 ## Companion-skill installer (`ossctl skill install`)
 
