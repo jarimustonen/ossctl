@@ -3,12 +3,16 @@ created: 2026-08-17
 updated: 2026-08-17
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 labels:
 - via:agent-homebase-wrapup
 lane: cli-canon
 lane_seq: 10
+closed: 2026-08-17
+commits:
+- hash: 15bb7f4f9762c8a4e423a61421160974fd0019d3
+  summary: alias version flags to version command
 ---
 
 # ossctl --version is rejected as an unknown flag; it should alias the ve…
@@ -44,3 +48,9 @@ falling back to the verb.
 `version` verb, exit 0. project-canon has the same defect filed as
 `version-flag-alias` ("--version must equal the version verb"), so this is a
 family-wide convention worth fixing consistently.
+
+## Resolution
+
+### 2026-08-17T08:53:03Z · @issuectl
+
+Implemented and verified `--version`/`-V` aliases, including JSON parity and nested release-flag regression coverage.
