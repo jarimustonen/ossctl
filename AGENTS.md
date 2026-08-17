@@ -7,40 +7,41 @@ family. `ossctl` owns the normalizer/validator for the project release contract
 per-ecosystem release-cut state machine; the prose `/oss-*` skills are thin callers
 of this binary (the binary is the source of truth, §17).
 
+**Status: public, live.** Current release: see `ossctl version --json` / the git tags.
+Shipped on all four channels — crates.io (`ossctl` + `ossctl-core`), GitHub Releases
+(cargo-dist: macOS aarch64, Linux musl x86_64+aarch64, `.sh` installer), and the
+Homebrew tap. **No Windows** (maintainer decision 2026-08-17; deliberate, documented in
+`DEFAULT_CROSS_PLATFORM_TARGETS`). Version history: `CHANGELOG.md` + git tags.
+
 ## CLI Design Principles
 
-Use the `/ai-first-cli-canon` skill shipped by `project-canon` as the maintained AI-first CLI canon. It is the binding reference for CLI surface work: strict input validation, `--json` output, JSONL logs, no interactive prompts, informative errors and composable commands. Do not keep or edit a repo-local `AGENTS-AI-FIRST-CLI.md` copy; update the canon at its source and reinstall the skill from the released tool.
-
+Use the `/ai-first-cli-canon` skill shipped by `project-canon` as the maintained AI-first
+CLI canon. It is the binding reference for CLI surface work: strict input validation,
+`--json` output, JSONL logs, no interactive prompts, informative errors and composable
+commands. Do not keep or edit a repo-local `AGENTS-AI-FIRST-CLI.md` copy; update the
+canon at its source and reinstall the skill from the released tool.
 
 ## Architecture (decided before code — read first)
 
-The founding architecture is **already settled** in three accepted ADRs under
-[`docs/adr/`](docs/adr/) — read them before writing any code; they are the spec, not
-background:
+The architecture lives in accepted ADRs under [`docs/adr/`](docs/adr/) — read them before
+writing any code; they are the spec, not background:
 
-- [`0001-founding-architecture.md`](docs/adr/0001-founding-architecture.md) — CLI
-  command taxonomy (`contract` / `facts` / `audit` / `release …` / `skill` / `doctor`
-  / `version`), the two-crate cargo workspace (`ossctl-core` lib + `ossctl-cli` bin),
-  and the binary↔skill boundary for all 10 family members.
+- [`0001-founding-architecture.md`](docs/adr/0001-founding-architecture.md) — CLI command
+  taxonomy, the two-crate workspace (`ossctl-core` lib + the `ossctl` bin crate in
+  `crates/ossctl-cli/`), the binary↔skill boundary.
 - [`0002-release-engine-adapter-model.md`](docs/adr/0002-release-engine-adapter-model.md)
-  — the `ReleaseAdapter` trait + enum-backed registry, the phase-barrier coordinator
-  (dry-run-all → build-all → publish-all → tag-once, coordinator-only tagging), and the
-  sealed content-addressed `plan_id` approval seam.
+  — the `ReleaseAdapter` trait + enum registry, the phase-barrier coordinator, the sealed
+  content-addressed `plan_id` approval seam, and (amendments) the cargo interleave and the
+  mandatory post-cut **verify** barrier ("a publish target that cannot be observed after
+  the fact is not a publish target"; `Unknown` is not green).
 - [`0003-config-and-journal-storage.md`](docs/adr/0003-config-and-journal-storage.md) —
-  `OSS-RELEASE.md` stays the project contract; the event-sourced JSONL release journal
-  under `git-common-dir/ossctl/releases/<run_id>/`; the remote-is-ground-truth
-  resume/reconcile state table.
+  `OSS-RELEASE.md` as the project contract; the event-sourced JSONL release journal under
+  `git-common-dir/ossctl/releases/<run_id>/`; the remote-is-ground-truth resume/reconcile
+  table; and (amendment) the durable **plan store** under `git-common-dir/ossctl/plans/`.
+- [`0004-cargo-adapter-one-target-one-publish-unit.md`](docs/adr/0004-cargo-adapter-one-target-one-publish-unit.md)
+  — one target = one publish unit; the coordinator owns cross-target ordering.
 
-**Provenance.** `ossctl` extracts the deterministic core of a skill family designed in
-`homebase` (`issues/oss-release-skill-family/`). The locked family design (`design.md`
-there) is realized — not re-opened — by these ADRs. The already-built `/oss-init` unit
-(a `SKILL.md`, `SCHEMA.md`, and two Python scripts `check-oss-release.py` /
-`infer-repo-facts.py`) migrates into this repo; the scripts become `ossctl contract
-validate` and `ossctl facts`.
-
-**Status: Private, early.** The architecture is decided; the workspace is not yet
-scaffolded. Open an `issuectl` issue before building a feature — do not pre-design the
-app beyond what the ADRs already fix.
+Open an `issuectl` issue before building a feature — do not pre-design beyond the ADRs.
 
 ## Operating policy (for `/stint`)
 
@@ -51,281 +52,109 @@ app beyond what the ADRs already fix.
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace`
   - `cargo build --workspace` (release build not required per-unit)
-  - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` — **CI runs this and it
-    is easy to miss locally**: broken intra-doc links (`[`Foo`]` to a moved/renamed/private
-    item, redundant explicit link targets) fail the `docs` job even when tests pass. Run it
-    before landing any unit that touches doc comments (`//!` / `///`).
+  - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` — CI runs this and it is
+    easy to miss locally: broken intra-doc links fail the `docs` job even when tests pass.
 - **Releases MAY be cut automatically whenever there is something to release** (maintainer
-  decision, 2026-08-05). Publishing `ossctl` itself (crates.io / GitHub Release / Homebrew)
-  no longer requires an explicit per-release go: when `main` carries unreleased user-facing
-  changes, `/stint` may bump the version, finalize the CHANGELOG, and run the release recipe
-  as an owned Phase-3 act — no confirmation needed. Preconditions still hold: the green gate
-  passes, and `cargo publish` runs `--dry-run` first. crates.io publishes are irreversible
-  (yank-only), so never publish red, and report each step.
-- **The ENGINE-DRIVEN cut (`ossctl release cut`) is fully autonomous — NO go/no-go checkpoint,
-  ever** (maintainer decision, 2026-08-06). Running the release *through the engine* — the full
-  multi-target flow (crates.io ×2 + cargo-dist binaries + the Homebrew tap) — requires **no
-  permission and no pause before the irreversible publish**, not for the first-ever engine cut,
-  not for the homebrew leg (the homebrew leg is the most important target — it must be cut, not
-  dropped). Do **not** stop to ask "shall I cut?" — just run the recipe end to end and report
-  as you go. The safety is structural, not a human gate: `ossctl release plan` seals a
-  content-addressed plan (a side-effect-free preview the agent inspects), the coordinator runs
-  `dry-run-all` before any publish, `ossctl-core`→`ossctl` ordering + index-wait guard the
-  crates.io partial-publish case, and `ossctl release resume`/`abandon` recover an interrupted
-  run. Still: green gate first, dry-run/plan first, never publish red, report each phase.
-  - **⚠️ The limit of that structural safety (learned 2026-08-17): it covers what the engine
-    DOES, not what it REPORTS.** Every fail-closed refusal above works — three of them fired
-    correctly across the 0.6.0/0.6.1 cuts and nothing wrong was written anywhere. But the same
-    engine had been reporting a **green Homebrew leg for six consecutive releases** while
-    publishing a formula that could not be installed, because no phase verified its own artifact
-    after the fact. **Trust the refusals; do not trust the green.** A publish target that cannot
-    be observed after the fact is not a publish target. Four open `release-safety` issues are the
-    same defect in different clothes — treat them as one design problem, and copy the pattern the
-    crates.io path already gets right (confirm the version reached the index before journaling a
-    receipt).
-  - **Shipped: 0.1.0 (2026-08-04), 0.1.1 (2026-08-05), 0.1.2 (2026-08-05), 0.2.0 (2026-08-06),
-    0.2.1 (2026-08-06), 0.2.2 (2026-08-06), 0.2.3 (2026-08-07), 0.2.4 (2026-08-10), 0.2.5 (2026-08-10),
-    0.3.0 (2026-08-11), 0.4.0 (2026-08-11), 0.5.0 (2026-08-13), 0.6.0 + 0.6.1 (2026-08-17), 0.7.0 (2026-08-17).**
-    All on crates.io (`ossctl` + `ossctl-core`), GitHub Releases (cross-platform: macOS aarch64,
-    Linux musl x86_64+aarch64, `.sh` installer), and its configured
-    Homebrew tap. Repo is **public**. **No Windows** — the `x86_64-pc-windows-msvc` target and the
-    PowerShell installer were dropped 2026-08-17 (maintainer decision: CI time spent on a platform
-    this fleet does not use). Windows was never in the normalizer's *default* platform set — that
-    omission is deliberate and documented in `DEFAULT_CROSS_PLATFORM_TARGETS`; this repo had simply
-    opted in, and the opt-in is withdrawn. 0.6.0/0.6.1 fixed the **uninstallable Homebrew formula**
-    (the engine emitted `cargo install` against a virtual workspace manifest, which cannot work) —
-    the formula is now a marker-carrying, per-platform prebuilt-archive formula with no toolchain
-    dependency — plus a downstream-safe stale-binary guard, `config path`/`config show`, the
-    contract never-drop fix, and the `/oss-dist` skill. 0.1.2 added `ossctl dist generate`. 0.2.0
-    made the engine drive a multi-target cut (multi-target/ecosystem in dep order, one-target-one-
-    publish-unit/ADR-0004, CI-delegated skip, GH-Release-to-CI, post-tag homebrew, crates.io-pin)
-    + `release list`/`abandon`. 0.2.1 landed the INTERLEAVE fix (adapter defers a `=`-pinned
-    dependent's packaging into its dep-ordered `cargo publish`; ADR-0002 amendment) — the first cut
-    to clear `dry-run-all` + `build-all` through the engine for all four targets. 0.2.2 wired the
-    crates.io **RegistryQuery** for `rust` (sparse index), clearing the PUBLISH barrier. 0.2.3 made
-    the homebrew dist leg **self-sufficient** (direct tap-write, dropping the `brew bump-formula-pr`/
-    `brew audit` dependency) + unified the registry probes behind a `ureq` `http_get` seam. 0.2.5
-    hardened the real-cut publish: a **self-visibility confirm** (the adapter verifies the target's own
-    `{name,version}` reached the index — reusing the bounded index-wait — before journaling a receipt,
-    so a silent no-op upload fails the cut closed instead of fabricating a receipt) + made the release
-    version **single-source** (derived from the workspace manifest; `--version` is an optional must-match
-    confirmation) + made the generated/own `publish-crates.yml` idempotent on "already exists". 0.3.0
-    (BREAKING) **removed `--version`** entirely (version derives solely from the manifest; a stray flag is
-    now a hard error — see recipe) + made the version guards **fail-closed for manifest-versioned non-Rust**
-    ecosystems (was fail-open for node/python) + made `cut`/`resume` publish from a **clean checkout of the
-    sealed `head_sha`** (reproducible, immune to mid-cut edits) + **digest-authenticated** the resume
-    idempotency skip (checksum-match the on-registry crate before trusting a skip, else fail closed). 0.4.0
-    made `ossctl skill install` **dual-home into pi.dev**: a new `pi` runtime writes each SKILL.md into
-    `~/.pi/agent/skills/<name>/` and — with `--agent` omitted — the installer now writes BOTH Claude and
-    pi.dev by DEFAULT (`--agent claude` restores single-home; `pi`/`codex` narrow; `all` = every runtime).
-    0.5.0 completed **`release-rust-workspace-multicrate`** (retires hand-cut downstream releases): the plan
-    now derives the dep-ordered multi-crate publish **CLOSURE** from a bin-only contract (lib → bin) + carries
-    `homebrew_tap` from the contract distribution block, and the engine OWNS the version bump via
-    `release plan/cut --bump major|minor|patch` — a cut-time executor sets the workspace version, rewrites the
-    `=`-lockstep pins, refreshes Cargo.lock, finalizes the CHANGELOG, runs a contract-declared
-    `release.bump_hook`, commits, and tags the bump commit (resume-safe; journal v3→v4). The `--bump` live
-    acceptance is a downstream cut of **orchestratectl 0.2.0** (prepared 2026-08-14: its contract now declares
-    the `bump_hook` + a `distribution` block; runs on orx's timeline).
-  - **🎉 THE DOGFOOD IS COMPLETE (stint #14).** `ossctl release cut` now cuts ossctl ITSELF
-    end-to-end, fully autonomously, with zero manual publish steps — proven by the **0.2.3 cut
-    (2026-08-07)**: dry-run-all → build-all → publish-all (both crates → crates.io) → tag → dist,
-    where the dist phase published the HOMEBREW leg itself via the direct tap-write. Exit 0,
-    "published 4 target(s)". History: 0.2.0's two engine cuts failed SAFELY at BUILD (fixed by the
-    interleave, stint #13); the 0.2.1 cut failed SAFELY at PUBLISH (no crates.io RegistryQuery for
-    `rust`, fixed by `release-publish-registry-query-not-wired`, 0.2.2); the 0.2.2 cut failed SAFELY
-    at DIST on the homebrew `brew audit` (fixed by `homebrew-dist-brew-audit-fails`, 0.2.3). Each
-    blocker fell in turn, always failing closed/safe. **0.2.0 and 0.2.1 were cut manually; 0.2.2 was
-    cut by the engine except its homebrew leg (done by hand); 0.2.3 was fully engine-cut.**
-    - **RESOLVED same day (stint #22, shipped in 0.7.0):** both HIGH bugs below are fixed and
-      field-verified. 0.7.0 added the durable PLAN STORE (`release plan` persists the sealed plan
-      under `git-common-dir/ossctl/plans/`; `cut` recovers an omitted `--bump` from it, `resume`
-      survives a code fix moving HEAD), the `undeclared_distribution` refusal (cut refuses before
-      any run when the repo has cargo-dist/tag-workflows the contract does not declare — the
-      issuectl 0.14.1 shape), and a mandatory **verify phase**: a cut is complete only when every
-      target is OBSERVED at its destination (crates.io index, tap formula content incl. marker +
-      version, GitHub Release assets; journal v5; Unknown is not green). The 0.7.0 cut itself was
-      the live acceptance: first-ever `--bump` engine cut (bump → dry-run → build → publish →
-      tag → dist → verify, all green, flagless `cut` recovering the bump from the plan store).
-      The paragraph below is kept as history:
-    - **⚠️ HIGH blockers DO exist again (2026-08-17) — this section said "no HIGH blocker remains"
-      and that is no longer true.** Cutting `issuectl` 0.14.1 surfaced two field-confirmed HIGH bugs,
-      now at the head of `release-safety`: `release-tag-preempts-cargo-dist` (in a repo whose
-      contract omits the gh-releases/cargo-dist target, the tag phase creates the GitHub Release
-      itself, collides with cargo-dist's workflow, and **silently drops the binaries and the
-      Homebrew formula while reporting a complete release**) and `release-bump-plan-uncuttable`
-      (`release plan --bump` seals a plan the cut always rejects as stale, and its error steers the
-      operator toward republishing the version already on the registry). **`--bump` has never worked
-      end-to-end** — stint #20's refusal to dogfood it on an irreversible path was vindicated. The
-      dogfood claim above still holds for *ossctl's own* cut; it does not generalise to downstream
-      repos whose contracts under-declare their distribution surface.
-  - **The ENGINE recipe (`ossctl release cut`) is the PRIMARY and PROVEN path** — the 4-step manual
-    fallback is RETIRED for ossctl's own cut (kept below only as partial-failure insurance). ossctl's
-    own `OSS-RELEASE.md` declares the
-    four targets (ossctl-core + ossctl on crates.io; ossctl on gh-releases/cargo-dist; ossctl
-    on homebrew) plus a `distribution` block with its configured `homebrew_tap`.
-    The recipe:
-    1. Bump `workspace.package.version` + the internal `=X.Y.Z` dep in lockstep → finalize
-       CHANGELOG → `cargo build` (refresh lock) → `cargo publish -p ossctl-core --dry-run` →
-       commit → push `main`.
-    2. **Cut with a FRESHLY-BUILT binary from the current tree.** Build it as
-       `cargo build --release -p ossctl` (the bin crate is **`ossctl`**, NOT `ossctl-cli` —
-       `-p ossctl-cli` silently no-ops and leaves a STALE binary) and verify `./target/release/ossctl
-       version` prints the just-bumped version. ⚠️ Since 0.2.5 the version is read from the tree at
-       runtime, so `release plan` can show the NEW version even from a stale old binary. `plan` and
-       `cut` now refuse when the binary's compiled commit differs from tree `HEAD`; rebuild with the
-       command above. `--allow-stale-binary` is an explicit escape hatch only for intentional
-       cross-tree invocations. Then `ossctl release plan` (seal + inspect; side-effect-free) → then
-       `ossctl release cut --plan <id>`. **There is no `--version` flag** (removed in 0.3.0,
-       `release-drop-version-flag`): the release version comes solely from the workspace manifest
-       (the version you bumped in step 1), so a stray `--version` is now a hard clap error, not a
-       silently-ignored confirmation. The engine runs
-       `dry-run-all → build-all → publish-all (crates.io, dep-ordered, index-waited) → tag →
-       dist (homebrew: real sha256 pushed to the tap)`. It **skips** the CI-delegated
-       cargo-dist target and **delegates the GitHub Release to CI** (Option 1,
-       `ci_owns_github_release`) — so the engine does crates.io + tag + homebrew; cargo-dist
-       CI does the binaries + the GitHub Release. No manual `gh workflow run publish-crates.yml`
-       and no manual homebrew bump anymore — the engine owns both.
-    3. The pushed tag triggers `release.yml` (cargo-dist): builds the cross-platform matrix +
-       creates/finalizes the GitHub Release. **macOS aarch64 builds on the personal `hauis`
-       self-hosted runner** — if it 400s, clear hauis's stale token
-       (`ssh hauis 'git config --global --unset-all "http.https://github.com/.extraheader"'`)
-       and `gh run rerun <release-run-id> --failed`. (Coupling tracked:
-       `release-macos-hauis-coupling`.)
-    4. Post-cut, verify the delegated Release exists: `gh release view vX.Y.Z` (until
-       `release-verify-delegated-github-release` automates it into `ossctl release verify`).
-    5. **Post-cut, verify the TAP actually moved** — `curl -s https://raw.githubusercontent.com/<tap>/main/Formula/<name>.rb | head -1`
-       and check the version. `✓ dist complete` does **not** mean the formula is correct or even
-       installable; that is exactly how six releases shipped a broken formula unnoticed
-       (`release-verify-homebrew-tap` will automate this).
-  - **⚠️ CUTTING ANY REPO WHOSE TAP PREDATES THE OWNERSHIP MARKER — read before you cut.** Since
-    0.6.0 the tap-write refuses to replace a formula that does not carry ossctl's ownership marker
-    on its **first line**: it cannot distinguish its own pre-marker output from a hand-maintained
-    formula, so it fails closed rather than clobbering. That refusal lands **in the dist phase —
-    after crates.io and the tag have already published**, which is the worst possible moment. As of
-    2026-08-17 the `issuectl`, `glasspad`, `orchestratectl`, and `project-canon` taps are all
-    unmarked. **Prepend this line to the tap's formula and push, before cutting:**
-
-    ```
-    # Generated by ossctl; do not edit by hand (template-version: 1)
-    ```
-
-    If you only discover it after the failure, add the marker and then
-    `ossctl release resume <run> --allow-unverified` (homebrew is structurally unverifiable, so the
-    flag is required and appropriate here). **But that only works if HEAD has not moved** — see the
-    next bullet.
-  - **⚠️ `release resume` cannot recover from a CODE FIX.** The sealed plan is re-derived from the
-    working tree, so fixing the very defect that stopped the cut moves HEAD and makes the run
-    permanently unresumable (`resume_drift`). Resume therefore only recovers *transient* failures.
-    After an engine-defect failure the real path is: `release abandon <run>`, fix, bump, and cut a
-    new version — the already-published targets stay published. Tracked in `resume-drift-after-fix`.
-  - **Fallback (manual recipe), if an engine cut fails partway:** the old hand-driven path
-    still works — `gh workflow run publish-crates.yml` for crates, a hand `brew bump-formula-pr`
-    for the tap — and `ossctl release resume <run>` / `abandon <run>` recover an interrupted
-    engine run. The three pre-engine defects (`publish-crates-no-auto-trigger`,
-    `homebrew-tap-bump-manual-and-missed`, `release-macos-hauis-coupling`) are now mostly
-    subsumed by the engine cut; hauis coupling is the surviving CI-side item.
+  decision, 2026-08-05), and **the engine-driven cut is fully autonomous — NO go/no-go
+  checkpoint, ever** (2026-08-06). Do not stop to ask "shall I cut?" — run the recipe end
+  to end and report as you go. The safety is structural: the sealed plan, `dry-run-all`
+  before any publish, dep-order + index-wait on crates.io, the `undeclared_distribution`
+  refusal, `resume`/`abandon`, and the mandatory **verify** phase (green means every
+  target was OBSERVED at its destination). Still: green gate first, plan first, never
+  publish red, report each phase. Trust the refusals — and since the verify phase, the
+  green is observation-backed, not assumed.
+- **The ENGINE recipe** (`ossctl release cut` — the primary and proven path; ossctl's own
+  contract declares all four targets + the `distribution` block with its tap):
+  1. Ensure `CHANGELOG.md` `[Unreleased]` is complete and main is clean + pushed.
+  2. **Build a fresh binary from the tree**: `cargo build --release -p ossctl` (the bin
+     crate is **`ossctl`**, NOT `ossctl-cli` — `-p ossctl-cli` silently no-ops). `plan`
+     and `cut` refuse when the binary's compiled commit differs from tree `HEAD`
+     (`--allow-stale-binary` is the escape hatch for deliberate cross-tree use).
+  3. `ossctl release plan --bump major|minor|patch` — seals the plan (bump version,
+     `=`-pin rewrites, CHANGELOG finalize plan) and persists it in the plan store.
+     Inspect the JSON. There is **no `--version` flag** (version derives from the
+     manifest; `--bump` computes the next one).
+  4. `ossctl release cut --plan <id>` — the `--bump` flag is optional (the cut recovers
+     the bump disposition from the stored plan). Phases: `bump → dry-run-all → build-all
+     → publish-all (crates.io, dep-ordered, index-waited) → tag (GitHub Release delegated
+     to cargo-dist CI) → dist (engine tap-write, real per-platform sha256s) → verify
+     (all targets observed: index, Release assets, tap formula)`.
+  5. Post-cut: fast-forward local `main` to the bump commit and push it (the tag push
+     carries the commit to the remote, but not the branch ref). A manual spot-check of
+     the channels is optional — the verify phase already observed them.
+  - **hauis note:** macOS aarch64 CI builds run on the personal `hauis` self-hosted
+    runner. If it 400s:
+    `ssh hauis 'git config --global --unset-all "http.https://github.com/.extraheader"'`
+    then `gh run rerun <run-id> --failed`. (Tracked: `release-macos-hauis-coupling`.)
+  - **Resume semantics:** `release resume <run>` executes the run's **stored sealed
+    plan** against a clean checkout of the sealed commit, so it survives a code fix
+    moving HEAD (plan-store era). `resume --allow-unverified` skips only targets whose
+    verify is `Unknown` — never `Missing`/`Conflicts`. `release abandon <run>` is the
+    exit for runs that should not finish, and it can break a provably-dead holder's
+    stale lock on its own.
+  - **Fallback (partial-failure insurance):** the manual path still works —
+    `gh workflow run publish-crates.yml` for crates, a hand formula bump for the tap.
+- **Homebrew tap ownership — two models in the fleet.** The ENGINE writes only ossctl's
+  OWN tap (marker-carrying formula, first line
+  `# Generated by ossctl; do not edit by hand`). The other fleet repos
+  (issuectl / glasspad / orchestratectl / project-canon) have their taps written by
+  **cargo-dist's `publish-homebrew-formula` CI job** on every tag — no marker applies
+  there, and their contracts must NOT declare an engine-owned (`homebrew-tap`) target
+  (double-writer). A CI-delegated homebrew target type is tracked as
+  `homebrew-ci-delegated-adapter`. Full fleet picture:
+  `homebase/issues/cross-repo-release-standardisation/audit-2026-08-17.md`.
 - **Git: `pull --rebase` → `push` is always allowed, no confirmation** (maintainer
-  decision, 2026-08-05). On this repo the agent may run the pull-rebase-push sequence
-  (`git pull --rebase origin main` then `git push origin main`, and pushing tags) on its own
-  whenever `main` is clean and green — publishing commits to the remote does not need a
-  separate go. (This is a repo-scoped grant that overrides the global "pushing is the user's
-  step" default.) Still: never force-push a shared branch, and never push a red tree.
-- **Scope boundary: ossctl the PRODUCT ≠ a maintainer's personal environment.** ossctl owns
-  the generic, reusable release/readiness engine (e.g. `ossctl dist generate`). It does **not**
-  own cross-repository standardisation or personal self-hosted CI infrastructure, which are
-  external concerns. Keep that work out of ossctl's issues/TODO/handoff; only the generic
-  capability lives here. The `hauis` override in `dist-workspace.toml` is the documented
-  repository-local exception for ossctl's own build, tracked for decoupling in
-  `release-macos-hauis-coupling`.
-- **Cross-platform is a hard requirement (macOS AND Linux).** All software the `/oss-*`
-  family produces — and `ossctl` itself — MUST install and run on **both macOS and Linux**
-  (arm64 and x86_64). This is `/oss-*` family canon, not a nice-to-have: a release path
-  that works on only one OS is incomplete. In practice that means every shipped tool
-  offers a source path (`cargo install` / equivalent) plus prebuilt binaries and installers
-  covering macOS (arm64 + x86_64) and Linux (statically-linked `musl`, arm64 + x86_64). For
-  `ossctl` this is wired via `dist-workspace.toml` (cargo-dist) and the Homebrew tap
-  (macOS + Linuxbrew). Treat a macOS-only or Linux-only install story as a release gap.
-- **No Code of Conduct — deliberate.** This project intentionally ships **no**
-  `CODE_OF_CONDUCT.md` (maintainer decision: no value seen). `ossctl audit` lists it as a
-  `recommended` gap — that is **expected and accepted**; do **not** propose adding one or
-  treat its absence as a defect.
-- **Live-version check:** `ossctl version --json` (once the binary builds); before that,
-  `git log --oneline` against `main`.
-- **Hot files.** Two classes — do not treat them the same (learned across parallel
-  rounds #3 and #5):
-  - **Append-union-safe — parallel is fine.** The workspace/crate `Cargo.toml`, a module
-    `mod.rs`, a CLI subcommand-dispatch file, and the bundled-skill `CATALOG` in
-    `crates/ossctl-cli/src/skill.rs` collide only as *append* conflicts (a new dep line,
-    a new `pub mod`, a new match arm, a new `BundledSkill { … }` row). Disjoint units may
-    run in parallel against these — just brief each worker to **union-resolve** the conflict
-    (keep all deps / all module decls / both arms / all rows). This resolved automatically in
-    practice for the release campaign (`f-coordinator`↔`f-verify-cmd`). Do **not** serialize
-    units solely because they both touch `Cargo.toml`.
-    - **But the auto-merge is NOT guaranteed** (learned stint #6, prose-skills). A parallel
-      worker's own auto-merge can *stall* on the union conflict: `f-changelog` authored complete
-      green work but its `run merge` never completed — the run sat at `pending` because its
-      branch (forked from `main`) hit a `skill.rs` CATALOG conflict after five siblings had
-      advanced the integration branch. The worker did **not** union-resolve it despite the brief.
-      So: parallelise freely, but **expect to salvage the last-in-line row-adder** — union-merge
-      its clean commit by hand (keep all rows, re-run the green gate incl. the §17 lockstep gate,
-      commit) — or serialize just the CATALOG-touching merges. The parallel *authoring* is safe;
-      only the final *merge* of the append-file is not automatic.
-  - **True shared-logic — sequence strictly, never parallelise.** A change to one of
-    these is semantic, not an append, and a parallel edit means a real conflict:
-    - `crates/ossctl-core/src/contract/schema.rs` — the ONE canonical serde model
-    - a shared `crates/ossctl-core/src/protocol/*.rs` module two units both edit
-      (a NEW `protocol/<x>.rs` per unit is append-safe; editing an existing shared one is not)
-    - `crates/ossctl-core/src/release/coordinator.rs` and
-      `crates/ossctl-core/src/release/adapters/mod.rs` — the release-engine seam
-      (`EffectCtx` / `ReleaseArtifacts`, the phase-barrier coordinator). Semantic, not an
-      append (learned stint #8: LANE R's two units both edited the artifact-threading seam,
-      so they were sequenced strictly — parallelising them would have been a real conflict).
-    - the canonical-JSON contract shape (SCHEMA) — the inter-skill contract; a change
-      here ripples to every member
+  decision, 2026-08-05), including tag pushes, whenever `main` is clean and green. This
+  repo-scoped grant overrides the global "pushing is the user's step" default. Never
+  force-push a shared branch; never push a red tree.
+- **Scope boundary: ossctl the PRODUCT ≠ a maintainer's personal environment.** ossctl
+  owns the generic, reusable release/readiness engine. Cross-repository standardisation
+  and personal self-hosted CI infrastructure are homebase concerns — keep them out of
+  ossctl's issues/TODO/handoff. The `hauis` override in `dist-workspace.toml` is the
+  documented repo-local exception.
+- **Cross-platform is a hard requirement (macOS AND Linux, arm64 + x86_64).** Every tool
+  the `/oss-*` family produces — and ossctl itself — must offer a source path
+  (`cargo install`) plus prebuilt binaries/installers covering macOS and statically-linked
+  musl Linux. A macOS-only or Linux-only install story is a release gap.
+- **No Code of Conduct — deliberate** (maintainer decision). `ossctl audit` listing it as
+  a `recommended` gap is expected and accepted; do not propose adding one.
+- **Live-version check:** `ossctl version --json`.
+- **Hot files.** Two classes — do not treat them the same:
+  - **Append-union-safe — parallel is fine:** `Cargo.toml`, module `mod.rs` files, CLI
+    subcommand-dispatch files, the bundled-skill `CATALOG` in
+    `crates/ossctl-cli/src/skill.rs`. Brief each worker to union-resolve (keep all deps /
+    decls / arms / rows). The auto-merge is not guaranteed, though — expect to salvage
+    the last-in-line row-adder's merge by hand occasionally.
+  - **True shared-logic — sequence strictly, never parallelise:**
+    `crates/ossctl-core/src/contract/schema.rs` (the ONE canonical serde model), any
+    existing shared `crates/ossctl-core/src/protocol/*.rs` module (a NEW file per unit is
+    append-safe), `crates/ossctl-core/src/release/coordinator.rs` +
+    `crates/ossctl-core/src/release/adapters/mod.rs` (the release-engine seam), and the
+    canonical-JSON contract shape (SCHEMA — ripples to every family member).
+- **Worker-model note:** for units on the coordinator/adapters seam, prefer the stronger
+  worker model up front — a weaker model has twice abandoned mid-unit there.
 - **Migration rule:** the canonical-JSON output shape is a schema-versioned compatibility
   contract (§10). Preserve it; bump `schema_version` on a breaking change, never silently.
 - **Test-account reset:** n/a (no external test accounts).
-- **Issue standard: a finding earns a place in the tracker only if its failure can actually occur
-  here** (maintainer decision, 2026-08-17). Judge the **content**: does this describe a failure
-  reachable in this project, for this user, on this path — and what is the damage beyond an error
-  message? Provenance (an `/llm-review` panel, several models agreeing) is a *supporting signal*
-  only, never the verdict; models share priors and correlate hardest on plausible-sounding generic
-  advice, so "all four flagged it" is not independent confirmation. **Reject** cosmic-ray
-  scenarios, checks duplicating checks that already exist elsewhere, and hostile-input hardening on
-  paths where the only actor is the maintainer's own machine. **Keep** a finding with no observed
-  occurrence when the failure would be *silent* (wrong result, no error), the consequence is
-  *irreversible*, it is reachable by a *downstream user* of a shipped tool, or it contradicts a
-  documented guarantee. When closing one of these, record the reason **and a reopen condition**, so
-  the next reviewer does not re-file the same ground. Applied 2026-08-17: ~40% of the open issue
-  base was this class and was closed; two worker rounds had already been spent on it. Also applies
-  to **deferral justifications** — a comment claiming work is blocked must have its blocker
-  verified, not inherited from the previous agent (a stale one froze a Homebrew tap for three
-  releases).
+- **Issue standard: a finding earns a place in the tracker only if its failure can
+  actually occur here** (maintainer decision, 2026-08-17). Judge the content: is the
+  failure reachable in this project, on this path, and what is the damage beyond an error
+  message? Provenance (a review panel, several models agreeing) is a supporting signal,
+  never the verdict — models correlate hardest on plausible-sounding generic advice.
+  **Reject** cosmic-ray scenarios, duplicate checks, and hostile-input hardening where the
+  only actor is the maintainer's own machine. **Keep** an unobserved finding when the
+  failure would be silent, irreversible, reachable by a downstream user, or contradicts a
+  documented guarantee. When closing one, record the reason **and a reopen condition**.
+  Also applies to **deferral justifications** — verify a claimed blocker, never inherit it.
 
 ## Companion-skill installer (`ossctl skill install`)
 
 The bundled `/oss-*` skills install into a per-runtime skills home. `skill install`
-**dual-homes** by default — with **no** `--agent`, each `SKILL.md` is written into
-**both** `~/.claude/skills/<name>/` (Claude Code) **and** `~/.pi/agent/skills/<name>/`
-(pi.dev), so a skill is discoverable under either harness (pi.dev resolves it as
-`/skill:<name>`; bare `/name` cross-references also resolve via pi's injected
-available-skills list, so only the install *target* changes — no cross-reference
-rewrite). This is the migration default (agents moving Claude Code → pi.dev).
-
-`--agent` narrows it: `claude` → `~/.claude/skills` only, `pi` → `~/.pi/agent/skills`
-only, `codex` → `~/.codex/prompts/<name>.md` (flat), `all` → every known runtime
-(Claude + pi.dev + Codex). Claude and pi.dev share the directory-per-skill shape
-(`<name>/SKILL.md`); Codex uses a flat prompt file. Only `SKILL.md` is ever mirrored
-(ossctl's bundled skills are single-file), so the vendored-filtering is inherent. The
-install is idempotent and §17 version-guarded, the write is atomic (a `rename`
-replaces a *final-component* symlink rather than following it — POSIX; ancestor dirs
-are not no-follow), and the `--json` envelope reports one `installed[]` row per
-requested target — the object shape is unchanged (additive), though the omitted-flag
-**default changed** from Claude-only to Claude + pi.dev, so it now writes two targets
-and emits two rows where it wrote one. `--dest <PATH>` overrides the root;
-shape-sharing runtimes rooted at the same `--dest` (Claude + pi.dev) resolve to one
-file, so the *write* collapses to a single file while both runtimes still get their
-report row.
+**dual-homes** by default — with no `--agent`, each `SKILL.md` is written into both
+`~/.claude/skills/<name>/` (Claude Code) and `~/.pi/agent/skills/<name>/` (pi.dev).
+`--agent` narrows it: `claude` | `pi` | `codex` (flat `~/.codex/prompts/<name>.md`) |
+`all`. Only `SKILL.md` is mirrored; the install is idempotent, §17 version-guarded, and
+the write is atomic. `--dest <PATH>` overrides the root.
 
 ## Gitignored directories
 
@@ -341,18 +170,14 @@ Every directory follows this structure:
 
 ## Issues & Planning
 
-Issue tracking is managed by `issuectl`. Use the `/issue` skill (installed by `issuectl init`) to create, search, update, and close issues.
+Issue tracking is managed by `issuectl`. Use the `/issue` skill (installed by
+`issuectl init`) to create, search, update, and close issues.
 
-- `issues/<slug>/item.md` — every issue and epic (flat layout — no numeric prefix, no `open/closed/` split)
+- `issues/<slug>/item.md` — every issue and epic (flat layout)
 - Status lives in the `status:` frontmatter field, not in the path
 - `issues/AGENTS.md` — issue schema, types, workflow (owned by issuectl)
 - `.issuectl/AGENTS.md` — repo-local policy for AI agents (owned by issuectl)
 
-All planning documents (plans, analyses, validations, designs, breakdowns, todos) belong under their parent issue directory — not as standalone files. If work needs a planning document, it also needs an issue.
-
-- `issues/<slug>/plan.md` — architecture, implementation plans
-- `issues/<slug>/analysis.md` — research and analysis
-- `issues/<slug>/validation.md` — design assumptions checked against current reality, noting what differs from first-pass analysis
-- `issues/<slug>/design.md` — design documents
-- `issues/<slug>/breakdown.md` — epic → child-issue breakdown with dependencies and critical path
-- `issues/<slug>/todo.md` — task checklists
+All planning documents (plans, analyses, validations, designs, breakdowns, todos) belong
+under their parent issue directory — not as standalone files. If work needs a planning
+document, it also needs an issue.
