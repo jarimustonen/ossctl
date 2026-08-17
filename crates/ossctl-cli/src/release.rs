@@ -1616,6 +1616,7 @@ fn resume_conflict_error(
 ///
 /// On any phase failure the run **stops with no rollback**; what landed is
 /// journalled and the error names the `run_id` for `release verify` / `resume`.
+#[allow(clippy::too_many_lines)] // Coordinates stored-plan and distribution preflights before journal creation.
 pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     let repo_root = resolve_repo_root(args.repo_root.as_ref())?;
     if !repo_root.is_dir() {
@@ -1634,7 +1635,6 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
             ),
         )
     })?;
-
     // Re-derive the same normalized contract + facts + HEAD the plan sealed
     // against, through the identical code paths behind `contract show` / `facts`.
     let normalized = contract::normalize(&root, &RealFs).map_err(load_error_to_cli)?;
@@ -1704,8 +1704,6 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     coordinator::validate_plan(&current).map_err(|e| cut_error_to_cli("(not created)", e))?;
 
     for warning in provenance_warnings {
-        // `cut` streams its primary data on stdout, so keep this operator-facing
-        // preflight diagnostic out of that stream.
         eprintln!("warning: {warning}");
     }
 
