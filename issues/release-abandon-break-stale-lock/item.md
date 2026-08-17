@@ -2,10 +2,14 @@
 created: 2026-08-05
 updated: 2026-08-17
 type: improvement
-status: in-progress
+status: done
 priority: normal
 epic: ossctl-phase4-build
 lane: release-hardening
+closed: 2026-08-17
+commits:
+- hash: a72ee55
+  summary: recover dead abandon locks
 ---
 
 # release abandon cannot break a stale single-active-cut lock after a hard-killed run
@@ -34,3 +38,8 @@ IN SCOPE: check whether the recorded lock holder is still alive; if it is not, l
 
 OUT OF SCOPE unless observed: process-id-reuse defence, network/shared-filesystem correctness, replacing the locking architecture with advisory locks, a separate doctor recovery path.
 
+## Resolution
+
+### 2026-08-17T06:21:55Z · @issuectl
+
+Shipped same-host dead-holder recovery: JSON locks record pid/hostname/started_unix; release abandon removes only a lock whose recorded PID is proven absent by kill -0 (ESRCH), retries once, and otherwise retains the actionable cut_in_progress refusal with its reason. Deliberately out of scope: PID-reuse defence, network/shared-filesystem semantics, advisory-lock migration, and a doctor recovery path. Reopen only on an observed failure in one of those excluded classes.
