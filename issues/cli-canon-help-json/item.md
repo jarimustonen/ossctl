@@ -2,7 +2,7 @@
 created: 2026-08-16
 updated: 2026-08-17
 type: improvement
-status: in-progress
+status: done
 priority: normal
 labels: [cli-canon, tooling]
 lane: cli-canon
@@ -10,6 +10,9 @@ lane_seq: 20
 commits:
 - hash: c68847f
   summary: add clap-derived structured JSON help with drill-down and coverage tests
+- hash: b1cedb9
+  summary: align short-help and delimiter selection with clap; validate examples and drill-down metadata
+closed: 2026-08-17
 ---
 
 # cli-canon: §14 --help --json machine-readable help
