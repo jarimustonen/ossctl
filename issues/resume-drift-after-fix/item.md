@@ -2,13 +2,16 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: bug
-status: in-progress
+status: fixed
 priority: high
 lane: release-safety
 lane_seq: 3
 commits:
 - hash: c990144
   summary: 'feat(release): persist sealed plans for cut and resume'
+- hash: ba67879
+  summary: 'docs(release): record durable plan issue progress'
+closed: 2026-08-17
 ---
 
 # release resume is unusable after a code fix: the fix itself drifts the sealed plan
@@ -47,3 +50,9 @@ Whichever direction, decide it deliberately; today the limitation is undocumente
 ### 2026-08-17T06:21:46Z · @pi
 
 Shipped durable sealed-plan storage. release resume loads the sealed stored plan and no longer re-derives from live HEAD when the plan is available, so it can resume after a code fix.
+
+## Resolution
+
+### 2026-08-17T06:25:12Z · @issuectl
+
+Fixed by resuming from the authenticated stored sealed plan instead of live HEAD.

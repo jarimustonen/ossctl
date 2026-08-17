@@ -2,13 +2,16 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: bug
-status: in-progress
+status: fixed
 priority: high
 lane: release-safety
 lane_seq: 2
 commits:
 - hash: c990144
   summary: 'feat(release): persist sealed plans for cut and resume'
+- hash: ba67879
+  summary: 'docs(release): record durable plan issue progress'
+closed: 2026-08-17
 ---
 
 # release plan --bump seals an un-cuttable plan, and the staleness error steers the operator into republishing the current version
@@ -115,4 +118,8 @@ MECHANISM CORRECTED (2026-08-17, controlled repro in a scratch repo — orchestr
 
 Shipped durable sealed-plan storage. release cut now obtains the bump disposition from a stored plan, so repeating --bump is optional and mismatch is rejected.
 
+## Resolution
 
+### 2026-08-17T06:25:12Z · @issuectl
+
+Fixed by durable content-addressed plan storage and stored bump disposition.
