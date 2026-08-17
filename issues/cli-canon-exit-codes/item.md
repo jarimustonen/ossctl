@@ -2,11 +2,15 @@
 created: 2026-08-16
 updated: 2026-08-17
 type: improvement
-status: in-progress
+status: done
 priority: normal
 labels: [cli-canon, tooling]
 lane: cli-canon
 lane_seq: 30
+closed: 2026-08-17
+commits:
+- hash: 5be7a15
+  summary: classify missing contracts as user errors
 ---
 
 # cli-canon: §2 exit-code semantics (user error = 1)
