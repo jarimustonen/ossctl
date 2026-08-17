@@ -7,6 +7,9 @@ priority: normal
 labels: [cli-canon, tooling]
 lane: cli-canon
 lane_seq: 20
+commits:
+- hash: c68847f
+  summary: add clap-derived structured JSON help with drill-down and coverage tests
 ---
 
 # cli-canon: §14 --help --json machine-readable help
