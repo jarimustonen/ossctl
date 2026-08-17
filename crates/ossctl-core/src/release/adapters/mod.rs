@@ -556,9 +556,9 @@ pub trait ReleaseAdapter {
     /// adapter upholds: `is_ci_delegated()` ⇒ `publish` returns
     /// [`AdapterError::Unsupported`].
     ///
-    /// Defaults to `false` (the engine owns the publish); the three delegated
-    /// identities (`cargo-dist`, `release-please`, `gh-action-pypi-publish`)
-    /// override it.
+    /// Defaults to `false` (the engine owns the publish); the four delegated
+    /// identities (`cargo-dist`, `cargo-publish-ci`, `release-please`,
+    /// `gh-action-pypi-publish`) override it.
     fn is_ci_delegated(&self) -> bool {
         false
     }
@@ -571,9 +571,10 @@ pub trait ReleaseAdapter {
     ///
     /// This is a **strict subset** of [`is_ci_delegated`](Self::is_ci_delegated), not
     /// a synonym: an adapter can be CI-delegated for its *publish* yet not own the
-    /// GitHub Release. `gh-action-pypi-publish` uploads to **`PyPI`** (not GitHub) and
-    /// `release-please` is publish-on-merge — neither runs `gh release create` for
-    /// this tag, so for those the coordinator still creates the Release. Only
+    /// GitHub Release. `gh-action-pypi-publish` uploads to **`PyPI`** (not GitHub),
+    /// `cargo-publish-ci` uploads to **crates.io**, and `release-please` is
+    /// publish-on-merge — none runs `gh release create` for this tag, so for those
+    /// the coordinator still creates the Release. Only
     /// `cargo-dist`, whose generated `release.yml` runs `gh release create <tag> …
     /// artifacts/*` (a create, not an upsert — it errors if the Release pre-exists),
     /// overrides this to `true`. Defaults to `false` (the coordinator owns the
@@ -671,7 +672,7 @@ pub enum EcosystemAdapter {
 #[must_use]
 pub fn resolve(adapter: Adapter) -> EcosystemAdapter {
     match adapter {
-        Adapter::CargoPublish | Adapter::CargoDist => {
+        Adapter::CargoPublish | Adapter::CargoPublishCi | Adapter::CargoDist => {
             EcosystemAdapter::Rust(cargo::CargoAdapter::new(adapter))
         }
         Adapter::ReleasePlease | Adapter::Changesets | Adapter::NpmPublish => {

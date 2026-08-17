@@ -563,6 +563,7 @@ fn receipt(ecosystem: Ecosystem, version: &str, digest: Option<&str>) -> Publish
 fn resolve_dispatches_every_adapter_identity() {
     let cases = [
         (Adapter::CargoPublish, "rust"),
+        (Adapter::CargoPublishCi, "rust"),
         (Adapter::CargoDist, "rust"),
         (Adapter::ReleasePlease, "node"),
         (Adapter::Changesets, "node"),
@@ -3606,7 +3607,7 @@ fn verify_outcome_as_str_matches_serde() {
 
 // ── CI-delegation capability (release-engine-cut-cargo-dist-flow) ─────────────
 
-/// The CI-delegated set is exactly the three adapters whose publish is produced by
+/// The CI-delegated set is exactly the four adapters whose publish is produced by
 /// the tag-triggered CI, and each of them returns `Unsupported` from `publish`.
 ///
 /// This is the invariant the coordinator relies on: it skips a target **iff** the
@@ -3619,22 +3620,16 @@ fn verify_outcome_as_str_matches_serde() {
 fn ci_delegation_matches_the_unsupported_publishers() {
     let delegated = [
         Adapter::CargoDist,
+        Adapter::CargoPublishCi,
         Adapter::ReleasePlease,
         Adapter::GhActionPypiPublish,
     ];
-    let all = [
-        Adapter::CargoPublish,
-        Adapter::CargoDist,
-        Adapter::ReleasePlease,
-        Adapter::Changesets,
-        Adapter::NpmPublish,
-        Adapter::GhActionPypiPublish,
-        Adapter::Twine,
-        Adapter::Goreleaser,
-        Adapter::HomebrewTap,
-        Adapter::HomebrewCore,
-        Adapter::Manual,
-    ];
+    // Derived from the wire enum itself, so a NEW adapter identity is covered the
+    // moment it is added — the list can never silently fall behind the enum.
+    let all: Vec<Adapter> = Adapter::VALID
+        .iter()
+        .filter_map(|s| Adapter::parse(s))
+        .collect();
     // 1. The capability flag is set for exactly the delegated set.
     for id in all {
         assert_eq!(
@@ -3675,19 +3670,12 @@ fn ci_delegation_matches_the_unsupported_publishers() {
 /// engine-created GitHub Release.
 #[test]
 fn only_cargo_dist_owns_the_github_release_and_it_is_a_subset_of_ci_delegation() {
-    let all = [
-        Adapter::CargoPublish,
-        Adapter::CargoDist,
-        Adapter::ReleasePlease,
-        Adapter::Changesets,
-        Adapter::NpmPublish,
-        Adapter::GhActionPypiPublish,
-        Adapter::Twine,
-        Adapter::Goreleaser,
-        Adapter::HomebrewTap,
-        Adapter::HomebrewCore,
-        Adapter::Manual,
-    ];
+    // Derived from the wire enum itself, so a NEW adapter identity is covered the
+    // moment it is added — the list can never silently fall behind the enum.
+    let all: Vec<Adapter> = Adapter::VALID
+        .iter()
+        .filter_map(|s| Adapter::parse(s))
+        .collect();
     for id in all {
         let owns = resolve(id).ci_owns_github_release();
         assert_eq!(
@@ -3706,4 +3694,78 @@ fn only_cargo_dist_owns_the_github_release_and_it_is_a_subset_of_ci_delegation()
     // The two delegated-but-not-Release-owning adapters explicitly do NOT own it.
     assert!(!resolve(Adapter::GhActionPypiPublish).ci_owns_github_release());
     assert!(!resolve(Adapter::ReleasePlease).ci_owns_github_release());
+}
+
+// ── cargo-publish-ci: same preflight, no host publish (release-ci-publish-mode) ─
+
+#[test]
+fn cargo_publish_ci_runs_the_same_local_gate_but_delegates_the_publish() {
+    // The CI-delegated crates.io identity differs from `cargo-publish` in exactly
+    // one respect — who runs the publish. The local preflight is IDENTICAL, because
+    // a repo that publishes from CI still needs an unpublishable manifest caught
+    // before the irreversible tag push (the tag is what triggers the publish).
+    let cmd = FakeCmd::new().with_metadata(&metadata_single("tool", "1.2.3"));
+    let clock = FakeClock(1);
+    let reg = FakeRegistry::new();
+    let root = Path::new("/repo");
+    let c = ctx(&cmd, &clock, &reg, root);
+
+    let t = target(
+        Ecosystem::Rust,
+        Registry::CratesIo,
+        Adapter::CargoPublishCi,
+        "1.2.3",
+    );
+    let report = resolve(Adapter::CargoPublishCi).dry_run(&c, &t).unwrap();
+    assert_eq!(report.adapter, Adapter::CargoPublishCi);
+    assert_eq!(
+        cmd.calls(),
+        vec![
+            "cargo metadata --no-deps --format-version 1",
+            "cargo check -p tool",
+            "cargo package --registry crates-io -p tool --no-verify",
+        ]
+    );
+    // The note must NOT promise an engine publish that will never happen — an
+    // approver reads this to know what the cut will actually do.
+    assert!(
+        report.notes.iter().any(|n| n.contains("CI-delegated")),
+        "dry-run must say the publish is CI-delegated: {:?}",
+        report.notes
+    );
+    assert!(
+        !report
+            .notes
+            .iter()
+            .any(|n| n.contains("in publish-all") && n.contains("cargo publish --registry")),
+        "dry-run claimed an engine publish for a delegated target: {:?}",
+        report.notes
+    );
+
+    // The publish itself is refused honestly, with no command run — the coordinator
+    // skips it by capability and never reaches this, but a fabricated receipt would
+    // be the one unrecoverable lie.
+    let cmd = FakeCmd::new().with_metadata(&metadata_single("tool", "1.2.3"));
+    let c = ctx(&cmd, &clock, &reg, root);
+    let err = resolve(Adapter::CargoPublishCi)
+        .publish(&c, &t)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        AdapterError::Unsupported {
+            adapter: Adapter::CargoPublishCi,
+            operation: "publish",
+        }
+    ));
+    assert!(cmd.calls().is_empty(), "a delegated publish ran a command");
+}
+
+#[test]
+fn cargo_publish_ci_does_not_claim_the_github_release() {
+    // It is CI-delegated, but to crates.io — CI's crates job runs no
+    // `gh release create`, so suppressing the engine-created Release here would
+    // silently drop the GitHub Release from a tag-only cut
+    // (`coordinator-release-vs-cargo-dist-ownership`).
+    assert!(resolve(Adapter::CargoPublishCi).is_ci_delegated());
+    assert!(!resolve(Adapter::CargoPublishCi).ci_owns_github_release());
 }

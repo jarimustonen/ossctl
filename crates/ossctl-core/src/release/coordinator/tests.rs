@@ -3525,3 +3525,288 @@ fn a_resumed_bump_run_does_not_double_bump() {
         cmd.calls()
     );
 }
+
+// ── CI-delegated crates.io publish: the tag-only cut (release-ci-publish-mode) ─
+
+/// A registry that reports `package@version` only after `appear_after` lookups —
+/// the CI-delegated publish landing while the verify barrier polls. Models the real
+/// shape: the tag push triggers a workflow that takes minutes to run `cargo publish`
+/// and reach the index, so the first observations legitimately see nothing.
+struct LaggingRegistry {
+    version: String,
+    appear_after: Cell<u32>,
+}
+impl LaggingRegistry {
+    fn new(version: &str, appear_after: u32) -> Self {
+        Self {
+            version: version.to_string(),
+            appear_after: Cell::new(appear_after),
+        }
+    }
+}
+impl RegistryQuery for LaggingRegistry {
+    fn published_versions(&self, _ecosystem: &str, _package: &str) -> io::Result<Vec<String>> {
+        let remaining = self.appear_after.get();
+        if remaining == 0 {
+            return Ok(vec![self.version.clone()]);
+        }
+        self.appear_after.set(remaining - 1);
+        Ok(Vec::new())
+    }
+}
+
+/// A registry that cannot be reached at all — an outage must never be read as
+/// "CI did not publish".
+struct UnreachableRegistry;
+impl RegistryQuery for UnreachableRegistry {
+    fn published_versions(&self, _ecosystem: &str, _package: &str) -> io::Result<Vec<String>> {
+        Err(io::Error::other("registry unreachable"))
+    }
+}
+
+/// A single crates.io target whose publish is CI-delegated (`cargo-publish-ci`) —
+/// the glasspad shape: the engine gates and tags, the tag-triggered workflow
+/// publishes.
+fn ci_publish_plan() -> ReleasePlan {
+    ReleasePlan {
+        plan_id: "p".into(),
+        contract_schema_version: 1,
+        head_sha: "d".into(),
+        version: "1.0.0".into(),
+        targets: vec![plan_target(
+            Ecosystem::Rust,
+            Registry::CratesIo,
+            Adapter::CargoPublishCi,
+        )],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
+        homebrew_tap: None,
+        license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
+    }
+}
+
+#[test]
+fn ci_delegated_crates_io_target_tags_without_publishing_and_verify_observes_the_index() {
+    // The whole point of the mode: `cargo publish` NEVER runs from this host (the
+    // repo's token lives in CI), the tag is still created + pushed by the engine —
+    // that push is what triggers the publish workflow — and the run only completes
+    // once verify OBSERVES the crate on the registry index.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::new().crate_version("1.0.0");
+    // The publish lands mid-verify, after a few polls — the engine waits for CI
+    // rather than racing it.
+    let reg = LaggingRegistry::new("1.0.0", 3);
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = RecordingSink::default();
+
+    let plan = ci_publish_plan();
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "p".into(),
+        "1.0.0".into(),
+        ids.clone(),
+    )
+    .unwrap();
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).expect("a tag-only cut completes");
+
+    let state = journal.state();
+    assert_eq!(state.status, RunStatus::Completed);
+    // Delegated, not published — and never a failure.
+    assert!(state.delegated.contains(&ids[0]));
+    assert!(!state.published.contains_key(&ids[0]));
+    assert!(
+        !cmd.calls()
+            .iter()
+            .any(|c| c.starts_with("cargo publish") && !c.contains("--dry-run")),
+        "the engine published locally for a CI-delegated target: {:?}",
+        cmd.calls()
+    );
+    // The local preflight gates STILL ran — that is their whole value before an
+    // irreversible tag push.
+    assert!(cmd.calls().iter().any(|c| c.starts_with("cargo check")));
+    assert!(cmd.calls().iter().any(|c| c.starts_with("cargo package")));
+    // The tag is the terminal actionable step, and it was taken.
+    assert!(tagger.calls().iter().any(|c| c == "push:v1.0.0"));
+    // crates.io delegation does NOT own the GitHub Release (that is cargo-dist's
+    // narrower capability), so the coordinator still created it.
+    assert!(tagger.calls().iter().any(|c| c == "release:v1.0.0"));
+    // Green is observation-backed: the target was verified as Matches.
+    assert_eq!(
+        state.verified.get(&ids[0]),
+        Some(&VerifyOutcome::Matches),
+        "a delegated crates.io target must be observed on the index"
+    );
+    // The observation ran against the registry index, never the GitHub Release
+    // asset observer (which would look in the wrong place entirely).
+    assert!(
+        !cmd.calls().iter().any(|c| c.starts_with("gh release view")),
+        "a delegated crates.io target was verified as a GitHub Release: {:?}",
+        cmd.calls()
+    );
+}
+
+#[test]
+fn a_ci_delegated_publish_that_never_lands_fails_the_cut_as_missing() {
+    // CI silently not publishing (a broken/absent workflow, a bad secret) must end
+    // the cut RED after the bounded wait — the mode must not degrade into "tagged,
+    // assumed published".
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::new().crate_version("1.0.0");
+    let reg = FakeRegistry::empty();
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = RecordingSink::default();
+
+    let plan = ci_publish_plan();
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "p".into(),
+        "1.0.0".into(),
+        ids.clone(),
+    )
+    .unwrap();
+    let err = execute(&mut journal, &plan, &ctx, &tagger, &mut sink)
+        .expect_err("an unobserved delegated publish must fail the cut");
+    assert!(
+        err.to_string().contains("missing at its destination"),
+        "unexpected error: {err}"
+    );
+    let state = journal.state();
+    assert_eq!(state.verified.get(&ids[0]), Some(&VerifyOutcome::Missing));
+    assert!(state
+        .phases
+        .iter()
+        .any(|r| r.phase == Phase::Verify && r.outcome == PhaseOutcome::Failed));
+}
+
+#[test]
+fn a_registry_outage_leaves_a_delegated_publish_unknown_never_missing() {
+    // The reconcile discipline: an outage is not evidence of absence. It still fails
+    // the barrier (Unknown is not green), but with the honest outcome, so the
+    // operator re-runs `release verify` instead of investigating a phantom CI bug.
+    let clock = FakeClock(Cell::new(1000));
+    let cmd = FakeCmd::new();
+    let reg = UnreachableRegistry;
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let plan = ci_publish_plan();
+    let target = AdapterTarget {
+        target: crate::contract::schema::Target {
+            ecosystem: Ecosystem::Rust,
+            package: Some("tool".into()),
+            registry: Registry::CratesIo,
+            adapter: Adapter::CargoPublishCi,
+        },
+        package: "tool".into(),
+        version: "1.0.0".into(),
+    };
+    assert_eq!(
+        verify_delegated_registry(&ctx, &plan, &target),
+        VerifyOutcome::Unknown
+    );
+}
+
+#[test]
+fn a_mixed_plan_publishes_the_engine_target_and_delegates_the_ci_one() {
+    // Delegation is PER TARGET: a contract with one engine-published crate and one
+    // CI-published crate must do both correctly in the same publish barrier.
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::new().crate_version("1.0.0");
+    // The engine's own publish lands in this map; the delegated crate is seeded as
+    // already-on-the-index (CI published it), so both verify green.
+    let reg = cmd.registry();
+    reg.published
+        .borrow_mut()
+        .insert(("rust".into(), "tool".into()), "1.0.0".into());
+    let tagger = FakeTagger::new();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = RecordingSink::default();
+
+    // An engine-published npm target alongside the CI-delegated crates.io one (two
+    // ecosystems keeps the single-member fake workspace honest; the mixing that
+    // matters is engine-owned vs delegated, not rust vs node).
+    let plan = ReleasePlan {
+        targets: vec![
+            plan_target(Ecosystem::Node, Registry::Npm, Adapter::NpmPublish),
+            plan_target(Ecosystem::Rust, Registry::CratesIo, Adapter::CargoPublishCi),
+        ],
+        ..ci_publish_plan()
+    };
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        "p".into(),
+        "1.0.0".into(),
+        ids.clone(),
+    )
+    .unwrap();
+    execute(&mut journal, &plan, &ctx, &tagger, &mut sink).expect("a mixed cut completes");
+
+    let state = journal.state();
+    assert_eq!(state.status, RunStatus::Completed);
+    assert!(state.published.contains_key(&ids[0]) && !state.delegated.contains(&ids[0]));
+    assert!(state.delegated.contains(&ids[1]) && !state.published.contains_key(&ids[1]));
+    // The engine-owned target really published; the delegated crate did not.
+    assert!(
+        cmd.calls().iter().any(|c| c.starts_with("npm publish")),
+        "the engine-owned target was not published: {:?}",
+        cmd.calls()
+    );
+    assert!(
+        !cmd.calls()
+            .iter()
+            .any(|c| c.starts_with("cargo publish") && !c.contains("--dry-run")),
+        "the delegated crate must not be published by the engine: {:?}",
+        cmd.calls()
+    );
+    // Both are observed at their destination.
+    assert_eq!(state.verified.get(&ids[0]), Some(&VerifyOutcome::Matches));
+    assert_eq!(state.verified.get(&ids[1]), Some(&VerifyOutcome::Matches));
+}

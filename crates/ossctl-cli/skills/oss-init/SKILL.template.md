@@ -213,6 +213,10 @@ docs_site: none
 | `license` | SPDX id/expression | `MIT` | `MIT OR Apache-2.0` offered when `rust` ∈ ecosystems. Must be a **valid SPDX expression**. |
 | `docs_site` | `none` \| `mkdocs` \| `vitepress` \| `docusaurus` \| `sphinx` \| `mintlify` | `none` | Production-tier. |
 
+Adapter values for a `crates.io` target: `cargo-publish` (the engine runs the publish)
+or `cargo-publish-ci` (a tag-triggered CI workflow runs it; the engine skips the publish
+and verifies the crate on the index afterwards).
+
 **Default `targets` expansion** (one per ecosystem): `rust`→`crates.io`/`cargo-publish`,
 `node`→`npm`/`release-please` (single) or `changesets` (monorepo), `python`→`pypi`/`gh-action-pypi-publish`,
 `go`→`proxy.golang.org`/`goreleaser`, `binary`→`gh-releases`/`manual`.
@@ -311,7 +315,12 @@ ossctl contract show --json --repo-root <repo-root>
 - **`ecosystems` + `targets`** — from Phase 1's manifests. For each ecosystem, choose the
   `registry` + `adapter` (funded-Rust → `cargo-dist`, solo-Rust → `cargo-publish`; Go →
   `goreleaser`; node single → `release-please`, monorepo → `changesets`; python →
-  `gh-action-pypi-publish`). Emit `targets` explicitly when the repo has ≥2 targets, a monorepo
+  `gh-action-pypi-publish`). **If the repo already publishes its crate from CI** — a
+  tag-triggered workflow running `cargo publish` with a repo secret (`publish-crates.yml`
+  or equivalent), rather than a maintainer running it locally — use `cargo-publish-ci`
+  instead of `cargo-publish`: the engine then gates, tags, and observes crates.io, and
+  never publishes from the host (declaring `cargo-publish` there would double-publish
+  against the workflow or fail on a stale local token). Emit `targets` explicitly when the repo has ≥2 targets, a monorepo
   layout, or a non-default registry/adapter; otherwise you may omit `targets` and let the
   normalizer expand them (record the intent in `## Rationale`).
 - **The remaining dials** — `versioning` (default `semver`; `zerover` if pre-1.0 and the

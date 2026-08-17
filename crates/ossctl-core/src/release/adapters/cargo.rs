@@ -1,4 +1,5 @@
-//! Rust ecosystem adapter: `cargo-publish` (crates.io) and `cargo-dist`.
+//! Rust ecosystem adapter: `cargo-publish` / `cargo-publish-ci` (crates.io) and
+//! `cargo-dist`.
 //!
 //! `cargo-publish` publishes a crate to crates.io via `cargo publish`.
 //! `cargo-dist` plans and builds distributable binaries locally (`dist`), but
@@ -7,6 +8,33 @@
 //! for a build-only command. `verify` (for `cargo-publish`) reconciles against
 //! crates.io through [`RegistryQuery`](crate::ports::RegistryQuery) via the
 //! adapter's default path.
+//!
+//! ## `cargo-publish-ci` — the crates.io publish runs in CI, not here
+//!
+//! `cargo-publish-ci` is `cargo-publish`'s **CI-delegated** identity, for a repo
+//! whose release model is "push the version tag; a tag-triggered workflow runs
+//! `cargo publish` with the repo's registry secret" (glasspad's
+//! `publish-crates.yml`, the common publish-from-CI-not-a-laptop pattern). Such a
+//! repo deliberately forbids the local publish: the maintainer's
+//! `~/.cargo/credentials.toml` may be stale (403) or absent, and the CI token is
+//! the source of truth — so an engine cut that ran `cargo publish` here would
+//! either fail or race the workflow into a double-publish.
+//!
+//! It differs from `cargo-publish` in **exactly one** respect: the publish. Its
+//! `dry_run` and `build` run the identical local gates (`cargo check`, `cargo
+//! package --no-verify`), because those are read-only preflights whose whole value
+//! is catching an unpublishable manifest *before* the irreversible tag push — and a
+//! repo that publishes from CI still wants them. Its `publish` is
+//! [`AdapterError::Unsupported`], and it declares
+//! [`is_ci_delegated`](ReleaseAdapter::is_ci_delegated), so the coordinator journals
+//! `target_delegated` and skips it in publish-all (never publishing, never failing).
+//! It does **not** own the GitHub Release (it uploads to crates.io), so a plan
+//! carrying only this delegated identity still gets an engine-created Release.
+//!
+//! The result is a cut whose terminal *actionable* phase is the tag push, followed
+//! by the mandatory verify barrier — which polls the crates.io index until CI's
+//! publish is observed (see the coordinator's delegated-verify wait). "Delegated"
+//! never means "assumed": an unobserved target still fails the cut.
 //!
 //! ## One plan target = one publish unit (ADR-0004)
 //!
@@ -109,19 +137,20 @@ const INDEX_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// (a member restricted to a *different* registry is excluded).
 const CRATES_IO_ALIAS: &str = "crates-io";
 
-/// The rust release adapter, operating as either `cargo-publish` or `cargo-dist`.
+/// The rust release adapter, operating as `cargo-publish`, `cargo-publish-ci`, or
+/// `cargo-dist`.
 pub struct CargoAdapter {
     adapter: Adapter,
 }
 
 impl CargoAdapter {
     /// Construct for a resolved rust adapter identity (`cargo-publish` /
-    /// `cargo-dist`).
+    /// `cargo-publish-ci` / `cargo-dist`).
     #[must_use]
     pub fn new(adapter: Adapter) -> Self {
         debug_assert!(matches!(
             adapter,
-            Adapter::CargoPublish | Adapter::CargoDist
+            Adapter::CargoPublish | Adapter::CargoPublishCi | Adapter::CargoDist
         ));
         Self { adapter }
     }
@@ -156,11 +185,12 @@ impl ReleaseAdapter for CargoAdapter {
 
     fn is_ci_delegated(&self) -> bool {
         // `cargo-dist` builds distributables locally but its *upload* is the
-        // tag-triggered `release.yml` — the engine cannot (and must not) publish it
-        // from this host. `cargo-publish` is a real host publish and is not
-        // delegated. Consistent with `publish` returning `Unsupported` for
-        // `cargo-dist` only.
-        matches!(self.adapter, Adapter::CargoDist)
+        // tag-triggered `release.yml`; `cargo-publish-ci` declares that this repo's
+        // crates.io publish is likewise a tag-triggered CI job holding the registry
+        // secret. For both, the engine cannot (and must not) publish from this host.
+        // `cargo-publish` is a real host publish and is not delegated. Consistent
+        // with `publish` returning `Unsupported` for exactly these two identities.
+        matches!(self.adapter, Adapter::CargoDist | Adapter::CargoPublishCi)
     }
 
     fn ci_owns_github_release(&self) -> bool {
@@ -168,7 +198,9 @@ impl ReleaseAdapter for CargoAdapter {
         // artifacts/*` — it creates AND finalizes the shared GitHub Release and
         // uploads the cross-platform binaries. So the coordinator must not create
         // the Release itself (a pre-existing Release makes `gh release create`
-        // error). `cargo-publish` owns no GitHub Release. See
+        // error). Neither `cargo-publish` nor `cargo-publish-ci` owns a GitHub
+        // Release — the latter is CI-delegated, but to crates.io, not GitHub, which
+        // is exactly why this capability is narrower than `is_ci_delegated`. See
         // `coordinator-release-vs-cargo-dist-ownership`.
         matches!(self.adapter, Adapter::CargoDist)
     }
@@ -223,10 +255,24 @@ impl ReleaseAdapter for CargoAdapter {
         let (planned_commands, _artifacts) =
             cargo_build_gate(registry, &t.package, &t.version, defer_packaging);
         run_all(ctx, &planned_commands)?;
-        let mut notes = vec![format!(
-            "publishes with `cargo publish --registry {registry} -p {}` in publish-all",
-            t.package
-        )];
+        // The note states who publishes, which differs by identity: the engine's own
+        // publish-all for `cargo-publish`, the tag-triggered workflow for the
+        // CI-delegated `cargo-publish-ci` (whose publish-all entry is a journalled
+        // skip). An approver reading the dry-run must not be told the engine will run
+        // a publish it will never run.
+        let mut notes = vec![if self.is_ci_delegated() {
+            format!(
+                "publish is CI-delegated: the tag push triggers the workflow that runs \
+                 `cargo publish` for `{}`; the engine skips it in publish-all and observes \
+                 the crates.io index in verify",
+                t.package
+            )
+        } else {
+            format!(
+                "publishes with `cargo publish --registry {registry} -p {}` in publish-all",
+                t.package
+            )
+        }];
         if defer_packaging {
             let chain = deferred
                 .iter()
@@ -239,11 +285,22 @@ impl ReleaseAdapter for CargoAdapter {
                  `cargo package`d until they are published",
                 t.package
             ));
-            notes.push(format!(
-                "waits for these workspace dependencies to be crates.io-index-visible \
-                 before publishing `{}`: {chain}",
-                t.package
-            ));
+            // The index-wait is the ENGINE's between-publishes wait; a CI-delegated
+            // target never runs it (its whole publish happens in the workflow, which
+            // owns its own ordering), so promising it would misdescribe the cut.
+            notes.push(if self.is_ci_delegated() {
+                format!(
+                    "the CI publish workflow must publish these workspace dependencies of \
+                     `{}` first — the engine does not order a delegated publish: {chain}",
+                    t.package
+                )
+            } else {
+                format!(
+                    "waits for these workspace dependencies to be crates.io-index-visible \
+                     before publishing `{}`: {chain}",
+                    t.package
+                )
+            });
         }
         Ok(DryRunReport {
             adapter: self.adapter,
@@ -318,9 +375,14 @@ impl ReleaseAdapter for CargoAdapter {
         t: &AdapterTarget,
     ) -> Result<PublishReceipt, AdapterError> {
         // cargo-dist uploads via the CI release workflow, not from this host —
-        // `dist build` only builds. Report that honestly rather than returning a
-        // receipt for a publish that did not happen.
-        if matches!(self.adapter, Adapter::CargoDist) {
+        // `dist build` only builds. `cargo-publish-ci` is the same story for
+        // crates.io: the tag-triggered workflow holds the registry token and runs
+        // the publish. Report that honestly rather than returning a receipt for a
+        // publish that did not happen. Both identities declare `is_ci_delegated`, so
+        // the coordinator skips them in publish-all and never reaches this arm; it
+        // is the honest answer for any other caller (and the invariant the
+        // capability documents: delegated ⇒ `Unsupported`).
+        if matches!(self.adapter, Adapter::CargoDist | Adapter::CargoPublishCi) {
             return Err(AdapterError::Unsupported {
                 adapter: self.adapter,
                 operation: "publish",

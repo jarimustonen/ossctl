@@ -689,6 +689,70 @@ fn expand_targets(ecosystems: &[Ecosystem], layout: ReleaseLayout) -> Vec<Target
         .collect()
 }
 
+/// Floor the registry/ecosystem/adapter combinations a target may declare — the
+/// checks that stop a well-formed-but-inert (or dangerously mis-routed) target
+/// before a cut, not during one.
+///
+/// Each field is an `Option` because a parse error already reported its own
+/// problem and substituted nothing; a combination is only judged once the fields
+/// it involves are well-formed.
+fn check_target_adapter_compat(
+    idx: usize,
+    ecosystem: Option<Ecosystem>,
+    registry: Option<Registry>,
+    adapter: Option<Adapter>,
+    p: &mut Problems,
+) {
+    // Floor: registry/adapter compatibility. A `homebrew`-registry target is
+    // either engine-owned (`homebrew-tap` pushes a personal-tap formula;
+    // `homebrew-core` opens the central-formula PR) or CI-delegated
+    // (`cargo-dist`'s publish-homebrew-formula job writes the tap). Any other
+    // adapter has no formula path, so the target would silently do nothing at
+    // cut time. Reject it here rather than at release time. Only checked once
+    // both fields are well-formed (a parse error already reported its problem).
+    if let (Some(Registry::Homebrew), Some(a)) = (registry, adapter) {
+        if !matches!(
+            a,
+            Adapter::HomebrewTap | Adapter::HomebrewCore | Adapter::CargoDist
+        ) {
+            p.err(format!(
+                "floor: targets[{idx}] has registry 'homebrew' but adapter {} — a \
+                 homebrew-registry target requires adapter 'homebrew-tap' (personal tap), \
+                 'homebrew-core' (central formula), or 'cargo-dist' (CI-delegated tap)",
+                quote_for_diagnostic(a.as_str())
+            ));
+        }
+    }
+
+    // Floor: `cargo-publish-ci` (the CI-delegated crates.io publish) is
+    // meaningful only for a rust crate going to crates.io. Its whole contract
+    // with the engine is "skip the local publish, then observe crates.io" — on
+    // any other registry there is nothing the observer knows how to look at, so
+    // the target would tag, skip, and then fail the mandatory verify barrier
+    // AFTER the irreversible tag push. Reject it at normalization instead, where
+    // nothing has happened yet. (The cargo adapter refuses a non-crates.io
+    // registry too, but only once a cut is already running.)
+    if let (Some(r), Some(Adapter::CargoPublishCi)) = (registry, adapter) {
+        if r != Registry::CratesIo {
+            p.err(format!(
+                "floor: targets[{idx}] has adapter 'cargo-publish-ci' but registry {} — the \
+                 CI-delegated cargo publish targets crates.io only (use 'cargo-publish' for \
+                 an engine-run publish, or the registry's own adapter)",
+                quote_for_diagnostic(r.as_str())
+            ));
+        }
+        if let Some(e) = ecosystem {
+            if e != Ecosystem::Rust {
+                p.err(format!(
+                    "floor: targets[{idx}] has adapter 'cargo-publish-ci' but ecosystem {} — \
+                     `cargo publish` releases a rust crate",
+                    quote_for_diagnostic(e.as_str())
+                ));
+            }
+        }
+    }
+}
+
 fn validate_targets(
     seq: &[Value],
     ecosystems: &[Ecosystem],
@@ -767,26 +831,7 @@ fn validate_targets(
             }
         };
 
-        // Floor: registry/adapter compatibility. A `homebrew`-registry target is
-        // either engine-owned (`homebrew-tap` pushes a personal-tap formula;
-        // `homebrew-core` opens the central-formula PR) or CI-delegated
-        // (`cargo-dist`'s publish-homebrew-formula job writes the tap). Any other
-        // adapter has no formula path, so the target would silently do nothing at
-        // cut time. Reject it here rather than at release time. Only checked once
-        // both fields are well-formed (a parse error already reported its problem).
-        if let (Some(Registry::Homebrew), Some(a)) = (registry, adapter) {
-            if !matches!(
-                a,
-                Adapter::HomebrewTap | Adapter::HomebrewCore | Adapter::CargoDist
-            ) {
-                p.err(format!(
-                    "floor: targets[{idx}] has registry 'homebrew' but adapter {} — a \
-                     homebrew-registry target requires adapter 'homebrew-tap' (personal tap), \
-                     'homebrew-core' (central formula), or 'cargo-dist' (CI-delegated tap)",
-                    quote_for_diagnostic(a.as_str())
-                ));
-            }
-        }
+        check_target_adapter_compat(idx, ecosystem, registry, adapter, p);
 
         // On the error path, placeholders keep the strong type; the document is
         // never emitted when problems.errors is non-empty.
@@ -2792,6 +2837,61 @@ mod tests {
         let canonical = serde_json::to_value(&n.contract).unwrap();
         assert_eq!(canonical["targets"][1]["adapter"], "cargo-dist");
         assert_eq!(canonical["targets"][1]["registry"], "homebrew");
+    }
+
+    /// A CI-delegated crates.io target (`cargo-publish-ci`) is a first-class,
+    /// round-trippable contract shape: the repo whose crates.io publish runs in a
+    /// tag-triggered workflow can declare its real publish surface, and the engine
+    /// reads the delegation off the adapter identity.
+    #[test]
+    fn ci_delegated_crates_io_target_normalizes_and_round_trips() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\ntargets:\n  \
+                    - {ecosystem: rust, package: glasspad, registry: crates.io, adapter: cargo-publish-ci}\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert!(
+            n.problems.warnings.is_empty(),
+            "warnings: {:?}",
+            n.problems.warnings
+        );
+        assert_eq!(n.contract.targets[0].adapter, Adapter::CargoPublishCi);
+        let canonical = serde_json::to_value(&n.contract).unwrap();
+        assert_eq!(canonical["targets"][0]["adapter"], "cargo-publish-ci");
+        assert_eq!(canonical["targets"][0]["registry"], "crates.io");
+    }
+
+    /// A mixed contract — one engine-published crate, one CI-published crate — is
+    /// valid: delegation is a per-target property, not a repo-wide mode.
+    #[test]
+    fn a_mixed_local_and_ci_publish_contract_is_valid() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\ntargets:\n  \
+                    - {ecosystem: rust, package: lib, registry: crates.io, adapter: cargo-publish}\n  \
+                    - {ecosystem: rust, package: cli, registry: crates.io, adapter: cargo-publish-ci}\n---\n";
+        let n = norm(text);
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+        assert_eq!(n.contract.targets[0].adapter, Adapter::CargoPublish);
+        assert_eq!(n.contract.targets[1].adapter, Adapter::CargoPublishCi);
+    }
+
+    /// `cargo-publish-ci` on a non-crates.io registry is a floor: the delegated
+    /// publish has no destination the verify barrier knows how to observe, so it
+    /// would tag first and only then fail — refuse it while nothing has happened.
+    #[test]
+    fn ci_delegated_cargo_publish_requires_crates_io() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\ntargets:\n  \
+                    - {ecosystem: rust, package: tool, registry: gh-releases, adapter: cargo-publish-ci}\n---\n";
+        assert_error_contains(
+            &norm(text),
+            "the CI-delegated cargo publish targets crates.io only",
+        );
+    }
+
+    /// …and it is a rust adapter: `cargo publish` releases a crate.
+    #[test]
+    fn ci_delegated_cargo_publish_requires_the_rust_ecosystem() {
+        let text = "---\nstatus: approved\nmaturity: production\necosystems: [node]\ntargets:\n  \
+                    - {ecosystem: node, package: tool, registry: crates.io, adapter: cargo-publish-ci}\n---\n";
+        assert_error_contains(&norm(text), "`cargo publish` releases a rust crate");
     }
 
     /// A `homebrew-core` target is a valid homebrew adapter and needs NO personal

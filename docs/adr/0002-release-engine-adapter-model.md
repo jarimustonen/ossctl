@@ -27,7 +27,7 @@ Two facts force real structure here, both surfaced sharply by the release-engine
 
 ### 1. `ReleaseAdapter` trait + enum-backed registry; runtime dispatch; all compiled in
 
-Adapter **identity** is the serde enum from `OSS-RELEASE.md` (`cargo-publish`, `cargo-dist`, `release-please`, `changesets`, `gh-action-pypi-publish`, `twine`, `goreleaser`, `homebrew-tap`, `homebrew-core`, `npm-publish`, `manual`). Adapter **behavior** lives behind a trait, one module per ecosystem under `ossctl-core/src/release/adapters/`. All adapters are **compiled in**; selection is **runtime dispatch** driven by the resolved config.
+Adapter **identity** is the serde enum from `OSS-RELEASE.md` (`cargo-publish`, `cargo-publish-ci` (see the 2026-08-17 tag-only-cut amendment), `cargo-dist`, `release-please`, `changesets`, `gh-action-pypi-publish`, `twine`, `goreleaser`, `homebrew-tap`, `homebrew-core`, `npm-publish`, `manual`). Adapter **behavior** lives behind a trait, one module per ecosystem under `ossctl-core/src/release/adapters/`. All adapters are **compiled in**; selection is **runtime dispatch** driven by the resolved config.
 
 The registry is an **exhaustive enum-backed map, not an unconstrained `Vec<&dyn>`**: composition resolves exactly one implementation per configured target **at startup** and fails fast there if a target has no impl — never mid-release. Compiler-enforced exhaustiveness over the adapter enum guarantees every variant is wired.
 
@@ -160,3 +160,34 @@ stanzas; cargo-dist GitHub Releases are polled through the command seam for thei
 expected archives. `Unknown` is not green: it journals an honest observation but
 fails the barrier alongside `Missing` and `Conflicts`. `--allow-unverified` remains
 resume-only and never makes an unobserved fresh cut complete.
+
+## Amendment (2026-08-17) — publish-in-CI / tag-only cut (`cargo-publish-ci`)
+
+The adapter identity list gains **`cargo-publish-ci`**: a rust crates.io target whose
+`cargo publish` is run by a tag-triggered CI workflow holding the registry secret, not
+by the engine on the maintainer's host. It is modelled entirely with the delegation
+vocabulary this ADR already defines — `is_ci_delegated() == true`, publish returns
+`Unsupported`, the coordinator journals `target_delegated` and skips it in publish-all —
+so it introduces **no second delegation concept**. It is deliberately NOT
+`ci_owns_github_release()`: the crates job runs no `gh release create`, so such a plan
+still gets an engine-created Release (the same strict-subset reasoning as the 2026-08-05
+addendum).
+
+For a plan whose registry targets are all delegated, the **tag push becomes the cut's
+terminal actionable step** — it is what triggers the publish — and everything after it is
+observation. The phase sequence is unchanged (so `SEAL_VERSION` is unchanged, and the
+sealed pre-image differs only where the contract itself differs): `publish-all` is still
+entered, and still completes; the delegated target's entry in it is a journalled skip.
+
+The verify amendment above binds without exception. A delegated **registry** publish is
+observed on the registry index (not in a GitHub Release, which is where the delegated
+observer previously looked for any non-Homebrew target), polled with the same bounded
+delegated wait — CI needs minutes. The outcome discipline is the reconcile table's: the
+version present ⇒ `Matches`; the registry answering without it after the window ⇒
+`Missing`; every lookup failing ⇒ `Unknown`. Both failures are red; the distinction tells
+the operator whether to fix CI or re-run `release verify`. Tagging without observing would
+be the mode's one real hazard, and it is the one thing the engine refuses to do.
+
+The contract floors the combination at normalization: `cargo-publish-ci` requires
+`registry: crates.io` and `ecosystem: rust`. A mis-declared target would otherwise tag
+first and fail verify second — after the irreversible step.

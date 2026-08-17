@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   emit the canonical success envelope with clap-derived subcommands, flags, positional
   arguments, defaults, accepted values, environment mappings, and structured examples
   (`cli-canon-help-json`). Text help remains unchanged.
+- **A repo that publishes to crates.io from CI can now use `release cut`.** A target
+  declared as `registry: crates.io, adapter: cargo-publish-ci` is CI-delegated: the cut
+  runs the local gates, bumps, and pushes the tag — which is what triggers the repo's
+  publish workflow — but never runs `cargo publish` from the host, so it can neither
+  double-publish against the workflow nor fail on a stale local token. The mandatory
+  verify barrier then polls the registry index until CI's publish is observed, with the
+  same bounded wait used for delegated GitHub Releases; an unobserved target still fails
+  the cut, and a registry outage reports `Unknown` rather than a false `Missing`.
+  Delegation is per target, so a contract may mix engine-published and CI-published
+  targets (`release-ci-publish-mode`).
 
 ## [0.8.0] - 2026-08-17
 

@@ -208,8 +208,25 @@ wire_enum! {
 
 wire_enum! {
     /// The release tool pinned for a [`Target`] so it is not re-inferred each cut.
+    ///
+    /// `cargo-publish-ci` is the **CI-delegated** sibling of `cargo-publish`: the
+    /// crate reaches crates.io through a tag-triggered CI workflow (a repo-secret
+    /// `CARGO_REGISTRY_TOKEN` running `cargo publish` in Actions), never through a
+    /// `cargo publish` on the maintainer's host. A repo that forbids the local
+    /// publish declares it, and the engine's cut then gates + tags + **observes**
+    /// instead of publishing — the same delegation vocabulary the `cargo-dist`
+    /// gh-releases / homebrew targets already use
+    /// ([`is_ci_delegated`](crate::release::adapters::ReleaseAdapter::is_ci_delegated)).
+    ///
+    /// A **new enum value is additive**, so it does not bump
+    /// [`KNOWN_SCHEMA_VERSION`]: no existing field is renamed or re-meant, and a
+    /// contract that does not use it serializes byte-for-byte as before. An older
+    /// reader meeting the value reports it as an invalid adapter (the normalizer's
+    /// closed-enum error path) rather than mis-executing it — fail-closed, which is
+    /// the property that matters for a publish identity.
     Adapter {
-        CargoPublish => "cargo-publish", CargoDist => "cargo-dist",
+        CargoPublish => "cargo-publish", CargoPublishCi => "cargo-publish-ci",
+        CargoDist => "cargo-dist",
         ReleasePlease => "release-please", Changesets => "changesets",
         GhActionPypiPublish => "gh-action-pypi-publish", Twine => "twine",
         Goreleaser => "goreleaser", HomebrewTap => "homebrew-tap",

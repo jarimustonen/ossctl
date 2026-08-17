@@ -61,12 +61,24 @@
 //!   (`coordinator-release-vs-cargo-dist-ownership`).
 //! - **CI-delegated targets are skipped, not failed.** A target whose adapter
 //!   declares [`is_ci_delegated`](ReleaseAdapter::is_ci_delegated) (its artifact is
-//!   produced by the tag-triggered CI, e.g. `cargo-dist`'s `release.yml`) is
+//!   produced by the tag-triggered CI, e.g. `cargo-dist`'s `release.yml`, or a
+//!   `cargo-publish-ci` workflow running `cargo publish` with the repo's registry
+//!   secret) is
 //!   journalled `target_delegated` in publish-all and skipped — never published
 //!   from this host, never counted as a failure. This closes the partial-publish
 //!   trap where an honest [`AdapterError::Unsupported`](super::adapters::AdapterError::Unsupported)
 //!   from such an adapter, after
-//!   an irreversible crates.io publish, would wedge the run.
+//!   an irreversible crates.io publish, would wedge the run. For a plan whose
+//!   registry targets are ALL delegated, the tag push is the cut's terminal
+//!   *actionable* step — everything after it is observation (the "publish in CI /
+//!   tag-only cut" mode, `release-ci-publish-mode`). Delegation is per target, so a
+//!   mixed plan (one engine-published target, one delegated) still publishes the
+//!   engine-owned one here, in the same barrier.
+//! - **Delegated is never assumed — it is observed.** Whatever CI owns, the verify
+//!   barrier must SEE at its destination before the run is complete: a delegated
+//!   GitHub Release by its uploaded archives, a delegated tap by its formula, a
+//!   delegated registry publish by the version on the registry index — each polled
+//!   with a bounded wait, since CI needs minutes. `Unknown` is not green.
 //! - **Post-tag distribution finalize.** Targets whose artifact only *exists*
 //!   after the tag is pushed — the Homebrew formula, whose `url` is the just-created
 //!   tag archive — are finalized in a fifth **dist** barrier that runs after
@@ -1225,8 +1237,10 @@ fn dist_phase(
     Ok(())
 }
 
-/// Maximum time the verify barrier waits for cargo-dist to create its delegated
-/// GitHub Release and upload its cross-platform archives.
+/// Maximum time the verify barrier waits for a CI-delegated destination to appear:
+/// cargo-dist creating its GitHub Release and uploading the cross-platform archives,
+/// its Homebrew job writing the tap formula, or a `cargo-publish-ci` workflow
+/// publishing the crate to the registry index.
 const DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS: u64 = 20 * 60;
 /// Delay between delegated GitHub Release observation attempts. Routed through
 /// [`Clock::sleep`](crate::ports::Clock::sleep) so tests advance virtual time.
@@ -1261,6 +1275,12 @@ fn verify_phase(
                 Registry::Homebrew => {
                     verify_delegated_homebrew(&verify_ctx, plan, &tp.input.package)
                 }
+                // A delegated **registry** publish (`cargo-publish-ci`: CI runs
+                // `cargo publish` on the tag) lands on the registry index, not in a
+                // GitHub Release — so it is observed by polling the index, with the
+                // same bounded delegated wait. Routing it through the Release-asset
+                // observer would look in the wrong place and fail a healthy cut.
+                Registry::CratesIo => verify_delegated_registry(&verify_ctx, plan, &tp.input),
                 _ => verify_delegated_release(&verify_ctx, plan, &tp.input.package),
             }
         } else if let Some(receipt) = journal.state().published.get(&tp.id) {
@@ -1356,6 +1376,55 @@ fn verify_delegated_homebrew(
             || ctx.clock.now_unix().saturating_sub(start) >= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS
         {
             return outcome;
+        }
+        ctx.clock.sleep(DELEGATED_RELEASE_VERIFY_POLL_INTERVAL);
+    }
+}
+
+/// Poll the package registry until a **CI-delegated registry publish** is visible —
+/// the observation half of the tag-only cut (`release-ci-publish-mode`).
+///
+/// For a `cargo-publish-ci` target the engine never publishes: the tag push triggers
+/// the workflow that runs `cargo publish` with the repo's registry secret. So the
+/// only thing that can make such a target green is *seeing the version on the
+/// index*, which this does with the same bounded wait the delegated GitHub Release
+/// observer uses (CI needs minutes: queue + build + publish + index propagation).
+/// The engine does not race CI, and it does not assume: an unobserved target ends
+/// the cut red.
+///
+/// Outcome discipline (ADR-0002's verify amendment, the reconcile table's
+/// never-guess rule):
+/// - the version appears in the registry's published set ⇒ [`VerifyOutcome::Matches`]
+/// - the window elapses with the registry **answering** and the version absent ⇒
+///   [`VerifyOutcome::Missing`] (CI did not publish it — a real, actionable failure)
+/// - the window elapses with every lookup **failing** (an outage, or an ecosystem the
+///   [`RegistryQuery`](crate::ports::RegistryQuery) port has no client for) ⇒
+///   [`VerifyOutcome::Unknown`] — never a false `Missing`. Both are barrier failures,
+///   but the operator needs to know which one happened.
+///
+/// No digest comparison: there is no engine receipt for a delegated publish (nothing
+/// was uploaded from here), so presence at the sealed version is the strongest
+/// available observation. That is the same bar the delegated Release/tap observers
+/// meet.
+fn verify_delegated_registry(
+    ctx: &EffectCtx<'_>,
+    plan: &ReleasePlan,
+    target: &AdapterTarget,
+) -> VerifyOutcome {
+    let ecosystem = target.ecosystem().as_str();
+    let start = ctx.clock.now_unix();
+    loop {
+        let observed = ctx.registry.published_versions(ecosystem, &target.package);
+        let reachable = observed.is_ok();
+        if observed.is_ok_and(|versions| versions.iter().any(|v| v == &plan.version)) {
+            return VerifyOutcome::Matches;
+        }
+        if ctx.clock.now_unix().saturating_sub(start) >= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS {
+            return if reachable {
+                VerifyOutcome::Missing
+            } else {
+                VerifyOutcome::Unknown
+            };
         }
         ctx.clock.sleep(DELEGATED_RELEASE_VERIFY_POLL_INTERVAL);
     }
