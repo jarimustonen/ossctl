@@ -2,11 +2,15 @@
 created: 2026-08-17
 updated: 2026-08-17
 type: bug
-status: in-progress
+status: fixed
 priority: high
 related: ['@release-cut-stale-binary-guard']
 lane: release-safety
 lane_seq: 1
+commits:
+- hash: f65fe79
+  summary: 'fix(release): scope stale-binary guard to self-cuts'
+closed: 2026-08-17
 ---
 
 # Stale-binary guard blocks every downstream release plan/cut
