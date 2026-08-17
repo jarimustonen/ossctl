@@ -29,7 +29,7 @@ are thin callers of this binary.",
     disable_version_flag = true,
     color = ColorChoice::Never,
 )]
-struct Cli {
+pub(crate) struct Cli {
     /// Emit a structured JSON envelope on stdout instead of human-readable
     /// text. Format is chosen only by this flag, never by TTY detection
     /// (AGENTS-AI-FIRST-CLI §9).
@@ -138,9 +138,10 @@ pub enum SkillAction {
 
 /// Parse argv, dispatch, and map the result to a process exit code.
 pub fn run() -> ExitCode {
-    let cli = match Cli::try_parse() {
+    let raw_args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let cli = match Cli::try_parse_from(&raw_args) {
         Ok(cli) => cli,
-        Err(e) => return handle_clap_error(&e),
+        Err(e) => return handle_clap_error(&e, &raw_args),
     };
 
     let format = OutputFormat::from_json_flag(cli.json);
@@ -203,15 +204,24 @@ fn emit_version_with_subcommand() -> ExitCode {
 
 /// Translate a clap parse failure into either its native help/usage output
 /// (exit 0 for `--help`) or the §10 error envelope on stderr.
-fn handle_clap_error(e: &clap::Error) -> ExitCode {
+fn handle_clap_error(e: &clap::Error, argv: &[std::ffi::OsString]) -> ExitCode {
     use clap::error::{ContextKind, ErrorKind};
-    // Help is not a failure; let clap print and exit 0. Clap's built-in version
-    // action is disabled because the custom alias routes through `cmd_version`
-    // and therefore honors the global `--json` flag.
+    // Help is not a failure. Structured help is generated from the same clap
+    // tree when the global JSON switch is present; otherwise clap prints its
+    // native text bytes exactly as before.
     if matches!(
         e.kind(),
         ErrorKind::DisplayHelp | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
     ) {
+        if argv.iter().any(|arg| arg == "--json") {
+            return match crate::help::emit(argv) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    error.emit();
+                    ExitCode::from(error.kind as u8)
+                }
+            };
+        }
         let _ = e.print();
         return ExitCode::SUCCESS;
     }

@@ -1,0 +1,10 @@
+Compute and seal a content-addressed release plan
+
+Usage: ossctl release plan [OPTIONS]
+
+Options:
+      --json                Emit a structured JSON envelope on stdout instead of human-readable text. Format is chosen only by this flag, never by TTY detection (AGENTS-AI-FIRST-CLI §9)
+      --repo-root <PATH>    Repository root to plan a release for (default: current directory)
+      --bump <LEVEL>        Own the version bump: compute the new version from the current manifest version + this semantic level (`major` → X+1.0.0, `minor` → X.Y+1.0, `patch` → X.Y.Z+1) and seal a bump phase (version + intra-workspace pin rewrites + Cargo.lock refresh + CHANGELOG finalize + any declared `bump_hook`). Omit for the default path that publishes the version already in the manifest
+      --allow-stale-binary  Permit planning ossctl itself with a binary built from a different commit. This is an explicit escape hatch for a deliberate ossctl self-cut
+  -h, --help                Print help

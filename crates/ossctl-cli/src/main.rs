@@ -12,6 +12,7 @@ mod dist;
 mod doctor;
 mod error;
 mod facts;
+mod help;
 mod output;
 mod release;
 mod skill;

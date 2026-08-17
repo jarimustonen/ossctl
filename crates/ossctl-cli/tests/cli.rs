@@ -98,6 +98,90 @@ fn version_alias_does_not_mask_subcommands_or_release_flags() {
     }
 }
 
+/// Text help stays pinned to the pre-JSON-help clap rendering. Structured help
+/// is a separate path and must never perturb these bytes.
+#[test]
+fn text_help_snapshots_are_unchanged() {
+    for (args, expected) in [
+        (
+            &["--help"][..],
+            include_bytes!("snapshots/root-help.txt").as_slice(),
+        ),
+        (
+            &["release", "plan", "--help"][..],
+            include_bytes!("snapshots/release-plan-help.txt").as_slice(),
+        ),
+    ] {
+        let out = ossctl().args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?} must exit 0");
+        assert!(out.stderr.is_empty(), "{args:?} must not write stderr");
+        assert_eq!(out.stdout, expected, "{args:?} text help changed");
+    }
+}
+
+/// Walk the command surface exclusively through `--help --json`. Every
+/// advertised command must support drill-down and carry the canon-required
+/// discoverability fields, so additions cannot silently disappear from help.
+#[test]
+fn json_help_covers_the_real_command_tree() {
+    assert_json_help_tree(&[]);
+}
+
+fn assert_json_help_tree(path: &[String]) {
+    let mut args: Vec<String> = path.to_vec();
+    args.extend(["--help".to_string(), "--json".to_string()]);
+    let out = ossctl().args(&args).output().unwrap();
+    assert!(out.status.success(), "{args:?} must exit 0");
+    assert!(out.stderr.is_empty(), "{args:?} must not write stderr");
+
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["schema_version"], 1, "canonical envelope: {args:?}");
+    assert_eq!(value["data"]["schema_version"], 1, "help schema: {args:?}");
+    let command = &value["data"]["command"];
+    assert!(command["flags"].is_array(), "flags missing: {args:?}");
+    assert!(command["args"].is_array(), "args missing: {args:?}");
+    assert!(
+        command["examples"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "examples missing: {args:?}"
+    );
+    for flag in command["flags"].as_array().unwrap() {
+        assert!(flag.get("env").is_some(), "env mapping missing: {args:?}");
+        assert!(
+            flag["accepted_values"].is_array(),
+            "accepted values missing: {args:?}"
+        );
+    }
+
+    for child in command["subcommands"].as_array().unwrap() {
+        let mut child_path = path.to_vec();
+        child_path.push(child["name"].as_str().unwrap().to_string());
+        assert_json_help_tree(&child_path);
+    }
+}
+
+/// Finite accepted values not represented by clap's parser remain structured
+/// rather than buried in prose.
+#[test]
+fn json_help_reports_bump_accepted_values() {
+    let out = ossctl()
+        .args(["release", "plan", "--help", "--json"])
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let bump = value["data"]["command"]["flags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|flag| flag["long"] == "bump")
+        .unwrap();
+    assert_eq!(
+        bump["accepted_values"],
+        serde_json::json!(["major", "minor", "patch"])
+    );
+}
+
 /// `doctor` runs the self-check and exits 0 (no failing checks).
 #[test]
 fn doctor_runs_and_exits_zero() {
