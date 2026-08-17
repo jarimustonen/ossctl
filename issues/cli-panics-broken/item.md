@@ -7,6 +7,9 @@ status: in-progress
 priority: normal
 lane: cli-canon
 lane_seq: 20
+commits:
+- hash: 392abf28978be13ccea41b883ee81a11b3a03259
+  summary: centralize fallible stdout writes and treat broken pipes as success
 ---
 
 # CLI panics on broken pipe
