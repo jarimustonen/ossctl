@@ -6,6 +6,9 @@ status: in-progress
 priority: high
 lane: contract-engine
 lane_seq: 30
+commits:
+- hash: 38f6a5b
+  summary: CI-delegated crates.io publish mode (cargo-publish-ci) + index-observing verify
 ---
 
 # release engine: support a 'publish-in-CI / tag-only cut' release mode
