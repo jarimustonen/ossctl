@@ -5,6 +5,7 @@ type: feature
 status: open
 priority: normal
 lane: release-safety
+lane_seq: 20
 ---
 
 # release engine: support a 'publish-in-CI / tag-only cut' release mode

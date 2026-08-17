@@ -7,7 +7,8 @@ status: open
 priority: normal
 labels:
 - via:agent-homebase-wrapup
-- needs-triage
+lane: cli-canon
+lane_seq: 50
 ---
 
 # ossctl --version is rejected as an unknown flag; it should alias the ve…

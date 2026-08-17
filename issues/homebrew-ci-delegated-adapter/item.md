@@ -5,6 +5,7 @@ type: feature
 status: open
 priority: normal
 lane: release-safety
+lane_seq: 10
 ---
 
 # homebrew target needs a CI-delegated adapter (cargo-dist publish-jobs owns the tap)

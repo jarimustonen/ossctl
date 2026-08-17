@@ -5,6 +5,7 @@ type: bug
 status: open
 priority: normal
 lane: release-safety
+lane_seq: 40
 ---
 
 # normalizer cannot express a publish-nothing rust repo (targets: [] force-expands to crates.io)

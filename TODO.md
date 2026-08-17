@@ -6,7 +6,21 @@ Pointers to open issues. Descriptions and plans live in the linked
 ## 🔄 Continue here (handoff)
 
 _Handoff written 2026-08-17 (stint #22, Fable-orchestrated). New agent: read this, then continue
-with a fresh `/stint-start`. Main is clean + pushed._
+with a fresh `/stint-start`. Main is clean + pushed. Live: **0.7.0 on all four channels,
+independently verified** (crates.io ×2, GitHub Release 11 assets, tap formula 0.7.0 + marker,
+local `brew` install runs). **GLOBAL HEAD-OF-LINE: `homebrew-ci-delegated-adapter`** (deliberate
+resequence: it unlocks fleet-wide contract uniformity for the four public repos with less work
+than `release-ci-publish-mode`, which now sits second in the lane). Second parallel lane head:
+`intake-bug-ossctl-d9b2ec7bb6d9` (maintainer-acked 2026-08-17: `--version` must alias the
+`version` verb; note project-canon filed the same class as its own `version-flag-alias`)._
+
+_**🚀 0.7.0 (2026-08-17, run `01M07BDD2RBRADH70DYR41JPBA`) — the first `--bump` engine cut, and
+the first verified one.** Seven phases green: bump (0.6.1→0.7.0 by the executor's first live run:
+version + `=`-pin + Cargo.lock + CHANGELOG finalize + commit `1294b2ef`) → dry-run → build →
+publish (crates.io ×2, gh-releases delegated) → tag → dist (tap-write) → **verify (all four
+targets OBSERVED — the new barrier's maiden run)**. The cut was invoked WITHOUT `--bump`,
+proving the plan store recovers the bump disposition — the exact issuectl 0.14.1 failure shape,
+now fixed in production. Post-cut: main fast-forwarded to the bump commit and pushed._
 
 _**Stint #22 (2026-08-17) — the release-safety cluster is CLOSED as one design.** Stint #21's ⭐
 THEME (the engine reports success without verifying the artifact) plus the two HIGH field bugs
@@ -193,4 +207,6 @@ live view. 0.6.1 is shipped; the epic stays open for its tails (see handoff) and
   should cover the Homebrew tap leg) was admitted and is now normal planned work in lane
   `release-safety` — its root cause is a tap declared in the distribution block but absent from
   `targets:`, so it is planned as a green cut that silently skips the leg.
-- [ ] 🐛 Piialiisan bugiraportti: ossctl --version is rejected as an unknown flag; it should alias the ve… — jari via Telegram ([`intake-bug-ossctl-d9b2ec7bb6d9`](issues/intake-bug-ossctl-d9b2ec7bb6d9/item.md))
+- [x] 🐛 ossctl --version should alias the version verb — **admitted 2026-08-17 (stint #22
+  handoff, maintainer ack), now head of lane `cli-canon`**
+  ([`intake-bug-ossctl-d9b2ec7bb6d9`](issues/intake-bug-ossctl-d9b2ec7bb6d9/item.md))

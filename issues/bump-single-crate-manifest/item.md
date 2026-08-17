@@ -5,6 +5,7 @@ type: bug
 status: open
 priority: normal
 lane: release-safety
+lane_seq: 30
 ---
 
 # release --bump cannot bump a single-crate manifest ([package] version)
