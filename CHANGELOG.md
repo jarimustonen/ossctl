@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 <!-- oss-changelog:unreleased-end -->
 
+## [0.6.1] - 2026-08-17
+
+### Fixed
+- **The Homebrew leg no longer fails on platforms Homebrew cannot serve.** 0.6.0's prebuilt-archive
+  renderer treated every entry in `distribution.platforms` as one it had to serve and errored on the
+  rest — so a contract that legitimately declares a Windows binary (built by cargo-dist and attached
+  to the GitHub Release, which Homebrew simply does not serve) could not complete its dist phase.
+  This blocked ossctl's own 0.6.0 cut after crates.io and the tag had already landed. The renderer
+  now selects the servable platforms (macOS aarch64/x86_64, Linux musl aarch64/x86_64) and ignores
+  the rest. A Homebrew target with *no* servable platform is still an error, and a servable platform
+  whose asset is missing still fails closed (`homebrew-skip-unsupported-platforms`).
+
+### Changed
+- **Windows is no longer built or shipped for ossctl itself** (maintainer decision): the
+  `x86_64-pc-windows-msvc` target and the PowerShell installer are removed from this repository's
+  contract and cargo-dist configuration. Building a Windows binary cost CI time on every release for
+  a platform that is not used. Note this changes only *this repository's* opt-in — Windows has never
+  been in the normalizer's default platform set, so no other project is affected and no generated
+  default changes.
+
 ## [0.6.0] - 2026-08-17
 
 ### Fixed

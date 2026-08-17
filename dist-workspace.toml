@@ -15,22 +15,29 @@ members = ["cargo:."]
 cargo-dist-version = "0.28.2"
 # CI backend.
 ci = "github"
-# Installer scripts generated as release assets: curl-to-shell (Unix) and
-# iwr-to-powershell (Windows). Homebrew auto-publish is deliberately NOT enabled
-# here — that needs a tap write token and is owned by the separate
-# `homebrew-adapter-first-formula` issue.
-installers = ["shell", "powershell"]
-# Cross-platform binary matrix (Rust target-triple syntax): macOS (arm64 +
-# x86_64), Linux (arm64 + x86_64), and Windows x86_64. The Linux targets use
-# `musl`, not `gnu`, so the binaries are statically linked and run on any distro
-# regardless of its glibc vintage — ossctl is pure Rust with no C dependencies,
-# so musl is a clean fit and avoids a `GLIBC_x.y not found` cliff on older LTS
-# systems.
+# Installer scripts generated as release assets: curl-to-shell (Unix) only.
+# No PowerShell installer — Windows is not a supported platform (see targets).
+#
+# Homebrew auto-publish is NOT enabled here because the ossctl release ENGINE
+# owns the tap write itself (a direct tap-write in the post-tag dist phase, since
+# 0.2.3). This is a real division of labour, not a deferral: cargo-dist builds and
+# attaches the binaries, the engine renders and pushes the formula against them.
+# (The tap write token exists and is not a constraint on either side.)
+installers = ["shell"]
+# Cross-platform binary matrix (Rust target-triple syntax): macOS (arm64) and
+# Linux (arm64 + x86_64). The Linux targets use `musl`, not `gnu`, so the
+# binaries are statically linked and run on any distro regardless of its glibc
+# vintage — ossctl is pure Rust with no C dependencies, so musl is a clean fit
+# and avoids a `GLIBC_x.y not found` cliff on older LTS systems.
+#
+# NO WINDOWS (maintainer decision, 2026-08-17). Building and shipping a Windows
+# binary costs CI time on every release for a platform this fleet does not use.
+# Windows is already excluded from the normalizer's default platform set — this
+# repo had opted into it explicitly, and that opt-in is now withdrawn.
 targets = [
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-musl",
     "x86_64-unknown-linux-musl",
-    "x86_64-pc-windows-msvc",
 ]
 # NOTE: no `x86_64-apple-darwin`. The macOS build runs on the self-hosted runner
 # below, which uses Homebrew Rust (no rustup) and so cannot cross-compile

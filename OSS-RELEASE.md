@@ -11,13 +11,12 @@ targets:
 distribution:
   adapter: cargo-dist
   gh_releases: true
-  installers: [shell, powershell]
+  installers: [shell]
   homebrew_tap: jarimustonen/homebrew-ossctl
   platforms:
     - aarch64-apple-darwin
     - aarch64-unknown-linux-musl
     - x86_64-unknown-linux-musl
-    - x86_64-pc-windows-msvc
 versioning: semver
 changelog:
   mode: curated
