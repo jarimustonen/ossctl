@@ -87,3 +87,4 @@ release-safety and cli-canon lanes drain). `issuectl list` for the live view.
   (`--version` alias) admitted at the #22 wrap, now head of lane `cli-canon`. Older
   dispositions live in the issues themselves.
 - [ ] 🐛 Piialiisan bugiraportti: verify phase races CI-delegated targets and fails a successful release — jari via Telegram ([`intake-bug-ossctl-03e1c1ce781b`](issues/intake-bug-ossctl-03e1c1ce781b/item.md))
+- [ ] 🐛 Piialiisan bugiraportti: ossctl repo schema predates intake statuses: issuectl intake file fails… — jari via Telegram ([`intake-bug-ossctl-ec745e86e089`](issues/intake-bug-ossctl-ec745e86e089/item.md))
