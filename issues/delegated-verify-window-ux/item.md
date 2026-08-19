@@ -4,8 +4,8 @@ updated: 2026-08-19
 type: improvement
 status: open
 priority: normal
-lane: contract-engine
-lane_seq: 20
+lane: verify-seam
+lane_seq: 30
 ---
 
 # delegated verify windows are serial, silent, and per-target

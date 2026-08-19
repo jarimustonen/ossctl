@@ -4,8 +4,8 @@ updated: 2026-08-19
 type: improvement
 status: open
 priority: normal
-lane: contract-engine
-lane_seq: 50
+lane: facts-evidence
+lane_seq: 10
 ---
 
 # publish evidence is not inspectable from the CLI

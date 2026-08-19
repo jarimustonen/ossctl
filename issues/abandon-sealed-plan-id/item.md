@@ -4,8 +4,9 @@ updated: 2026-08-19
 type: improvement
 status: open
 priority: normal
-lane: plan-seal
+lane: plan-store
 lane_seq: 10
+collision: [crates/ossctl-cli/src/release.rs]
 ---
 
 # release abandon rejects a sealed-but-never-cut plan id

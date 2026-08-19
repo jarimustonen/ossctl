@@ -4,8 +4,8 @@ updated: 2026-08-19
 type: bug
 status: open
 priority: normal
-lane: contract-engine
-lane_seq: 30
+lane: verify-seam
+lane_seq: 40
 ---
 
 # delegated PyPI/npm targets are verified against GitHub Release assets

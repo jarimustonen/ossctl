@@ -6,8 +6,9 @@ status: open
 priority: high
 labels:
 - via:agent-issuectl-stint
-lane: contract-engine
-lane_seq: 10
+lane: verify-seam
+lane_seq: 20
+collision: [crates/ossctl-cli/src/release.rs, crates/ossctl-core/src/release/distribution.rs]
 ---
 
 # cut runs its own homebrew leg despite cargo-dist publish-jobs owning the tap: double-writer, no retry on 503, false-red failed run

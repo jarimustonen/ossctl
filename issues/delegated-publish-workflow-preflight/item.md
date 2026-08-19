@@ -4,8 +4,9 @@ updated: 2026-08-19
 type: improvement
 status: open
 priority: normal
-lane: contract-engine
-lane_seq: 40
+lane: verify-seam
+lane_seq: 50
+collision: [crates/ossctl-core/src/release/distribution.rs, crates/ossctl-core/src/release/plan.rs]
 ---
 
 # release cut does not check that a CI-delegated publish workflow exists

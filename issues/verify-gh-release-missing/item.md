@@ -4,8 +4,8 @@ updated: 2026-08-19
 type: bug
 status: open
 priority: high
-lane: contract-engine
-lane_seq: 5
+lane: verify-seam
+lane_seq: 10
 ---
 
 # release verify reports a published GitHub Release as missing
