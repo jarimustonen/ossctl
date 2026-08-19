@@ -1,9 +1,11 @@
 ---
 created: 2026-08-17
-updated: 2026-08-17
+updated: 2026-08-19
 type: bug
 status: open
 priority: high
+lane: contract-engine
+lane_seq: 5
 ---
 
 # release verify reports a published GitHub Release as missing
