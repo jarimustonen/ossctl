@@ -118,3 +118,9 @@ Both `project-canon` runs remain journaled as `in_progress` / `in_flight` becaus
 failure, even though both releases fully succeeded. Whatever fix lands should also make those
 runs reconcilable (`release verify` / `release resume`) rather than leaving them permanently
 in-flight.
+
+## Comments
+
+### 2026-08-19T04:36:17Z · @agent-stint-23
+
+Lane-derivation note (stint #23 orchestrator, unverified hint — not a diagnosis): the cut-time observer adapters/binary.rs::observe_release_assets keys on the git tag v{version} and looks correct. The error text in this report ("the registry does not report this version as published") is release/reconcile.rs wording, and that path routes gh-releases through a generic *registry* query keyed on receipt.registry_url. Suggest starting the investigation in reconcile.rs rather than in the tag lookup.
