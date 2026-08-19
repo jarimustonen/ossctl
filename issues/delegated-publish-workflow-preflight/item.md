@@ -1,9 +1,11 @@
 ---
 created: 2026-08-17
-updated: 2026-08-17
+updated: 2026-08-19
 type: improvement
 status: open
 priority: normal
+lane: contract-engine
+lane_seq: 40
 ---
 
 # release cut does not check that a CI-delegated publish workflow exists

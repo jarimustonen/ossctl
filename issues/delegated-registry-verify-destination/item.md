@@ -1,9 +1,11 @@
 ---
 created: 2026-08-17
-updated: 2026-08-17
+updated: 2026-08-19
 type: bug
 status: open
 priority: normal
+lane: contract-engine
+lane_seq: 30
 ---
 
 # delegated PyPI/npm targets are verified against GitHub Release assets

@@ -1,9 +1,11 @@
 ---
 created: 2026-08-17
-updated: 2026-08-17
+updated: 2026-08-19
 type: improvement
 status: open
 priority: normal
+lane: plan-seal
+lane_seq: 10
 ---
 
 # release abandon rejects a sealed-but-never-cut plan id

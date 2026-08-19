@@ -1,12 +1,13 @@
 ---
 created: 2026-08-17
-updated: 2026-08-17
+updated: 2026-08-19
 type: bug
 status: open
 priority: high
 labels:
-- needs-triage
 - via:agent-issuectl-stint
+lane: contract-engine
+lane_seq: 10
 ---
 
 # cut runs its own homebrew leg despite cargo-dist publish-jobs owning the tap: double-writer, no retry on 503, false-red failed run
