@@ -1,9 +1,9 @@
 ---
 created: 2026-08-20
-updated: 2026-08-20
+updated: 2026-08-21
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: high
 collision: [crates/ossctl-core/src/release/plan.rs]
 lane: bump-exec
@@ -12,6 +12,9 @@ provenance: agent-homebase-wrapup
 commits:
 - hash: d36be5d
   summary: reconcile repeated workspace pins
+- hash: ab1572f
+  summary: harden pin-set agreement and advance seal v7
+closed: 2026-08-21
 ---
 
 # Release bump plan accepts duplicate exact pins then cut fails
