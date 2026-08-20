@@ -683,7 +683,7 @@ fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace>
     if !fs.is_file(&root_path) {
         return None;
     }
-    let root_text = read_text(fs, &root_path, MANIFEST_LIMIT)?;
+    let root_text = read_text_full(fs, &root_path)?;
     let dirs = workspace_member_dirs(repo_root, fs, &root_text);
     if dirs.is_empty() {
         return None;
@@ -693,8 +693,7 @@ fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace>
     // First pass: parse every named member (name, version, publishability, edges).
     let mut raw: Vec<RawMember> = Vec::new();
     for rel in &dirs {
-        let Some(text) = read_text(fs, &repo_root.join(rel).join("Cargo.toml"), MANIFEST_LIMIT)
-        else {
+        let Some(text) = read_text_full(fs, &repo_root.join(rel).join("Cargo.toml")) else {
             continue;
         };
         let (package, version) = resolve_member_name_version(&text, ws_pkg.as_deref());
@@ -705,8 +704,11 @@ fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace>
             package,
             version,
             publishable: member_publishable_to_crates_io(&text),
-            deps: member_dependency_edges(&text, false),
-            pins: member_dependency_edges(&text, true),
+            deps: member_dependency_edges(&text),
+            pins: crate::release::bump::cargo_pin_declarations(&text)
+                .into_iter()
+                .map(|d| (d.package, d.requirement))
+                .collect(),
         });
     }
 
@@ -878,7 +880,7 @@ enum DepTable {
 /// inline table is read only by its first physical line; a dotted `dep.version = "…"`
 /// requirement on a line separate from `dep.path` is not captured (so that edge's pin is
 /// left un-rewritten — fail closed).
-fn member_dependency_edges(text: &str, include_dev: bool) -> Vec<(String, Option<String>)> {
+fn member_dependency_edges(text: &str) -> Vec<(String, Option<String>)> {
     let mut state = DepTable::Other;
     let mut out: Vec<(String, Option<String>)> = Vec::new();
 
@@ -887,7 +889,7 @@ fn member_dependency_edges(text: &str, include_dev: bool) -> Vec<(String, Option
         if let Some(header) = t.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
             // Leaving a table: flush a completed sub-table's edge before switching.
             flush_dep_subtable(&mut state, &mut out);
-            state = classify_dep_table(header.trim(), include_dev);
+            state = classify_dep_table(header.trim());
             continue;
         }
         match &mut state {
@@ -931,8 +933,8 @@ fn member_dependency_edges(text: &str, include_dev: bool) -> Vec<(String, Option
 /// quotes; classification keys on the unquoted `.dependencies` / `.build-dependencies`
 /// suffix (and the `.dependencies.` / `.build-dependencies.` infix for sub-tables),
 /// which is robust regardless of the cfg contents.
-fn classify_dep_table(header: &str, include_dev: bool) -> DepTable {
-    if let Some(name) = dep_subtable_name(header, include_dev) {
+fn classify_dep_table(header: &str) -> DepTable {
+    if let Some(name) = dep_subtable_name(header) {
         return DepTable::Sub {
             key: name.trim().trim_matches(['"', '\'']).to_string(),
             package: None,
@@ -940,13 +942,11 @@ fn classify_dep_table(header: &str, include_dev: bool) -> DepTable {
             version: None,
         };
     }
-    // Dev dependencies are included only for pin discovery; they never gate publish order.
-    if (include_dev || !header.contains("dev-dependencies"))
+    // dev-dependencies (plain or target-specific) never gate publish order.
+    if !header.contains("dev-dependencies")
         && (header == "dependencies"
-            || header == "dev-dependencies"
             || header == "build-dependencies"
             || header.ends_with(".dependencies")
-            || header.ends_with(".dev-dependencies")
             || header.ends_with(".build-dependencies"))
     {
         return DepTable::Table;
@@ -958,24 +958,19 @@ fn classify_dep_table(header: &str, include_dev: bool) -> DepTable {
 /// `[build-dependencies.<name>]`, or their target-specific
 /// `[target.<cfg>.dependencies.<name>]` forms), or `None` when the header is not a
 /// dependency sub-table. Every `dev-dependencies` form yields `None`.
-fn dep_subtable_name(header: &str, include_dev: bool) -> Option<&str> {
-    if header.contains("dev-dependencies") && !include_dev {
+fn dep_subtable_name(header: &str) -> Option<&str> {
+    if header.contains("dev-dependencies") {
         return None;
     }
     if let Some(name) = header
         .strip_prefix("dependencies.")
-        .or_else(|| header.strip_prefix("dev-dependencies."))
         .or_else(|| header.strip_prefix("build-dependencies."))
     {
         return Some(name);
     }
     // Target-specific: split on the LAST `.dependencies.` / `.build-dependencies.`
     // (the cfg expression precedes it and may itself contain dots).
-    for infix in [
-        ".dependencies.",
-        ".dev-dependencies.",
-        ".build-dependencies.",
-    ] {
+    for infix in [".dependencies.", ".build-dependencies."] {
         if let Some(idx) = header.rfind(infix) {
             return Some(&header[idx + infix.len()..]);
         }
@@ -1599,6 +1594,13 @@ fn read_text(fs: &dyn Fs, path: &Path, limit: usize) -> Option<String> {
             .take(limit)
             .collect(),
     )
+}
+
+/// Read a complete UTF-8-lossy file. Release-plan workspace discovery must not use the
+/// general facts cap: cut execution reads the complete manifest, so truncating here
+/// would let plan and cut classify different pin declaration sets.
+fn read_text_full(fs: &dyn Fs, path: &Path) -> Option<String> {
+    Some(String::from_utf8_lossy(&fs.read(path).ok()?).into_owned())
 }
 
 /// Count non-blank lines (git shortlog emits one per committer).
@@ -2234,6 +2236,27 @@ mod tests {
         assert_eq!(
             cli.pin_reqs.get("core"),
             Some(&vec![Some("=0.4.0".to_string()); 4])
+        );
+    }
+
+    #[test]
+    fn rust_workspace_pin_discovery_reads_the_complete_manifest() {
+        let root = "[workspace]\nmembers = [\"core\", \"cli\"]\n";
+        let core = "[package]\nname = \"core\"\nversion = \"0.4.0\"\n";
+        let mut cli = "[package]\nname = \"cli\"\nversion = \"0.4.0\"\n\n[dependencies]\ncore = { path = \"../core\", version = \"=0.4.0\" }\n".to_string();
+        cli.push('#');
+        cli.push_str(&"x".repeat(MANIFEST_LIMIT));
+        cli.push_str("\n[dev-dependencies]\ncore = { path = \"../core\", version = \"^0.4\" }\n");
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/core/Cargo.toml", core)
+            .file("/repo/cli/Cargo.toml", &cli);
+        let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
+        let cli = ws.members.iter().find(|m| m.package == "cli").unwrap();
+
+        assert_eq!(
+            cli.pin_reqs.get("core"),
+            Some(&vec![Some("=0.4.0".to_string()), Some("^0.4".to_string())])
         );
     }
 

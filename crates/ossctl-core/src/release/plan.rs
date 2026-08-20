@@ -116,8 +116,8 @@ pub fn build(contract: &Contract, facts: &Facts, head_sha: &str, version: &str) 
 ///
 /// # Errors
 /// [`BumpError`](crate::release::bump::BumpError) when `from_version` is not a strict
-/// `MAJOR.MINOR.PATCH` release version — the engine will not seal a plan whose computed
-/// version it cannot derive (fail closed).
+/// `MAJOR.MINOR.PATCH` release version or the deterministic edit set contains
+/// non-equivalent exact pins. The engine refuses both before sealing.
 pub fn build_with_bump(
     contract: &Contract,
     facts: &Facts,
@@ -730,7 +730,7 @@ fn derive_pin_rewrites(
     let from_pin = format!("={from_version}");
     let mut rewrites: Vec<PinRewrite> = Vec::new();
     for member in &workspace.members {
-        for dep in member.pin_reqs.keys() {
+        for (dep, requirements) in &member.pin_reqs {
             // Only edges to another publishable member carry an intra-workspace pin.
             if !is_member.contains(dep.as_str()) {
                 continue;
@@ -739,9 +739,7 @@ fn derive_pin_rewrites(
             // and target-specific tables. Rewrite one sealed dependency set only when
             // every declaration is provably the same exact lockstep pin. This is the
             // same equivalence rule the cut-time rewriter enforces.
-            let Some(requirements) = member.pin_reqs.get(dep) else {
-                continue;
-            };
+            let explicit = requirements.iter().filter(|req| req.is_some()).count();
             let matching = requirements
                 .iter()
                 .filter(|req| req.as_deref() == Some(from_pin.as_str()))
@@ -749,12 +747,13 @@ fn derive_pin_rewrites(
             if matching == 0 {
                 continue;
             }
-            if matching != requirements.len() {
+            if matching != explicit {
+                let conflicts = explicit - matching;
                 return Err(crate::release::bump::BumpError {
                     version: from_version.to_string(),
                     reason: format!(
-                        "the `{dep} = \"{from_pin}\"` pin has {} non-equivalent declaration(s) in crate `{}` — refusing to seal an ambiguous pin rewrite",
-                        requirements.len(), member.package
+                        "crate `{}` declares `{dep}` with {conflicts} explicit requirement(s) that differ from `{from_pin}` — refusing to seal an ambiguous pin rewrite",
+                        member.package
                     ),
                 });
             }
@@ -1146,16 +1145,16 @@ fn resolve_package(facts: &Facts, ecosystem: crate::contract::schema::Ecosystem)
 /// [`SEAL_VERSION`] is also hashed as its own field.
 const SEAL_DOMAIN: &str = "ossctl.release-plan";
 
-/// Version of the *hashing pre-image format* — the field set, their order, and
-/// the canonicalization. Independent of the contract-document or wire-envelope
-/// versions. Bump this (never silently) whenever the pre-image shape changes
-/// (e.g. once resolved adapter versions are folded in), so old and new plan ids
-/// are intentionally disjoint rather than accidentally colliding.
-// v6 adds the mandatory `verify` barrier to the sealed phase sequence. v5 plan
-// documents remain readable from the durable store, but a fresh cut deliberately
-// refuses their old address as `plan_stale`: their approval did not bind `verify`,
-// so the operator must create and approve a new plan.
-const SEAL_VERSION: u32 = 6;
+/// Version of the sealed approval interpretation: the hashing pre-image's field set,
+/// order, canonicalization, **and execution semantics**. Independent of contract or
+/// wire-envelope versions. Bump this (never silently) whenever the shape changes or an
+/// unchanged sealed field gains a different effect, so approvals made under distinct
+/// interpretations always occupy disjoint plan-id spaces.
+// v7 changes a sealed PinRewrite's execution semantics from one declaration to a
+// provably-equivalent declaration set. Older plan documents remain readable from the
+// durable store for resume, but a fresh cut deliberately refuses their old address:
+// an approval made under the single-match interpretation must be re-planned.
+const SEAL_VERSION: u32 = 7;
 
 /// The canonical hashed pre-image (see the module docs for the exact contents).
 /// A dedicated struct rather than an ad-hoc byte concatenation so the field set

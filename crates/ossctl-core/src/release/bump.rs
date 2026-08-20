@@ -17,11 +17,12 @@
 
 use crate::protocol::plan::BumpLevel;
 
-/// Why a manifest version could not be bumped: it is not a strict `X.Y.Z` semver
-/// core, so the engine will not guess a new number (fail closed).
+/// Why an engine-owned bump plan could not be built. This covers an invalid source
+/// version and plan-time edit-set conflicts such as non-equivalent workspace pins;
+/// both refuse before an approval artifact is sealed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BumpError {
-    /// The offending version string, echoed for the CLI's `invalid_value`.
+    /// The source version associated with the failed bump plan.
     pub version: String,
     /// Why it was rejected (human-readable), e.g. "expected MAJOR.MINOR.PATCH".
     pub reason: String,
@@ -155,11 +156,11 @@ pub enum BumpEditError {
     /// all the sealed `from` value, so equivalence cannot be established. Equivalent
     /// duplicates are supported and rewritten as one deterministic set.
     PinAmbiguous {
-        /// The dependency whose pin matched more than once.
+        /// The dependency whose explicit requirements conflict.
         dependency: String,
-        /// The requirement string that matched multiply.
+        /// The exact sealed requirement every explicit declaration must carry.
         from: String,
-        /// How many declarations matched.
+        /// Total number of explicit version declarations inspected.
         count: usize,
     },
     /// The CHANGELOG had no `## [Unreleased]` section to finalize, but the contract's
@@ -192,8 +193,8 @@ impl std::fmt::Display for BumpEditError {
                 count,
             } => write!(
                 f,
-                "the `{dependency} = \"{from}\"` pin matched {count} declarations — refusing to \
-                 rewrite an ambiguous pin"
+                "`{dependency}` has {count} explicit version declarations that are not all \
+                 `{from}` — refusing to rewrite an ambiguous pin set"
             ),
             Self::ChangelogUnreleasedNotFound => write!(
                 f,
@@ -301,6 +302,189 @@ fn set_section_version(manifest: &str, section: &str, from: &str, to: &str) -> O
     replaced.then_some(out)
 }
 
+/// One local Cargo dependency declaration discovered by the shared plan/cut scanner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PinDeclaration {
+    /// Resolved package name (`package = "…"` when renamed, otherwise the table key).
+    pub(crate) package: String,
+    /// Literal version requirement, or `None` for a path/workspace-only declaration.
+    pub(crate) requirement: Option<String>,
+    /// Zero-based physical line containing the version value, when one exists.
+    version_line: Option<usize>,
+}
+
+/// Parse local dependency declarations from normal, dev, build, and target-specific
+/// Cargo dependency tables. Planning and cut execution deliberately call this same
+/// scanner so they classify exactly the same declaration set, including aliases.
+pub(crate) fn cargo_pin_declarations(manifest: &str) -> Vec<PinDeclaration> {
+    enum Table {
+        Other,
+        Inline,
+        Sub {
+            key: String,
+            package: Option<String>,
+            local: bool,
+            requirement: Option<String>,
+            version_line: Option<usize>,
+        },
+    }
+
+    fn flush(table: &mut Table, out: &mut Vec<PinDeclaration>) {
+        if let Table::Sub {
+            key,
+            package,
+            local: true,
+            requirement,
+            version_line,
+        } = table
+        {
+            out.push(PinDeclaration {
+                package: package.clone().unwrap_or_else(|| key.clone()),
+                requirement: requirement.clone(),
+                version_line: *version_line,
+            });
+        }
+        *table = Table::Other;
+    }
+
+    let mut table = Table::Other;
+    let mut out = Vec::new();
+    for (line_no, line) in manifest.lines().enumerate() {
+        let trimmed = strip_comment(line).trim();
+        if let Some(header) = section_header(trimmed) {
+            flush(&mut table, &mut out);
+            table = if dependency_inline_table(header) {
+                Table::Inline
+            } else if let Some(key) = dependency_subtable_key(header) {
+                Table::Sub {
+                    key: key.to_string(),
+                    package: None,
+                    local: false,
+                    requirement: None,
+                    version_line: None,
+                }
+            } else {
+                Table::Other
+            };
+            continue;
+        }
+
+        match &mut table {
+            Table::Inline => {
+                let Some(eq) = trimmed.find('=') else {
+                    continue;
+                };
+                let key = trimmed[..eq].trim().trim_matches(['"', '\'']);
+                let value = trimmed[eq + 1..].trim_start();
+                if key.is_empty()
+                    || !value.starts_with('{')
+                    || !(scan_key_string(value, "path").is_some()
+                        || scan_key_bool(value, "workspace") == Some(true))
+                {
+                    continue;
+                }
+                let requirement = scan_key_string(value, "version");
+                out.push(PinDeclaration {
+                    package: scan_key_string(value, "package").unwrap_or_else(|| key.to_string()),
+                    version_line: requirement.as_ref().map(|_| line_no),
+                    requirement,
+                });
+            }
+            Table::Sub {
+                package,
+                local,
+                requirement,
+                version_line,
+                ..
+            } => {
+                if line_starts_with_key(trimmed, "package") && package.is_none() {
+                    *package = scan_key_string(trimmed, "package");
+                } else if line_starts_with_key(trimmed, "path") {
+                    *local |= scan_key_string(trimmed, "path").is_some();
+                } else if line_starts_with_key(trimmed, "workspace") {
+                    *local |= scan_key_bool(trimmed, "workspace") == Some(true);
+                } else if line_starts_with_key(trimmed, "version") && requirement.is_none() {
+                    *requirement = scan_key_string(trimmed, "version");
+                    if requirement.is_some() {
+                        *version_line = Some(line_no);
+                    }
+                }
+            }
+            Table::Other => {}
+        }
+    }
+    flush(&mut table, &mut out);
+    out
+}
+
+/// Whether `header` is a whole dependency table containing inline declarations.
+fn dependency_inline_table(header: &str) -> bool {
+    matches!(
+        header,
+        "dependencies" | "dev-dependencies" | "build-dependencies"
+    ) || (header.starts_with("target.")
+        && [".dependencies", ".dev-dependencies", ".build-dependencies"]
+            .iter()
+            .any(|suffix| header.ends_with(suffix)))
+}
+
+/// The declaration key when `header` is a supported dependency subtable.
+fn dependency_subtable_key(header: &str) -> Option<&str> {
+    for prefix in ["dependencies.", "dev-dependencies.", "build-dependencies."] {
+        if let Some(key) = header.strip_prefix(prefix) {
+            return nonempty_dep_key(key);
+        }
+    }
+    if header.starts_with("target.") {
+        for marker in [
+            ".dependencies.",
+            ".dev-dependencies.",
+            ".build-dependencies.",
+        ] {
+            if let Some(idx) = header.rfind(marker) {
+                return nonempty_dep_key(&header[idx + marker.len()..]);
+            }
+        }
+    }
+    None
+}
+
+fn nonempty_dep_key(key: &str) -> Option<&str> {
+    let key = key.trim().trim_matches(['"', '\'']);
+    (!key.is_empty() && !key.contains('.')).then_some(key)
+}
+
+/// Read a bare boolean whole-key value.
+fn scan_key_bool(s: &str, key: &str) -> Option<bool> {
+    let mut search = 0;
+    while let Some(rel) = s[search..].find(key) {
+        let pos = search + rel;
+        let before_is_ident = s[..pos]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-');
+        if !before_is_ident {
+            if let Some(rest) = s[pos + key.len()..].trim_start().strip_prefix('=') {
+                let rest = rest.trim_start();
+                for (literal, value) in [("true", true), ("false", false)] {
+                    if let Some(tail) = rest.strip_prefix(literal) {
+                        let tail = tail.trim_start();
+                        if tail.is_empty()
+                            || tail.starts_with(',')
+                            || tail.starts_with('}')
+                            || tail.starts_with('#')
+                        {
+                            return Some(value);
+                        }
+                    }
+                }
+            }
+        }
+        search = pos + key.len();
+    }
+    None
+}
+
 /// Rewrite a single intra-workspace `=`-pin (`dependency = "…, version = \"<from>\""`)
 /// from `from` to `to`, returning the new manifest text.
 ///
@@ -321,77 +505,68 @@ pub fn rewrite_pin(
     from: &str,
     to: &str,
 ) -> Result<String, BumpEditError> {
-    // First pass: prove every explicit declaration is equivalent before any edit.
-    let (matches, declarations) = count_pin_matches(manifest, dependency, from);
-    if matches == 0 {
+    // Planning and execution share this exact declaration scanner. Path-only local
+    // declarations carry no version to rewrite and are neutral; every explicit
+    // requirement must equal the sealed `from` value.
+    let declarations: Vec<PinDeclaration> = cargo_pin_declarations(manifest)
+        .into_iter()
+        .filter(|d| d.package == dependency)
+        .collect();
+    let explicit = declarations
+        .iter()
+        .filter(|d| d.requirement.is_some())
+        .count();
+    let matching = declarations
+        .iter()
+        .filter(|d| d.requirement.as_deref() == Some(from))
+        .count();
+    if matching == 0 {
         return Err(BumpEditError::PinNotFound {
             dependency: dependency.to_string(),
             from: from.to_string(),
         });
     }
-    if matches != declarations {
+    if matching != explicit {
         return Err(BumpEditError::PinAmbiguous {
             dependency: dependency.to_string(),
             from: from.to_string(),
-            count: declarations,
+            count: explicit,
         });
     }
-    // One or more equivalent matches: rewrite the complete declaration set.
+
+    let version_lines: std::collections::BTreeSet<usize> = declarations
+        .iter()
+        .filter(|d| d.requirement.as_deref() == Some(from))
+        .filter_map(|d| d.version_line)
+        .collect();
     let mut out = String::with_capacity(manifest.len() + to.len());
-    let mut in_dep_subtable = false;
     let ends_with_newline = manifest.ends_with('\n');
     let mut rewritten_count = 0;
-    let mut lines = manifest.lines().peekable();
-    while let Some(line) = lines.next() {
-        let trimmed = strip_comment(line).trim();
-        let mut rewritten: Option<String> = None;
-        if let Some(header) = section_header(trimmed) {
-            in_dep_subtable = dep_subtable_matches(header, dependency);
+    let mut lines = manifest.lines().enumerate().peekable();
+    while let Some((line_no, line)) = lines.next() {
+        if version_lines.contains(&line_no) {
+            let Some(rewritten) = replace_exact_string_value(line, "version", from, to) else {
+                return Err(BumpEditError::PinAmbiguous {
+                    dependency: dependency.to_string(),
+                    from: from.to_string(),
+                    count: explicit,
+                });
+            };
+            out.push_str(&rewritten);
+            rewritten_count += 1;
         } else {
-            if in_dep_subtable {
-                // A `version = "<from>"` line inside `[dependencies.<dep>]`.
-                rewritten = replace_exact_string_value(line, "version", from, to);
-            } else if line_declares_dep_inline(trimmed, dependency) {
-                // An inline `dep = { …, version = "<from>" }` line.
-                rewritten = replace_exact_string_value(line, "version", from, to);
-            }
-        }
-        match rewritten {
-            Some(r) => {
-                out.push_str(&r);
-                rewritten_count += 1;
-            }
-            None => out.push_str(line),
+            out.push_str(line);
         }
         push_line_ending(&mut out, lines.peek().is_some(), ends_with_newline);
     }
-    debug_assert_eq!(rewritten_count, matches);
-    Ok(out)
-}
-
-/// Count `(matching, total)` explicit version declarations for `dependency` — the
-/// fail-closed equivalence gate [`rewrite_pin`] keys on.
-fn count_pin_matches(manifest: &str, dependency: &str, from: &str) -> (usize, usize) {
-    let mut matching = 0;
-    let mut total = 0;
-    let mut in_dep_subtable = false;
-    for line in manifest.lines() {
-        let trimmed = strip_comment(line).trim();
-        if let Some(header) = section_header(trimmed) {
-            in_dep_subtable = dep_subtable_matches(header, dependency);
-        } else if in_dep_subtable {
-            if let Some(value) = scan_key_string(trimmed, "version") {
-                total += 1;
-                matching += usize::from(value == from);
-            }
-        } else if line_declares_dep_inline(trimmed, dependency) {
-            if let Some(value) = inline_version_value(trimmed) {
-                total += 1;
-                matching += usize::from(value == from);
-            }
-        }
+    if rewritten_count != matching {
+        return Err(BumpEditError::PinAmbiguous {
+            dependency: dependency.to_string(),
+            from: from.to_string(),
+            count: explicit,
+        });
     }
-    (matching, total)
+    Ok(out)
 }
 
 /// Finalize a Keep-a-Changelog CHANGELOG: promote the `## [Unreleased]` section's
@@ -454,40 +629,6 @@ fn section_header(trimmed: &str) -> Option<&str> {
         return None;
     }
     Some(inner.trim())
-}
-
-/// Whether a TOML section `header` is the dependency sub-table for `dependency`
-/// (`[dependencies.<dep>]`, `[dev-dependencies.<dep>]`,
-/// `[build-dependencies.<dep>]`, or a target-specific equivalent).
-fn dep_subtable_matches(header: &str, dependency: &str) -> bool {
-    for infix in ["dependencies.", "dev-dependencies.", "build-dependencies."] {
-        if let Some(idx) = header.rfind(infix) {
-            let name = header[idx + infix.len()..].trim().trim_matches(['"', '\'']);
-            return name == dependency;
-        }
-    }
-    false
-}
-
-/// Whether `trimmed` (a `[dependencies]`-table line) declares `dependency` as an inline
-/// table (`dep = { … }` or `"dep" = { … }`) — the form whose `version` an inline pin
-/// rewrite edits. A dotted `dep.version = …` line is not matched here (its own key is
-/// `dep.version`, handled by the sub-table/dotted paths).
-fn line_declares_dep_inline(trimmed: &str, dependency: &str) -> bool {
-    let Some(eq) = trimmed.find('=') else {
-        return false;
-    };
-    let key = trimmed[..eq].trim().trim_matches(['"', '\'']);
-    if key != dependency {
-        return false;
-    }
-    trimmed[eq + 1..].trim_start().starts_with('{')
-}
-
-/// The `version = "…"` value inside an inline dependency table, matching `version` as a
-/// whole key (mirrors the facts parser's discipline).
-fn inline_version_value(inline: &str) -> Option<String> {
-    scan_key_string(inline, "version")
 }
 
 /// Whether a trimmed line starts with `key =`, excluding a matching string embedded in
@@ -783,6 +924,30 @@ mod tests {
         let manifest = "[dependencies]\ncore = { path = \"a\", version = \"=0.4.0\" }\n[dev-dependencies]\ncore = { path = \"a\", version = \"^0.4\" }\n";
         let err = rewrite_pin(manifest, "core", "=0.4.0", "=0.5.0").unwrap_err();
         assert!(matches!(err, BumpEditError::PinAmbiguous { count: 2, .. }));
+    }
+
+    #[test]
+    fn pin_rewrite_uses_resolved_package_aliases() {
+        let manifest = "[dependencies]\nalias = { package = \"core\", path = \"../core\", version = \"=0.4.0\" }\n[dev-dependencies.alias]\npackage = \"core\"\npath = \"../core\"\nversion = \"=0.4.0\"\n";
+        let out = rewrite_pin(manifest, "core", "=0.4.0", "=0.5.0").unwrap();
+        assert_eq!(out.matches("version = \"=0.5.0\"").count(), 2);
+    }
+
+    #[test]
+    fn pin_rewrite_ignores_non_dependency_tables_and_registry_dependencies() {
+        let manifest = "[dependencies]\ncore = { path = \"../core\", version = \"=0.4.0\" }\n[dev-dependencies]\ncore = { version = \"^0.4\" }\n[package.metadata.release]\ncore = { version = \"=999.0.0\" }\n[patch.crates-io]\ncore = { path = \"vendor/core\", version = \"=999.0.0\" }\n";
+        let out = rewrite_pin(manifest, "core", "=0.4.0", "=0.5.0").unwrap();
+        assert!(out.contains("version = \"=0.5.0\""));
+        assert!(out.contains("core = { version = \"^0.4\" }"));
+        assert_eq!(out.matches("version = \"=999.0.0\"").count(), 2);
+    }
+
+    #[test]
+    fn path_only_duplicates_are_neutral() {
+        let manifest = "[dependencies]\ncore = { path = \"../core\", version = \"=0.4.0\" }\n[target.'cfg(unix)'.dev-dependencies.core]\npath = \"../core\"\n";
+        let out = rewrite_pin(manifest, "core", "=0.4.0", "=0.5.0").unwrap();
+        assert_eq!(out.matches("=0.5.0").count(), 1);
+        assert!(out.contains("[target.'cfg(unix)'.dev-dependencies.core]\npath"));
     }
 
     // ── finalize_changelog ───────────────────────────────────────────────────

@@ -167,9 +167,10 @@ pub struct BumpPlan {
     pub bump_hook: Option<String>,
 }
 
-/// One intra-workspace `=`-version pin the [`PlanPhase::Bump`] phase rewrites in
-/// lockstep with the workspace version (e.g. the bin crate's `lib-core = "=0.1.5"`
-/// → `lib-core = "=0.1.6"`). Derived deterministically from the workspace graph.
+/// One intra-workspace `=`-version pin **set** the [`PlanPhase::Bump`] phase rewrites
+/// in lockstep with the workspace version (e.g. every normal/dev/build declaration of
+/// the bin crate's `lib-core = "=0.1.5"` → `lib-core = "=0.1.6"`). Derived
+/// deterministically after proving every explicit declaration in the set equivalent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PinRewrite {
     /// The workspace member whose manifest carries the pin (the dependent crate).

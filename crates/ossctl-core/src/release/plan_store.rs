@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn legacy_v5_plan_without_verify_remains_readable() {
         // Existing v5 plans must load so an interrupted run can resume through the
-        // now-mandatory verify barrier. A fresh cut re-derives a v6 address and
+        // now-mandatory verify barrier. A fresh cut re-derives a v7 address and
         // rejects this old approval as stale instead of silently extending it.
         let plan = serde_json::json!({
             "plan_id": "legacy",
@@ -389,5 +389,37 @@ mod tests {
 
         let decoded = decode_plan(&plan, "legacy").expect("legacy plan is valid");
         assert_eq!(decoded.phases, PlanPhase::SEQUENCE[..5]);
+    }
+
+    #[test]
+    fn legacy_v6_bump_plan_remains_readable_after_pin_set_semantics_change() {
+        let plan = serde_json::json!({
+            "plan_id": "legacy-v6",
+            "contract_schema_version": 4,
+            "head_sha": "abc",
+            "version": "0.5.0",
+            "targets": [],
+            "phases": ["bump", "dry-run-all", "build-all", "publish-all", "tag", "dist", "verify"],
+            "bump": {
+                "level": "minor",
+                "from_version": "0.4.0",
+                "to_version": "0.5.0",
+                "pin_rewrites": [{
+                    "in_package": "cli",
+                    "dependency": "core",
+                    "from": "=0.4.0",
+                    "to": "=0.5.0"
+                }],
+                "changelog_finalize": true
+            },
+            "homebrew_tap": null,
+            "license": null,
+            "description": null,
+            "homebrew_platforms": []
+        });
+
+        let decoded = decode_plan(&plan, "legacy-v6").expect("v6 bump plan remains loadable");
+        assert_eq!(decoded.bump.unwrap().pin_rewrites.len(), 1);
+        assert_eq!(decoded.phases.last(), Some(&PlanPhase::Verify));
     }
 }

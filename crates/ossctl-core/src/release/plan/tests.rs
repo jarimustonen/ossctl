@@ -247,7 +247,7 @@ fn plan_id_golden_vector() {
     let plan = build(&rust_contract(), &rust_facts(), HEAD, "1.2.0");
     assert_eq!(
         plan.plan_id,
-        "925f60b6d1d9827d85cead987d40fbaf1905d50853b461ae35ce36638238b9e2"
+        "7719a9f01a97d91fdecf2a813aaf9221b0bd04f7befcca0b617c59cf9e1fe985"
     );
 }
 
@@ -275,7 +275,7 @@ fn plan_id_golden_vector_with_distribution() {
     let plan = build(&contract, &rust_facts(), HEAD, "1.2.0");
     assert_eq!(
         plan.plan_id,
-        "f7ce6e1559d49fdef4e694c96ff65bde3e33543862ee44043b31536ced6ace05"
+        "afe0905788b9f71bfe5717115336948b803ff701cf186913e7f8a9e32fc630fe"
     );
     // The tap threads into the plan from the sole distribution.
     assert_eq!(plan.homebrew_tap.as_deref(), Some("acme/homebrew-acme"));
@@ -1424,13 +1424,31 @@ fn non_equivalent_duplicate_pins_are_refused_while_planning() {
 
     let err = build_with_bump(&c, &f, HEAD, "0.1.6", BumpLevel::Minor).unwrap_err();
     assert!(
-        err.reason.contains("non-equivalent declaration"),
+        err.reason.contains("differ from `=0.1.6`"),
         "{}",
         err.reason
     );
     assert!(err
         .reason
         .contains("refusing to seal an ambiguous pin rewrite"));
+}
+
+#[test]
+fn path_only_duplicate_is_neutral_during_planning() {
+    let mut c = rust_contract();
+    c.targets = vec![target(
+        Ecosystem::Rust,
+        "orchestratectl",
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+    )];
+    let mut f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    f.rust_workspace.as_mut().unwrap().members[1]
+        .pin_reqs
+        .insert("octl-core".into(), vec![Some("=0.1.6".into()), None]);
+
+    let plan = build_with_bump(&c, &f, HEAD, "0.1.6", BumpLevel::Minor).unwrap();
+    assert_eq!(plan.bump.unwrap().pin_rewrites.len(), 1);
 }
 
 #[test]

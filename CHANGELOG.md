@@ -86,7 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target-specific dependency tables seals one deterministic rewrite set and updates
   every equivalent declaration during the bump. Mixed requirements for the same
   workspace crate are refused while planning, before an unexecutable approval artifact
-  can be sealed.
+  can be sealed. This changes the meaning of a sealed pin rewrite, so release-plan
+  `SEAL_VERSION` advances from 6 to 7: plans sealed by an older binary still load for
+  resume, but cannot start a fresh cut and must be re-planned and approved.
 - **Closed stdout pipes no longer panic the CLI.** Text and JSON output now share a
   fallible writer: a downstream reader closing early exits quietly with success, while
   other stdout failures use the canonical system-error envelope (`cli-panics-broken`).

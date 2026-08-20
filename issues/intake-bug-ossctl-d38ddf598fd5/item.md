@@ -9,6 +9,9 @@ collision: [crates/ossctl-core/src/release/plan.rs]
 lane: bump-exec
 lane_seq: 10
 provenance: agent-homebase-wrapup
+commits:
+- hash: d36be5d
+  summary: reconcile repeated workspace pins
 ---
 
 # Release bump plan accepts duplicate exact pins then cut fails
