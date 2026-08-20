@@ -14,6 +14,10 @@ commits:
   summary: reconcile repeated workspace pins
 - hash: ab1572f
   summary: harden pin-set agreement and advance seal v7
+- hash: ef5a3db
+  summary: reconcile repeated workspace pins
+- hash: ca6c3cb
+  summary: harden pin-set agreement and advance seal v7
 closed: 2026-08-21
 ---
 
