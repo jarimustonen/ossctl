@@ -8,8 +8,8 @@ owns the parts that must be exact and identical for every caller:
 
 - **`ossctl contract show | validate`** — the single reader/validator of a project's
   `OSS-RELEASE.md` release contract (normalizes, materializes defaults, enforces floors).
-- **`ossctl facts`** — deterministic repo-fact detection (ecosystems, packages, CI,
-  tags, maturity).
+- **`ossctl facts`** — deterministic repo-fact detection (ecosystems, packages, Cargo
+  publish policy, CI, tags, maturity).
 - **`ossctl audit`** — readiness scoring against the gated core (README + LICENSE + CI)
   and the tier-scaled canon.
 - **`ossctl release plan | cut | resume | verify | show | list | abandon`** — a
@@ -51,6 +51,19 @@ archive from this repository's GitHub Releases for macOS (arm64 / x86_64) and Li
 [`docs/adr/`](docs/adr/). Releases are available on
 [crates.io](https://crates.io/crates/ossctl) (`ossctl` + `ossctl-core`) and this
 repository's GitHub Releases. See [`CHANGELOG.md`](CHANGELOG.md) for the release history.
+
+## Repository facts
+
+`ossctl facts --json` reports the repository evidence used by the detector and
+normalizer. Its additive `data.cargo_publish` array lists every discovered Cargo
+package manifest as `{manifest, package, policy}`. `policy` is `allowed`, `forbidden`,
+or `unknown`; workspace-level `publish` inheritance is resolved before emission.
+The contract normalizer uses this same evidence for its crates.io publish floor, so
+an operator can inspect exactly what caused a validation refusal:
+
+```sh
+ossctl facts --json | jq '.data.cargo_publish'
+```
 
 ## Configuration inspection
 

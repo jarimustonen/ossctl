@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use clap::Args;
 
-use ossctl_core::protocol::facts::Facts;
+use ossctl_core::protocol::facts::FactsReport;
 
 use crate::error::CliError;
 use crate::output::OutputFormat;
@@ -48,11 +48,11 @@ pub fn run(args: &FactsArgs, format: OutputFormat) -> Result<(), CliError> {
         )
     })?;
     let git = RealGitRepo::new(&root);
-    let facts = ossctl_core::facts::gather(&root, &RealFs, &git);
+    let report = ossctl_core::facts::gather_report(&root, &RealFs, &git);
 
     match format {
-        OutputFormat::Json => crate::output::emit_json(&facts, &[])?,
-        OutputFormat::Text => render_facts_text(&facts)?,
+        OutputFormat::Json => crate::output::emit_json(&report, &[])?,
+        OutputFormat::Text => render_facts_text(&report)?,
     }
     Ok(())
 }
@@ -65,7 +65,8 @@ fn resolve_repo_root(flag: Option<&PathBuf>) -> Result<PathBuf, CliError> {
     }
 }
 
-fn render_facts_text(f: &Facts) -> Result<(), CliError> {
+fn render_facts_text(report: &FactsReport) -> Result<(), CliError> {
+    let f = &report.facts;
     let ecos = if f.ecosystems.is_empty() {
         "[]".to_string()
     } else {
@@ -80,6 +81,13 @@ fn render_facts_text(f: &Facts) -> Result<(), CliError> {
     crate::output::stdoutln!("has_commits:       {}", f.has_commits)?;
     crate::output::stdoutln!("ecosystems:        {ecos}")?;
     crate::output::stdoutln!("packages:          {}", f.packages.len())?;
+    crate::output::stdoutln!(
+        "cargo_publish:     {} manifest(s)",
+        report.cargo_publish.len()
+    )?;
+    for evidence in &report.cargo_publish {
+        crate::output::stdoutln!("  {}: {:?}", evidence.manifest, evidence.policy)?;
+    }
     crate::output::stdoutln!("has_ci:            {}", f.has_ci)?;
     crate::output::stdoutln!("tags:              {}", f.tags.len())?;
     crate::output::stdoutln!("has_semver_tag:    {}", f.has_semver_tag)?;

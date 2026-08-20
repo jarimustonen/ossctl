@@ -270,7 +270,9 @@ ossctl facts --json --repo-root <repo-root> || exit   # abort on any non-zero ex
 ```
 
 It emits JSON under `data`: `ecosystems`, `packages[]` (each `{ecosystem, manifest, package,
-version}`), `committers_total`/`committers_recent_year`, `tags`/`has_semver_tag`/`has_ge_1_0_release`,
+version}`), `cargo_publish[]` (each `{manifest, package, policy}` with `policy` = `allowed` |
+`forbidden` | `unknown` after workspace inheritance), `committers_total`/`committers_recent_year`,
+`tags`/`has_semver_tag`/`has_ge_1_0_release`,
 `has_ci`, `dependency_bot`, `has_issues_dir`, `readme_self_label`, `description`,
 `maturity_signals`, and `inferred_maturity`. **Read this JSON and reason over it** — it is
 your evidence base for `ecosystems`, `targets[].package`/`version`, the `maturity` inference,

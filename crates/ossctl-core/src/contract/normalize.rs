@@ -1572,7 +1572,9 @@ fn check_cargo_publish_evidence(
             "floor: targets declares a crates.io publish for {} with adapter {}, but {} \
              forbids publishing ('publish = false', 'publish = []', or an allow-list without \
              'crates-io') — the publish can never succeed. Drop the target (an explicit \
-             'targets: []' is the publish-none contract) or allow the publish in the manifest",
+             'targets: []' is the publish-none contract) or allow the publish in the manifest. \
+             Run 'ossctl facts --json' from the repository root and inspect \
+             data.cargo_publish to see the manifest evidence ossctl read",
             quote_for_diagnostic(target.package.as_deref().unwrap_or("this repo's crate")),
             target.adapter.as_str(),
             blocking
@@ -2424,6 +2426,14 @@ mod tests {
         assert!(
             n.problems.errors.iter().any(|e| e.contains("targets: []")),
             "the error must name the publish-none escape: {:?}",
+            n.problems.errors
+        );
+        assert!(
+            n.problems
+                .errors
+                .iter()
+                .any(|e| e.contains("ossctl facts --json") && e.contains("data.cargo_publish")),
+            "the error must point to the inspectable evidence: {:?}",
             n.problems.errors
         );
     }

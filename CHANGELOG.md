@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
 
+### Added
+- `ossctl facts --json` now exposes `data.cargo_publish`, the per-manifest
+  `allowed` / `forbidden` / `unknown` evidence (with workspace inheritance resolved)
+  used by the contract normalizer's crates.io publish floor. Floor errors point to
+  this command so operators can inspect exactly what ossctl read.
+
 ## [0.9.0] - 2026-08-17
 
 ### Added

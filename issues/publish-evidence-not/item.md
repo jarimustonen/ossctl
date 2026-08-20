@@ -6,6 +6,9 @@ status: in-progress
 priority: normal
 lane: facts-evidence
 lane_seq: 10
+commits:
+- hash: 9ec99177782751d50ae6cae88977e91ad3990c2c
+  summary: start publish evidence work
 ---
 
 # publish evidence is not inspectable from the CLI

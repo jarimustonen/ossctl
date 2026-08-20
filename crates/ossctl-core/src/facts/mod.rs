@@ -37,8 +37,10 @@ use std::path::Path;
 
 use crate::contract::schema::{Ecosystem, Maturity};
 use crate::ports::{Fs, GitRepo};
+pub use crate::protocol::facts::{CargoPublishFlag, CargoPublishPolicy};
 use crate::protocol::facts::{
-    DistributionSurface, Facts, MaturitySignals, Package, RustWorkspace, WorkspaceMember,
+    DistributionSurface, Facts, FactsReport, MaturitySignals, Package, RustWorkspace,
+    WorkspaceMember,
 };
 
 /// Root-level manifests, in the canonical probe order. The ecosystem order here
@@ -247,6 +249,20 @@ pub fn gather(repo_root: &Path, fs: &dyn Fs, git: &dyn GitRepo) -> Facts {
     }
 }
 
+/// Gather the complete public facts report, including the Cargo publish evidence
+/// used by the contract normalizer's hard floor.
+///
+/// Keeping the evidence collection here as a direct call to
+/// [`cargo_publish_evidence`] makes the CLI report and the normalizer consume one
+/// implementation rather than two parsers that could drift.
+#[must_use]
+pub fn gather_report(repo_root: &Path, fs: &dyn Fs, git: &dyn GitRepo) -> FactsReport {
+    FactsReport {
+        facts: gather(repo_root, fs, git),
+        cargo_publish: cargo_publish_evidence(repo_root, fs),
+    }
+}
+
 /// Detect cargo-dist configuration and tag-triggered GitHub workflows through the
 /// injected filesystem port. The line scanner intentionally recognizes only the
 /// ordinary nested `on: push: tags:` shape: missing an exotic YAML spelling is safe,
@@ -322,45 +338,6 @@ fn workflow_pushes_tags(text: &str) -> bool {
         }
     }
     false
-}
-
-/// What a Cargo manifest says about publishing to crates.io — a **tri-state**,
-/// because "the read found nothing conclusive" is a third answer that must not be
-/// laundered into either verdict.
-///
-/// The two verdicts drive opposite diagnostics in the contract normalizer (a
-/// declared crates.io target is contradicted by `Forbidden`; a publish-none contract
-/// is left unguarded by `Allowed`), so collapsing `Unknown` into either one produces
-/// a confident wrong statement. `Unknown` earns no diagnostic at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CargoPublishPolicy {
-    /// The manifest permits a crates.io publish: `publish` absent, `publish = true`,
-    /// or an allow-list naming `crates-io`.
-    Allowed,
-    /// The manifest forbids it: `publish = false`, `publish = []`, or an allow-list
-    /// without `crates-io`.
-    Forbidden,
-    /// The read could not resolve the key — `publish.workspace = true` with no
-    /// readable `[workspace.package]` to inherit from, or a shape this textual
-    /// reader does not model (a multi-line inline table). Never a verdict.
-    Unknown,
-}
-
-/// One Cargo manifest's `publish` disposition — the contract normalizer's
-/// cross-read evidence that a declared crates.io target (or the absence of one) is
-/// consistent with what Cargo would actually allow.
-///
-/// Off-wire: this is a normalizer input, not part of the `facts` JSON shape, so it
-/// carries no schema-version obligation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CargoPublishFlag {
-    /// The manifest path relative to the repo root (`Cargo.toml`,
-    /// `crates/foo/Cargo.toml`).
-    pub manifest: String,
-    /// The crate's `[package].name`, or `None` when the manifest declares none.
-    pub package: Option<String>,
-    /// What the manifest says about a crates.io publish.
-    pub policy: CargoPublishPolicy,
 }
 
 /// Read every Cargo manifest's `publish` disposition under `repo_root` — the
@@ -2061,6 +2038,49 @@ mod tests {
             cargo_publish_evidence(repo(), &fs)[0].policy,
             CargoPublishPolicy::Unknown
         );
+    }
+
+    #[test]
+    fn facts_report_exposes_the_normalizers_exact_tri_state_evidence() {
+        let fs = FakeFs::default()
+            .file(
+                "/repo/Cargo.toml",
+                "[workspace]\nmembers = [\"allowed\", \"inherited\", \"unknown\"]\n\
+                 \n[workspace.package]\npublish = false\n",
+            )
+            .file(
+                "/repo/allowed/Cargo.toml",
+                "[package]\nname = \"allowed\"\npublish = true\n",
+            )
+            .file(
+                "/repo/inherited/Cargo.toml",
+                "[package]\nname = \"inherited\"\npublish.workspace = true\n",
+            )
+            .file(
+                "/repo/unknown/Cargo.toml",
+                "[package]\nname = \"unknown\"\npublish = { workspace = false }\n",
+            );
+
+        let report = gather_report(repo(), &fs, &FakeGit::default());
+        assert_eq!(report.cargo_publish, cargo_publish_evidence(repo(), &fs));
+        assert_eq!(
+            report
+                .cargo_publish
+                .iter()
+                .map(|e| e.policy)
+                .collect::<Vec<_>>(),
+            vec![
+                CargoPublishPolicy::Allowed,
+                CargoPublishPolicy::Forbidden,
+                CargoPublishPolicy::Unknown,
+            ]
+        );
+
+        let json = serde_json::to_value(&report).expect("facts report serializes");
+        assert_eq!(json["cargo_publish"][0]["manifest"], "allowed/Cargo.toml");
+        assert_eq!(json["cargo_publish"][0]["policy"], "allowed");
+        assert_eq!(json["cargo_publish"][1]["policy"], "forbidden");
+        assert_eq!(json["cargo_publish"][2]["policy"], "unknown");
     }
 
     #[test]

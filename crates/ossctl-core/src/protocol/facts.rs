@@ -35,6 +35,47 @@ pub struct DistributionSurface {
     pub tag_triggered_workflows: Vec<String>,
 }
 
+/// What one Cargo manifest says about publishing to crates.io.
+///
+/// This is deliberately tri-state: an unresolved inheritance or unsupported
+/// manifest shape is evidence of neither permission nor prohibition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CargoPublishPolicy {
+    /// Cargo permits publication to crates.io.
+    Allowed,
+    /// Cargo forbids publication to crates.io.
+    Forbidden,
+    /// The detector could not resolve the manifest's publish policy.
+    Unknown,
+}
+
+/// The resolved crates.io publish evidence read from one Cargo manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CargoPublishFlag {
+    /// Path relative to the repository root.
+    pub manifest: String,
+    /// The resolved package name, or `null` when the manifest declares none.
+    pub package: Option<String>,
+    /// The resolved crates.io publish verdict.
+    pub policy: CargoPublishPolicy,
+}
+
+/// The complete `ossctl facts --json` data payload.
+///
+/// [`Self::cargo_publish`] is additive to the original flat facts shape. It is
+/// collected by the same detector function the contract normalizer calls for
+/// its Cargo publish hard floor, preventing the inspectable report and the
+/// enforcing decision from drifting apart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FactsReport {
+    /// The established flat repo-facts fields.
+    #[serde(flatten)]
+    pub facts: Facts,
+    /// Per-manifest Cargo publish evidence, with workspace inheritance resolved.
+    pub cargo_publish: Vec<CargoPublishFlag>,
+}
+
 /// The deterministic repo-fact report — a pure function of `(repo tree, git
 /// HEAD)`, emitted by `ossctl facts` and consumed by `/oss-init` and `audit`.
 ///
