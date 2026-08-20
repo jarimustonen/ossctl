@@ -180,7 +180,11 @@ fn delegated_release_with_zero_assets_fails_verify_and_is_posthoc_observable() {
     let repo = TempRepo::new("approved");
     repo.use_cargo_dist_target();
     let shims = Shims::new();
-    shims.set("gh", 0, r#"{"assets":[]}"#);
+    shims.set(
+        "gh",
+        0,
+        r#"{"tagName":"v0.1.0","isDraft":false,"assets":[]}"#,
+    );
     let plan = plan_id(&repo, &shims);
 
     let cut = repo.run(&shims, &["--json", "release", "cut", "--plan", &plan]);

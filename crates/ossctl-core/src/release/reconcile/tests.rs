@@ -28,7 +28,9 @@ impl CommandRunner for RecordingCmd {
         self.calls
             .borrow_mut()
             .push(format!("{program} {}", args.join(" ")));
-        let stdout = if program == "gh" {
+        let stdout = if program == "gh" && args.starts_with(&["release", "download"]) {
+            r#"{"announcement_tag":"v1.0.0","releases":[{"app_name":"project-canon-cli","app_version":"1.0.0","artifacts":["tool-aarch64-apple-darwin.tar.xz","tool-aarch64-unknown-linux-musl.tar.xz","tool-x86_64-unknown-linux-musl.tar.xz","tool-installer.sh"]}]}"#.to_string()
+        } else if program == "gh" {
             r#"{"tagName":"v1.0.0","name":"1.0.0 - 2026-08-17","isDraft":false,"assets":[{"name":"dist-manifest.json"},{"name":"tool-aarch64-apple-darwin.tar.xz"},{"name":"tool-aarch64-unknown-linux-musl.tar.xz"},{"name":"tool-x86_64-unknown-linux-musl.tar.xz"},{"name":"tool-installer.sh"}]}"#.to_string()
         } else {
             String::new()
@@ -36,6 +38,24 @@ impl CommandRunner for RecordingCmd {
         Ok(CommandOutput {
             status: Some(0),
             stdout,
+            stderr: String::new(),
+        })
+    }
+}
+
+struct CargoDistCmd {
+    view: String,
+    manifest: String,
+}
+impl CommandRunner for CargoDistCmd {
+    fn run(&self, _program: &str, args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
+        Ok(CommandOutput {
+            status: Some(0),
+            stdout: if args.starts_with(&["release", "download"]) {
+                self.manifest.clone()
+            } else {
+                self.view.clone()
+            },
             stderr: String::new(),
         })
     }
@@ -317,8 +337,59 @@ fn delegated_cargo_dist_uses_the_tagged_release_not_registry_or_title() {
     assert!(reg.queried.borrow().is_empty(), "must not query a registry");
     assert_eq!(
         cmd.calls.borrow().as_slice(),
-        &["gh release view v1.0.0 --json assets,isDraft,tagName"]
+        &[
+            "gh release view v1.0.0 --json assets,isDraft,tagName",
+            "gh release download v1.0.0 --pattern dist-manifest.json --output -",
+        ]
     );
+}
+
+#[test]
+fn cargo_dist_manifest_inventory_must_be_complete_and_parseable() {
+    let view = r#"{"tagName":"v1.0.0","isDraft":false,"assets":[{"name":"dist-manifest.json"},{"name":"tool-aarch64-apple-darwin.tar.xz"}]}"#;
+    let missing_asset_manifest = r#"{"announcement_tag":"v1.0.0","releases":[{"app_name":"project-canon-cli","app_version":"1.0.0","artifacts":["tool-aarch64-apple-darwin.tar.xz","tool-x86_64-unknown-linux-musl.tar.xz"]}]}"#;
+    let clock = FixedClock;
+    let reg = FakeRegistry::new();
+    for (manifest, expected) in [
+        (missing_asset_manifest, VerifyOutcome::Missing),
+        (
+            r#"{"announcement_tag":"v1.0.0","releases":[{"app_name":"project-canon-cli","app_version":"1.0.0","artifacts":[]}]}"#,
+            VerifyOutcome::Missing,
+        ),
+        (
+            r#"{"announcement_tag":"v1.0.0","releases":[{"app_name":"another-app","app_version":"1.0.0","artifacts":["tool-aarch64-apple-darwin.tar.xz"]}]}"#,
+            VerifyOutcome::Unknown,
+        ),
+        (
+            r#"{"announcement_tag":"v1.0.0","releases":[{"app_name":"project-canon-cli","app_version":"2.0.0","artifacts":["tool-aarch64-apple-darwin.tar.xz"]}]}"#,
+            VerifyOutcome::Conflicts,
+        ),
+        (
+            r#"{"announcement_tag":"v1.0.0","releases":"new schema"}"#,
+            VerifyOutcome::Unknown,
+        ),
+        ("not json", VerifyOutcome::Unknown),
+    ] {
+        let cmd = CargoDistCmd {
+            view: view.to_string(),
+            manifest: manifest.to_string(),
+        };
+        let ctx = EffectCtx {
+            runner: &cmd,
+            clock: &clock,
+            registry: &reg,
+            repo_root: Path::new("/repo"),
+            artifacts: &crate::release::adapters::EMPTY_ARTIFACTS,
+        };
+        assert_eq!(
+            crate::release::adapters::observe_cargo_dist_github_release(
+                &ctx,
+                "1.0.0",
+                "project-canon-cli"
+            ),
+            expected
+        );
+    }
 }
 
 #[test]

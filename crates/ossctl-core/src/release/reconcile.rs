@@ -220,7 +220,9 @@ fn classify_delegated(
     let ecosystem = planned.map_or(Ecosystem::Binary, |target| target.ecosystem);
     let package = planned.and_then(|target| target.package.clone());
     let outcome = match (adapter, package.as_deref()) {
-        (Some(Adapter::CargoDist), _) => observe_cargo_dist_github_release(ctx, &version),
+        (Some(Adapter::CargoDist), Some(package)) => {
+            observe_cargo_dist_github_release(ctx, &version, package)
+        }
         (Some(adapter), Some(package)) => {
             let receipt = PublishReceipt {
                 adapter,
@@ -262,6 +264,10 @@ fn detail_for(
         VerifyOutcome::Missing => {
             Some("the registry does not report this version as published".to_string())
         }
+        VerifyOutcome::Conflicts if adapter == Some(Adapter::CargoDist) => Some(
+            "the Release manifest identifies a different tag or package version than requested"
+                .to_string(),
+        ),
         VerifyOutcome::Conflicts => Some(
             "the registry holds this version but its digest differs from the recorded receipt"
                 .to_string(),

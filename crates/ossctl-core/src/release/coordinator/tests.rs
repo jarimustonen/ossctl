@@ -289,6 +289,16 @@ impl CommandRunner for FakeCmd {
                 stderr: String::new(),
             });
         }
+        if program == "gh" && args.starts_with(&["release", "download"]) {
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: format!(
+                    r#"{{"announcement_tag":"{}","releases":[{{"app_name":"tool","app_version":"{}","artifacts":["tool-aarch64-apple-darwin.tar.xz","tool-x86_64-apple-darwin.tar.xz","tool-aarch64-unknown-linux-musl.tar.xz","tool-x86_64-unknown-linux-musl.tar.xz"]}},{{"app_name":"ossctl","app_version":"{}","artifacts":["ossctl-aarch64-apple-darwin.tar.xz","ossctl-x86_64-apple-darwin.tar.xz","ossctl-aarch64-unknown-linux-musl.tar.xz","ossctl-x86_64-unknown-linux-musl.tar.xz"]}}]}}"#,
+                    args[2], self.publish_version, self.publish_version
+                ),
+                stderr: String::new(),
+            });
+        }
         // Serve the Homebrew publish receipt and a green post-publish formula
         // observation through the same read-only runner seam as production.
         if let Some(output) = self.homebrew_observation(program, args) {
@@ -1485,6 +1495,13 @@ impl CommandRunner for WorkspaceCmd {
             return Ok(CommandOutput {
                 status: Some(0),
                 stdout: r#"{"tagName":"v1.2.3","isDraft":false,"assets":[{"name":"dist-manifest.json"},{"name":"ossctl-aarch64-apple-darwin.tar.xz"}]}"#.into(),
+                stderr: String::new(),
+            });
+        }
+        if program == "gh" && args.starts_with(&["release", "download"]) {
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: r#"{"announcement_tag":"v1.2.3","releases":[{"app_name":"ossctl","app_version":"1.2.3","artifacts":["ossctl-aarch64-apple-darwin.tar.xz"]}]}"#.into(),
                 stderr: String::new(),
             });
         }

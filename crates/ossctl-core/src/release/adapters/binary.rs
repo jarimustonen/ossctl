@@ -5,7 +5,10 @@
 //! command transport failure is `Unknown`; an absent Release or empty asset set is
 //! `Missing`.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
+
+use serde::Deserialize;
 
 use crate::contract::schema::Adapter;
 use crate::protocol::release::{
@@ -32,6 +35,66 @@ impl BinaryAdapter {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubRelease {
+    assets: Vec<GithubAsset>,
+    is_draft: bool,
+    tag_name: String,
+}
+
+#[derive(Deserialize)]
+struct GithubAsset {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct DistManifest {
+    announcement_tag: String,
+    releases: Vec<DistRelease>,
+}
+
+#[derive(Deserialize)]
+struct DistRelease {
+    app_name: String,
+    app_version: String,
+    artifacts: Vec<String>,
+}
+
+/// Read the published GitHub Release at the stable `v<version>` tag. A malformed
+/// response or command failure is an unobservable destination (`Unknown`), never
+/// evidence that a Release is absent.
+fn release_asset_names(
+    ctx: &EffectCtx<'_>,
+    version: &str,
+) -> Result<BTreeSet<String>, VerifyOutcome> {
+    let tag = format!("v{version}");
+    let out = ctx
+        .runner
+        .run(
+            "gh",
+            &["release", "view", &tag, "--json", "assets,isDraft,tagName"],
+            ctx.repo_root,
+        )
+        .map_err(|_| VerifyOutcome::Unknown)?;
+    if out.status != Some(0) {
+        // `gh` unfortunately uses exit 1 for both a definite absence and failures
+        // to observe (auth, rate limits, transport). Its stable not-found diagnostic
+        // is the only case that proves `Missing`; every other failure stays Unknown.
+        return Err(if out.stderr.trim() == "release not found" {
+            VerifyOutcome::Missing
+        } else {
+            VerifyOutcome::Unknown
+        });
+    }
+    let release: GithubRelease =
+        serde_json::from_str(&out.stdout).map_err(|_| VerifyOutcome::Unknown)?;
+    if release.tag_name != tag || release.is_draft {
+        return Err(VerifyOutcome::Missing);
+    }
+    Ok(release.assets.into_iter().map(|asset| asset.name).collect())
+}
+
 /// Observe a GitHub Release by tag and require its uploaded asset set. The
 /// release title is deliberately irrelevant: cargo-dist commonly formats it as
 /// `<version> - <date>`, while the stable lookup coordinate is the `v<version>` tag.
@@ -42,63 +105,88 @@ pub(super) fn observe_release_assets(
     version: &str,
     expected_assets: &[String],
 ) -> VerifyOutcome {
-    let tag = format!("v{version}");
-    let out = match ctx.runner.run(
-        "gh",
-        &["release", "view", &tag, "--json", "assets,isDraft,tagName"],
-        ctx.repo_root,
-    ) {
-        Ok(out) if out.status == Some(0) => out,
-        Ok(_) => return VerifyOutcome::Missing,
-        Err(_) => return VerifyOutcome::Unknown,
+    let observed = match release_asset_names(ctx, version) {
+        Ok(observed) => observed,
+        Err(outcome) => return outcome,
     };
-    let Some(observed) = serde_json::from_str::<serde_json::Value>(&out.stdout)
-        .ok()
-        .filter(|value| value.get("isDraft").and_then(|draft| draft.as_bool()) == Some(false))
-        .filter(|value| value.get("tagName").and_then(|tag| tag.as_str()) == Some(tag.as_str()))
-        .and_then(|value| {
-            value
-                .get("assets")
-                .and_then(|assets| assets.as_array())
-                .cloned()
-        })
-        .map(|assets| {
-            assets
-                .into_iter()
-                .filter_map(|asset| {
-                    asset
-                        .get("name")
-                        .and_then(|name| name.as_str())
-                        .map(str::to_owned)
-                })
-                .collect::<Vec<_>>()
-        })
-    else {
-        return VerifyOutcome::Missing;
-    };
-    let matches = if expected_assets.is_empty() {
+    if if expected_assets.is_empty() {
         !observed.is_empty()
     } else {
         expected_assets
             .iter()
-            .all(|wanted| observed.iter().any(|name| name == wanted))
-    };
-    if matches {
+            .all(|wanted| observed.contains(wanted))
+    } {
         VerifyOutcome::Matches
     } else {
         VerifyOutcome::Missing
     }
 }
 
-/// Observe the stable completion marker cargo-dist uploads with every finalized
-/// GitHub Release. The sealed contract's platform list is an install-policy input,
-/// not cargo-dist's authoritative artifact inventory: repositories can deliberately
-/// build a narrower set in `dist-workspace.toml` (for example when an Intel macOS
-/// runner is unavailable). Reconstructing archive names from that list falsely
-/// reports a complete cargo-dist Release as missing. Presence of cargo-dist's own
-/// manifest proves that CI finalized the tagged Release and published its inventory.
-pub(super) fn observe_cargo_dist_release(ctx: &EffectCtx<'_>, version: &str) -> VerifyOutcome {
-    observe_release_assets(ctx, version, &["dist-manifest.json".to_string()])
+/// Observe cargo-dist's authoritative inventory on the published tagged Release.
+/// The sealed contract's platform list is install policy and can deliberately be
+/// broader than cargo-dist's configured targets, so archive names must come from
+/// cargo-dist's manifest instead. Verification downloads that manifest, finds the
+/// declared package and version, and requires every artifact cargo-dist records for
+/// it to be present on the same Release. This avoids both the historical false red
+/// and a false green while uploads are incomplete.
+pub(super) fn observe_cargo_dist_release(
+    ctx: &EffectCtx<'_>,
+    version: &str,
+    package: &str,
+) -> VerifyOutcome {
+    const MANIFEST: &str = "dist-manifest.json";
+    let observed = match release_asset_names(ctx, version) {
+        Ok(observed) => observed,
+        Err(outcome) => return outcome,
+    };
+    if !observed.contains(MANIFEST) {
+        return VerifyOutcome::Missing;
+    }
+
+    let tag = format!("v{version}");
+    let out = match ctx.runner.run(
+        "gh",
+        &[
+            "release",
+            "download",
+            &tag,
+            "--pattern",
+            MANIFEST,
+            "--output",
+            "-",
+        ],
+        ctx.repo_root,
+    ) {
+        Ok(out) if out.status == Some(0) => out,
+        _ => return VerifyOutcome::Unknown,
+    };
+    let manifest: DistManifest = match serde_json::from_str(&out.stdout) {
+        Ok(manifest) => manifest,
+        Err(_) => return VerifyOutcome::Unknown,
+    };
+    if manifest.announcement_tag != tag {
+        return VerifyOutcome::Conflicts;
+    }
+    let Some(release) = manifest
+        .releases
+        .iter()
+        .find(|release| release.app_name == package)
+    else {
+        return VerifyOutcome::Unknown;
+    };
+    if release.app_version != version {
+        return VerifyOutcome::Conflicts;
+    }
+    if !release.artifacts.is_empty()
+        && release
+            .artifacts
+            .iter()
+            .all(|artifact| observed.contains(artifact))
+    {
+        VerifyOutcome::Matches
+    } else {
+        VerifyOutcome::Missing
+    }
 }
 
 impl ReleaseAdapter for BinaryAdapter {

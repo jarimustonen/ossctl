@@ -1542,21 +1542,23 @@ fn verify_delegated_registry(ctx: &EffectCtx<'_>, target: &AdapterTarget) -> Ver
     }
 }
 
-/// Poll a cargo-dist owned GitHub Release until its expected platform archives are
-/// visible. A failed `gh release view` is treated as not-yet-visible while within
-/// the bounded window: CI can create the Release after the tag push.
+/// Poll a cargo-dist owned GitHub Release until its manifest-declared package
+/// inventory is visible. Failures remain retryable inside the bounded window, but
+/// the final outcome preserves `Unknown`/`Conflicts` rather than laundering an
+/// observation failure into `Missing` after the irreversible tag push.
 fn verify_delegated_release(
     ctx: &EffectCtx<'_>,
     plan: &ReleasePlan,
-    _package: &str,
+    package: &str,
 ) -> VerifyOutcome {
     let start = ctx.clock.now_unix();
     loop {
-        if observe_cargo_dist_github_release(ctx, &plan.version) == VerifyOutcome::Matches {
-            return VerifyOutcome::Matches;
+        let outcome = observe_cargo_dist_github_release(ctx, &plan.version, package);
+        if matches!(outcome, VerifyOutcome::Matches | VerifyOutcome::Conflicts) {
+            return outcome;
         }
         if ctx.clock.now_unix().saturating_sub(start) >= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS {
-            return VerifyOutcome::Missing;
+            return outcome;
         }
         ctx.clock.sleep(DELEGATED_RELEASE_VERIFY_POLL_INTERVAL);
     }

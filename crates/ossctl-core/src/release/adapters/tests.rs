@@ -3571,7 +3571,10 @@ fn verify_unknown_on_registry_outage() {
 fn homebrew_and_binary_verify_use_their_destination_observers() {
     // Homebrew cannot locate a tap without a receipt URL; manual GitHub Release
     // verification sees the fake release as present but asset-less.
-    let cmd = FakeCmd::new();
+    let cmd = FakeCmd::new().stdout_calls_containing(
+        "gh release view",
+        r#"{"tagName":"v1.0.0","isDraft":false,"assets":[]}"#,
+    );
     let clock = FakeClock(1);
     let reg = FakeRegistry::new().with("binary", "tool", &["1.0.0"]);
     let root = Path::new("/repo");

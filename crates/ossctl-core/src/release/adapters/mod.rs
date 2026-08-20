@@ -249,10 +249,14 @@ pub fn observe_github_release_assets(
     binary::observe_release_assets(ctx, version, expected_assets)
 }
 
-/// Observe cargo-dist's own completion marker on the tagged GitHub Release.
+/// Observe cargo-dist's manifest inventory on the tagged GitHub Release.
 #[must_use]
-pub fn observe_cargo_dist_github_release(ctx: &EffectCtx<'_>, version: &str) -> VerifyOutcome {
-    binary::observe_cargo_dist_release(ctx, version)
+pub fn observe_cargo_dist_github_release(
+    ctx: &EffectCtx<'_>,
+    version: &str,
+    package: &str,
+) -> VerifyOutcome {
+    binary::observe_cargo_dist_release(ctx, version, package)
 }
 
 /// The published source tarball a Homebrew formula bump consumes (`--url` /
