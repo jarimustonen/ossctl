@@ -13,7 +13,7 @@ use clap::Args;
 
 use ossctl_core::contract::schema::{Contract, Status};
 use ossctl_core::contract::{self, LoadError, Normalized};
-use ossctl_core::ports::GitRepo;
+use ossctl_core::ports::{GitRepo, JournalStore};
 use ossctl_core::protocol::journal::{
     EventKind, JournalEvent, RunState, RunStatus, JOURNAL_SCHEMA_VERSION,
 };
@@ -159,8 +159,8 @@ pub struct ListArgs {
 /// Arguments for `release abandon`.
 #[derive(Args, Debug)]
 pub struct AbandonArgs {
-    /// The run id to abandon.
-    #[arg(value_name = "RUN_ID")]
+    /// The run id to abandon, or the plan id to discard when no run has started.
+    #[arg(value_name = "RUN_OR_PLAN_ID")]
     pub run_id: String,
     /// Why the run is being abandoned (journaled). Optional; a generic reason is
     /// recorded when omitted. `allow_hyphen_values` lets a reason begin with `--`
@@ -987,6 +987,20 @@ struct AbandonReport {
 /// critically — does **not** roll anything back: any target already published
 /// under this run stays published, and the output says so explicitly.
 pub fn abandon(args: &AbandonArgs, format: OutputFormat) -> Result<(), CliError> {
+    // Preserve the existing fail-fast input contract before any filesystem read.
+    normalize_reason(args.reason.as_deref())?;
+    let paths = resolve_journal_paths(args.repo_root.as_ref(), args.journal_dir.as_deref())?;
+    match journal::read_run_state(&ReadOnlyJournalStore, &paths, &args.run_id)
+        .map_err(|error| read_state_error(&args.run_id, error))?
+    {
+        // Preserve the existing direct run path exactly, including stale-lock
+        // recovery and terminal-state errors.
+        Some(_) => abandon_existing_run(args, format),
+        None => abandon_plan_or_matching_run(args, paths, format),
+    }
+}
+
+fn abandon_existing_run(args: &AbandonArgs, format: OutputFormat) -> Result<(), CliError> {
     // Validate/normalize the reason up front, before any I/O. An *absent* flag falls
     // back to the generic default; a *provided* reason is trimmed and must be
     // non-blank, control-character-free, and bounded — it is journaled durably and
@@ -1089,6 +1103,162 @@ pub fn abandon(args: &AbandonArgs, format: OutputFormat) -> Result<(), CliError>
         OutputFormat::Text => render_abandon_text(&report, &warnings)?,
     }
     Ok(())
+}
+
+/// The additive `--json` data variant emitted when the identifier names a plan
+/// rather than a started run.
+#[derive(serde::Serialize)]
+struct PlanDiscardReport {
+    kind: &'static str,
+    plan_id: String,
+    /// `discarded` on the first call; `not_present` on an idempotent retry.
+    status: &'static str,
+    note: &'static str,
+}
+
+/// Dispose of an unstarted sealed plan, or redirect a plan id that already backs
+/// a run to the unchanged run-abandon path.
+fn abandon_plan_or_matching_run(
+    args: &AbandonArgs,
+    paths: JournalPaths,
+    format: OutputFormat,
+) -> Result<(), CliError> {
+    if !is_sealed_plan_id(&args.run_id) {
+        return Err(CliError::user(
+            "run_not_found",
+            format!(
+                "no release run '{}' found under {}",
+                args.run_id,
+                paths.releases_dir().display()
+            ),
+        )
+        .with_invalid_value(args.run_id.clone()));
+    }
+    let store = RealJournalStore;
+    // Serialize the reference scan and deletion with cut/resume. No cut can create
+    // a run between this scan and removal of the approval document it would need.
+    let (plan_lock, stale_lock_warning) = acquire_abandon_lock(&store, &paths)?;
+    let mut matching_runs = Vec::new();
+    for run_id in journal::list_runs(&store, &paths).map_err(|error| {
+        CliError::system(
+            "journal_error",
+            format!(
+                "cannot check whether plan {} backs a release run: {error}",
+                args.run_id
+            ),
+        )
+    })? {
+        let state = journal::read_run_state(&store, &paths, &run_id)
+            .map_err(|error| read_state_error(&run_id, error))?
+            .ok_or_else(|| {
+                CliError::system(
+                    "journal_error",
+                    format!("run {run_id} disappeared while checking plan references"),
+                )
+            })?;
+        if state.plan_id == args.run_id {
+            matching_runs.push(run_id);
+        }
+    }
+
+    if matching_runs.len() == 1 {
+        let run_id = matching_runs.pop().expect("length checked");
+        drop(plan_lock);
+        let redirected = AbandonArgs {
+            run_id,
+            reason: args.reason.clone(),
+            repo_root: args.repo_root.clone(),
+            journal_dir: args.journal_dir.clone(),
+        };
+        return abandon_existing_run(&redirected, format);
+    }
+    if !matching_runs.is_empty() {
+        return Err(CliError::user(
+            "plan_has_multiple_runs",
+            format!(
+                "plan {} backs multiple release runs ({}) and cannot be discarded; abandon each run by its run id",
+                args.run_id,
+                matching_runs.join(", ")
+            ),
+        )
+        .with_invalid_value(args.run_id.clone()));
+    }
+
+    let outcome = ossctl_core::release::plan_store::PlanStore::new(paths)
+        .discard(&args.run_id)
+        .map_err(plan_store_error)?;
+    drop(plan_lock);
+
+    let (status, note) = match outcome {
+        ossctl_core::release::plan_store::DiscardOutcome::Discarded => (
+            "discarded",
+            "the sealed plan was removed; no run existed, so nothing was journaled",
+        ),
+        ossctl_core::release::plan_store::DiscardOutcome::NotPresent => (
+            "not_present",
+            "no stored plan remains at this id; the idempotent disposal request is satisfied",
+        ),
+    };
+    let report = PlanDiscardReport {
+        kind: "plan",
+        plan_id: args.run_id.clone(),
+        status,
+        note,
+    };
+    let warnings = stale_lock_warning.into_iter().collect::<Vec<_>>();
+    match format {
+        OutputFormat::Json => crate::output::emit_json(&report, &warnings)?,
+        OutputFormat::Text => {
+            crate::output::stdoutln!("plan {} {status}", args.run_id)?;
+            crate::output::stdoutln!("note: {note}")?;
+            for warning in warnings {
+                crate::output::stdoutln!("warning: {warning}")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_sealed_plan_id(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+/// Take the release lock for plan disposal, retaining abandon's narrow stale-lock
+/// recovery policy.
+fn acquire_abandon_lock(
+    store: &RealJournalStore,
+    paths: &JournalPaths,
+) -> Result<(Box<dyn ossctl_core::ports::JournalLock>, Option<String>), CliError> {
+    match store.lock_exclusive(&paths.lock_file()) {
+        Ok(lock) => Ok((lock, None)),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            match RealJournalStore::break_stale_lock(&paths.lock_file()) {
+                Ok(StaleLockOutcome::Broken { pid }) => {
+                    let warning = format!(
+                        "broke stale single-active-cut lock held by pid {pid}: kill -0 reported ESRCH (the holder no longer exists)"
+                    );
+                    let lock = store.lock_exclusive(&paths.lock_file()).map_err(|error| {
+                        abandon_lock_not_broken_error("sealed plan", error.to_string())
+                    })?;
+                    Ok((lock, Some(warning)))
+                }
+                Ok(StaleLockOutcome::NotBroken { reason }) => {
+                    Err(abandon_lock_not_broken_error("sealed plan", reason))
+                }
+                Err(error) => Err(abandon_lock_not_broken_error(
+                    "sealed plan",
+                    format!("the lock could not be inspected: {error}"),
+                )),
+            }
+        }
+        Err(error) => Err(CliError::system(
+            "journal_error",
+            format!("cannot lock release state before discarding sealed plan: {error}"),
+        )),
+    }
 }
 
 /// Open a journal for abandonment. `abandon` alone may recover a stale `O_EXCL`

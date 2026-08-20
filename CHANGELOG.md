@@ -68,6 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verified.
 
 ### Fixed
+- **Sealed plans can now be abandoned before a run starts.** `release abandon <plan_id>`
+  removes the authenticated plan document without creating a journal, remains idempotent on
+  retry, and redirects to the existing run-abandon path when that plan already backs a run
+  (`abandon-sealed-plan-id`).
 - **Closed stdout pipes no longer panic the CLI.** Text and JSON output now share a
   fallible writer: a downstream reader closing early exits quietly with success, while
   other stdout failures use the canonical system-error envelope (`cli-panics-broken`).

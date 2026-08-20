@@ -1441,6 +1441,101 @@ fn release_abandon_marks_a_non_terminal_run_and_keeps_publishes() {
     assert_eq!(sv["data"]["last_seq"], 3);
 }
 
+/// A sealed plan with no run is removed from the durable plan store. The additive
+/// JSON outcome explicitly identifies the resource as a plan, and a retry is an
+/// idempotent success rather than a misleading `run_not_found` failure.
+#[test]
+fn release_abandon_discards_an_unstarted_plan_idempotently() {
+    let repo = approved_git_repo();
+    let planned = ossctl()
+        .args(["release", "plan", "--json", "--repo-root"])
+        .arg(repo.path())
+        .output()
+        .unwrap();
+    assert!(planned.status.success(), "plan must succeed: {planned:?}");
+    let plan: serde_json::Value = serde_json::from_slice(&planned.stdout).unwrap();
+    let plan_id = plan["data"]["plan_id"].as_str().unwrap();
+    let stored = repo
+        .path()
+        .join(".git/ossctl/plans")
+        .join(format!("{plan_id}.json"));
+    assert!(stored.is_file(), "release plan persisted its sealed plan");
+
+    let discard = ossctl()
+        .args(["release", "abandon", plan_id, "--json", "--repo-root"])
+        .arg(repo.path())
+        .output()
+        .unwrap();
+    assert!(
+        discard.status.success(),
+        "discard must succeed: {discard:?}"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&discard.stdout).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["data"]["kind"], "plan");
+    assert_eq!(value["data"]["plan_id"], plan_id);
+    assert_eq!(value["data"]["status"], "discarded");
+    assert_eq!(value["warnings"], serde_json::json!([]));
+    assert!(
+        !stored.exists(),
+        "discard removes the stored approval document"
+    );
+    let releases = repo.path().join(".git/ossctl/releases");
+    assert_eq!(
+        std::fs::read_dir(releases).unwrap().count(),
+        0,
+        "disposing an unstarted plan journals no run"
+    );
+
+    let retry = ossctl()
+        .args(["release", "abandon", plan_id, "--json", "--repo-root"])
+        .arg(repo.path())
+        .output()
+        .unwrap();
+    assert!(
+        retry.status.success(),
+        "retry must be idempotent: {retry:?}"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&retry.stdout).unwrap();
+    assert_eq!(value["data"]["kind"], "plan");
+    assert_eq!(value["data"]["status"], "not_present");
+}
+
+/// Supplying a plan id that already backs a run redirects to the original run
+/// path. The plan document is not deleted, and the run gets its terminal event.
+#[test]
+fn release_abandon_plan_id_backed_by_run_uses_run_path() {
+    let plan_id = "a".repeat(64);
+    let created = format!(
+        r#"{{"schema_version":1,"seq":1,"ts":1000,"idempotency_key":"run_created","kind":"run_created","run_id":"RUN01","plan_id":"{plan_id}","version":"1.0.0","targets":[]}}"#
+    );
+    let dir = seed_journal("RUN01", &[&created]);
+    let out = ossctl()
+        .args([
+            "release",
+            "abandon",
+            &plan_id,
+            "--reason",
+            "changed mind",
+            "--json",
+            "--journal-dir",
+        ])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "run-backed plan must abandon run: {out:?}"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["data"]["run_id"], "RUN01");
+    assert_eq!(value["data"]["status"], "abandoned");
+    assert_eq!(value["data"]["reason"], "changed mind");
+
+    let journal = std::fs::read_to_string(dir.path().join("RUN01/journal.jsonl")).unwrap();
+    assert!(journal.contains("run_abandoned"));
+}
+
 /// `release abandon` with no `--reason` records a generic default reason.
 #[test]
 fn release_abandon_without_reason_uses_a_default() {

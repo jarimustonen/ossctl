@@ -57,6 +57,15 @@ impl From<io::Error> for PlanStoreError {
     }
 }
 
+/// Result of discarding a sealed plan from the durable store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardOutcome {
+    /// The authenticated plan document was removed.
+    Discarded,
+    /// No plan document exists at that address (idempotent retry).
+    NotPresent,
+}
+
 #[derive(Serialize)]
 struct StoredPlan<'a> {
     plan: &'a ReleasePlan,
@@ -155,7 +164,50 @@ impl PlanStore {
         }
         Ok(Some(plan))
     }
+
+    /// Authenticate and remove a sealed plan document.
+    ///
+    /// Missing plans are an idempotent success. A present document is fully loaded
+    /// and content-address verified before deletion, so corruption is never erased
+    /// under the guise of disposal. Callers coordinating this with release-run
+    /// creation must hold the repository's single-active-cut lock.
+    pub fn discard(&self, plan_id: &str) -> Result<DiscardOutcome, PlanStoreError> {
+        if !is_plan_id(plan_id) {
+            return Err(PlanStoreError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid plan id {plan_id:?}: expected 64 lowercase hexadecimal characters"
+                ),
+            )));
+        }
+        if self.load(plan_id)?.is_none() {
+            return Ok(DiscardOutcome::NotPresent);
+        }
+
+        let path = self.paths.plan_file(plan_id);
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                // Make the removed directory entry durable before reporting success.
+                if let Ok(dir) = fs::File::open(self.paths.plans_dir()) {
+                    dir.sync_all()?;
+                }
+                Ok(DiscardOutcome::Discarded)
+            }
+            // A concurrent idempotent retry may have won after our authenticated
+            // load. Under the release lock this is not expected, but remains safe.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(DiscardOutcome::NotPresent),
+            Err(error) => Err(error.into()),
+        }
+    }
 }
+
+fn is_plan_id(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
 fn corrupt(id: &str, detail: impl Into<String>) -> PlanStoreError {
     PlanStoreError::Corrupt {
         plan_id: id.to_string(),
