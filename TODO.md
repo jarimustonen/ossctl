@@ -80,3 +80,7 @@ are the source of truth.
 Post-release hardening + Track B are children/followups under
 [`ossctl-phase4-build`](issues/ossctl-phase4-build/item.md) (still OPEN — closes when the
 release-safety and cli-canon lanes drain). `issuectl list` for the live view.
+
+## Piialiisan bugiraportit
+
+- [ ] 🐛 Piialiisan bugiraportti: Release bump plan accepts duplicate exact pins then cut fails — jari via Telegram ([`intake-bug-ossctl-d38ddf598fd5`](issues/intake-bug-ossctl-d38ddf598fd5/item.md))
