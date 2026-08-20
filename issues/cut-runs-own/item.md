@@ -8,6 +8,9 @@ collision: [crates/ossctl-cli/src/release.rs, crates/ossctl-core/src/release/dis
 lane: verify-seam
 lane_seq: 20
 provenance: agent-issuectl-stint
+commits:
+- hash: ef39fca
+  summary: fix release double-writer routing, dist retries, and post-failure verification
 ---
 
 # cut runs its own homebrew leg despite cargo-dist publish-jobs owning the tap: double-writer, no retry on 503, false-red failed run
