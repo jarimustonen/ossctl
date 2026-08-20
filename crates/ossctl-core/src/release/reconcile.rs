@@ -41,7 +41,7 @@ use crate::protocol::plan::{PlanTarget, ReleasePlan};
 use crate::protocol::reconcile::{ReconcileReport, ReconcileSummary, TargetReconcile};
 use crate::protocol::release::{PublishReceipt, VerifyOutcome};
 
-use super::adapters::{observe_github_release_assets, resolve, EffectCtx, ReleaseAdapter};
+use super::adapters::{observe_cargo_dist_github_release, resolve, EffectCtx, ReleaseAdapter};
 use super::journal_target_ids;
 
 /// Reconcile a journaled run's published targets against current registry state.
@@ -194,7 +194,7 @@ fn classify(
         // never a false Missing.
         Err(_) => VerifyOutcome::Unknown,
     };
-    (outcome, detail_for(outcome, ecosystem))
+    (outcome, detail_for(outcome, ecosystem, Some(adapter_id)))
 }
 
 fn classify_delegated(
@@ -220,15 +220,7 @@ fn classify_delegated(
     let ecosystem = planned.map_or(Ecosystem::Binary, |target| target.ecosystem);
     let package = planned.and_then(|target| target.package.clone());
     let outcome = match (adapter, package.as_deref()) {
-        (Some(Adapter::CargoDist), Some(package)) => {
-            let expected = plan
-                .into_iter()
-                .flat_map(|plan| &plan.homebrew_platforms)
-                .map(|triple| format!("{package}-{triple}.tar.xz"))
-                .collect::<Vec<_>>();
-            observe_github_release_assets(ctx, &version, &expected)
-        }
-        (Some(Adapter::CargoDist), None) => observe_github_release_assets(ctx, &version, &[]),
+        (Some(Adapter::CargoDist), _) => observe_cargo_dist_github_release(ctx, &version),
         (Some(adapter), Some(package)) => {
             let receipt = PublishReceipt {
                 adapter,
@@ -251,15 +243,20 @@ fn classify_delegated(
         package,
         version,
         outcome,
-        detail_for(outcome, ecosystem),
+        detail_for(outcome, ecosystem, adapter),
     )
 }
 
 /// The operator-facing reason for a non-`matches` outcome (`None` for `matches`).
-fn detail_for(outcome: VerifyOutcome, ecosystem: Ecosystem) -> Option<String> {
+fn detail_for(
+    outcome: VerifyOutcome,
+    ecosystem: Ecosystem,
+    adapter: Option<Adapter>,
+) -> Option<String> {
+    let is_release = adapter == Some(Adapter::CargoDist) || ecosystem == Ecosystem::Binary;
     match outcome {
         VerifyOutcome::Matches => None,
-        VerifyOutcome::Missing if ecosystem == Ecosystem::Binary => {
+        VerifyOutcome::Missing if is_release => {
             Some("the destination does not contain the expected release artifact".to_string())
         }
         VerifyOutcome::Missing => {
@@ -269,7 +266,7 @@ fn detail_for(outcome: VerifyOutcome, ecosystem: Ecosystem) -> Option<String> {
             "the registry holds this version but its digest differs from the recorded receipt"
                 .to_string(),
         ),
-        VerifyOutcome::Unknown if ecosystem == Ecosystem::Binary => Some(
+        VerifyOutcome::Unknown if is_release => Some(
             "the release destination could not be observed (network or command failure)"
                 .to_string(),
         ),

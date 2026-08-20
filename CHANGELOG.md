@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   used by the contract normalizer's crates.io publish floor. Floor errors point to
   this command so operators can inspect exactly what ossctl read.
 
+### Fixed
+- **GitHub Releases produced by cargo-dist are now verified at their actual destination.**
+  Release verification resolves the published `v<version>` tag, ignores cargo-dist's
+  human-formatted Release title, and observes cargo-dist's own manifest instead of
+  inventing archive names from the contract's broader install-platform policy. This
+  removes false `missing` results for complete Releases whose project/package naming or
+  cargo-dist target set differs from that policy (`verify-gh-release-missing`).
+
 ## [0.9.0] - 2026-08-17
 
 ### Added

@@ -282,7 +282,10 @@ impl CommandRunner for FakeCmd {
         if program == "gh" && args.starts_with(&["release", "view"]) && args.contains(&"--json") {
             return Ok(CommandOutput {
                 status: Some(0),
-                stdout: r#"{"assets":[{"name":"tool-aarch64-apple-darwin.tar.xz"},{"name":"tool-x86_64-apple-darwin.tar.xz"},{"name":"tool-aarch64-unknown-linux-musl.tar.xz"},{"name":"tool-x86_64-unknown-linux-musl.tar.xz"},{"name":"ossctl-aarch64-apple-darwin.tar.xz"},{"name":"ossctl-x86_64-apple-darwin.tar.xz"},{"name":"ossctl-aarch64-unknown-linux-musl.tar.xz"},{"name":"ossctl-x86_64-unknown-linux-musl.tar.xz"}]}"#.into(),
+                stdout: format!(
+                    r#"{{"tagName":"{}","isDraft":false,"assets":[{{"name":"dist-manifest.json"}},{{"name":"tool-aarch64-apple-darwin.tar.xz"}},{{"name":"tool-x86_64-apple-darwin.tar.xz"}},{{"name":"tool-aarch64-unknown-linux-musl.tar.xz"}},{{"name":"tool-x86_64-unknown-linux-musl.tar.xz"}},{{"name":"ossctl-aarch64-apple-darwin.tar.xz"}},{{"name":"ossctl-x86_64-apple-darwin.tar.xz"}},{{"name":"ossctl-aarch64-unknown-linux-musl.tar.xz"}},{{"name":"ossctl-x86_64-unknown-linux-musl.tar.xz"}}]}}"#,
+                    args[2]
+                ),
                 stderr: String::new(),
             });
         }
@@ -1481,7 +1484,7 @@ impl CommandRunner for WorkspaceCmd {
         if program == "gh" && args.starts_with(&["release", "view"]) && args.contains(&"--json") {
             return Ok(CommandOutput {
                 status: Some(0),
-                stdout: r#"{"assets":[{"name":"ossctl-aarch64-apple-darwin.tar.xz"}]}"#.into(),
+                stdout: r#"{"tagName":"v1.2.3","isDraft":false,"assets":[{"name":"dist-manifest.json"},{"name":"ossctl-aarch64-apple-darwin.tar.xz"}]}"#.into(),
                 stderr: String::new(),
             });
         }

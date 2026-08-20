@@ -32,9 +32,11 @@ impl BinaryAdapter {
     }
 }
 
-/// Observe a GitHub Release and require its uploaded asset set. An empty
-/// `expected_assets` slice still requires at least one asset, which is the
-/// strongest check available when reconciling a pre-plan-store journal.
+/// Observe a GitHub Release by tag and require its uploaded asset set. The
+/// release title is deliberately irrelevant: cargo-dist commonly formats it as
+/// `<version> - <date>`, while the stable lookup coordinate is the `v<version>` tag.
+/// An empty `expected_assets` slice still requires at least one asset, which is
+/// the strongest check available when reconciling a pre-plan-store journal.
 pub(super) fn observe_release_assets(
     ctx: &EffectCtx<'_>,
     version: &str,
@@ -43,7 +45,7 @@ pub(super) fn observe_release_assets(
     let tag = format!("v{version}");
     let out = match ctx.runner.run(
         "gh",
-        &["release", "view", &tag, "--json", "assets"],
+        &["release", "view", &tag, "--json", "assets,isDraft,tagName"],
         ctx.repo_root,
     ) {
         Ok(out) if out.status == Some(0) => out,
@@ -52,6 +54,8 @@ pub(super) fn observe_release_assets(
     };
     let Some(observed) = serde_json::from_str::<serde_json::Value>(&out.stdout)
         .ok()
+        .filter(|value| value.get("isDraft").and_then(|draft| draft.as_bool()) == Some(false))
+        .filter(|value| value.get("tagName").and_then(|tag| tag.as_str()) == Some(tag.as_str()))
         .and_then(|value| {
             value
                 .get("assets")
@@ -84,6 +88,17 @@ pub(super) fn observe_release_assets(
     } else {
         VerifyOutcome::Missing
     }
+}
+
+/// Observe the stable completion marker cargo-dist uploads with every finalized
+/// GitHub Release. The sealed contract's platform list is an install-policy input,
+/// not cargo-dist's authoritative artifact inventory: repositories can deliberately
+/// build a narrower set in `dist-workspace.toml` (for example when an Intel macOS
+/// runner is unavailable). Reconstructing archive names from that list falsely
+/// reports a complete cargo-dist Release as missing. Presence of cargo-dist's own
+/// manifest proves that CI finalized the tagged Release and published its inventory.
+pub(super) fn observe_cargo_dist_release(ctx: &EffectCtx<'_>, version: &str) -> VerifyOutcome {
+    observe_release_assets(ctx, version, &["dist-manifest.json".to_string()])
 }
 
 impl ReleaseAdapter for BinaryAdapter {

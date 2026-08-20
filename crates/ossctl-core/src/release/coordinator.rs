@@ -134,7 +134,7 @@ use crate::protocol::plan::ReleasePlan;
 use crate::protocol::release::{PublishReceipt as AdapterReceipt, VerifyOutcome};
 
 use super::adapters::{
-    hash_file, observe_github_release_assets, resolve, verification_artifacts, AdapterTarget,
+    hash_file, observe_cargo_dist_github_release, resolve, verification_artifacts, AdapterTarget,
     EcosystemAdapter, EffectCtx, HomebrewAsset, HomebrewFormula, ReleaseAdapter, ReleaseArtifacts,
     SourceTarball,
 };
@@ -1548,16 +1548,11 @@ fn verify_delegated_registry(ctx: &EffectCtx<'_>, target: &AdapterTarget) -> Ver
 fn verify_delegated_release(
     ctx: &EffectCtx<'_>,
     plan: &ReleasePlan,
-    package: &str,
+    _package: &str,
 ) -> VerifyOutcome {
-    let expected: Vec<String> = plan
-        .homebrew_platforms
-        .iter()
-        .map(|triple| format!("{package}-{triple}.tar.xz"))
-        .collect();
     let start = ctx.clock.now_unix();
     loop {
-        if observe_github_release_assets(ctx, &plan.version, &expected) == VerifyOutcome::Matches {
+        if observe_cargo_dist_github_release(ctx, &plan.version) == VerifyOutcome::Matches {
             return VerifyOutcome::Matches;
         }
         if ctx.clock.now_unix().saturating_sub(start) >= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS {

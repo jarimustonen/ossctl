@@ -8,9 +8,11 @@ use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 
-use super::reconcile;
+use super::{reconcile, reconcile_with_plan};
+use crate::contract::schema::{Adapter, Ecosystem, Registry};
 use crate::ports::{Clock, CommandOutput, CommandRunner, RegistryQuery};
 use crate::protocol::journal::{PublishReceipt, RunState, RunStatus};
+use crate::protocol::plan::{PlanTarget, ReleasePlan};
 use crate::protocol::release::VerifyOutcome;
 use crate::release::adapters::EffectCtx;
 
@@ -27,7 +29,7 @@ impl CommandRunner for RecordingCmd {
             .borrow_mut()
             .push(format!("{program} {}", args.join(" ")));
         let stdout = if program == "gh" {
-            r#"{"assets":[{"name":"tool-aarch64-apple-darwin.tar.xz"}]}"#.to_string()
+            r#"{"tagName":"v1.0.0","name":"1.0.0 - 2026-08-17","isDraft":false,"assets":[{"name":"dist-manifest.json"},{"name":"tool-aarch64-apple-darwin.tar.xz"},{"name":"tool-aarch64-unknown-linux-musl.tar.xz"},{"name":"tool-x86_64-unknown-linux-musl.tar.xz"},{"name":"tool-installer.sh"}]}"#.to_string()
         } else {
             String::new()
         };
@@ -237,7 +239,7 @@ fn distribution_targets_are_observable_and_fetch_failure_is_unknown_not_green() 
     assert_eq!(only(&report).outcome, VerifyOutcome::Matches);
     assert_eq!(
         cmd.calls.borrow().as_slice(),
-        &["gh release view v1.0.0 --json assets"]
+        &["gh release view v1.0.0 --json assets,isDraft,tagName"]
     );
 
     let mut formula = receipt("binary", Some("tool"), "1.0.0", None);
@@ -260,6 +262,63 @@ fn distribution_targets_are_observable_and_fetch_failure_is_unknown_not_green() 
     );
     assert!(failed.calls.borrow().is_empty());
     assert!(reg.queried.borrow().is_empty());
+}
+
+#[test]
+fn delegated_cargo_dist_uses_the_tagged_release_not_registry_or_title() {
+    // Regression for project-canon v0.4.0/v0.5.0: its contract listed four
+    // installation platforms, while cargo-dist deliberately built three. The
+    // Release was complete according to cargo-dist (including dist-manifest.json),
+    // but reconstructing archive names from contract policy false-red'd it. Its
+    // title also differs from the tag and the package differs from the project.
+    let target = PlanTarget {
+        ecosystem: Ecosystem::Rust,
+        package: Some("project-canon-cli".to_string()),
+        registry: Registry::GhReleases,
+        adapter: Adapter::CargoDist,
+    };
+    let plan = ReleasePlan {
+        plan_id: "plan-abc".to_string(),
+        contract_schema_version: 2,
+        head_sha: "abc123".to_string(),
+        version: "1.0.0".to_string(),
+        targets: vec![target],
+        phases: Vec::new(),
+        bump: None,
+        homebrew_tap: None,
+        license: None,
+        description: None,
+        homebrew_platforms: vec![
+            "aarch64-apple-darwin".to_string(),
+            "x86_64-apple-darwin".to_string(),
+            "aarch64-unknown-linux-musl".to_string(),
+            "x86_64-unknown-linux-musl".to_string(),
+        ],
+    };
+    let mut state = state_with(&[]);
+    state.targets = vec!["rust".to_string()];
+    state.delegated.insert("rust".to_string());
+    state
+        .delegated_adapters
+        .insert("rust".to_string(), "cargo-dist".to_string());
+    let (cmd, clock) = (RecordingCmd::default(), FixedClock);
+    let reg = FakeRegistry::new();
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: Path::new("/repo"),
+        artifacts: &crate::release::adapters::EMPTY_ARTIFACTS,
+    };
+
+    let report = reconcile_with_plan(&state, Some(&plan), &ctx);
+
+    assert_eq!(only(&report).outcome, VerifyOutcome::Matches);
+    assert!(reg.queried.borrow().is_empty(), "must not query a registry");
+    assert_eq!(
+        cmd.calls.borrow().as_slice(),
+        &["gh release view v1.0.0 --json assets,isDraft,tagName"]
+    );
 }
 
 #[test]
@@ -351,7 +410,7 @@ fn reconcile_runs_only_the_exact_read_only_observation_commands() {
 
     assert_eq!(
         cmd.calls.borrow().as_slice(),
-        &["gh release view v1.0.0 --json assets"],
+        &["gh release view v1.0.0 --json assets,isDraft,tagName"],
         "reconcile must never execute a mutating command"
     );
 }

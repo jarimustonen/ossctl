@@ -2,7 +2,7 @@
 created: 2026-08-17
 updated: 2026-08-20
 type: bug
-status: open
+status: in-progress
 priority: high
 lane: verify-seam
 lane_seq: 10
@@ -134,3 +134,9 @@ FOURTH occurrence, and new evidence (from duplicate intake-bug-ossctl-09cd3c1d03
 - The operator had to `release abandon` a fully-landed release to clear it.
 
 Reporter naming the affected package: project-canon-cli (binary) vs project-canon (project/tag/tap) — consistent with the package-vs-project lookup hypothesis already recorded.
+
+## Agent Runs
+
+### 2026-08-20T10:24:13Z · @agent-spinoff
+
+Root cause confirmed: both the cut-time and read-only paths correctly reached the GitHub Release asset observer (not the registry observer). The misleading registry detail was selected only from ecosystem=rust. The Release observer then reconstructed required archive names from ReleasePlan.homebrew_platforms; project-canon deliberately omitted x86_64-apple-darwin from cargo-dist, so its complete Release could never match the broader contract platform list. The fix observes cargo-dist own dist-manifest.json completion marker on the published v<version> tag, ignores the human-formatted title/package-vs-project naming, and makes detail routing adapter-aware. Current-tree verification now reports matches for both v0.4.0 run 01M08H40373DF571PXY979934D and v0.5.0 run 01M08P4D4HK25MRQXDE0XDW9NJ.
