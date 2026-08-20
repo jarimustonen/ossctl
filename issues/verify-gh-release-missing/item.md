@@ -2,13 +2,16 @@
 created: 2026-08-17
 updated: 2026-08-20
 type: bug
-status: in-progress
+status: fixed
 priority: high
 lane: verify-seam
 lane_seq: 10
 commits:
-- hash: '96216e3'
+- hash: a7e724e
   summary: observe cargo-dist's published manifest
+- hash: 7c60a2e
+  summary: verify cargo-dist's package inventory after review
+closed: 2026-08-20
 ---
 
 # release verify reports a published GitHub Release as missing
@@ -143,3 +146,9 @@ Reporter naming the affected package: project-canon-cli (binary) vs project-cano
 ### 2026-08-20T10:24:13Z · @agent-spinoff
 
 Root cause confirmed: both the cut-time and read-only paths correctly reached the GitHub Release asset observer (not the registry observer). The misleading registry detail was selected only from ecosystem=rust. The Release observer then reconstructed required archive names from ReleasePlan.homebrew_platforms; project-canon deliberately omitted x86_64-apple-darwin from cargo-dist, so its complete Release could never match the broader contract platform list. The fix observes cargo-dist own dist-manifest.json completion marker on the published v<version> tag, ignores the human-formatted title/package-vs-project naming, and makes detail routing adapter-aware. Current-tree verification now reports matches for both v0.4.0 run 01M08H40373DF571PXY979934D and v0.5.0 run 01M08P4D4HK25MRQXDE0XDW9NJ.
+
+## Resolution
+
+### 2026-08-20T10:51:33Z · @issuectl
+
+Fixed and verified. Root cause: the gh-releases target did reach the GitHub Release observer, but that observer rebuilt archive names from the contract's broader homebrew_platforms policy; project-canon's cargo-dist config deliberately omitted Intel macOS, so a complete Release could never match. The registry detail came from ecosystem-only wording, not registry dispatch. Verification now resolves the exact published v<version> tag, downloads cargo-dist's manifest, identifies the exact app/version, and requires every manifest-listed artifact on the same Release. Full green gate passed; project-canon v0.4.0 and v0.5.0 historical runs both reconcile with 3 matches, 0 missing.
