@@ -62,8 +62,10 @@ impl From<io::Error> for PlanStoreError {
 pub enum DiscardOutcome {
     /// The authenticated plan document was removed.
     Discarded,
-    /// No plan document exists at that address (idempotent retry).
-    NotPresent,
+    /// A durable disposal marker proves an earlier request removed the plan.
+    AlreadyDiscarded,
+    /// Neither a plan nor a disposal marker has ever existed at this address.
+    Unknown,
 }
 
 #[derive(Serialize)]
@@ -101,7 +103,10 @@ impl PlanStore {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let path = self.paths.plan_file(&plan.plan_id);
         match fs::read(&path) {
-            Ok(existing) if existing == bytes => return Ok(()),
+            Ok(existing) if existing == bytes => {
+                self.clear_discard_marker(&plan.plan_id)?;
+                return Ok(());
+            }
             Ok(_) => {
                 return Err(PlanStoreError::ContentAddressViolation {
                     plan_id: plan.plan_id.clone(),
@@ -117,11 +122,13 @@ impl PlanStore {
         match fs::hard_link(&tmp, &path) {
             Ok(()) => {
                 fs::remove_file(tmp)?;
+                self.clear_discard_marker(&plan.plan_id)?;
                 Ok(())
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 fs::remove_file(tmp)?;
                 if fs::read(&path)? == bytes {
+                    self.clear_discard_marker(&plan.plan_id)?;
                     Ok(())
                 } else {
                     Err(PlanStoreError::ContentAddressViolation {
@@ -167,10 +174,11 @@ impl PlanStore {
 
     /// Authenticate and remove a sealed plan document.
     ///
-    /// Missing plans are an idempotent success. A present document is fully loaded
-    /// and content-address verified before deletion, so corruption is never erased
-    /// under the guise of disposal. Callers coordinating this with release-run
-    /// creation must hold the repository's single-active-cut lock.
+    /// A durable marker distinguishes an idempotent retry from a well-formed but
+    /// genuinely unknown address. A present document is fully authenticated before
+    /// deletion, so corruption is never erased under the guise of disposal. Callers
+    /// coordinating this with release-run creation must hold the repository's
+    /// single-active-cut lock.
     pub fn discard(&self, plan_id: &str) -> Result<DiscardOutcome, PlanStoreError> {
         if !is_plan_id(plan_id) {
             return Err(PlanStoreError::Io(io::Error::new(
@@ -181,27 +189,64 @@ impl PlanStore {
             )));
         }
         if self.load(plan_id)?.is_none() {
-            return Ok(DiscardOutcome::NotPresent);
+            return Ok(if self.paths.discarded_plan_file(plan_id).is_file() {
+                DiscardOutcome::AlreadyDiscarded
+            } else {
+                DiscardOutcome::Unknown
+            });
         }
 
+        self.write_discard_marker(plan_id)?;
         let path = self.paths.plan_file(plan_id);
         match fs::remove_file(&path) {
             Ok(()) => {
-                // Make the removed directory entry durable before reporting success.
-                if let Ok(dir) = fs::File::open(self.paths.plans_dir()) {
-                    dir.sync_all()?;
-                }
+                sync_dir(&self.paths.plans_dir())?;
                 Ok(DiscardOutcome::Discarded)
             }
             // A concurrent idempotent retry may have won after our authenticated
             // load. Under the release lock this is not expected, but remains safe.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(DiscardOutcome::NotPresent),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Ok(DiscardOutcome::AlreadyDiscarded)
+            }
             Err(error) => Err(error.into()),
         }
     }
+
+    fn write_discard_marker(&self, plan_id: &str) -> Result<(), PlanStoreError> {
+        let marker = self.paths.discarded_plan_file(plan_id);
+        let parent = marker.parent().expect("discard marker has a parent");
+        fs::create_dir_all(parent)?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+        {
+            Ok(file) => file.sync_all()?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        sync_dir(parent)?;
+        Ok(())
+    }
+
+    fn clear_discard_marker(&self, plan_id: &str) -> Result<(), PlanStoreError> {
+        let marker = self.paths.discarded_plan_file(plan_id);
+        match fs::remove_file(&marker) {
+            Ok(()) => sync_dir(marker.parent().expect("discard marker has a parent"))?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
 }
 
-fn is_plan_id(value: &str) -> bool {
+fn sync_dir(path: &std::path::Path) -> io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+/// Whether `value` is a canonical SHA-256 plan address.
+#[must_use]
+pub fn is_plan_id(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()

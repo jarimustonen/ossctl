@@ -7,6 +7,9 @@ priority: normal
 lane: plan-store
 lane_seq: 10
 collision: [crates/ossctl-cli/src/release.rs]
+commits:
+- hash: b515b1e
+  summary: discard sealed plans before cut
 ---
 
 # release abandon rejects a sealed-but-never-cut plan id

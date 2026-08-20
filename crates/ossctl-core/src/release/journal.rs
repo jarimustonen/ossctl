@@ -113,6 +113,15 @@ impl JournalPaths {
         self.plans_dir().join(format!("{plan_id}.json"))
     }
 
+    /// Durable disposal marker used to distinguish an idempotent retry from an
+    /// address that was never present.
+    #[must_use]
+    pub fn discarded_plan_file(&self, plan_id: &str) -> PathBuf {
+        self.plans_dir()
+            .join("discarded")
+            .join(format!("{plan_id}.discarded"))
+    }
+
     /// The single-active-cut lock path (`…/releases/.lock`).
     #[must_use]
     pub fn lock_file(&self) -> PathBuf {
@@ -582,6 +591,53 @@ impl<'a> Journal<'a> {
         )
     }
 
+    /// Create a run using a release lock the caller already holds. This lets a
+    /// caller authenticate a referenced sealed plan under the same lock before
+    /// durably publishing the `RunCreated` reference.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_locked(
+        store: &'a dyn JournalStore,
+        clock: &'a dyn Clock,
+        idgen: &dyn IdGen,
+        paths: JournalPaths,
+        plan_id: String,
+        version: String,
+        targets: Vec<String>,
+        lock: Box<dyn JournalLock>,
+    ) -> io::Result<Self> {
+        Self::create_inner_locked(
+            store, clock, idgen, paths, plan_id, version, targets, None, None, lock,
+        )
+    }
+
+    /// Bump-aware counterpart to [`Self::create_locked`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_bump_locked(
+        store: &'a dyn JournalStore,
+        clock: &'a dyn Clock,
+        idgen: &dyn IdGen,
+        paths: JournalPaths,
+        plan_id: String,
+        version: String,
+        targets: Vec<String>,
+        head_sha: String,
+        bump: crate::protocol::journal::BumpInputs,
+        lock: Box<dyn JournalLock>,
+    ) -> io::Result<Self> {
+        Self::create_inner_locked(
+            store,
+            clock,
+            idgen,
+            paths,
+            plan_id,
+            version,
+            targets,
+            Some(head_sha),
+            Some(bump),
+            lock,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn create_inner(
         store: &'a dyn JournalStore,
@@ -595,6 +651,24 @@ impl<'a> Journal<'a> {
         bump: Option<crate::protocol::journal::BumpInputs>,
     ) -> io::Result<Self> {
         let lock = store.lock_exclusive(&paths.lock_file())?;
+        Self::create_inner_locked(
+            store, clock, idgen, paths, plan_id, version, targets, head_sha, bump, lock,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_inner_locked(
+        store: &'a dyn JournalStore,
+        clock: &'a dyn Clock,
+        idgen: &dyn IdGen,
+        paths: JournalPaths,
+        plan_id: String,
+        version: String,
+        targets: Vec<String>,
+        head_sha: Option<String>,
+        bump: Option<crate::protocol::journal::BumpInputs>,
+        lock: Box<dyn JournalLock>,
+    ) -> io::Result<Self> {
         let run_id = idgen.new_id();
         let mut journal = Self {
             store,

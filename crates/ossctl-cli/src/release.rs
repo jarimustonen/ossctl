@@ -344,6 +344,13 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
             format!("cannot locate the durable plan store: {e}"),
         )
     })?;
+    // Serialize plan creation with disposal. Re-planning the same content after a
+    // discard is an explicit reapproval and clears its disposal marker atomically
+    // with restoring the active plan document.
+    let store = RealJournalStore;
+    let _plan_lock = store
+        .lock_exclusive(&paths.lock_file())
+        .map_err(create_journal_error)?;
     ossctl_core::release::plan_store::PlanStore::new(paths)
         .save(&plan, &normalized.contract)
         .map_err(plan_store_error)?;
@@ -956,6 +963,8 @@ const DEFAULT_ABANDON_REASON: &str = "abandoned by operator (no reason given)";
 /// with the irreversibility semantics made explicit.
 #[derive(serde::Serialize)]
 struct AbandonReport {
+    /// Discriminator shared with the additive plan-disposal result.
+    kind: &'static str,
     /// The abandoned run's id.
     run_id: String,
     /// Always `abandoned` — the run's new terminal status.
@@ -989,18 +998,25 @@ struct AbandonReport {
 pub fn abandon(args: &AbandonArgs, format: OutputFormat) -> Result<(), CliError> {
     // Preserve the existing fail-fast input contract before any filesystem read.
     normalize_reason(args.reason.as_deref())?;
+    // Minted run ids are ULIDs, disjoint from 64-hex plan addresses. Keep their
+    // original path free of the new unlocked dispatch read.
+    if !is_sealed_plan_id(&args.run_id) {
+        return abandon_existing_run(args, format, None);
+    }
     let paths = resolve_journal_paths(args.repo_root.as_ref(), args.journal_dir.as_deref())?;
     match journal::read_run_state(&ReadOnlyJournalStore, &paths, &args.run_id)
         .map_err(|error| read_state_error(&args.run_id, error))?
     {
-        // Preserve the existing direct run path exactly, including stale-lock
-        // recovery and terminal-state errors.
-        Some(_) => abandon_existing_run(args, format),
+        Some(_) => abandon_existing_run(args, format, None),
         None => abandon_plan_or_matching_run(args, paths, format),
     }
 }
 
-fn abandon_existing_run(args: &AbandonArgs, format: OutputFormat) -> Result<(), CliError> {
+fn abandon_existing_run(
+    args: &AbandonArgs,
+    format: OutputFormat,
+    inherited_warning: Option<String>,
+) -> Result<(), CliError> {
     // Validate/normalize the reason up front, before any I/O. An *absent* flag falls
     // back to the generic default; a *provided* reason is trimmed and must be
     // non-blank, control-character-free, and bounded — it is journaled durably and
@@ -1074,6 +1090,7 @@ fn abandon_existing_run(args: &AbandonArgs, format: OutputFormat) -> Result<(), 
     drop(journal);
 
     let report = AbandonReport {
+        kind: "run",
         run_id: args.run_id.clone(),
         status: RunStatus::Abandoned.as_str(),
         reason,
@@ -1085,7 +1102,7 @@ fn abandon_existing_run(args: &AbandonArgs, format: OutputFormat) -> Result<(), 
 
     // Surface already-published targets as a warning too: they are the one thing an
     // operator abandoning a run most needs to be reminded still exists remotely.
-    let mut warnings = Vec::new();
+    let mut warnings = inherited_warning.into_iter().collect::<Vec<_>>();
     if let Some(warning) = stale_lock_warning {
         warnings.push(warning);
     }
@@ -1118,6 +1135,7 @@ struct PlanDiscardReport {
 
 /// Dispose of an unstarted sealed plan, or redirect a plan id that already backs
 /// a run to the unchanged run-abandon path.
+#[allow(clippy::too_many_lines)] // Lock-scoped resolution, safety scan, disposal, and both output modes.
 fn abandon_plan_or_matching_run(
     args: &AbandonArgs,
     paths: JournalPaths,
@@ -1170,7 +1188,7 @@ fn abandon_plan_or_matching_run(
             repo_root: args.repo_root.clone(),
             journal_dir: args.journal_dir.clone(),
         };
-        return abandon_existing_run(&redirected, format);
+        return abandon_existing_run(&redirected, format, stale_lock_warning);
     }
     if !matching_runs.is_empty() {
         return Err(CliError::user(
@@ -1184,6 +1202,7 @@ fn abandon_plan_or_matching_run(
         .with_invalid_value(args.run_id.clone()));
     }
 
+    let paths_for_error = paths.clone();
     let outcome = ossctl_core::release::plan_store::PlanStore::new(paths)
         .discard(&args.run_id)
         .map_err(plan_store_error)?;
@@ -1194,10 +1213,21 @@ fn abandon_plan_or_matching_run(
             "discarded",
             "the sealed plan was removed; no run existed, so nothing was journaled",
         ),
-        ossctl_core::release::plan_store::DiscardOutcome::NotPresent => (
-            "not_present",
-            "no stored plan remains at this id; the idempotent disposal request is satisfied",
+        ossctl_core::release::plan_store::DiscardOutcome::AlreadyDiscarded => (
+            "already_discarded",
+            "a durable disposal marker proves this plan was already removed; the idempotent request is satisfied",
         ),
+        ossctl_core::release::plan_store::DiscardOutcome::Unknown => {
+            return Err(CliError::user(
+                "run_not_found",
+                format!(
+                    "no release run or sealed plan '{}' found under {}",
+                    args.run_id,
+                    paths_for_error.plans_dir().display()
+                ),
+            )
+            .with_invalid_value(args.run_id.clone()));
+        }
     };
     let report = PlanDiscardReport {
         kind: "plan",
@@ -1220,10 +1250,7 @@ fn abandon_plan_or_matching_run(
 }
 
 fn is_sealed_plan_id(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    ossctl_core::release::plan_store::is_plan_id(value)
 }
 
 /// Take the release lock for plan disposal, retaining abandon's narrow stale-lock
@@ -1902,11 +1929,31 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     // No retry or resume fixes it — only a contract edit — so refuse before the run.
     ensure_no_delegated_dependency_conflict(&current, &facts)?;
 
+    // Close the cut-vs-discard race: authenticate the sealed plan again while
+    // holding the same lock that will durably publish RunCreated. An abandon can
+    // neither delete the plan after this check nor miss the new run reference.
+    let store = RealJournalStore;
+    let cut_lock = store
+        .lock_exclusive(&paths.lock_file())
+        .map_err(create_journal_error)?;
+    let locked_plan = ossctl_core::release::plan_store::PlanStore::new(paths.clone())
+        .load(&args.plan)
+        .map_err(plan_store_error)?;
+    if locked_plan.is_none() {
+        return Err(CliError::user(
+            "plan_not_found",
+            format!(
+                "sealed plan {} was discarded before the release run could start; run `ossctl release plan` again",
+                args.plan
+            ),
+        )
+        .with_invalid_value(args.plan.clone()));
+    }
+
     for warning in provenance_warnings {
         eprintln!("warning: {warning}");
     }
 
-    let store = RealJournalStore;
     let clock = RealClock;
     let idgen = RealIdGen;
     let runner = RealCommandRunner;
@@ -1920,7 +1967,9 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     // targets (two crates.io crates, or a crate plus its gh-releases/homebrew
     // channels — all under `rust`).
     let target_ids = ossctl_core::release::journal_target_ids(&current.targets);
-    let mut journal = create_run_journal(&store, &clock, &idgen, paths, &current, target_ids)?;
+    let mut journal = create_run_journal_locked(
+        &store, &clock, &idgen, paths, &current, target_ids, cut_lock,
+    )?;
     let run_id = journal.run_id().to_string();
 
     let mut sink = StreamSink::new(std::io::stdout(), matches!(format, OutputFormat::Json));
@@ -1950,16 +1999,17 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
 /// inputs (`Journal::create_bump`) so `release resume` can reconstruct the exact sealed
 /// plan against the pre-bump commit after the bump commit moves HEAD
 /// (`release-rust-workspace-multicrate`); a no-bump run uses plain `Journal::create`.
-fn create_run_journal<'a>(
+fn create_run_journal_locked<'a>(
     store: &'a RealJournalStore,
     clock: &'a RealClock,
     idgen: &'a RealIdGen,
     paths: JournalPaths,
     current: &ReleasePlan,
     target_ids: Vec<String>,
+    lock: Box<dyn ossctl_core::ports::JournalLock>,
 ) -> Result<Journal<'a>, CliError> {
     match &current.bump {
-        Some(bump) => Journal::create_bump(
+        Some(bump) => Journal::create_bump_locked(
             store,
             clock,
             idgen,
@@ -1972,8 +2022,9 @@ fn create_run_journal<'a>(
                 level: bump.level.as_str().to_string(),
                 from_version: bump.from_version.clone(),
             },
+            lock,
         ),
-        None => Journal::create(
+        None => Journal::create_locked(
             store,
             clock,
             idgen,
@@ -1981,6 +2032,7 @@ fn create_run_journal<'a>(
             current.plan_id.clone(),
             current.version.clone(),
             target_ids,
+            lock,
         ),
     }
     .map_err(create_journal_error)

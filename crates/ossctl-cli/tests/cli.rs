@@ -1413,6 +1413,7 @@ fn release_abandon_marks_a_non_terminal_run_and_keeps_publishes() {
         .unwrap();
     assert!(out.status.success(), "abandon must exit 0: {out:?}");
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout JSON");
+    assert_eq!(v["data"]["kind"], "run");
     assert_eq!(v["data"]["run_id"], "RUN01");
     assert_eq!(v["data"]["status"], "abandoned");
     assert_eq!(v["data"]["reason"], "registry outage");
@@ -1498,7 +1499,24 @@ fn release_abandon_discards_an_unstarted_plan_idempotently() {
     );
     let value: serde_json::Value = serde_json::from_slice(&retry.stdout).unwrap();
     assert_eq!(value["data"]["kind"], "plan");
-    assert_eq!(value["data"]["status"], "not_present");
+    assert_eq!(value["data"]["status"], "already_discarded");
+}
+
+/// A well-formed address that was never issued is still genuinely unknown; only
+/// a durable disposal marker turns absence into an idempotent success.
+#[test]
+fn release_abandon_rejects_an_unknown_plan_shaped_id() {
+    let repo = approved_git_repo();
+    let unknown = "f".repeat(64);
+    let out = ossctl()
+        .args(["release", "abandon", &unknown, "--json", "--repo-root"])
+        .arg(repo.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(value["error"]["code"], "run_not_found");
+    assert_eq!(value["error"]["invalid_value"], unknown);
 }
 
 /// Supplying a plan id that already backs a run redirects to the original run
