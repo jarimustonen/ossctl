@@ -84,3 +84,4 @@ release-safety and cli-canon lanes drain). `issuectl list` for the live view.
 ## Piialiisan bugiraportit
 
 - [ ] 🐛 Piialiisan bugiraportti: Release bump plan accepts duplicate exact pins then cut fails — jari via Telegram ([`intake-bug-ossctl-d38ddf598fd5`](issues/intake-bug-ossctl-d38ddf598fd5/item.md))
+- [ ] 🐛 Piialiisan bugiraportti: Cargo-dist verifier reports existing GitHub Releases missing — jari via Telegram ([`intake-bug-ossctl-09cd3c1d03d0`](issues/intake-bug-ossctl-09cd3c1d03d0/item.md))
