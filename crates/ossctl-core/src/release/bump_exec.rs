@@ -8,8 +8,9 @@
 //!
 //! 1. sets `[workspace.package] version`, or a plain root `[package] version` when the
 //!    workspace-inheritance source is absent;
-//! 2. rewrites each sealed intra-workspace `=`-pin (verifying the exact old value in the
-//!    tree — fail closed on zero/multiple, [`crate::release::bump::rewrite_pin`]);
+//! 2. rewrites each sealed intra-workspace `=`-pin set (verifying every declaration is
+//!    equivalent, then updating all of them; fail closed on zero/non-equivalence,
+//!    [`crate::release::bump::rewrite_pin`]);
 //! 3. refreshes `Cargo.lock` (`cargo update --workspace`);
 //! 4. finalizes the CHANGELOG (`[Unreleased]` → a dated section) when the contract's
 //!    changelog mode asked for it;
@@ -188,8 +189,9 @@ pub fn apply_bump(
     };
     write(&root_manifest, &bumped)?;
 
-    // 2. Rewrite each sealed intra-workspace pin in its dependent crate's manifest,
-    //    verifying the exact old value (fail closed on zero/multiple).
+    // 2. Rewrite each sealed intra-workspace pin set in its dependent crate's manifest,
+    //    verifying all declarations are the exact old value (fail closed on zero or a
+    //    non-equivalent declaration).
     if !bump.pin_rewrites.is_empty() {
         let members = member_manifest_paths(root)?;
         for pin in &bump.pin_rewrites {

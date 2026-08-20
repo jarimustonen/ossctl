@@ -81,6 +81,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removes the authenticated plan document without creating a journal, remains idempotent on
   retry, and redirects to the existing run-abandon path when that plan already backs a run
   (`abandon-sealed-plan-id`).
+- **Release plans and cuts now agree on repeated exact workspace pins.** A crate that
+  declares the same internal `=version` dependency in normal, dev, build, or
+  target-specific dependency tables seals one deterministic rewrite set and updates
+  every equivalent declaration during the bump. Mixed requirements for the same
+  workspace crate are refused while planning, before an unexecutable approval artifact
+  can be sealed.
 - **Closed stdout pipes no longer panic the CLI.** Text and JSON output now share a
   fallible writer: a downstream reader closing early exits quietly with success, while
   other stdout failures use the canonical system-error envelope (`cli-panics-broken`).

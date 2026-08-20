@@ -3,7 +3,7 @@ created: 2026-08-20
 updated: 2026-08-20
 type: bug
 reporter: jari
-status: open
+status: in-progress
 priority: high
 collision: [crates/ossctl-core/src/release/plan.rs]
 lane: bump-exec

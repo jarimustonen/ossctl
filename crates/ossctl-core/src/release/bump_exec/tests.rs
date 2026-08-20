@@ -232,6 +232,25 @@ fn applies_version_pin_changelog_and_commits() {
 }
 
 #[test]
+fn applies_one_sealed_rewrite_to_normal_and_dev_dependency_pins() {
+    let dir = temp_workspace();
+    std::fs::write(
+        dir.path().join("crates/cli/Cargo.toml"),
+        "[package]\nname = \"acme\"\nversion.workspace = true\n\n[dependencies]\nacme-core = { path = \"../core\", version = \"=0.4.0\" }\n\n[dev-dependencies]\nacme-core = { path = \"../core\", version = \"=0.4.0\" }\n",
+    )
+    .unwrap();
+    let runner = FakeRunner::new("duplicate123");
+    let (clock, reg) = (FakeClock, NoRegistry);
+    let ctx = ctx(&runner, &clock, &reg, dir.path());
+
+    apply_bump(&ctx, &bump_plan(), "2026-08-13").unwrap();
+
+    let cli = std::fs::read_to_string(dir.path().join("crates/cli/Cargo.toml")).unwrap();
+    assert_eq!(cli.matches("version = \"=0.5.0\"").count(), 2, "{cli}");
+    assert!(!cli.contains("version = \"=0.4.0\""));
+}
+
+#[test]
 fn applies_version_lockfile_changelog_and_commits_for_a_single_crate() {
     let dir = temp_single_crate();
     let runner = FakeRunner::new("single123");

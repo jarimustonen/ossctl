@@ -126,7 +126,7 @@ pub fn build_with_bump(
     level: BumpLevel,
 ) -> Result<ReleasePlan, crate::release::bump::BumpError> {
     let to_version = crate::release::bump::bump_version(level, from_version)?;
-    let bump = derive_bump_plan(contract, facts, level, from_version, &to_version);
+    let bump = derive_bump_plan(contract, facts, level, from_version, &to_version)?;
     Ok(build_inner(
         contract,
         facts,
@@ -659,18 +659,18 @@ fn derive_bump_plan(
     level: BumpLevel,
     from_version: &str,
     to_version: &str,
-) -> BumpPlan {
-    BumpPlan {
+) -> Result<BumpPlan, crate::release::bump::BumpError> {
+    Ok(BumpPlan {
         level,
         from_version: from_version.to_string(),
         to_version: to_version.to_string(),
-        pin_rewrites: derive_pin_rewrites(facts, from_version, to_version),
+        pin_rewrites: derive_pin_rewrites(facts, from_version, to_version)?,
         changelog_finalize: changelog_is_finalizable(contract),
         // Copied from the (already-hashed) contract so the executor need not re-read it;
         // being a copy of a hashed value it adds no new content to the address beyond
         // its presence on the bump plan.
         bump_hook: contract.release.bump_hook.clone(),
-    }
+    })
 }
 
 /// Whether the bump phase finalizes the CHANGELOG (`[Unreleased]` → a dated
@@ -706,18 +706,21 @@ fn changelog_is_finalizable(contract: &Contract) -> bool {
 ///
 /// **Precise, not over-broad** (`release-rust-workspace-multicrate` facet 3, llm-review):
 /// a rewrite is emitted **only** when the member's manifest declares that edge's
-/// requirement literally as `=<from_version>` — the exact lockstep pin — read from
-/// [`WorkspaceMember::dep_reqs`](crate::protocol::facts::WorkspaceMember). A
-/// caret/range/`workspace = true`/independently-versioned edge (whose recorded
-/// requirement is absent or is not `=<from_version>`) is **skipped**, so the bump never
-/// clobbers a `^1.2` or a `workspace = true` sibling that does not track the workspace
-/// version in lockstep. Skipping a genuinely-lockstepped edge whose requirement the
-/// parser could not read (a dotted-key blind spot) fails the cut *closed* — the stale
-/// `=<from>` pin the publish rejects — never a mis-rewrite. The executor re-verifies the
-/// exact old value in the manifest before replacing (fail closed on zero/multiple).
-fn derive_pin_rewrites(facts: &Facts, from_version: &str, to_version: &str) -> Vec<PinRewrite> {
+/// requirement literally as `=<from_version>` — the exact lockstep pin — across every
+/// dependency table, read from
+/// [`WorkspaceMember::pin_reqs`](crate::protocol::facts::WorkspaceMember). Equivalent
+/// repeated declarations form one deterministic rewrite set; a mix of exact and
+/// different/path-only requirements is refused here before sealing. A caret/range/
+/// `workspace = true`/independently-versioned edge with no exact lockstep declaration
+/// is **skipped**, so the bump never clobbers it. The executor applies the same
+/// equivalence rule to the sealed manifest text before replacing every match.
+fn derive_pin_rewrites(
+    facts: &Facts,
+    from_version: &str,
+    to_version: &str,
+) -> Result<Vec<PinRewrite>, crate::release::bump::BumpError> {
     let Some(workspace) = facts.rust_workspace.as_ref() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let is_member: BTreeSet<&str> = workspace
         .members
@@ -727,15 +730,33 @@ fn derive_pin_rewrites(facts: &Facts, from_version: &str, to_version: &str) -> V
     let from_pin = format!("={from_version}");
     let mut rewrites: Vec<PinRewrite> = Vec::new();
     for member in &workspace.members {
-        for dep in &member.workspace_deps {
+        for dep in member.pin_reqs.keys() {
             // Only edges to another publishable member carry an intra-workspace pin.
             if !is_member.contains(dep.as_str()) {
                 continue;
             }
-            // Only a literal `=<from_version>` lockstep pin is rewritten — a caret/range
-            // or an inherited (`workspace = true`) requirement is left untouched.
-            if member.dep_reqs.get(dep).map(String::as_str) != Some(from_pin.as_str()) {
+            // Pin discovery preserves every declaration across normal, dev, build,
+            // and target-specific tables. Rewrite one sealed dependency set only when
+            // every declaration is provably the same exact lockstep pin. This is the
+            // same equivalence rule the cut-time rewriter enforces.
+            let Some(requirements) = member.pin_reqs.get(dep) else {
                 continue;
+            };
+            let matching = requirements
+                .iter()
+                .filter(|req| req.as_deref() == Some(from_pin.as_str()))
+                .count();
+            if matching == 0 {
+                continue;
+            }
+            if matching != requirements.len() {
+                return Err(crate::release::bump::BumpError {
+                    version: from_version.to_string(),
+                    reason: format!(
+                        "the `{dep} = \"{from_pin}\"` pin has {} non-equivalent declaration(s) in crate `{}` — refusing to seal an ambiguous pin rewrite",
+                        requirements.len(), member.package
+                    ),
+                });
             }
             rewrites.push(PinRewrite {
                 in_package: member.package.clone(),
@@ -752,7 +773,7 @@ fn derive_pin_rewrites(facts: &Facts, from_version: &str, to_version: &str) -> V
     // this is a no-op in practice; it guards against a facts parser that emitted a
     // duplicate edge producing a duplicated rewrite.
     rewrites.dedup_by(|a, b| a.in_package == b.in_package && a.dependency == b.dependency);
-    rewrites
+    Ok(rewrites)
 }
 
 /// One engine-published crate whose release is blocked by a CI-delegated workspace

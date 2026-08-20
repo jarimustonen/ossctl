@@ -208,6 +208,12 @@ pub struct WorkspaceMember {
     /// lockstep convention), never for a caret/range/`workspace = true` edge it would
     /// otherwise clobber. Off-wire, like the rest of [`RustWorkspace`].
     pub dep_reqs: std::collections::BTreeMap<String, String>,
+    /// Every literal requirement declared for an intra-workspace dependency, across
+    /// normal, dev, build, and target-specific dependency tables. `None` represents a
+    /// local declaration with no literal version requirement. Unlike [`Self::dep_reqs`],
+    /// this preserves duplicate declarations so release planning can prove that every
+    /// pin it asks the bump executor to rewrite is equivalent.
+    pub pin_reqs: std::collections::BTreeMap<String, Vec<Option<String>>>,
 }
 
 /// One detected package manifest and the name/version parsed from it.

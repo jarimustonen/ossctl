@@ -671,9 +671,11 @@ struct RawMember {
     package: String,
     version: Option<String>,
     publishable: bool,
-    /// Intra-workspace dependency edges: crate name + the literal version
-    /// requirement the manifest declares for it (or `None` for a path-only edge).
+    /// Publish-order dependency edges (normal + build): crate name + literal version.
     deps: Vec<(String, Option<String>)>,
+    /// All local dependency declarations, including dev and target-specific tables.
+    /// Duplicates are preserved for plan-time pin-equivalence validation.
+    pins: Vec<(String, Option<String>)>,
 }
 
 fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace> {
@@ -703,7 +705,8 @@ fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace>
             package,
             version,
             publishable: member_publishable_to_crates_io(&text),
-            deps: member_dependency_edges(&text),
+            deps: member_dependency_edges(&text, false),
+            pins: member_dependency_edges(&text, true),
         });
     }
 
@@ -742,11 +745,19 @@ fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace>
                 .collect();
             workspace_deps.sort();
             workspace_deps.dedup();
+            let mut pin_reqs: std::collections::BTreeMap<String, Vec<Option<String>>> =
+                std::collections::BTreeMap::new();
+            for (name, req) in &m.pins {
+                if name.as_str() != m.package && publishable_names.contains(name.as_str()) {
+                    pin_reqs.entry(name.clone()).or_default().push(req.clone());
+                }
+            }
             WorkspaceMember {
                 package: m.package.clone(),
                 version: m.version.clone(),
                 workspace_deps,
                 dep_reqs,
+                pin_reqs,
             }
         })
         .collect();
@@ -867,7 +878,7 @@ enum DepTable {
 /// inline table is read only by its first physical line; a dotted `dep.version = "…"`
 /// requirement on a line separate from `dep.path` is not captured (so that edge's pin is
 /// left un-rewritten — fail closed).
-fn member_dependency_edges(text: &str) -> Vec<(String, Option<String>)> {
+fn member_dependency_edges(text: &str, include_dev: bool) -> Vec<(String, Option<String>)> {
     let mut state = DepTable::Other;
     let mut out: Vec<(String, Option<String>)> = Vec::new();
 
@@ -876,7 +887,7 @@ fn member_dependency_edges(text: &str) -> Vec<(String, Option<String>)> {
         if let Some(header) = t.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
             // Leaving a table: flush a completed sub-table's edge before switching.
             flush_dep_subtable(&mut state, &mut out);
-            state = classify_dep_table(header.trim());
+            state = classify_dep_table(header.trim(), include_dev);
             continue;
         }
         match &mut state {
@@ -920,8 +931,8 @@ fn member_dependency_edges(text: &str) -> Vec<(String, Option<String>)> {
 /// quotes; classification keys on the unquoted `.dependencies` / `.build-dependencies`
 /// suffix (and the `.dependencies.` / `.build-dependencies.` infix for sub-tables),
 /// which is robust regardless of the cfg contents.
-fn classify_dep_table(header: &str) -> DepTable {
-    if let Some(name) = dep_subtable_name(header) {
+fn classify_dep_table(header: &str, include_dev: bool) -> DepTable {
+    if let Some(name) = dep_subtable_name(header, include_dev) {
         return DepTable::Sub {
             key: name.trim().trim_matches(['"', '\'']).to_string(),
             package: None,
@@ -929,11 +940,13 @@ fn classify_dep_table(header: &str) -> DepTable {
             version: None,
         };
     }
-    // dev-dependencies (plain or target-specific) never gate publish order.
-    if !header.contains("dev-dependencies")
+    // Dev dependencies are included only for pin discovery; they never gate publish order.
+    if (include_dev || !header.contains("dev-dependencies"))
         && (header == "dependencies"
+            || header == "dev-dependencies"
             || header == "build-dependencies"
             || header.ends_with(".dependencies")
+            || header.ends_with(".dev-dependencies")
             || header.ends_with(".build-dependencies"))
     {
         return DepTable::Table;
@@ -945,19 +958,24 @@ fn classify_dep_table(header: &str) -> DepTable {
 /// `[build-dependencies.<name>]`, or their target-specific
 /// `[target.<cfg>.dependencies.<name>]` forms), or `None` when the header is not a
 /// dependency sub-table. Every `dev-dependencies` form yields `None`.
-fn dep_subtable_name(header: &str) -> Option<&str> {
-    if header.contains("dev-dependencies") {
+fn dep_subtable_name(header: &str, include_dev: bool) -> Option<&str> {
+    if header.contains("dev-dependencies") && !include_dev {
         return None;
     }
     if let Some(name) = header
         .strip_prefix("dependencies.")
+        .or_else(|| header.strip_prefix("dev-dependencies."))
         .or_else(|| header.strip_prefix("build-dependencies."))
     {
         return Some(name);
     }
     // Target-specific: split on the LAST `.dependencies.` / `.build-dependencies.`
     // (the cfg expression precedes it and may itself contain dots).
-    for infix in [".dependencies.", ".build-dependencies."] {
+    for infix in [
+        ".dependencies.",
+        ".dev-dependencies.",
+        ".build-dependencies.",
+    ] {
         if let Some(idx) = header.rfind(infix) {
             return Some(&header[idx + infix.len()..]);
         }
@@ -2193,6 +2211,29 @@ mod tests {
         assert_eq!(
             cli.dep_reqs.get("octl-core").map(String::as_str),
             Some("=0.4.0")
+        );
+        assert_eq!(
+            cli.pin_reqs.get("octl-core"),
+            Some(&vec![Some("=0.4.0".to_string())])
+        );
+    }
+
+    #[test]
+    fn rust_workspace_pin_requirements_preserve_all_dependency_tables() {
+        let root = "[workspace]\nmembers = [\"core\", \"cli\"]\n";
+        let core = "[package]\nname = \"core\"\nversion = \"0.4.0\"\n";
+        let cli = "[package]\nname = \"cli\"\nversion = \"0.4.0\"\n\n[dependencies]\ncore = { path = \"../core\", version = \"=0.4.0\" }\n[dev-dependencies]\ncore = { path = \"../core\", version = \"=0.4.0\" }\n[build-dependencies]\ncore = { path = \"../core\", version = \"=0.4.0\" }\n[target.'cfg(unix)'.dependencies]\ncore = { path = \"../core\", version = \"=0.4.0\" }\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/core/Cargo.toml", core)
+            .file("/repo/cli/Cargo.toml", cli);
+        let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
+        let cli = ws.members.iter().find(|m| m.package == "cli").unwrap();
+
+        assert_eq!(cli.workspace_deps, vec!["core".to_string()]);
+        assert_eq!(
+            cli.pin_reqs.get("core"),
+            Some(&vec![Some("=0.4.0".to_string()); 4])
         );
     }
 

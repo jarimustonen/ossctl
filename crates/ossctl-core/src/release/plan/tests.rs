@@ -789,6 +789,10 @@ fn member(name: &str, version: &str, deps: &[&str]) -> WorkspaceMember {
             .iter()
             .map(|d| ((*d).to_string(), format!("={version}")))
             .collect(),
+        pin_reqs: deps
+            .iter()
+            .map(|d| ((*d).to_string(), vec![Some(format!("={version}"))]))
+            .collect(),
     }
 }
 
@@ -1372,6 +1376,61 @@ fn the_bump_derives_the_intra_workspace_pin_rewrite() {
     assert_eq!(r.dependency, "octl-core");
     assert_eq!(r.from, "=0.1.6");
     assert_eq!(r.to, "=0.2.0");
+}
+
+#[test]
+fn equivalent_duplicate_pins_plan_once_and_rewrite_every_declaration() {
+    let mut c = rust_contract();
+    c.targets = vec![target(
+        Ecosystem::Rust,
+        "orchestratectl",
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+    )];
+    let mut f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let cli = &mut f.rust_workspace.as_mut().unwrap().members[1];
+    cli.pin_reqs.insert(
+        "octl-core".into(),
+        vec![Some("=0.1.6".into()), Some("=0.1.6".into())],
+    );
+
+    let plan = build_with_bump(&c, &f, HEAD, "0.1.6", BumpLevel::Minor).unwrap();
+    let rewrites = &plan.bump.as_ref().unwrap().pin_rewrites;
+    assert_eq!(rewrites.len(), 1, "one sealed equivalent declaration set");
+
+    let manifest = "[dependencies]\noctl-core = { path = \"../core\", version = \"=0.1.6\" }\n[dev-dependencies]\noctl-core = { path = \"../core\", version = \"=0.1.6\" }\n";
+    let r = &rewrites[0];
+    let bumped =
+        crate::release::bump::rewrite_pin(manifest, &r.dependency, &r.from, &r.to).unwrap();
+    assert_eq!(bumped.matches("version = \"=0.2.0\"").count(), 2);
+}
+
+#[test]
+fn non_equivalent_duplicate_pins_are_refused_while_planning() {
+    let mut c = rust_contract();
+    c.targets = vec![target(
+        Ecosystem::Rust,
+        "orchestratectl",
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+    )];
+    let mut f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    f.rust_workspace.as_mut().unwrap().members[1]
+        .pin_reqs
+        .insert(
+            "octl-core".into(),
+            vec![Some("=0.1.6".into()), Some("^0.1".into())],
+        );
+
+    let err = build_with_bump(&c, &f, HEAD, "0.1.6", BumpLevel::Minor).unwrap_err();
+    assert!(
+        err.reason.contains("non-equivalent declaration"),
+        "{}",
+        err.reason
+    );
+    assert!(err
+        .reason
+        .contains("refusing to seal an ambiguous pin rewrite"));
 }
 
 #[test]

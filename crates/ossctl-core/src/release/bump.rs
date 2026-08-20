@@ -151,9 +151,9 @@ pub enum BumpEditError {
         /// The exact requirement string that was expected (`=<from_version>`).
         from: String,
     },
-    /// A pin rewrite matched `dependency`'s `from` requirement in **more than one**
-    /// place, so replacing is ambiguous — the executor refuses rather than rewrite the
-    /// wrong one (fail closed on **multiple** matches).
+    /// A pin rewrite found declarations of `dependency` whose requirements are not
+    /// all the sealed `from` value, so equivalence cannot be established. Equivalent
+    /// duplicates are supported and rewritten as one deterministic set.
     PinAmbiguous {
         /// The dependency whose pin matched more than once.
         dependency: String,
@@ -304,10 +304,11 @@ fn set_section_version(manifest: &str, section: &str, from: &str, to: &str) -> O
 /// Rewrite a single intra-workspace `=`-pin (`dependency = "…, version = \"<from>\""`)
 /// from `from` to `to`, returning the new manifest text.
 ///
-/// Precise and fail-closed (`release-rust-workspace-multicrate` facet 3): it counts the
-/// declarations of `dependency` whose version requirement is **exactly** `from` and
-/// rewrites iff there is exactly one — refusing on zero
-/// ([`BumpEditError::PinNotFound`]) or several ([`BumpEditError::PinAmbiguous`]). It
+/// Precise and fail-closed (`release-rust-workspace-multicrate` facet 3): it collects
+/// declarations of `dependency` and rewrites every declaration iff all literal version
+/// requirements are **exactly** `from` — refusing on zero
+/// ([`BumpEditError::PinNotFound`]) or any non-equivalent requirement
+/// ([`BumpEditError::PinAmbiguous`]). It
 /// matches both the inline-table form (`dep = { path = "…", version = "=X" }`) and the
 /// dependency sub-table form (`[dependencies.dep]` … `version = "=X"`), the two shapes
 /// [`crate::facts`] records a requirement for.
@@ -320,33 +321,33 @@ pub fn rewrite_pin(
     from: &str,
     to: &str,
 ) -> Result<String, BumpEditError> {
-    // First pass: count matches so we can fail closed on 0 or >1 without a partial edit.
-    let matches = count_pin_matches(manifest, dependency, from);
+    // First pass: prove every explicit declaration is equivalent before any edit.
+    let (matches, declarations) = count_pin_matches(manifest, dependency, from);
     if matches == 0 {
         return Err(BumpEditError::PinNotFound {
             dependency: dependency.to_string(),
             from: from.to_string(),
         });
     }
-    if matches > 1 {
+    if matches != declarations {
         return Err(BumpEditError::PinAmbiguous {
             dependency: dependency.to_string(),
             from: from.to_string(),
-            count: matches,
+            count: declarations,
         });
     }
-    // Exactly one match: rewrite it.
+    // One or more equivalent matches: rewrite the complete declaration set.
     let mut out = String::with_capacity(manifest.len() + to.len());
     let mut in_dep_subtable = false;
     let ends_with_newline = manifest.ends_with('\n');
-    let mut done = false;
+    let mut rewritten_count = 0;
     let mut lines = manifest.lines().peekable();
     while let Some(line) = lines.next() {
         let trimmed = strip_comment(line).trim();
         let mut rewritten: Option<String> = None;
         if let Some(header) = section_header(trimmed) {
             in_dep_subtable = dep_subtable_matches(header, dependency);
-        } else if !done {
+        } else {
             if in_dep_subtable {
                 // A `version = "<from>"` line inside `[dependencies.<dep>]`.
                 rewritten = replace_exact_string_value(line, "version", from, to);
@@ -358,35 +359,39 @@ pub fn rewrite_pin(
         match rewritten {
             Some(r) => {
                 out.push_str(&r);
-                done = true;
+                rewritten_count += 1;
             }
             None => out.push_str(line),
         }
         push_line_ending(&mut out, lines.peek().is_some(), ends_with_newline);
     }
+    debug_assert_eq!(rewritten_count, matches);
     Ok(out)
 }
 
-/// Count the declarations of `dependency` whose version requirement is exactly `from`
-/// — the fail-closed gate [`rewrite_pin`] keys on.
-fn count_pin_matches(manifest: &str, dependency: &str, from: &str) -> usize {
-    let mut count = 0;
+/// Count `(matching, total)` explicit version declarations for `dependency` — the
+/// fail-closed equivalence gate [`rewrite_pin`] keys on.
+fn count_pin_matches(manifest: &str, dependency: &str, from: &str) -> (usize, usize) {
+    let mut matching = 0;
+    let mut total = 0;
     let mut in_dep_subtable = false;
     for line in manifest.lines() {
         let trimmed = strip_comment(line).trim();
         if let Some(header) = section_header(trimmed) {
             in_dep_subtable = dep_subtable_matches(header, dependency);
         } else if in_dep_subtable {
-            if key_has_exact_string(trimmed, "version", from) {
-                count += 1;
+            if let Some(value) = scan_key_string(trimmed, "version") {
+                total += 1;
+                matching += usize::from(value == from);
             }
-        } else if line_declares_dep_inline(trimmed, dependency)
-            && inline_has_exact_version(trimmed, from)
-        {
-            count += 1;
+        } else if line_declares_dep_inline(trimmed, dependency) {
+            if let Some(value) = inline_version_value(trimmed) {
+                total += 1;
+                matching += usize::from(value == from);
+            }
         }
     }
-    count
+    (matching, total)
 }
 
 /// Finalize a Keep-a-Changelog CHANGELOG: promote the `## [Unreleased]` section's
@@ -452,13 +457,10 @@ fn section_header(trimmed: &str) -> Option<&str> {
 }
 
 /// Whether a TOML section `header` is the dependency sub-table for `dependency`
-/// (`[dependencies.<dep>]`, `[build-dependencies.<dep>]`, or a target-specific
-/// `[target.<cfg>.dependencies.<dep>]`), excluding every `dev-dependencies` form.
+/// (`[dependencies.<dep>]`, `[dev-dependencies.<dep>]`,
+/// `[build-dependencies.<dep>]`, or a target-specific equivalent).
 fn dep_subtable_matches(header: &str, dependency: &str) -> bool {
-    if header.contains("dev-dependencies") {
-        return false;
-    }
-    for infix in ["dependencies.", "build-dependencies."] {
+    for infix in ["dependencies.", "dev-dependencies.", "build-dependencies."] {
         if let Some(idx) = header.rfind(infix) {
             let name = header[idx + infix.len()..].trim().trim_matches(['"', '\'']);
             return name == dependency;
@@ -482,11 +484,6 @@ fn line_declares_dep_inline(trimmed: &str, dependency: &str) -> bool {
     trimmed[eq + 1..].trim_start().starts_with('{')
 }
 
-/// Whether an inline dependency table `trimmed` carries `version = "<from>"` exactly.
-fn inline_has_exact_version(trimmed: &str, from: &str) -> bool {
-    inline_version_value(trimmed).is_some_and(|v| v == from)
-}
-
 /// The `version = "…"` value inside an inline dependency table, matching `version` as a
 /// whole key (mirrors the facts parser's discipline).
 fn inline_version_value(inline: &str) -> Option<String> {
@@ -499,11 +496,6 @@ fn inline_version_value(inline: &str) -> Option<String> {
 fn line_starts_with_key(line: &str, key: &str) -> bool {
     line.strip_prefix(key)
         .is_some_and(|rest| rest.trim_start().starts_with('='))
-}
-
-/// Whether a `key = "value"` line (whole-key `key`) has value exactly `expected`.
-fn key_has_exact_string(trimmed: &str, key: &str, expected: &str) -> bool {
-    scan_key_string(trimmed, key).is_some_and(|v| v == expected)
 }
 
 /// Replace a whole-key `key = "<old>"` with `key = "<new>"` on `line`, but only when
@@ -779,8 +771,16 @@ mod tests {
     }
 
     #[test]
-    fn pin_rewrite_fails_closed_on_multiple_matches() {
-        let manifest = "[dependencies]\ncore = { path = \"a\", version = \"=0.4.0\" }\n[build-dependencies]\ncore = { path = \"a\", version = \"=0.4.0\" }\n";
+    fn pin_rewrite_updates_every_equivalent_dependency_table() {
+        let manifest = "[dependencies]\ncore = { path = \"a\", version = \"=0.4.0\" }\n[dev-dependencies]\ncore = { path = \"a\", version = \"=0.4.0\" }\n[build-dependencies]\ncore = { path = \"a\", version = \"=0.4.0\" }\n[target.'cfg(unix)'.dependencies]\ncore = { path = \"a\", version = \"=0.4.0\" }\n";
+        let out = rewrite_pin(manifest, "core", "=0.4.0", "=0.5.0").unwrap();
+        assert_eq!(out.matches("version = \"=0.5.0\"").count(), 4);
+        assert!(!out.contains("version = \"=0.4.0\""));
+    }
+
+    #[test]
+    fn pin_rewrite_fails_closed_on_non_equivalent_matches() {
+        let manifest = "[dependencies]\ncore = { path = \"a\", version = \"=0.4.0\" }\n[dev-dependencies]\ncore = { path = \"a\", version = \"^0.4\" }\n";
         let err = rewrite_pin(manifest, "core", "=0.4.0", "=0.5.0").unwrap_err();
         assert!(matches!(err, BumpEditError::PinAmbiguous { count: 2, .. }));
     }
