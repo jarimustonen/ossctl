@@ -566,6 +566,34 @@ impl std::fmt::Display for AdapterError {
 
 impl std::error::Error for AdapterError {}
 
+impl AdapterError {
+    /// Whether repeating a post-tag distribution operation is appropriate after a
+    /// bounded backoff. Only command failures carrying a recognized transient
+    /// network signal qualify: spawn/filesystem/configuration failures require an
+    /// operator fix, while arbitrary command failures may have permanent causes.
+    #[must_use]
+    pub(crate) fn is_retryable_network_failure(&self) -> bool {
+        let Self::Command { stderr, .. } = self else {
+            return false;
+        };
+        let detail = stderr.to_ascii_lowercase();
+        [
+            "http 429",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+            "connection reset",
+            "connection timed out",
+            "operation timed out",
+            "temporary failure",
+            "temporarily unavailable",
+        ]
+        .iter()
+        .any(|signal| detail.contains(signal))
+    }
+}
+
 /// The per-ecosystem operations the release coordinator drives through its phase
 /// barriers (ADR-0002 §1).
 ///

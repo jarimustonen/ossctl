@@ -422,7 +422,7 @@ pub fn execute(
     // its real sha256. Runs for every cut (a no-op when there is no post-tag
     // target); its Ok completion flips the run to Completed. (`repo_slug` /
     // `homebrew` were moved into `artifacts` above; re-read them from there.)
-    dist_phase(
+    let dist_result = dist_phase(
         journal,
         sink,
         ctx,
@@ -430,17 +430,38 @@ pub fn execute(
         plan,
         artifacts.repo_slug.as_deref(),
         artifacts.homebrew.as_ref(),
-    )?;
-    verify_phase(
-        journal,
-        sink,
-        ctx,
-        &targets,
-        plan,
-        artifacts.homebrew.as_ref(),
-    )?;
-
-    Ok(())
+    );
+    match dist_result {
+        Ok(()) => verify_phase(
+            journal,
+            sink,
+            ctx,
+            &targets,
+            plan,
+            artifacts.homebrew.as_ref(),
+        ),
+        Err(dist_error @ CutError::PhaseFailed { .. }) => {
+            let verify_result = verify_phase(
+                journal,
+                sink,
+                ctx,
+                &targets,
+                plan,
+                artifacts.homebrew.as_ref(),
+            );
+            match verify_result {
+                Ok(()) | Err(CutError::PhaseFailed { .. }) => {
+                    Err(with_post_failure_verification(dist_error, journal.state()))
+                }
+                // A journal failure while recording the urgent post-failure
+                // observation is more fundamental than the already-recorded dist
+                // failure. Plan/checkout errors cannot arise inside verify.
+                Err(verify_error) => Err(verify_error),
+            }
+        }
+        // Never continue effects after the journal itself failed.
+        Err(other) => Err(other),
+    }
 }
 
 /// Preflight a plan **without** touching external state or creating a run: check
@@ -1217,6 +1238,14 @@ fn needs_post_tag(tp: &TargetPlan) -> bool {
     )
 }
 
+/// Maximum attempts for a retryable post-tag distribution publish. Three attempts
+/// absorb a brief GitHub 5xx/rate-limit window without turning a cut into an
+/// unbounded retry loop after the point of no return.
+const DIST_PUBLISH_ATTEMPTS: u32 = 3;
+/// Exponential-backoff base for distribution retries (2s, then 4s), through the
+/// injected clock so tests never sleep in wall-clock time.
+const DIST_PUBLISH_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Run the dist (post-tag finalize) barrier: finalize every post-tag target now
 /// that the tag archive exists. For homebrew this resolves the pushed tag archive,
 /// computes its **real** `sha256`, and hands it to the homebrew adapter so the
@@ -1284,7 +1313,7 @@ fn dist_phase(
             if journal.state().published.contains_key(&tp.id) {
                 continue;
             }
-            match tp.adapter.publish(&dist_ctx, &tp.input) {
+            match publish_dist_with_retry(&dist_ctx, tp) {
                 Ok(receipt) => {
                     record(
                         journal,
@@ -1311,6 +1340,62 @@ fn dist_phase(
         },
     )?;
     Ok(())
+}
+
+fn publish_dist_with_retry(
+    ctx: &EffectCtx<'_>,
+    target: &TargetPlan,
+) -> Result<AdapterReceipt, super::adapters::AdapterError> {
+    let mut attempt = 1;
+    loop {
+        match target.adapter.publish(ctx, &target.input) {
+            Ok(receipt) => return Ok(receipt),
+            Err(error)
+                if error.is_retryable_network_failure() && attempt < DIST_PUBLISH_ATTEMPTS =>
+            {
+                ctx.clock
+                    .sleep(DIST_PUBLISH_BACKOFF.saturating_mul(attempt));
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Enrich a post-tag dist failure with the observation facts the coordinator
+/// gathered before returning. The original failure remains primary (and resumable),
+/// but the operator immediately sees which destinations actually match instead of
+/// receiving the old "verify is not implemented yet" dead end after irreversible
+/// publishes.
+fn with_post_failure_verification(error: CutError, state: &RunState) -> CutError {
+    let CutError::PhaseFailed {
+        phase,
+        target,
+        mut message,
+    } = error
+    else {
+        return error;
+    };
+    let observations = state
+        .targets
+        .iter()
+        .map(|target| {
+            let outcome = state
+                .verified
+                .get(target)
+                .map_or("not_observed", |outcome| outcome.as_str());
+            format!("{target}={outcome}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    message = format!(
+        "{message}; post-failure verify ran after the irreversible tag/publishes and observed: {observations}"
+    );
+    CutError::PhaseFailed {
+        phase,
+        target,
+        message,
+    }
 }
 
 /// Maximum time the verify barrier waits for a CI-delegated destination to appear:

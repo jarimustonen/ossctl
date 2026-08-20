@@ -2309,9 +2309,10 @@ fn cut_error_to_cli(run_id: &str, err: CutError) -> CliError {
             "release_failed",
             format!(
                 "run {run_id}: {err}. Nothing was rolled back; the journal records exactly what \
-                 landed under this run id. Recovery via `release verify {run_id}` / `release \
-                 resume {run_id}` lands in a later version; until then inspect the journal and \
-                 reconcile the registries manually before retrying"
+                 landed under this run id. For a post-publish distribution failure the cut already \
+                 ran the verify barrier and included its observations above. Re-run `ossctl release \
+                 verify {run_id}` for a fresh read-only snapshot, or `ossctl release resume \
+                 {run_id}` after resolving the reported blocker"
             ),
         ),
     }

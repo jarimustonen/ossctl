@@ -2,7 +2,7 @@
 created: 2026-08-17
 updated: 2026-08-20
 type: bug
-status: open
+status: in-progress
 priority: high
 collision: [crates/ossctl-cli/src/release.rs, crates/ossctl-core/src/release/distribution.rs]
 lane: verify-seam

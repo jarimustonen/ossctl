@@ -604,6 +604,20 @@ fn check_dist_workspace_homebrew(
         });
 
     let contract_tap = distributions.iter().find_map(|d| d.homebrew_tap.as_deref());
+    if has_homebrew_publish_job
+        && targets.iter().any(|target| {
+            target.registry == Registry::Homebrew && target.adapter == Adapter::HomebrewTap
+        })
+    {
+        p.err(
+            "floor: dist-workspace.toml publish-jobs includes 'homebrew', but the contract's \
+             Homebrew target uses adapter 'homebrew-tap' — cargo-dist CI and ossctl would both \
+             write the same tap. Change that target to adapter 'cargo-dist' so the engine \
+             delegates the write and verifies the formula, or remove cargo-dist's Homebrew \
+             publish job"
+                .to_string(),
+        );
+    }
     if (has_tap || has_homebrew_publish_job) && contract_tap.is_none() {
         p.warn(
             "dist-workspace.toml configures Homebrew, but the contract omits \
@@ -3056,7 +3070,42 @@ mod tests {
         );
     }
 
-    /// When both configs declare the tap, cargo-dist contributes no warning.
+    #[test]
+    fn dist_workspace_homebrew_publish_job_refuses_an_engine_owned_tap_target() {
+        let fs = FakeFs::with_file(
+            "/repo/dist-workspace.toml",
+            "[dist]\ntap = \"owner/homebrew-tool\"\npublish-jobs = [\"homebrew\"]\n",
+        );
+        let n = norm_with(
+            "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets:\n  \
+             - {ecosystem: rust, package: tool, registry: gh-releases, adapter: cargo-dist}\n  \
+             - {ecosystem: rust, package: tool, registry: homebrew, adapter: homebrew-tap}\n\
+             distribution:\n  adapter: cargo-dist\n  installers: [shell]\n  \
+             homebrew_tap: owner/homebrew-tool\n---\n",
+            &fs,
+        );
+        assert_error_contains(&n, "cargo-dist CI and ossctl would both write the same tap");
+    }
+
+    #[test]
+    fn dist_workspace_homebrew_publish_job_accepts_a_delegated_tap_target() {
+        let fs = FakeFs::with_file(
+            "/repo/dist-workspace.toml",
+            "[dist]\ntap = \"owner/homebrew-tool\"\npublish-jobs = [\"homebrew\"]\n",
+        );
+        let n = norm_with(
+            "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets:\n  \
+             - {ecosystem: rust, package: tool, registry: gh-releases, adapter: cargo-dist}\n  \
+             - {ecosystem: rust, package: tool, registry: homebrew, adapter: cargo-dist}\n\
+             distribution:\n  adapter: cargo-dist\n  installers: [homebrew]\n  \
+             homebrew_tap: owner/homebrew-tool\n---\n",
+            &fs,
+        );
+        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
+    }
+
+    /// When both configs declare the tap but cargo-dist does not publish it, the
+    /// engine-owned target remains valid (ossctl's own release shape).
     #[test]
     fn dist_workspace_tap_matching_contract_is_silent() {
         let fs = FakeFs::with_file(

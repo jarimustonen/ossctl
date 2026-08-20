@@ -113,6 +113,9 @@ struct FakeCmd {
     /// commit that is not present locally, so the clean checkout fails closed.
     cat_file_missing: bool,
     fail_contains: Option<String>,
+    /// A transient command failure injected only on its first matching call.
+    fail_once_contains: Option<String>,
+    failed_once: Cell<bool>,
     /// Canned `git remote get-url origin` stdout — lets a cut resolve a source
     /// tarball URL. `None` means "no origin" (empty stdout, as a bare repo).
     origin: Option<String>,
@@ -142,6 +145,8 @@ impl FakeCmd {
             cwds: RefCell::new(Vec::new()),
             cat_file_missing: false,
             fail_contains: None,
+            fail_once_contains: None,
+            failed_once: Cell::new(false),
             origin: None,
             published: Rc::new(RefCell::new(HashMap::new())),
             publish_version: "1.2.3".to_string(),
@@ -167,6 +172,12 @@ impl FakeCmd {
     fn failing_on(substr: &str) -> Self {
         Self {
             fail_contains: Some(substr.to_string()),
+            ..Self::new()
+        }
+    }
+    fn failing_once_on(substr: &str) -> Self {
+        Self {
+            fail_once_contains: Some(substr.to_string()),
             ..Self::new()
         }
     }
@@ -198,6 +209,18 @@ impl FakeCmd {
     }
     fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
+    }
+    fn transient_failure(&self, line: &str) -> Option<CommandOutput> {
+        (self
+            .fail_once_contains
+            .as_ref()
+            .is_some_and(|needle| line.contains(needle))
+            && !self.failed_once.replace(true))
+        .then(|| CommandOutput {
+            status: Some(1),
+            stdout: String::new(),
+            stderr: "remote service unavailable (HTTP 503)".into(),
+        })
     }
     fn git_output(&self, args: &[&str]) -> Option<CommandOutput> {
         if args.first() == Some(&"cat-file") {
@@ -236,7 +259,13 @@ impl FakeCmd {
         })
     }
     fn homebrew_observation(&self, program: &str, args: &[&str]) -> Option<CommandOutput> {
-        if program == "brew" && args.first() == Some(&"bump-formula-pr") {
+        if program == "brew"
+            && args.first() == Some(&"bump-formula-pr")
+            && !self
+                .fail_contains
+                .as_ref()
+                .is_some_and(|needle| format!("{program} {}", args.join(" ")).contains(needle))
+        {
             return Some(CommandOutput {
                 status: Some(0),
                 stdout: "https://github.com/Homebrew/homebrew-core/pull/1\n".to_string(),
@@ -273,6 +302,9 @@ impl CommandRunner for FakeCmd {
         let line = format!("{program} {}", args.join(" "));
         self.calls.borrow_mut().push(line.clone());
         self.cwds.borrow_mut().push(cwd.to_path_buf());
+        if let Some(output) = self.transient_failure(&line) {
+            return Ok(output);
+        }
         if program == "git" {
             if let Some(output) = self.git_output(args) {
                 return Ok(output);
@@ -337,10 +369,11 @@ impl CommandRunner for FakeCmd {
                 stderr: String::new(),
             });
         }
-        let fails = self
+        let permanently_fails = self
             .fail_contains
             .as_ref()
             .is_some_and(|s| line.contains(s.as_str()));
+        let fails = permanently_fails;
         // A successful twine upload is visible to the Python registry verification.
         if !fails && program == "twine" && args.first() == Some(&"upload") {
             self.published.borrow_mut().insert(
@@ -375,7 +408,11 @@ impl CommandRunner for FakeCmd {
         Ok(CommandOutput {
             status: Some(i32::from(fails)),
             stdout: String::new(),
-            stderr: if fails { "boom".into() } else { String::new() },
+            stderr: if permanently_fails {
+                "boom".into()
+            } else {
+                String::new()
+            },
         })
     }
 }
@@ -2104,6 +2141,122 @@ fn refuses_a_target_with_no_resolved_package() {
     // Refused before any command or tag ran.
     assert!(cmd.calls().is_empty());
     assert!(tagger.calls().is_empty());
+}
+
+// ── Post-tag failure safety ─────────────────────────────────────────────────
+
+fn homebrew_core_plan() -> ReleasePlan {
+    ReleasePlan {
+        plan_id: "homebrew-core-plan".into(),
+        contract_schema_version: 1,
+        head_sha: "deadbeef".into(),
+        version: "1.2.3".into(),
+        targets: vec![plan_target(
+            Ecosystem::Rust,
+            Registry::Homebrew,
+            Adapter::HomebrewCore,
+        )],
+        phases: PlanPhase::SEQUENCE.to_vec(),
+        bump: None,
+        homebrew_tap: None,
+        license: None,
+        description: Some("Test release tool".into()),
+        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
+    }
+}
+
+#[test]
+fn dist_publish_retries_a_transient_network_failure() {
+    let cmd = FakeCmd::failing_once_on("brew bump-formula-pr");
+    let clock = FakeClock(Cell::new(1000));
+    let registry = FakeRegistry::empty();
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &registry,
+        repo_root: Path::new("/repo"),
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let targets = resolve_target_plans(&homebrew_core_plan()).unwrap();
+
+    publish_dist_with_retry(&ctx, &targets[0]).expect("the retry should recover the 503");
+
+    assert_eq!(
+        cmd.calls()
+            .iter()
+            .filter(|call| call.starts_with("brew bump-formula-pr"))
+            .count(),
+        2,
+        "the transient failure must be retried exactly once before success"
+    );
+    assert!(clock.0.get() >= 1002, "the retry must use bounded backoff");
+}
+
+#[test]
+fn dist_failure_after_tag_still_runs_verify_and_reports_observations() {
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::failing_on("brew bump-formula-pr");
+    let registry = FakeRegistry::empty();
+    let tagger = FakeTagger::new();
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &registry,
+        repo_root: Path::new("/repo"),
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let plan = homebrew_core_plan();
+    let ids = crate::release::journal_target_ids(&plan.targets);
+    let mut journal = Journal::create(
+        &store,
+        &clock,
+        &idgen,
+        paths(),
+        plan.plan_id.clone(),
+        plan.version.clone(),
+        ids.clone(),
+    )
+    .unwrap();
+    let mut sink = RecordingSink::default();
+
+    let error = execute(&mut journal, &plan, &ctx, &tagger, &mut sink)
+        .expect_err("the permanent dist failure remains red");
+
+    assert!(tagger.calls().iter().any(|call| call == "push:v1.2.3"));
+    assert_eq!(
+        journal.state().verified.get(&ids[0]),
+        Some(&VerifyOutcome::Missing)
+    );
+    let dist_failed = first_idx(&sink.kinds, |event| {
+        matches!(
+            event,
+            EventKind::PhaseCompleted {
+                phase: Phase::Dist,
+                outcome: PhaseOutcome::Failed
+            }
+        )
+    })
+    .unwrap();
+    let verify_entered = first_idx(&sink.kinds, |event| {
+        matches!(
+            event,
+            EventKind::PhaseEntered {
+                phase: Phase::Verify
+            }
+        )
+    })
+    .unwrap();
+    assert!(
+        dist_failed < verify_entered,
+        "verify must follow the failed dist barrier"
+    );
+    assert!(
+        error.to_string().contains("post-failure verify ran")
+            && error.to_string().contains("rust=missing"),
+        "operator-facing error omitted the landing observation: {error}"
+    );
 }
 
 // ── CI-delegated skip + post-tag homebrew (release-engine-cut-cargo-dist-flow) ─

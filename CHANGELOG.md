@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this command so operators can inspect exactly what ossctl read.
 
 ### Fixed
+- **Release cuts no longer double-write cargo-dist-owned Homebrew taps or hide what landed after a post-tag failure.** A cargo-dist `publish-jobs = ["homebrew"]` configuration now refuses an engine-owned `homebrew-tap` target in favor of the delegated `cargo-dist` target, while ossctl's own engine-owned tap path remains intact. Retryable dist-phase network failures use bounded backoff, and a terminal dist failure still runs the verify barrier and reports its destination observations (`cut-runs-own`).
 - **GitHub Releases produced by cargo-dist are now verified at their actual destination.**
   Release verification resolves the published `v<version>` tag, ignores cargo-dist's
   human-formatted Release title, and observes cargo-dist's own manifest instead of
