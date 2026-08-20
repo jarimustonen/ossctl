@@ -66,8 +66,13 @@ _2. **`project-canon`: is its crates.io publish local or CI-performed?** Unlike
    orchestratectl its contract does not say, and guessing wrong either double-publishes or
    pushes a tag and waits 20 minutes for a publish nobody performs. Its filed issue
    deliberately refuses to guess._
-_3. **Cross-repo follow-through is unauthorised.** The five filed issues are ossctl-scope
-   clean but acting on them edits other repos' release behaviour. Awaiting a go._
+_3. **Cross-repo follow-through is PART DONE (verified 2026-08-20 at wrap).** Of the five
+   filed issues, `issuectl` (`homebrew-double-writer-contract` — the active double writer)
+   and `orchestratectl` (`contract-declare-ci-publish-surface`) are already `fixed`;
+   orchestratectl's contract now declares `cargo-publish-ci` ×2 + `cargo-dist` for both
+   gh-releases and homebrew. Still open: `glasspad`, `project-canon`, `intakectl`. Note
+   NONE of the fixed ones has yet been through a real cut, so the 1.0 evidence gap below is
+   unchanged — declaring the shape is not the same as proving it._
 _4. **`ossctl-phase4-build` (the parent epic) is unscheduled** and needs scheduling
    triage — it was written to close when the release-safety and cli-canon lanes drain, and
    both have since drained and refilled with different work._
