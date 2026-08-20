@@ -1,6 +1,6 @@
 ---
 created: 2026-08-17
-updated: 2026-08-19
+updated: 2026-08-20
 type: bug
 status: open
 priority: high
@@ -124,3 +124,16 @@ in-flight.
 ### 2026-08-19T04:36:17Z · @agent-stint-23
 
 Lane-derivation note (stint #23 orchestrator, unverified hint — not a diagnosis): the cut-time observer adapters/binary.rs::observe_release_assets keys on the git tag v{version} and looks correct. The error text in this report ("the registry does not report this version as published") is release/reconcile.rs wording, and that path routes gh-releases through a generic *registry* query keyed on receipt.registry_url. Suggest starting the investigation in reconcile.rs rather than in the tag lookup.
+
+### 2026-08-20T05:32:44Z · @agent-stint-23
+
+FOURTH occurrence, and new evidence (from duplicate intake-bug-ossctl-09cd3c1d03d0, project-canon v0.6.0, 2026-08-19):
+
+- Reproduced on ossctl 0.9.0, commit 4bd2ae389627 — the released binary. 0.9.0 gh-releases verify work does NOT fix this.
+- Run 01M0CDRH6CBM574MRFMQTCR9W2, plan de0d83794b6a. crates.io both matched; only gh-releases returned missing after the ~20 min wait.
+- External proof of existence at the time of the false missing: release published 2026-08-19T07:15:41Z with dist-manifest, installer, formula, source archives, checksums and macOS/Linux arm64+x86_64 archives; cargo-dist workflow run 32226769657 green; crates.io and the Homebrew tap both at 0.6.0.
+- NEW SYMPTOM worth fixing alongside: `ossctl release list --json` showed THREE earlier project-canon runs stuck in_progress on the same delegated gh-releases shape. So the fault does not only fail a cut, it leaves accumulating unresolved runs in the journal.
+- The operator had to `release abandon` a fully-landed release to clear it.
+
+Reporter naming the affected package: project-canon-cli (binary) vs project-canon (project/tag/tap) — consistent with the package-vs-project lookup hypothesis already recorded.
+

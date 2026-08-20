@@ -3,11 +3,12 @@ created: 2026-08-20
 updated: 2026-08-20
 type: bug
 reporter: jari
-status: open
+status: duplicate
 priority: normal
 labels:
 - via:agent-homebase-wrapup
-- needs-triage
+closed: 2026-08-20
+closed_by: agent-stint-23
 ---
 
 # Cargo-dist verifier reports existing GitHub Releases missing
@@ -116,3 +117,11 @@ If the adapter cannot verify GitHub at that moment, it should report `unknown` w
 - `project-canon-cli` is the Cargo package, `project-canon` is the repository and installed binary/formula name, and the tag is `v0.6.0`; a package-vs-repository-name mismatch may be relevant.
 - Compare verifier requests with `gh release view v0.6.0 --repo jarimustonen/project-canon` or the equivalent GitHub Releases API endpoint.
 - The project-canon release journal retains the run ids and event history listed above.
+
+## Resolution
+
+### 2026-08-20T05:32:44Z · @agent-stint-23
+
+Duplicate of @verify-gh-release-missing (same false-missing on a delegated gh-releases target, same repo). Not closed silently: its distinguishing evidence — reproduction on the released 0.9.0 binary, the external proof-of-existence set, and the three earlier runs left stuck in_progress — has been appended to that issue, which is head-of-line in the verify-seam lane.
+
+Reopen condition: reopen this slug only if it turns out to be a DIFFERENT fault from verify-gh-release-missing (for example if the latter is fixed and this shape still reproduces).
