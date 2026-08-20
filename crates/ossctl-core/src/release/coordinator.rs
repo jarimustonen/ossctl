@@ -21,7 +21,9 @@
 //! - **Strict barriers.** Every target must clear a phase before *any* target
 //!   enters the next. A publish can never precede an all-targets build; a tag can
 //!   never precede an all-targets publish. A failure in phase *K* blocks entry to
-//!   *K+1* and records a `phase_completed { phase, outcome: failed }` fact.
+//!   *K+1* and records a `phase_completed { phase, outcome: failed }` fact. The sole
+//!   exception is observation-only verify after a post-tag dist failure: it records
+//!   every destination outcome but can never complete the failed run.
 //! - **One scoped exception — cargo-ecosystem interleave (ADR-0002 amendment,
 //!   2026-08-06).** For a multi-crate cargo workspace whose dependent crate pins a
 //!   workspace dependency that is **not yet on the crates.io index** (`dep =
@@ -85,7 +87,8 @@
 //!   tag-once: the coordinator resolves the pushed tag archive, computes its real
 //!   `sha256`, and hands it to the Homebrew adapter so the generated `.rb` carries a
 //!   correct hash (no draft-PR placeholder). It runs for every cut (a no-op when
-//!   there is no post-tag target) and its `Ok` completion flips the run to
+//!   there is no post-tag target) and leads into the final verify barrier; only
+//!   `verify ok` flips the run to
 //!   [`RunStatus::Completed`](crate::protocol::journal::RunStatus::Completed).
 //! - **No auto-rollback.** On any failure the coordinator *stops and journals
 //!   precisely what landed* — it never undoes a published artifact. Recovery is
@@ -420,13 +423,27 @@ pub fn execute(
     )?;
     // dist (post-tag finalize): now the tag archive exists, finalize homebrew with
     // its real sha256. Runs for every cut (a no-op when there is no post-tag
-    // target); its Ok completion flips the run to Completed. (`repo_slug` /
+    // target); the following verify barrier is the only completion signal. (`repo_slug` /
     // `homebrew` were moved into `artifacts` above; re-read them from there.)
+    dist_then_verify(journal, sink, ctx, &targets, plan, &artifacts)
+}
+
+/// Finalize post-tag distribution and always gather destination evidence after an
+/// ordinary dist phase failure. Kept separate so [`execute`] remains a readable
+/// high-level phase sequence.
+fn dist_then_verify(
+    journal: &mut Journal<'_>,
+    sink: &mut dyn ProgressSink,
+    ctx: &EffectCtx<'_>,
+    targets: &[TargetPlan],
+    plan: &ReleasePlan,
+    artifacts: &ReleaseArtifacts,
+) -> Result<(), CutError> {
     let dist_result = dist_phase(
         journal,
         sink,
         ctx,
-        &targets,
+        targets,
         plan,
         artifacts.repo_slug.as_deref(),
         artifacts.homebrew.as_ref(),
@@ -436,22 +453,33 @@ pub fn execute(
             journal,
             sink,
             ctx,
-            &targets,
+            targets,
             plan,
             artifacts.homebrew.as_ref(),
+            VerifyMode::CompletionBarrier,
         ),
         Err(dist_error @ CutError::PhaseFailed { .. }) => {
             let verify_result = verify_phase(
                 journal,
                 sink,
                 ctx,
-                &targets,
+                targets,
                 plan,
                 artifacts.homebrew.as_ref(),
+                VerifyMode::ObserveAfterDistFailure,
             );
             match verify_result {
-                Ok(()) | Err(CutError::PhaseFailed { .. }) => {
-                    Err(with_post_failure_verification(dist_error, journal.state()))
+                Ok(()) => Err(with_post_failure_verification(
+                    dist_error,
+                    journal.state(),
+                    None,
+                )),
+                Err(verify_error @ CutError::PhaseFailed { .. }) => {
+                    Err(with_post_failure_verification(
+                        dist_error,
+                        journal.state(),
+                        Some(&verify_error),
+                    ))
                 }
                 // A journal failure while recording the urgent post-failure
                 // observation is more fundamental than the already-recorded dist
@@ -1242,7 +1270,7 @@ fn needs_post_tag(tp: &TargetPlan) -> bool {
 /// absorb a brief GitHub 5xx/rate-limit window without turning a cut into an
 /// unbounded retry loop after the point of no return.
 const DIST_PUBLISH_ATTEMPTS: u32 = 3;
-/// Exponential-backoff base for distribution retries (2s, then 4s), through the
+/// Backoff base for distribution retries (2s, then 4s), through the
 /// injected clock so tests never sleep in wall-clock time.
 const DIST_PUBLISH_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -1351,7 +1379,7 @@ fn publish_dist_with_retry(
         match target.adapter.publish(ctx, &target.input) {
             Ok(receipt) => return Ok(receipt),
             Err(error)
-                if error.is_retryable_network_failure() && attempt < DIST_PUBLISH_ATTEMPTS =>
+                if error.is_retryable_dist_setup_failure() && attempt < DIST_PUBLISH_ATTEMPTS =>
             {
                 ctx.clock
                     .sleep(DIST_PUBLISH_BACKOFF.saturating_mul(attempt));
@@ -1367,7 +1395,11 @@ fn publish_dist_with_retry(
 /// but the operator immediately sees which destinations actually match instead of
 /// receiving the old "verify is not implemented yet" dead end after irreversible
 /// publishes.
-fn with_post_failure_verification(error: CutError, state: &RunState) -> CutError {
+fn with_post_failure_verification(
+    error: CutError,
+    state: &RunState,
+    verify_error: Option<&CutError>,
+) -> CutError {
     let CutError::PhaseFailed {
         phase,
         target,
@@ -1389,8 +1421,11 @@ fn with_post_failure_verification(error: CutError, state: &RunState) -> CutError
         .collect::<Vec<_>>()
         .join(", ");
     message = format!(
-        "{message}; post-failure verify ran after the irreversible tag/publishes and observed: {observations}"
+        "{message}; post-failure verify ran after the irreversible tag/publishes and observed journal targets: {observations}"
     );
+    if let Some(verify_error) = verify_error {
+        message = format!("{message}; post-failure verify reported: {verify_error}");
+    }
     CutError::PhaseFailed {
         phase,
         target,
@@ -1408,6 +1443,15 @@ const DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS: u64 = 20 * 60;
 /// [`Clock::sleep`](crate::ports::Clock::sleep) so tests advance virtual time.
 const DELEGATED_RELEASE_VERIFY_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(15);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerifyMode {
+    /// The ordinary final barrier: all Matches records Verify Ok and completes.
+    CompletionBarrier,
+    /// Emergency observation after Dist Failed: records every target outcome but
+    /// always records Verify Failed, so a red dist run can never become Completed.
+    ObserveAfterDistFailure,
+}
 
 /// Observe every destination after dist. A v5 cut is not complete until each
 /// receipt or CI-delegation has an observed-good result; Unknown is deliberately
@@ -1439,6 +1483,7 @@ fn verify_phase(
     targets: &[TargetPlan],
     plan: &ReleasePlan,
     homebrew: Option<&HomebrewFormula>,
+    mode: VerifyMode,
 ) -> Result<(), CutError> {
     let phase = Phase::Verify;
     if phase_completed_ok(journal.state(), phase) {
@@ -1448,6 +1493,7 @@ fn verify_phase(
     verification_artifacts.homebrew = homebrew.cloned();
     let verify_ctx = ctx.with_artifacts(&verification_artifacts);
     record(journal, sink, EventKind::PhaseEntered { phase })?;
+    let mut first_failure: Option<(String, String)> = None;
     for tp in targets {
         if journal.state().verified.get(&tp.id) == Some(&VerifyOutcome::Matches) {
             continue;
@@ -1494,46 +1540,45 @@ fn verify_phase(
                 outcome,
             },
         )?;
-        match outcome {
-            VerifyOutcome::Matches => {}
+        let failure = match outcome {
+            VerifyOutcome::Matches => None,
             VerifyOutcome::Unknown => {
-                return fail_phase(
-                    journal,
-                    sink,
-                    phase,
-                    Some(tp.id.clone()),
-                    format!("could not observe {} at its destination", tp.id),
-                )
+                Some(format!("could not observe {} at its destination", tp.id))
             }
-            VerifyOutcome::Missing => {
-                return fail_phase(
-                    journal,
-                    sink,
-                    phase,
-                    Some(tp.id.clone()),
-                    format!("{} is missing at its destination", tp.id),
-                )
-            }
+            VerifyOutcome::Missing => Some(format!("{} is missing at its destination", tp.id)),
             VerifyOutcome::Conflicts => {
-                return fail_phase(
-                    journal,
-                    sink,
-                    phase,
-                    Some(tp.id.clone()),
-                    format!("{} conflicts with its recorded receipt", tp.id),
-                )
+                Some(format!("{} conflicts with its recorded receipt", tp.id))
+            }
+        };
+        if first_failure.is_none() {
+            if let Some(message) = failure {
+                first_failure = Some((tp.id.clone(), message));
             }
         }
     }
-    record(
-        journal,
-        sink,
-        EventKind::PhaseCompleted {
+    match (mode, first_failure) {
+        (VerifyMode::CompletionBarrier, None) => {
+            record(
+                journal,
+                sink,
+                EventKind::PhaseCompleted {
+                    phase,
+                    outcome: PhaseOutcome::Ok,
+                },
+            )?;
+            Ok(())
+        }
+        (_, Some((target, message))) => {
+            fail_phase(journal, sink, phase, Some(target), message)
+        }
+        (VerifyMode::ObserveAfterDistFailure, None) => fail_phase(
+            journal,
+            sink,
             phase,
-            outcome: PhaseOutcome::Ok,
-        },
-    )?;
-    Ok(())
+            None,
+            "all declared destinations match, but the preceding dist barrier failed and the run remains resumable".to_string(),
+        ),
+    }
 }
 
 /// Observe a cargo-dist CI-owned Homebrew formula. Unlike the engine-owned tap

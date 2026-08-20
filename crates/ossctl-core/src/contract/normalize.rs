@@ -604,6 +604,18 @@ fn check_dist_workspace_homebrew(
         });
 
     let contract_tap = distributions.iter().find_map(|d| d.homebrew_tap.as_deref());
+    let has_delegated_homebrew_target = targets.iter().any(|target| {
+        target.registry == Registry::Homebrew && target.adapter == Adapter::CargoDist
+    });
+    if has_homebrew_publish_job && !has_delegated_homebrew_target {
+        p.err(
+            "floor: dist-workspace.toml publish-jobs includes 'homebrew', but the contract has \
+             no delegated Homebrew target — cargo-dist would write a formula that the verify \
+             barrier never observes. Add a target with registry 'homebrew' and adapter \
+             'cargo-dist', or remove cargo-dist's Homebrew publish job"
+                .to_string(),
+        );
+    }
     if has_homebrew_publish_job
         && targets.iter().any(|target| {
             target.registry == Registry::Homebrew && target.adapter == Adapter::HomebrewTap
@@ -3024,9 +3036,10 @@ mod tests {
         );
     }
 
-    /// A cargo-dist Homebrew publish job has the same silent-drop risk as a tap.
+    /// A cargo-dist Homebrew publish job is a real destination and must be modelled
+    /// as a delegated target so the mandatory verify barrier observes it.
     #[test]
-    fn dist_workspace_homebrew_publish_job_without_distribution_warns() {
+    fn dist_workspace_homebrew_publish_job_without_target_is_a_floor() {
         let fs = FakeFs::with_file(
             "/repo/dist-workspace.toml",
             "[dist]\npublish-jobs = [\"homebrew\"]\n",
@@ -3035,16 +3048,7 @@ mod tests {
             "---\nstatus: approved\nmaturity: mvp\necosystems: [rust]\n---\n",
             &fs,
         );
-        assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
-        assert!(
-            n.problems
-                .warnings
-                .iter()
-                .any(|w| w.contains("distribution.homebrew_tap")
-                    && w.contains("will not be planned")),
-            "expected cargo-dist drift warning: {:?}",
-            n.problems.warnings
-        );
+        assert_error_contains(&n, "no delegated Homebrew target");
     }
 
     /// A distribution without its own tap still warns when cargo-dist configures one.

@@ -567,15 +567,22 @@ impl std::fmt::Display for AdapterError {
 impl std::error::Error for AdapterError {}
 
 impl AdapterError {
-    /// Whether repeating a post-tag distribution operation is appropriate after a
-    /// bounded backoff. Only command failures carrying a recognized transient
-    /// network signal qualify: spawn/filesystem/configuration failures require an
-    /// operator fix, while arbitrary command failures may have permanent causes.
+    /// Whether a post-tag distribution failure is safe to retry after bounded
+    /// backoff. The command must be the tap clone: it is a local setup/read whose
+    /// failure cannot have mutated the remote destination. Later commands (commit,
+    /// push, PR creation) have ambiguous remote disposition and are never blindly
+    /// repeated, even when their stderr contains a transient-looking status.
     #[must_use]
-    pub(crate) fn is_retryable_network_failure(&self) -> bool {
-        let Self::Command { stderr, .. } = self else {
+    pub(crate) fn is_retryable_dist_setup_failure(&self) -> bool {
+        let Self::Command {
+            command, stderr, ..
+        } = self
+        else {
             return false;
         };
+        if !command.starts_with("gh repo clone ") {
+            return false;
+        }
         let detail = stderr.to_ascii_lowercase();
         [
             "http 429",

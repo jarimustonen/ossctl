@@ -2305,16 +2305,22 @@ fn cut_error_to_cli(run_id: &str, err: CutError) -> CliError {
             "journal_error",
             format!("run {run_id}: could not write the release journal: {io} — the run may be in an unknown state"),
         ),
-        CutError::PhaseFailed { .. } => CliError::system(
-            "release_failed",
-            format!(
-                "run {run_id}: {err}. Nothing was rolled back; the journal records exactly what \
-                 landed under this run id. For a post-publish distribution failure the cut already \
-                 ran the verify barrier and included its observations above. Re-run `ossctl release \
-                 verify {run_id}` for a fresh read-only snapshot, or `ossctl release resume \
-                 {run_id}` after resolving the reported blocker"
-            ),
-        ),
+        error @ CutError::PhaseFailed { phase, .. } => {
+            let observation_note = if phase == ossctl_core::protocol::journal::Phase::Dist {
+                " The cut already ran post-failure verification after the irreversible tag/publishes; its observations are included above."
+            } else {
+                ""
+            };
+            CliError::system(
+                "release_failed",
+                format!(
+                    "run {run_id}: {error}. Nothing was rolled back; the journal records exactly \
+                     what landed under this run id.{observation_note} Re-run `ossctl release verify \
+                     {run_id}` for a fresh read-only snapshot, or `ossctl release resume {run_id}` \
+                     after resolving the reported blocker"
+                ),
+            )
+        }
     }
 }
 

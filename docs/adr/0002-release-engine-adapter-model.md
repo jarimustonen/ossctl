@@ -161,6 +161,25 @@ expected archives. `Unknown` is not green: it journals an honest observation but
 fails the barrier alongside `Missing` and `Conflicts`. `--allow-unverified` remains
 resume-only and never makes an unobserved fresh cut complete.
 
+## Amendment (2026-08-20) — post-dist failure observation and safe setup retry
+
+The strict phase barrier has one post-point-of-no-return exception: when the `dist`
+phase records `Failed` after the shared tag has been pushed, the coordinator still
+enters `verify` in **observation-only mode**. It records an outcome for every declared
+destination and records `Verify Failed` even when all destinations match. It can never
+turn a dist-failed run `Completed`; the original dist error remains primary, augmented
+with the verify result. This exception exists because after irreversible publishes and
+tagging, learning what actually landed is more urgent than preserving a control-flow
+rule that would suppress read-only evidence.
+
+A transient dist retry is permitted only for the engine-owned tap's `gh repo clone`
+setup step. Clone mutates only a fresh local scratch directory, so repeating it cannot
+duplicate a remote publish. The retry is bounded to three attempts with 2s then 4s
+backoff through the injected clock. A push, PR creation, timeout, reset, or other
+failure with ambiguous remote disposition is never blindly retried; it proceeds to the
+post-failure observation path instead. CI-owned Homebrew targets perform no engine dist
+write at all and remain destination-observed in verify.
+
 ## Amendment (2026-08-17) — publish-in-CI / tag-only cut (`cargo-publish-ci`)
 
 The adapter identity list gains **`cargo-publish-ci`**: a rust crates.io target whose
