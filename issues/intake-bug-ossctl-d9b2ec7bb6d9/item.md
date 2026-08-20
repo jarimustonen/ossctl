@@ -1,18 +1,17 @@
 ---
 created: 2026-08-17
-updated: 2026-08-17
+updated: 2026-08-20
 type: bug
 reporter: jari
 status: fixed
 priority: normal
-labels:
-- via:agent-homebase-wrapup
-lane: cli-canon
-lane_seq: 10
-closed: 2026-08-17
 commits:
 - hash: 15bb7f4f9762c8a4e423a61421160974fd0019d3
   summary: alias version flags to version command
+lane: cli-canon
+lane_seq: 10
+closed: 2026-08-17
+provenance: agent-homebase-wrapup
 ---
 
 # ossctl --version is rejected as an unknown flag; it should alias the ve…

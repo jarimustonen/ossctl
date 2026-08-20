@@ -5,10 +5,9 @@ type: bug
 reporter: jari
 status: duplicate
 priority: normal
-labels:
-- via:agent-homebase-wrapup
-closed: 2026-08-20
 closed_by: agent-stint-23
+closed: 2026-08-20
+provenance: agent-homebase-wrapup
 ---
 
 # Cargo-dist verifier reports existing GitHub Releases missing

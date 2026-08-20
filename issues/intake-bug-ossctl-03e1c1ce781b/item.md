@@ -5,10 +5,9 @@ type: bug
 reporter: jari
 status: fixed
 priority: normal
-labels:
-- via:agent-homebase-wrapup
-closed: 2026-08-17
 closed_by: agent-stint-23
+closed: 2026-08-17
+provenance: agent-homebase-wrapup
 ---
 
 # verify phase races CI-delegated targets and fails a successful release

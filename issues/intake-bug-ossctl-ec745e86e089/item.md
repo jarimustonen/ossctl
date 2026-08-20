@@ -1,13 +1,11 @@
 ---
 created: 2026-08-18
-updated: 2026-08-18
+updated: 2026-08-20
 type: bug
 reporter: jari
-status: open
+status: untriaged
 priority: normal
-labels:
-- via:agent-homebase-wrapup
-- needs-triage
+provenance: agent-homebase-wrapup
 ---
 
 # ossctl repo schema predates intake statuses: issuectl intake file fails…

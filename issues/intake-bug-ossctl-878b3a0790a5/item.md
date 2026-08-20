@@ -5,9 +5,8 @@ type: bug
 reporter: jari
 status: fixed
 priority: normal
-labels:
-- via:agent-homebase-wrapup
 closed: 2026-08-16
+provenance: agent-homebase-wrapup
 ---
 
 # release plan rejects --output flag though other subcommands accept it

@@ -5,11 +5,10 @@ type: bug
 reporter: jari
 status: open
 priority: high
-labels:
-- via:agent-homebase-wrapup
+collision: [crates/ossctl-core/src/release/plan.rs]
 lane: bump-exec
 lane_seq: 10
-collision: [crates/ossctl-core/src/release/plan.rs]
+provenance: agent-homebase-wrapup
 ---
 
 # Release bump plan accepts duplicate exact pins then cut fails

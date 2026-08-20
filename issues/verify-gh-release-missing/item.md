@@ -112,14 +112,12 @@ reports `matches`, so a successful multi-target cut exits zero.
 - Re-verifying `project-canon` runs `01M08H40373DF571PXY979934D` (v0.4.0) and
   `01M08P4D4HK25MRQXDE0XDW9NJ` (v0.5.0) reports `matches` for the `gh-releases` target.
 
-## Notes
+## Comments
 
 Both `project-canon` runs remain journaled as `in_progress` / `in_flight` because of this false
 failure, even though both releases fully succeeded. Whatever fix lands should also make those
 runs reconcilable (`release verify` / `release resume`) rather than leaving them permanently
 in-flight.
-
-## Comments
 
 ### 2026-08-19T04:36:17Z · @agent-stint-23
 
@@ -136,4 +134,3 @@ FOURTH occurrence, and new evidence (from duplicate intake-bug-ossctl-09cd3c1d03
 - The operator had to `release abandon` a fully-landed release to clear it.
 
 Reporter naming the affected package: project-canon-cli (binary) vs project-canon (project/tag/tap) — consistent with the package-vs-project lookup hypothesis already recorded.
-

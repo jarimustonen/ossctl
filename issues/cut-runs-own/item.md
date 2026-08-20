@@ -1,14 +1,13 @@
 ---
 created: 2026-08-17
-updated: 2026-08-19
+updated: 2026-08-20
 type: bug
 status: open
 priority: high
-labels:
-- via:agent-issuectl-stint
+collision: [crates/ossctl-cli/src/release.rs, crates/ossctl-core/src/release/distribution.rs]
 lane: verify-seam
 lane_seq: 20
-collision: [crates/ossctl-cli/src/release.rs, crates/ossctl-core/src/release/distribution.rs]
+provenance: agent-issuectl-stint
 ---
 
 # cut runs its own homebrew leg despite cargo-dist publish-jobs owning the tap: double-writer, no retry on 503, false-red failed run

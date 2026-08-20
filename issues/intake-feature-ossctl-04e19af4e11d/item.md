@@ -5,10 +5,9 @@ type: feature
 reporter: jari
 status: duplicate
 priority: normal
-labels:
-- via:agent-homebase-wrapup
-related: ['@oss-dist-channel-generator']
 closed: 2026-08-16
+related: ['@oss-dist-channel-generator']
+provenance: agent-homebase-wrapup
 ---
 
 # No standalone Homebrew-formula (re)generate/push; generated model assum…
