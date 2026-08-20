@@ -89,6 +89,15 @@ Also newly admitted: a sealed `--bump` plan counted one intra-workspace pin wher
 found two and refused — plan and cut disagreeing about one sealed tree, which is a seal-
 boundary problem rather than a bump edge case._
 
+_**Found during the wrap, affects the next session directly:** `intakectl file` currently
+cannot file into any repo other than homebase — it ignores `--repo` and `--type`, produces a
+`tg-bug-…` slug, and the service slug-guard then refuses to confirm (the merge gate held;
+nothing reached any remote). `--repo issuectl` worked, `--repo orchestratectl` did not, so
+check before relying on it. Filed as homebase `intake-file-repo-routing-ignored`. A second
+filer defect (`intake-filer-legacy-label-shape`) means freshly filed items still get
+`status: open` + a `needs-triage` label instead of `status: untriaged`, so the label debt
+migrated away this session will slowly reaccumulate until that is fixed._
+
 _**Known issuectl quirk** (filed `intake-bug-issuectl-fab0edad2e42`): within a lane,
 priority silently outranks `lane_seq` in dag ordering — visible in `issuectl dag`'s own
 "intra-lane order" line. Set priority deliberately, not just sequence._
