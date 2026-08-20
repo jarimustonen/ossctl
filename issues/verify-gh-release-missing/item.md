@@ -6,6 +6,9 @@ status: in-progress
 priority: high
 lane: verify-seam
 lane_seq: 10
+commits:
+- hash: '96216e3'
+  summary: observe cargo-dist's published manifest
 ---
 
 # release verify reports a published GitHub Release as missing
