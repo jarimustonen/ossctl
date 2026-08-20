@@ -1,13 +1,12 @@
 ---
 created: 2026-08-16
-updated: 2026-08-16
+updated: 2026-08-20
 type: feature
 reporter: jari
 status: duplicate
 priority: normal
 labels:
 - via:agent-homebase-wrapup
-- needs-triage
 related: ['@oss-dist-channel-generator']
 closed: 2026-08-16
 ---
