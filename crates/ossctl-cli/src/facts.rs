@@ -86,7 +86,12 @@ fn render_facts_text(report: &FactsReport) -> Result<(), CliError> {
         report.cargo_publish.len()
     )?;
     for evidence in &report.cargo_publish {
-        crate::output::stdoutln!("  {}: {:?}", evidence.manifest, evidence.policy)?;
+        crate::output::stdoutln!(
+            "  {} (package={}): {}",
+            evidence.manifest,
+            evidence.package.as_deref().unwrap_or("unknown"),
+            evidence.policy.as_str()
+        )?;
     }
     crate::output::stdoutln!("has_ci:            {}", f.has_ci)?;
     crate::output::stdoutln!("tags:              {}", f.tags.len())?;

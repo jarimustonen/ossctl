@@ -37,17 +37,34 @@ pub struct DistributionSurface {
 
 /// What one Cargo manifest says about publishing to crates.io.
 ///
-/// This is deliberately tri-state: an unresolved inheritance or unsupported
-/// manifest shape is evidence of neither permission nor prohibition.
+/// This is deliberately tri-state: collapsing [`Self::Unknown`] into either
+/// other value would turn an inconclusive read into a confident wrong statement.
+/// These serialized variant names are part of the additive `facts` wire contract;
+/// renaming one is a breaking change that requires a `schema_version` bump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CargoPublishPolicy {
-    /// Cargo permits publication to crates.io.
+    /// The manifest permits crates.io publication: `publish` is absent or `true`,
+    /// or an allow-list names `crates-io`.
     Allowed,
-    /// Cargo forbids publication to crates.io.
+    /// The manifest forbids it: `publish = false`, `publish = []`, or an
+    /// allow-list omits `crates-io`.
     Forbidden,
-    /// The detector could not resolve the manifest's publish policy.
+    /// The read is inconclusive, such as unresolved `publish.workspace = true`
+    /// inheritance or a publish value shape the textual reader does not model.
     Unknown,
+}
+
+impl CargoPublishPolicy {
+    /// The stable spelling used in JSON and human-readable output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::Forbidden => "forbidden",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// The resolved crates.io publish evidence read from one Cargo manifest.
@@ -55,7 +72,7 @@ pub enum CargoPublishPolicy {
 pub struct CargoPublishFlag {
     /// Path relative to the repository root.
     pub manifest: String,
-    /// The resolved package name, or `null` when the manifest declares none.
+    /// The crate's `[package].name`, or `null` when it cannot be resolved.
     pub package: Option<String>,
     /// The resolved crates.io publish verdict.
     pub policy: CargoPublishPolicy,
@@ -76,8 +93,8 @@ pub struct FactsReport {
     pub cargo_publish: Vec<CargoPublishFlag>,
 }
 
-/// The deterministic repo-fact report — a pure function of `(repo tree, git
-/// HEAD)`, emitted by `ossctl facts` and consumed by `/oss-init` and `audit`.
+/// The established base repo facts, flattened into [`FactsReport`] for
+/// `ossctl facts` and consumed directly by internal release and audit logic.
 ///
 /// Every field is always present (an empty/unborn repo still gets a defined
 /// value for each), mirroring the Python detector's "exit 0 even for an empty

@@ -679,6 +679,7 @@ fn facts_json_shape_and_field_names() {
     for key in [
         "ecosystems",
         "packages",
+        "cargo_publish",
         "has_ci",
         "tags",
         "committers_total",
@@ -693,6 +694,10 @@ fn facts_json_shape_and_field_names() {
     assert_eq!(d["ecosystems"], serde_json::json!(["rust"]));
     assert_eq!(d["packages"][0]["package"], "toolx");
     assert_eq!(d["packages"][0]["version"], "0.3.0");
+    assert!(d.get("facts").is_none(), "base fields stay flat: {d}");
+    assert_eq!(d["cargo_publish"][0]["manifest"], "Cargo.toml");
+    assert_eq!(d["cargo_publish"][0]["package"], "toolx");
+    assert_eq!(d["cargo_publish"][0]["policy"], "allowed");
     assert_eq!(d["has_ci"], true);
     assert_eq!(d["is_git"], false, "a temp dir is not a git work tree");
     assert_eq!(d["committers_total"], 0);

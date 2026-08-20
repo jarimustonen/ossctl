@@ -275,8 +275,11 @@ version}`), `cargo_publish[]` (each `{manifest, package, policy}` with `policy` 
 `tags`/`has_semver_tag`/`has_ge_1_0_release`,
 `has_ci`, `dependency_bot`, `has_issues_dir`, `readme_self_label`, `description`,
 `maturity_signals`, and `inferred_maturity`. **Read this JSON and reason over it** — it is
-your evidence base for `ecosystems`, `targets[].package`/`version`, the `maturity` inference,
-and most defaults. It handles the empty/unborn-repo case (`is_git`/`has_commits` flags).
+your evidence base for `ecosystems`, `targets[].package`/`version`, whether each Rust
+package can support a crates.io target, the `maturity` inference, and most defaults. Never
+emit a crates.io target for a `cargo_publish` entry whose policy is `forbidden`; investigate
+`unknown` rather than guessing. It handles the empty/unborn-repo case (`is_git`/`has_commits`
+flags).
 
 Then gather the **judgment-laden** evidence the binary deliberately leaves to you (cite real
 paths in the `## Rationale` later):

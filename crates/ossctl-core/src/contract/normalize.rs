@@ -1574,7 +1574,7 @@ fn check_cargo_publish_evidence(
              'crates-io') — the publish can never succeed. Drop the target (an explicit \
              'targets: []' is the publish-none contract) or allow the publish in the manifest. \
              Run 'ossctl facts --json' from the repository root and inspect \
-             data.cargo_publish to see the manifest evidence ossctl read",
+             data.cargo_publish to see the manifest evidence ossctl read.",
             quote_for_diagnostic(target.package.as_deref().unwrap_or("this repo's crate")),
             target.adapter.as_str(),
             blocking
