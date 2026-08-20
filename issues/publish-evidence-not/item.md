@@ -2,13 +2,18 @@
 created: 2026-08-17
 updated: 2026-08-20
 type: improvement
-status: in-progress
+status: done
 priority: normal
 lane: facts-evidence
 lane_seq: 10
 commits:
 - hash: 9ec99177782751d50ae6cae88977e91ad3990c2c
   summary: start publish evidence work
+- hash: dfe0ec2b5f6d8cd17e940d0a0c731246f5f893d4
+  summary: expose Cargo publish evidence in facts
+- hash: f0575f0a44f9f16dfec604160429e4468984145a
+  summary: lock publish evidence wire contract after review
+closed: 2026-08-20
 ---
 
 # publish evidence is not inspectable from the CLI
