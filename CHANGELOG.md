@@ -15,6 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this command so operators can inspect exactly what ossctl read.
 
 ### Fixed
+- **Release plans and cuts now agree on repeated exact workspace pins.** A crate that
+  declares the same internal `=version` dependency in normal, dev, build, or
+  target-specific dependency tables seals one deterministic rewrite set and updates
+  every equivalent declaration during the bump. Mixed requirements for the same
+  workspace crate are refused while planning, before an unexecutable approval artifact
+  can be sealed. This changes the meaning of a sealed pin rewrite, so release-plan
+  `SEAL_VERSION` advances from 6 to 7: plans sealed by an older binary still load for
+  resume, but cannot start a fresh cut and must be re-planned and approved
+  (`intake-bug-ossctl-d38ddf598fd5`).
+- **Sealed plans can now be abandoned before a run starts.** `release abandon <plan_id>`
+  removes the authenticated plan document without creating a journal, remains idempotent on
+  retry, and redirects to the existing run-abandon path when that plan already backs a run
+  (`abandon-sealed-plan-id`).
 - **Release cuts no longer double-write cargo-dist-owned Homebrew taps or hide what landed after a post-tag failure.** A cargo-dist `publish-jobs = ["homebrew"]` configuration now refuses an engine-owned `homebrew-tap` target in favor of the delegated `cargo-dist` target, while ossctl's own engine-owned tap path remains intact. A transient tap-clone failure retries with bounded backoff (later, ambiguously mutating steps never retry blindly), and an ordinary terminal dist-phase failure still observes every destination without marking the failed run complete (`cut-runs-own`).
 - **GitHub Releases produced by cargo-dist are now verified at their actual destination.**
   Release verification resolves the published `v<version>` tag, ignores cargo-dist's
@@ -77,18 +90,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verified.
 
 ### Fixed
-- **Sealed plans can now be abandoned before a run starts.** `release abandon <plan_id>`
-  removes the authenticated plan document without creating a journal, remains idempotent on
-  retry, and redirects to the existing run-abandon path when that plan already backs a run
-  (`abandon-sealed-plan-id`).
-- **Release plans and cuts now agree on repeated exact workspace pins.** A crate that
-  declares the same internal `=version` dependency in normal, dev, build, or
-  target-specific dependency tables seals one deterministic rewrite set and updates
-  every equivalent declaration during the bump. Mixed requirements for the same
-  workspace crate are refused while planning, before an unexecutable approval artifact
-  can be sealed. This changes the meaning of a sealed pin rewrite, so release-plan
-  `SEAL_VERSION` advances from 6 to 7: plans sealed by an older binary still load for
-  resume, but cannot start a fresh cut and must be re-planned and approved.
 - **Closed stdout pipes no longer panic the CLI.** Text and JSON output now share a
   fallible writer: a downstream reader closing early exits quietly with success, while
   other stdout failures use the canonical system-error envelope (`cli-panics-broken`).
