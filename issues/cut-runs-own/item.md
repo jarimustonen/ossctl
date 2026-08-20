@@ -2,7 +2,7 @@
 created: 2026-08-17
 updated: 2026-08-21
 type: bug
-status: in-progress
+status: fixed
 priority: high
 collision: [crates/ossctl-cli/src/release.rs, crates/ossctl-core/src/release/distribution.rs]
 lane: verify-seam
@@ -15,6 +15,7 @@ commits:
   summary: record initial fix commit on issue
 - hash: e02c840
   summary: apply review findings for safe retry and observation-only verify
+closed: 2026-08-21
 ---
 
 # cut runs its own homebrew leg despite cargo-dist publish-jobs owning the tap: double-writer, no retry on 503, false-red failed run
