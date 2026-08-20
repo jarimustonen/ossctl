@@ -48,3 +48,11 @@ VERIFIED. issuectl intake file now succeeds against these repos (it produced the
 SIDE EFFECT WORTH KNOWING. The migration surfaced 12 untriaged bug reports in deutschpad that had been invisible to every status query because their state lived in a label. They are now reachable via issuectl intake queue.
 
 REOPEN CONDITION. Reopen if issuectl intake file fails with a schema-violation against any active repo — most likely cause would be a NEW repo bootstrapped from an old schema template, or issuectl adding a further lifecycle status the enums do not yet carry. Note issuectl init's scaffold was not audited here: if new repos keep arriving with the old enum, that scaffold is the real fix and belongs in issuectl.
+
+## Comments
+
+### 2026-08-20T05:57:44Z · @agent-stint-23
+
+Correction to this issue reopen condition, same day. The condition I recorded ("reopen if intake file fails with a schema-violation") does NOT catch the case found minutes later during the wrap: intake file now SUCCEEDS against these repos, but still writes the legacy shape (status: open + a needs-triage label) rather than status: untriaged. So the failure mode is silent reaccumulation of exactly the debt this issue cleaned up, not a visible error.
+
+Filed as homebase intake-filer-legacy-label-shape. Leaving this issue closed — the schema side is genuinely fixed in all eight repos and that was this issue scope — but the fleet is not durably clean until the filer is fixed too. Evidence: intake-feature-issuectl-0b1bf129b13b was filed after issuectl schema migration and still carries status: open + needs-triage.
