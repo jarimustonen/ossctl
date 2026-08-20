@@ -1,8 +1,8 @@
 ---
 created: 2026-08-17
-updated: 2026-08-19
+updated: 2026-08-20
 type: improvement
-status: open
+status: in-progress
 priority: normal
 lane: facts-evidence
 lane_seq: 10
