@@ -3,7 +3,7 @@ created: 2026-08-21
 updated: 2026-08-21
 type: bug
 reporter: mail-triage
-status: in-progress
+status: fixed
 priority: high
 lane: verify-seam
 lane_seq: 5
@@ -13,6 +13,9 @@ commits:
   summary: pin Rust 1.98 and fix Clippy regression
 - hash: e38adf8
   summary: test release verification with hermetic destination observations
+- hash: 06a9efbcd3a184e371803fd2b02ddb7dc4f40ea4
+  summary: record verified red-CI fixes
+closed: 2026-08-21
 ---
 
 # CI fails in release verification and Clippy
@@ -53,3 +56,9 @@ Why the local green gate missed both, which is the more important finding:
 Severity reading for the test failure: it is not cosmetic. Classifying a Python target as 'missing' when its registry lookup cannot run contradicts ADR-0002 ('Unknown is not green' but absence of evidence is never evidence) and would fail an otherwise-healthy cut for a downstream repo with a delegated Python target. Adjacent to delegated-registry-verify-destination (verify-seam/40), which covers the routing half of the same area — check whether that issue's fix subsumes this one before implementing both.
 
 Reopen/close condition: close as fixed when CI is green on main for both the clippy and test jobs, AND the intended unknown-vs-missing classification for an unavailable registry lookup is encoded deliberately (either the implementation restores 'unknown' or the fixture and the surrounding contract comments are updated to say 'missing' is intended). Reopen if the local green gate again diverges from CI on a released commit.
+
+## Resolution
+
+### 2026-08-21T08:00:00Z · @issuectl
+
+CI run 32461018909 passed on main across Clippy, Linux/macOS tests, rustfmt, docs, MSRV, and skill lockstep. Python lookup inability is deliberately Unknown; the binary fixture supplies an answering missing destination. The delegated-registry-verify-destination issue does not subsume this fix: it covers delegated target routing, while this journal-receipt path already routes through RegistryQuery and needed a hermetic fixture.
