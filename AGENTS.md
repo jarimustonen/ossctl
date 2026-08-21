@@ -72,6 +72,15 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
 - **The ENGINE recipe** (`ossctl release cut` — the primary and proven path; ossctl's own
   contract declares all four targets + the `distribution` block with its tap):
   1. Ensure `CHANGELOG.md` `[Unreleased]` is complete and main is clean + pushed.
+     **Two pre-cut checks that a green local gate does NOT cover** (both learned the hard
+     way when 0.10.0 was cut from a red tree, 2026-08-21):
+     - **CI must be green on main** — `gh run list --workflow=ci.yml --branch main --limit 3`.
+       The local gate is now toolchain-pinned, but it still runs on one host with one
+       environment; CI runs Linux + macOS. A local green is necessary, never sufficient.
+     - **Read the `[Unreleased]` block itself** before planning. A parallel merge can land a
+       correct-looking entry in the WRONG section — this happened into an already-published
+       version's block, which would have shipped wrong release notes and rewritten the
+       history of a version already on crates.io. Union-merge cannot catch it.
   2. **Build a fresh binary from the tree**: `cargo build --release -p ossctl` (the bin
      crate is **`ossctl`**, NOT `ossctl-cli` — `-p ossctl-cli` silently no-ops). `plan`
      and `cut` refuse when the binary's compiled commit differs from tree `HEAD`
