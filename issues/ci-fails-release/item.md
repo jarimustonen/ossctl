@@ -3,7 +3,7 @@ created: 2026-08-21
 updated: 2026-08-21
 type: bug
 reporter: mail-triage
-status: open
+status: in-progress
 priority: high
 lane: verify-seam
 lane_seq: 5

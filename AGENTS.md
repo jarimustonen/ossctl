@@ -47,7 +47,11 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
 
 `/stint` reads this section for how to run a work-session in this repo.
 
-- **Green gate** (must pass before a unit counts as landed):
+- **Green gate** (must pass before a unit counts as landed). The repository's
+  `rust-toolchain.toml` pins the same Rust release used by CI; do not override it with an
+  ambient `stable`, because Clippy lint sets change between releases. Tests in this gate
+  must be hermetic: an unavailable destination is `Unknown`, but fixtures must inject
+  destination responses rather than depend on host credentials or network access.
   - `cargo fmt --all --check`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace`

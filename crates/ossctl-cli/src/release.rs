@@ -207,8 +207,7 @@ fn release_binary_warnings(
     let mut warnings = Vec::new();
     let is_ossctl_source_tree = git
         .origin_url()
-        .ok()
-        .is_some_and(|origin| is_ossctl_source_tree(&origin));
+        .is_ok_and(|origin| is_ossctl_source_tree(&origin));
     if !is_ossctl_source_tree {
         return Ok(warnings);
     }

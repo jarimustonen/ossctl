@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt
       - run: cargo fmt --all --check
@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: clippy
       # Cache the cargo registry + git db only. We deliberately do NOT cache
@@ -64,7 +64,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -102,7 +102,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -127,7 +127,7 @@ jobs:
       RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
       # Guards the ossctl-core #![warn(missing_docs)] investment: fails on
       # missing docs or broken intra-doc links.
       - run: cargo doc --locked --workspace --no-deps
