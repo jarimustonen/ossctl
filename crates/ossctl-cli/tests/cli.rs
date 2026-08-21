@@ -864,9 +864,10 @@ fn seed_journal(run_id: &str, lines: &[&str]) -> tempfile::TempDir {
 
 /// `release verify` reconciles a journaled run and emits the report envelope.
 /// Uses `python` + `binary` targets. Python remains `unknown` when its registry
-/// lookup cannot run: absence of evidence is never evidence that a release is
-/// missing. The binary observer is given a hermetic `gh` response so the test
-/// does not depend on the host's GitHub authentication or network access.
+/// lookup cannot run: `RealRegistryQuery` has no Python backend and therefore
+/// returns `Unknown` without touching the network. The binary observer is given
+/// a hermetic `gh` response so the test does not depend on the host's GitHub
+/// authentication or network access.
 #[test]
 fn release_verify_reconciles_a_journaled_run() {
     let dir = seed_journal(
@@ -880,9 +881,10 @@ fn release_verify_reconciles_a_journaled_run() {
 
     let shims = tempfile::tempdir().unwrap();
     let gh = shims.path().join("gh");
+    let calls = shims.path().join("gh.calls");
     std::fs::write(
         &gh,
-        "#!/bin/sh\nprintf 'release not found\\n' >&2\nexit 1\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$OSSCTL_TEST_GH_CALLS\"\nprintf 'release not found\\n' >&2\nexit 1\n",
     )
     .unwrap();
     #[cfg(unix)]
@@ -890,11 +892,17 @@ fn release_verify_reconciles_a_journaled_run() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let shimmed_path = std::env::join_paths(
+        std::iter::once(shims.path().to_path_buf()).chain(std::env::split_paths(&original_path)),
+    )
+    .unwrap();
 
     let out = ossctl()
         .args(["release", "verify", "RUN01", "--json", "--journal-dir"])
         .arg(dir.path())
-        .env("PATH", shims.path())
+        .env("PATH", shimmed_path)
+        .env("OSSCTL_TEST_GH_CALLS", &calls)
         .output()
         .unwrap();
     assert!(out.status.success(), "verify must exit 0: {out:?}");
@@ -914,6 +922,17 @@ fn release_verify_reconciles_a_journaled_run() {
         .map(|t| t["outcome"].as_str().unwrap())
         .collect();
     assert_eq!(outcomes, vec!["missing", "unknown"]);
+    let calls = std::fs::read_to_string(calls).unwrap_or_else(|error| {
+        panic!(
+            "gh shim recorded no calls ({error}); stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert_eq!(
+        calls, "release view v1.0.0 --json assets,isDraft,tagName\n",
+        "the binary destination must be observed through the expected read-only query"
+    );
 
     // Read-only: verify must not materialize a manifest cache next to the journal.
     assert!(

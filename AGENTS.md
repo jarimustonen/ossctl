@@ -49,9 +49,11 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
 
 - **Green gate** (must pass before a unit counts as landed). The repository's
   `rust-toolchain.toml` pins the same Rust release used by CI; do not override it with an
-  ambient `stable`, because Clippy lint sets change between releases. Tests in this gate
-  must be hermetic: an unavailable destination is `Unknown`, but fixtures must inject
-  destination responses rather than depend on host credentials or network access.
+  ambient `stable`, because Clippy lint sets change between releases. Keep the exact
+  `dtolnay/rust-toolchain` refs in `.github/workflows/ci.yml` synchronized when bumping
+  the pin. Tests in this gate must control observer behavior rather than depend on host
+  credentials or network access: an answering destination that lacks an artifact is
+  `Missing`; a destination that cannot be reached or understood is `Unknown` (and red).
   - `cargo fmt --all --check`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace`

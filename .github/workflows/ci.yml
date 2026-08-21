@@ -27,6 +27,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt
+      - name: Verify the CI toolchain matches the repository pin
+        run: |
+          pin=$(awk -F '"' '/^channel = / { print $2 }' rust-toolchain.toml)
+          test -n "$pin"
+          test "$(rustc --version | cut -d ' ' -f 2)" = "$pin"
+          bad_refs=$(grep -oE 'dtolnay/rust-toolchain@[0-9A-Za-z._-]+' .github/workflows/ci.yml \
+            | grep -Fvx "dtolnay/rust-toolchain@$pin" \
+            | grep -Fvx 'dtolnay/rust-toolchain@1.85' || true)
+          test -z "$bad_refs" || { echo "unexpected Rust toolchain refs: $bad_refs"; exit 1; }
       - run: cargo fmt --all --check
 
   clippy:
