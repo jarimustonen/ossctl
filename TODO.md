@@ -30,6 +30,17 @@ project-canon v0.4.0 and v0.5.0. That fix is now confirmed against real infrastr
 just tests. Treat that as the model: this engine's bugs are only truly closed when a real
 cut observes them._
 
+_**And it was then confirmed against the original victim.** At wrap I re-ran the read-only
+reconcile that `verify-gh-release-missing` cites as its decisive test —
+`ossctl release verify 01M08P4D4HK25MRQXDE0XDW9NJ` in project-canon, the run that reported
+`gh-releases: missing` on demand under 0.9.0. Under 0.10.0 it returns
+`matches: 3, missing: 0, unknown: 0`. That closes the loop on the suspected cause too: the
+issue predicted a package-vs-project naming mismatch (`project-canon-cli` vs `project-canon`),
+and the fix — resolve the published tag, ignore cargo-dist's Release title, observe
+cargo-dist's own manifest rather than inventing archive names — is exactly that class.
+**Re-running an old journal's verify is a cheap, powerful regression check for this engine;
+use it.**_
+
 _**`SEAL_VERSION` is now 7** (was 6). The repeated-pin fix changed the meaning of a sealed
 pin rewrite, so plans sealed by 0.9.0 or earlier can no longer start a fresh cut and must be
 re-planned; legacy plans still load, so an interrupted run can still `resume`. This is the
@@ -107,10 +118,14 @@ _1. **Does ossctl converge to the uniform fleet shape?** The maintainer asked fo
    releases across the fleet (intakectl excepted). I kept ossctl on its engine-owned tap
    and local publish, because it is the only live exercise of the `homebrew-tap` adapter —
    converging it would leave that path with no real release testing it. Not yet ratified._
-_2. **`project-canon`: is its crates.io publish local or CI-performed?** Unlike
-   orchestratectl its contract does not say, and guessing wrong either double-publishes or
-   pushes a tag and waits 20 minutes for a publish nobody performs. Its filed issue
-   deliberately refuses to guess._
+_2. **RESOLVED and no longer ossctl's to carry — `project-canon` publishes from CI.** The
+   answer was settled from that repo's own files, not guessed: `.github/workflows/
+   publish-crates.yml` is tag-triggered (`on: push: tags: ['v[0-9]+...']`) and its header
+   states "crates.io publishing happens in CI with no dependency on a local token". So its
+   contract's `adapter: cargo-publish` on both crates contradicts reality and would
+   double-publish; `cargo-publish-ci` is correct. **A project-canon agent now owns that work
+   (maintainer, 2026-08-21) — do not act on it from here.** Recorded only because ossctl's
+   handoff previously listed it as an open question._
 _3. **Cross-repo follow-through is PART DONE (verified 2026-08-20 at wrap).** Of the five
    filed issues, `issuectl` (`homebrew-double-writer-contract` — the active double writer)
    and `orchestratectl` (`contract-declare-ci-publish-surface`) are already `fixed`;
@@ -155,14 +170,19 @@ external crates), but reachable by any downstream repo using that very common la
 extends the same discovery path just reconciled, so check whether it moves the seal pre-image
 again — that would be another deliberate `SEAL_VERSION` event, not a silent hash change._
 
-_**Found during stint #23's wrap, still unfixed:** `intakectl file` currently
-cannot file into any repo other than homebase — it ignores `--repo` and `--type`, produces a
-`tg-bug-…` slug, and the service slug-guard then refuses to confirm (the merge gate held;
-nothing reached any remote). `--repo issuectl` worked, `--repo orchestratectl` did not, so
-check before relying on it. Filed as homebase `intake-file-repo-routing-ignored`. A second
-filer defect (`intake-filer-legacy-label-shape`) means freshly filed items still get
-`status: open` + a `needs-triage` label instead of `status: untriaged`, so the label debt
-migrated away this session will slowly reaccumulate until that is fixed._
+_**Cross-repo issue filing does NOT work — plan for the fallback.** Reproduced again
+2026-08-21 during this wrap. `intakectl file --repo <other>` still lands a `tg-bug-…` slug in
+**homebase**, and the slug guard then refuses to confirm (the gate holds — nothing reaches any
+remote). Diagnosis has advanced though, and it matters: the **client half is fixed** (it
+computed the correct `intake-bug-orchestratectl-…` slug, on the deployed binary at the very
+commit that closed the bug, `8d6bc96`), so the remaining defect is the **server-side
+deterministic filer**. Reopened as intakectl `intake-file-routing` with that evidence; inbox
+entry `0fed8f9c-df4b-47d4-863c-9fdb946e02cc` was parked by the failed attempt and needs
+disposal. **Until it is fixed, file directly in the target tool's own repo** — that is what
+this wrap did for `run-wait-json` / `worker-wedged-one` (orchestratectl) and
+`intake-file-generates` (issuectl). A second filer defect
+(`intake-filer-legacy-label-shape`) means freshly filed items still get `status: open` + a
+`needs-triage` label instead of `status: untriaged`._
 
 _**Known issuectl quirk** (filed `intake-bug-issuectl-fab0edad2e42`): within a lane,
 priority silently outranks `lane_seq` in dag ordering — visible in `issuectl dag`'s own
