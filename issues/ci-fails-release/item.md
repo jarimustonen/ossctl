@@ -8,6 +8,11 @@ priority: high
 lane: verify-seam
 lane_seq: 5
 collision: [crates/ossctl-cli/src/release.rs]
+commits:
+- hash: 4c4ca030536f206355c70d41039db9758d3e546a
+  summary: pin Rust 1.98 and fix Clippy regression
+- hash: e38adf8
+  summary: test release verification with hermetic destination observations
 ---
 
 # CI fails in release verification and Clippy
