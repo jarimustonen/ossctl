@@ -1,11 +1,11 @@
 ---
 created: 2026-08-17
-updated: 2026-08-19
+updated: 2026-08-21
 type: improvement
 status: open
 priority: normal
-lane: verify-seam
-lane_seq: 50
+lane: plan-seal
+lane_seq: 20
 collision: [crates/ossctl-core/src/release/distribution.rs, crates/ossctl-core/src/release/plan.rs]
 ---
 

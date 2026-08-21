@@ -19,9 +19,9 @@ labels:
 - ai-review-model:gpt-5.6-sol
 - ai-review-model:claude-opus-5
 - ai-review-model:deepseek-v4-pro
-lane: bump-exec
-lane_seq: 20
-collision: [crates/ossctl-core/src/release/plan.rs]
+lane: plan-seal
+lane_seq: 10
+collision: [crates/ossctl-core/src/release/plan.rs, crates/ossctl-core/src/release/bump.rs]
 ---
 
 # Release bump can leave inherited exact workspace pins stale

@@ -1,13 +1,13 @@
 ---
 created: 2026-08-20
-updated: 2026-08-20
+updated: 2026-08-21
 type: bug
 status: open
 priority: high
 provenance: agent:issuectl-stint-wrapup
-lane: verify-seam
-lane_seq: 25
-collision: [crates/ossctl-core/src/release/distribution.rs]
+lane: verify-observers
+lane_seq: 10
+collision: [crates/ossctl-core/src/release/coordinator.rs]
 ---
 
 # release verify infers delivery from the destination, not the delegated run: pending and failed are indistinguishable
