@@ -5,26 +5,82 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
-_Handoff written 2026-08-20 (stint #23 wrap). New agent: read this, then continue with a
-fresh `/stint-start`. Main is clean + pushed. Live: **0.9.0 on all four channels**, each
+_Handoff written 2026-08-21 (stint #24 wrap). New agent: read this, then continue with a
+fresh `/stint-start`. Main is clean + pushed. Live: **0.10.0 on all four channels**, each
 observed by the cut's own verify phase (crates.io ×2, GitHub Release 11 assets, tap
-formula), CI green on the tag, and `ossctl --version` confirmed against a fresh install._
+formula), CI green on the tag **and on main**, and the installed binary confirmed at
+0.10.0._
 
-_**What this stint did.** Two full waves and two engine cuts in one session. Wave A →
-0.8.0: the CI-delegated Homebrew target, the single-crate `[package] version` bump
-fallback, `verify` added to the sealed plan's phase list (a deliberate `SEAL_VERSION`
-5→6 event — plans sealed before 0.8.0 need re-planning), and `--version` / `-V` as
-aliases of the `version` verb. Wave B → 0.9.0: the `cargo-publish-ci` tag-only publish
-mode, publish-none (`targets: []`) as a first-class cuttable shape, `--help --json` for
-the whole command tree, and centralized stdout writing so a broken pipe exits quietly
-instead of panicking. Test count went 686 → 746; every unit passed the full green gate
-plus `/llm-review` before landing._
+_**Read the CI note below before you trust a local green gate.** This stint shipped 0.10.0
+from a tree whose CI was red, because the documented gate passed locally and nobody checked
+CI. The gate has since been made predictive (pinned toolchain), but the habit it exposed is
+worth keeping: **check CI on main before cutting**, not just the local gate._
 
-_**The engine now models three publishing dispositions in one vocabulary** — Engine
+_**What this stint did.** Six units landed and one engine cut → 0.10.0. Wave A ran four in
+parallel: the false-`missing` GitHub Release verification, the sealed-plan disposal gap in
+`release abandon`, the Cargo publish evidence now exposed through `facts --json`, and the
+plan/cut disagreement on repeated exact workspace pins. Wave B fixed the cargo-dist Homebrew
+double-writer (plus a bounded tap-clone retry and observation-only verify after a post-tag
+dist failure). A seventh unit then fixed red CI. Tests 746 → 768; every unit passed the full
+green gate plus `/llm-review` before landing._
+
+_**The strongest evidence this stint produced.** The 0.10.0 cut verified
+`rust:ossctl:gh-releases (matches)` — the exact path that produced false reds on
+project-canon v0.4.0 and v0.5.0. That fix is now confirmed against real infrastructure, not
+just tests. Treat that as the model: this engine's bugs are only truly closed when a real
+cut observes them._
+
+_**`SEAL_VERSION` is now 7** (was 6). The repeated-pin fix changed the meaning of a sealed
+pin rewrite, so plans sealed by 0.9.0 or earlier can no longer start a fresh cut and must be
+re-planned; legacy plans still load, so an interrupted run can still `resume`. This is the
+second seal event in three releases (5→6 in 0.8.0) — expected, but check any fleet repo's
+plan store for now-dead sealed plans._
+
+_**Two process failures found this stint. Both matter more than any single bug fixed.**_
+
+_1. **CI was red on main and 0.10.0 was cut anyway.** Two failures — an environment-dependent
+   verify test (passed locally, failed on both CI runners) and a Clippy lint from a newer
+   toolchain than the local one. The documented green gate therefore did not predict CI. Fixed
+   by `ci-fails-release`: `rust-toolchain.toml` now pins 1.98.0 to match CI, the verify test
+   was made hermetic by controlling the observer instead of depending on ambient network, and
+   the AGENTS green-gate section now states both rules. The classification question underneath
+   it was resolved deliberately and is worth knowing: **a destination that answers but lacks
+   the artifact is `Missing`; a destination that cannot be reached or understood is `Unknown`**
+   — absence of evidence is never evidence, per ADR-0002._
+
+_2. **The CHANGELOG was corrupted before the cut and had to be repaired by hand.** Two of this
+   round's entries had been merged into the already-published `[0.9.0]` section instead of
+   `[Unreleased]`. Cutting from that state would have published wrong release notes for 0.10.0
+   AND silently rewritten the history of a version already on crates.io, with the
+   `SEAL_VERSION` break buried inside it. AGENTS.md lists `CHANGELOG.md` as append-union-safe,
+   but a union merge does not catch a correct-looking entry in the **wrong section**. Worth
+   considering a marker-anchored guard on released sections — `/oss-changelog` already uses
+   markers for `[Unreleased]`. **Inspect the `[Unreleased]` block before every cut.**_
+
+_**Infrastructure defect found outside ossctl (filed in homebase as `assess-models-wedges`).**
+Two workers idled 11h28m and 5h38m inside `/assess-models` on an unbounded
+`find /Users/jari`, and orchestratectl saw nothing wrong — healthy `pending` runs, no
+`agent-died`, two `run wait` calls timing out normally. Killing the `find`s let both merge
+within 143 seconds. The maintainer's decision is to move the model-performance corpus to
+`haapa`; the filed issue records that the move alone does not close it, because the wedge
+came from an improvised locator search, not from where the data lives. **If a worker in any
+repo appears hung, capture its tmux pane and look for a long-running `find` before assuming a
+model or harness problem.**_
+
+_**Product direction — the 1.0 evidence gap is essentially unchanged.** The gate is one clean
+engine cut per fleet shape. Multicrate-with-local-publish is now proven three times (0.8.0,
+0.9.0, 0.10.0). The other three shapes — single-crate `--bump`, CI-publish, publish-none —
+remain code-complete, well-tested, and **never run in a real release**. Do not treat tests as
+substitute evidence; this stint is itself the argument, since the local gate was green while
+CI was red. The cross-repo follow-through is still the most direct route to those missing
+runs. After that: the ~2-week soak with zero new HIGH findings, then the 1.0 stability
+contract (which JSON shapes / exit codes / store formats freeze) and the 1.0 cut._
+
+_**The engine models three publishing dispositions in one vocabulary** — Engine
 publishes / CI publishes and the engine observes / nothing is published at all. That is
-the through-line of both cuts and the frame for reading the remaining work._
+the frame for reading the remaining work._
 
-_**Worth knowing about the review that caught the most.** The `release-ci-publish-mode`
+_**Worth knowing about the review that caught the most** (stint #23). The `release-ci-publish-mode`
 unit ran on the stronger worker model per the AGENTS worker-model note, and its
 `/llm-review` found three failure modes that would only have surfaced AFTER the
 irreversible tag. One was silent: cutting an already-published version would have gone
@@ -32,7 +88,7 @@ green over a CI publish that failed with "already uploaded". All three are now r
 before the tag. Treat "what fails after the point of no return" as a standing review lens
 on this engine._
 
-_**Fleet work done outside ossctl (recorded here because it originated in this stint).**
+_**Fleet work done outside ossctl (originated in stint #23; still the live picture).**
 Contract-alignment issues were filed in five repos now that the engine features they need
 have shipped: `issuectl` (an ACTIVE Homebrew double-writer that already false-red'd its
 0.15.0 cut), `glasspad` and `orchestratectl` (under-declared surface + `cargo-publish`
@@ -45,17 +101,6 @@ enabled across all eight active repos (schema enum + `intake migrate --apply` +
 triage state became real statuses. That surfaced **12 previously invisible untriaged bug
 reports in deutschpad** — they were unreachable by any status query while their state
 lived in a label._
-
-_**Product direction — the 1.0 gate is closer but one condition is genuinely unmet.** The
-gate is one clean engine cut per fleet shape. Multicrate-with-local-publish is proven
-twice (ossctl 0.8.0, 0.9.0). The other three shapes — single-crate `--bump`, CI-publish,
-publish-none — are code-complete and well-tested but have **never run in a real
-release**. Do not treat tests as substitute evidence here; the failures this engine exists
-to catch appear against real infrastructure under real timing. The cross-repo
-follow-through above would produce exactly those missing runs as a by-product, which is
-why it is the most direct route to 1.0 rather than a side quest. After that: the ~2-week
-soak with zero new HIGH findings, then write the 1.0 stability contract (which JSON
-shapes / exit codes / store formats freeze) and cut 1.0._
 
 _**Unresolved decisions for the maintainer:**_
 _1. **Does ossctl converge to the uniform fleet shape?** The maintainer asked for uniform
@@ -71,30 +116,46 @@ _3. **Cross-repo follow-through is PART DONE (verified 2026-08-20 at wrap).** Of
    and `orchestratectl` (`contract-declare-ci-publish-surface`) are already `fixed`;
    orchestratectl's contract now declares `cargo-publish-ci` ×2 + `cargo-dist` for both
    gh-releases and homebrew. Still open: `glasspad`, `project-canon`, `intakectl`. Note
-   NONE of the fixed ones has yet been through a real cut, so the 1.0 evidence gap below is
+   NONE of the fixed ones has yet been through a real cut, so the 1.0 evidence gap noted above is
    unchanged — declaring the shape is not the same as proving it._
-_4. **`ossctl-phase4-build` (the parent epic) is unscheduled** and needs scheduling
-   triage — it was written to close when the release-safety and cli-canon lanes drain, and
-   both have since drained and refilled with different work._
+_4. **RESOLVED — `ossctl-phase4-build` was closed as delivered** (maintainer decision,
+   2026-08-21). Every stage of its build order shipped, and it tracked no children. It was
+   deliberately NOT recycled into a 1.0 tracker, because its scope had already drifted and an
+   epic whose scope silently changes can never be audited. **Open question: the 1.0 gate now
+   has no tracking artifact.** If one is wanted, it needs its own epic with a checkable
+   condition — all four fleet shapes proven in real cuts (currently 1/4), a ~2-week soak with
+   no new HIGH findings, and a written stability contract. Not yet filed._
 _5. Housekeeping left deliberately undone: `issuectl` lacks `.issuectl/AGENTS.md`
    (`issuectl agents init` is an opt-in, not a fix) and has 2 broken cross-references + 1
    unknown frontmatter key; `deutschpad` has 20 closed issues missing `closed:` dates that
-   `doctor` cannot invent. Five Dependabot PRs remain open and untriaged._
+   `doctor` cannot invent. Dependabot PRs remain open and untriaged — note the clap 4.6.6 PR
+   surfaced the red-CI regressions before anyone else did, so they are worth a look._
 
-_**Two HIGH bugs dominate the remaining work, both false-reds on delivered releases.**
-`verify-gh-release-missing` — a published GitHub Release verifies as `missing`, observed
-four times on project-canon, confirmed present in the released 0.9.0, and it also leaves
-runs stuck `in_progress`. It is a lookup bug, not a timing race (the release existed for
-~18 of the 20 polling minutes). A starting-point hint is recorded on the issue:
-`adapters/binary.rs` keys correctly on the tag, but the reported error text is
-`reconcile.rs`'s wording and that path routes gh-releases through a generic registry
-query. The hint is explicitly marked unverified — confirm it, do not inherit it.
-`cut-runs-own` is the engine half of issuectl's double-writer, plus a missing 503 retry.
-Also newly admitted: a sealed `--bump` plan counted one intra-workspace pin where the cut
-found two and refused — plan and cut disagreeing about one sealed tree, which is a seal-
-boundary problem rather than a bump edge case._
+_**What remains, and the shape of it.** Both of last stint's dominant HIGH false-reds are
+fixed and released. The open work now splits in two:_
 
-_**Found during the wrap, affects the next session directly:** `intakectl file` currently
+_**The verify seam** still has four items, and the through-line is that verify reasons about
+**destinations** rather than about the **delegated run that fills them**. The sharpest is
+`verify-delegated-run-state`, from a real issuectl 0.16.0 cut: "still building", "succeeded",
+and "died" are indistinguishable, so a cancelled cargo-dist workflow (six-hour runner queue,
+then GitHub's job ceiling) reported only `gh-releases (missing)` and the operator's plausible
+first reading — "verify raced CI" — was wrong and cost a round-trip. It was placed ahead of
+`delegated-verify-window-ux` on purpose: that item rebuilds the same polling loop, and the
+loop is far easier to write once verify can separate pending from failed. `delegated-registry-
+verify-destination` and `delegated-publish-workflow-preflight` complete the seam. Note the
+CI-fix unit touched adjacent classification code — check whether it partly subsumes the
+registry-destination item before implementing it fresh._
+
+_**The bump/seal path** carries `bump-inherited-workspace-pins`, which is the same class as
+the repeated-pin bug fixed this stint but **silent where that one was loud**: a member
+inheriting an exact internal pin from root `[workspace.dependencies]` publishes to crates.io
+tied to a stale internal version while local checks stay green, because they resolve through
+`path`. Not reachable in ossctl's own contract (its `[workspace.dependencies]` holds only
+external crates), but reachable by any downstream repo using that very common layout. Its fix
+extends the same discovery path just reconciled, so check whether it moves the seal pre-image
+again — that would be another deliberate `SEAL_VERSION` event, not a silent hash change._
+
+_**Found during stint #23's wrap, still unfixed:** `intakectl file` currently
 cannot file into any repo other than homebase — it ignores `--repo` and `--type`, produces a
 `tg-bug-…` slug, and the service slug-guard then refuses to confirm (the merge gate held;
 nothing reached any remote). `--repo issuectl` worked, `--repo orchestratectl` did not, so
@@ -129,11 +190,11 @@ are the source of truth.
 
 ## Backlog
 
-Post-release hardening + Track B are children/followups under
-[`ossctl-phase4-build`](issues/ossctl-phase4-build/item.md) (still OPEN — closes when the
-release-safety and cli-canon lanes drain). `issuectl list` for the live view.
+[`ossctl-phase4-build`](issues/ossctl-phase4-build/item.md) — the founding extraction epic —
+was closed as delivered on 2026-08-21. There is no parent epic now; open work stands on its
+own issues. `issuectl list` for the live view.
 
 ## Piialiisan bugiraportit
 
-- [x] 🐛 Piialiisan bugiraportti: Release bump plan accepts duplicate exact pins then cut fails — admitted to the plan — jari via Telegram ([`intake-bug-ossctl-d38ddf598fd5`](issues/intake-bug-ossctl-d38ddf598fd5/item.md))
+- [x] 🐛 Piialiisan bugiraportti: Release bump plan accepts duplicate exact pins then cut fails — FIXED and released in 0.10.0 (SEAL_VERSION 6->7) — jari via Telegram ([`intake-bug-ossctl-d38ddf598fd5`](issues/intake-bug-ossctl-d38ddf598fd5/item.md))
 - [x] 🐛 Piialiisan bugiraportti: Cargo-dist verifier reports existing GitHub Releases missing — closed as a duplicate; evidence folded into `verify-gh-release-missing` — jari via Telegram ([`intake-bug-ossctl-09cd3c1d03d0`](issues/intake-bug-ossctl-09cd3c1d03d0/item.md))
