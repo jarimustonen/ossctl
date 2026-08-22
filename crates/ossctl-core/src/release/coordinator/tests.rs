@@ -4450,13 +4450,16 @@ fn delegated_pypi_destinations_are_unknown_when_the_registry_has_no_python_clien
             VerifyOutcome::Unknown,
             "{registry_destination:?} must stay honest when no Python registry observer exists"
         );
+        let calls = registry.calls.borrow();
         assert!(
-            registry
-                .calls
-                .borrow()
+            !calls.is_empty(),
+            "{registry_destination:?} never reached the Python registry observer"
+        );
+        assert!(
+            calls
                 .iter()
                 .all(|(ecosystem, package)| ecosystem == "python" && package == "tool"),
-            "{registry_destination:?} was queried through the wrong registry identity"
+            "{registry_destination:?} was queried through the wrong ecosystem/package identity"
         );
         assert!(
             !cmd.calls()
