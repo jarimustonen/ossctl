@@ -76,14 +76,14 @@ impl CommandRunner for CargoDistCmd {
 }
 
 struct FormulaRegistry {
-    status: u16,
+    status: Option<u16>,
     body: Vec<u8>,
     urls: RefCell<Vec<String>>,
 }
 impl FormulaRegistry {
     fn cargo_dist_fixture() -> Self {
         Self {
-            status: 200,
+            status: Some(200),
             body: include_bytes!("../fixtures/project-canon-cargo-dist-0.28.2.rb").to_vec(),
             urls: RefCell::new(Vec::new()),
         }
@@ -91,7 +91,15 @@ impl FormulaRegistry {
 
     fn with_status(status: u16) -> Self {
         Self {
-            status,
+            status: Some(status),
+            body: Vec::new(),
+            urls: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn erroring() -> Self {
+        Self {
+            status: None,
             body: Vec::new(),
             urls: RefCell::new(Vec::new()),
         }
@@ -100,7 +108,10 @@ impl FormulaRegistry {
 impl RegistryQuery for FormulaRegistry {
     fn http_get(&self, url: &str) -> io::Result<(u16, Vec<u8>)> {
         self.urls.borrow_mut().push(url.to_string());
-        Ok((self.status, self.body.clone()))
+        self.status.map_or_else(
+            || Err(io::Error::from(io::ErrorKind::TimedOut)),
+            |status| Ok((status, self.body.clone())),
+        )
     }
 
     fn published_versions(&self, _ecosystem: &str, _package: &str) -> io::Result<Vec<String>> {
@@ -503,6 +514,17 @@ fn delegated_homebrew_distinguishes_missing_from_observer_failure() {
         let report = reconcile_with_plan(&state, Some(&plan), &ctx);
         assert_eq!(only(&report).outcome, expected, "HTTP {status}");
     }
+
+    let erroring = FormulaRegistry::erroring();
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &erroring,
+        repo_root: Path::new("/repo"),
+        artifacts: &crate::release::adapters::EMPTY_ARTIFACTS,
+    };
+    let report = reconcile_with_plan(&state, Some(&plan), &ctx);
+    assert_eq!(only(&report).outcome, VerifyOutcome::Unknown);
 }
 
 #[test]

@@ -1149,45 +1149,6 @@ fn is_sha256_hex(s: &str) -> bool {
 /// name, a path separator (`/`, `\`), a `..` traversal component, or a leading `.`.
 /// The name is otherwise trusted (it reaches `desc`/`bin` via [`ruby_escape`]); this
 /// guards only the filesystem/path uses.
-#[cfg(test)]
-mod platform_stanza_tests {
-    use super::formula_has_platform_stanza;
-
-    const CARGO_DIST_0_28_2_FORMULA: &str =
-        include_str!("../fixtures/project-canon-cargo-dist-0.28.2.rb");
-
-    #[test]
-    fn cargo_dist_nested_downloads_are_not_shadowed_by_install_guards() {
-        for condition in [
-            "if OS.mac? && Hardware::CPU.arm?",
-            "if OS.linux? && Hardware::CPU.arm?",
-            "if OS.linux? && Hardware::CPU.intel?",
-        ] {
-            assert!(
-                formula_has_platform_stanza(CARGO_DIST_0_28_2_FORMULA, condition),
-                "cargo-dist 0.28.2 formula should contain {condition}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_matching_install_guard_without_a_download_stanza_is_not_enough() {
-        let formula = r#"class Tool < Formula
-  version \"1.0.0\"
-  def install
-    if OS.linux? && Hardware::CPU.arm?
-      bin.install \"tool\"
-    end
-  end
-end
-"#;
-        assert!(!formula_has_platform_stanza(
-            formula,
-            "if OS.linux? && Hardware::CPU.arm?"
-        ));
-    }
-}
-
 fn validate_package_name(name: &str) -> Result<(), AdapterError> {
     let bad = name.is_empty()
         || name.starts_with('.')
@@ -1230,4 +1191,43 @@ fn formula_class(name: &str) -> String {
         out.insert(0, 'X');
     }
     out
+}
+
+#[cfg(test)]
+mod platform_stanza_tests {
+    use super::formula_has_platform_stanza;
+
+    const CARGO_DIST_0_28_2_FORMULA: &str =
+        include_str!("../fixtures/project-canon-cargo-dist-0.28.2.rb");
+
+    #[test]
+    fn cargo_dist_nested_downloads_are_not_shadowed_by_install_guards() {
+        for condition in [
+            "if OS.mac? && Hardware::CPU.arm?",
+            "if OS.linux? && Hardware::CPU.arm?",
+            "if OS.linux? && Hardware::CPU.intel?",
+        ] {
+            assert!(
+                formula_has_platform_stanza(CARGO_DIST_0_28_2_FORMULA, condition),
+                "cargo-dist 0.28.2 formula should contain {condition}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_matching_install_guard_without_a_download_stanza_is_not_enough() {
+        let formula = r#"class Tool < Formula
+  version "1.0.0"
+  def install
+    if OS.linux? && Hardware::CPU.arm?
+      bin.install "tool"
+    end
+  end
+end
+"#;
+        assert!(!formula_has_platform_stanza(
+            formula,
+            "if OS.linux? && Hardware::CPU.arm?"
+        ));
+    }
 }

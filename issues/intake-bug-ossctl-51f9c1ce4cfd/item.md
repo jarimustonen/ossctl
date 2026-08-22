@@ -1,6 +1,6 @@
 ---
 created: 2026-08-21
-updated: 2026-08-22
+updated: 2026-08-23
 type: bug
 reporter: jari
 status: in-progress
@@ -10,6 +10,9 @@ source_ref: agent:homebase-wrapup/reporter:jari/id:d2d40ad8-c9c6-439e-a39c-da8b6
 lane: homebrew-observer
 lane_seq: 10
 collision: [crates/ossctl-core/src/release/adapters/homebrew.rs, crates/ossctl-core/src/release/reconcile.rs]
+commits:
+- hash: 345d42f
+  summary: fix delegated Homebrew formula parsing and reconcile destination dispatch
 ---
 
 # homebrew/binary target verification fails: missing during cut, unknown …
