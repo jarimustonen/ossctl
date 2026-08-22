@@ -1,8 +1,8 @@
 ---
 created: 2026-08-20
-updated: 2026-08-21
+updated: 2026-08-22
 type: bug
-status: open
+status: in-progress
 priority: high
 provenance: agent:issuectl-stint-wrapup
 lane: verify-observers
