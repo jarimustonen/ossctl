@@ -4106,6 +4106,23 @@ impl RegistryQuery for UnreachableRegistry {
     }
 }
 
+/// Records which ecosystem/package destination the delegated observer queried.
+struct RecordingDestinationRegistry {
+    calls: RefCell<Vec<(String, String)>>,
+    versions: io::Result<Vec<String>>,
+}
+impl RegistryQuery for RecordingDestinationRegistry {
+    fn published_versions(&self, ecosystem: &str, package: &str) -> io::Result<Vec<String>> {
+        self.calls
+            .borrow_mut()
+            .push((ecosystem.to_string(), package.to_string()));
+        match &self.versions {
+            Ok(versions) => Ok(versions.clone()),
+            Err(error) => Err(io::Error::new(error.kind(), error.to_string())),
+        }
+    }
+}
+
 /// A single crates.io target whose publish is CI-delegated (`cargo-publish-ci`) —
 /// the glasspad shape: the engine gates and tags, the tag-triggered workflow
 /// publishes.
@@ -4353,6 +4370,102 @@ fn a_mixed_plan_publishes_the_engine_target_and_delegates_the_ci_one() {
     // Both are observed at their destination.
     assert_eq!(state.verified.get(&ids[0]), Some(&VerifyOutcome::Matches));
     assert_eq!(state.verified.get(&ids[1]), Some(&VerifyOutcome::Matches));
+}
+
+#[test]
+fn delegated_npm_is_observed_on_npm_never_github_release_assets() {
+    let clock = FakeClock(Cell::new(1000));
+    let cmd = FakeCmd::new();
+    let registry = RecordingDestinationRegistry {
+        calls: RefCell::new(Vec::new()),
+        versions: Ok(vec!["1.0.0".to_string()]),
+    };
+    let context = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &registry,
+        repo_root: Path::new("/repo"),
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let target = AdapterTarget {
+        target: crate::contract::schema::Target {
+            ecosystem: Ecosystem::Node,
+            package: Some("tool".into()),
+            registry: Registry::Npm,
+            adapter: Adapter::ReleasePlease,
+        },
+        package: "tool".into(),
+        version: "1.0.0".into(),
+    };
+
+    assert_eq!(
+        verify_delegated_destination(&context, &ci_publish_plan(), &target),
+        VerifyOutcome::Matches
+    );
+    assert_eq!(
+        registry.calls.borrow().as_slice(),
+        &[("node".to_string(), "tool".to_string())]
+    );
+    assert!(
+        !cmd.calls()
+            .iter()
+            .any(|call| call.starts_with("gh release")),
+        "npm delegation fell through to GitHub Release assets: {:?}",
+        cmd.calls()
+    );
+}
+
+#[test]
+fn delegated_pypi_destinations_are_unknown_when_the_registry_has_no_python_client() {
+    for registry_destination in [Registry::Pypi, Registry::TestPypi] {
+        let clock = FakeClock(Cell::new(1000));
+        let cmd = FakeCmd::new();
+        let registry = RecordingDestinationRegistry {
+            calls: RefCell::new(Vec::new()),
+            versions: Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "python registry query is not wired",
+            )),
+        };
+        let context = EffectCtx {
+            runner: &cmd,
+            clock: &clock,
+            registry: &registry,
+            repo_root: Path::new("/repo"),
+            artifacts: &EMPTY_ARTIFACTS,
+        };
+        let target = AdapterTarget {
+            target: crate::contract::schema::Target {
+                ecosystem: Ecosystem::Python,
+                package: Some("tool".into()),
+                registry: registry_destination,
+                adapter: Adapter::GhActionPypiPublish,
+            },
+            package: "tool".into(),
+            version: "1.0.0".into(),
+        };
+
+        assert_eq!(
+            verify_delegated_destination(&context, &ci_publish_plan(), &target),
+            VerifyOutcome::Unknown,
+            "{registry_destination:?} must stay honest when no Python registry observer exists"
+        );
+        assert!(
+            registry
+                .calls
+                .borrow()
+                .iter()
+                .all(|(ecosystem, package)| ecosystem == "python" && package == "tool"),
+            "{registry_destination:?} was queried through the wrong registry identity"
+        );
+        assert!(
+            !cmd.calls()
+                .iter()
+                .any(|call| call.starts_with("gh release")),
+            "{registry_destination:?} delegation fell through to GitHub Release assets: {:?}",
+            cmd.calls()
+        );
+    }
 }
 
 #[test]

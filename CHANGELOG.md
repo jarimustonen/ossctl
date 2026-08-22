@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Delegated npm and Python publishes are now verified at their package registries.**
+  npm uses the production registry observer; PyPI and TestPyPI report an honest
+  `Unknown` until a Python registry client is available instead of falsely reporting
+  missing GitHub Release assets (`delegated-registry-verify-destination`).
 - **Engine-owned Cargo bumps now rewrite exact internal pins inherited from root
   `[workspace.dependencies]`.** Discovery and execution share a parser-backed TOML
   model, including dotted keys and multiline inline tables, so local `path` resolution

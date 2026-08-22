@@ -1681,22 +1681,7 @@ fn verify_phase(
             // verdict. Journal Unknown, never a false Missing.
             VerifyOutcome::Unknown
         } else if is_delegated {
-            // The observation destination follows the DELEGATED ADAPTER's identity
-            // first, then the registry. A delegated **registry** publish
-            // (`cargo-publish-ci`: CI runs `cargo publish` on the tag) lands on the
-            // registry index, not in a GitHub Release, so the Release-asset observer
-            // would look in the wrong place and fail a healthy cut. Keying that on the
-            // adapter rather than on `registry == crates.io` leaves every other
-            // delegated target — including the odd-but-expressible
-            // `{registry: crates.io, adapter: cargo-dist}` — observed exactly where it
-            // was observed before.
-            match (tp.input.target.adapter, tp.input.target.registry) {
-                (Adapter::CargoPublishCi, _) => verify_delegated_registry(&verify_ctx, &tp.input),
-                (_, Registry::Homebrew) => {
-                    verify_delegated_homebrew(&verify_ctx, plan, &tp.input.package)
-                }
-                _ => verify_delegated_release(&verify_ctx, plan, &tp.input.package),
-            }
+            verify_delegated_destination(&verify_ctx, plan, &tp.input)
         } else if let Some(receipt) = journal.state().published.get(&tp.id) {
             let receipt = AdapterReceipt {
                 adapter: tp.input.target.adapter,
@@ -1796,6 +1781,30 @@ fn verify_phase(
             None,
             "all declared destinations match, but the preceding dist barrier failed and the run remains resumable".to_string(),
         ),
+    }
+}
+
+/// Observe a CI-delegated target at the destination it actually publishes to.
+/// Package-registry adapters use the registry observer; cargo-dist remains on its
+/// GitHub Release (or Homebrew formula) surface even for an odd registry declaration.
+/// Keeping this dispatch after [`wait_for_delegated_runs`] preserves the stronger
+/// workflow-state-first rule: a pending or failed workflow never degrades into a
+/// false destination `Missing` verdict.
+fn verify_delegated_destination(
+    ctx: &EffectCtx<'_>,
+    plan: &ReleasePlan,
+    target: &AdapterTarget,
+) -> VerifyOutcome {
+    match (target.target.adapter, target.target.registry) {
+        (_, Registry::Homebrew) => verify_delegated_homebrew(ctx, plan, &target.package),
+        // cargo-dist publishes Release assets regardless of an odd-but-expressible
+        // registry declaration. Its adapter identity therefore takes precedence over
+        // the package-registry destination cases below.
+        (Adapter::CargoDist, _) => verify_delegated_release(ctx, plan, &target.package),
+        (Adapter::CargoPublishCi, _) | (_, Registry::Npm | Registry::Pypi | Registry::TestPypi) => {
+            verify_delegated_registry(ctx, target)
+        }
+        _ => verify_delegated_release(ctx, plan, &target.package),
     }
 }
 
