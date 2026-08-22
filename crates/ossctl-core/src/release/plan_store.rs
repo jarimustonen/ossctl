@@ -259,6 +259,13 @@ fn corrupt(id: &str, detail: impl Into<String>) -> PlanStoreError {
         detail: detail.into(),
     }
 }
+fn bool_at_or_false(v: &Value, key: &str, id: &str) -> Result<bool, PlanStoreError> {
+    match v.get(key) {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(corrupt(id, format!("invalid {key}: expected a boolean"))),
+    }
+}
 fn str_at<'a>(v: &'a Value, key: &str, id: &str) -> Result<&'a str, PlanStoreError> {
     v.get(key)
         .and_then(Value::as_str)
@@ -313,6 +320,7 @@ fn decode_plan(v: &Value, id: &str) -> Result<ReleasePlan, PlanStoreError> {
                 .map(|p| {
                     Ok(PinRewrite {
                         in_package: str_at(p, "in_package", id)?.into(),
+                        workspace_root: bool_at_or_false(p, "workspace_root", id)?,
                         dependency: str_at(p, "dependency", id)?.into(),
                         from: str_at(p, "from", id)?.into(),
                         to: str_at(p, "to", id)?.into(),
@@ -372,7 +380,7 @@ mod tests {
     #[test]
     fn legacy_v5_plan_without_verify_remains_readable() {
         // Existing v5 plans must load so an interrupted run can resume through the
-        // now-mandatory verify barrier. A fresh cut re-derives a v7 address and
+        // now-mandatory verify barrier. A fresh cut re-derives a v8 address and
         // rejects this old approval as stale instead of silently extending it.
         let plan = serde_json::json!({
             "plan_id": "legacy",
@@ -392,9 +400,39 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v6_bump_plan_remains_readable_after_pin_set_semantics_change() {
+    fn malformed_present_workspace_root_flag_is_corruption() {
         let plan = serde_json::json!({
-            "plan_id": "legacy-v6",
+            "plan_id": "bad",
+            "contract_schema_version": 4,
+            "head_sha": "abc",
+            "version": "0.5.0",
+            "targets": [],
+            "phases": ["bump"],
+            "bump": {
+                "level": "minor",
+                "from_version": "0.4.0",
+                "to_version": "0.5.0",
+                "pin_rewrites": [{
+                    "in_package": "workspace",
+                    "workspace_root": "true",
+                    "dependency": "core",
+                    "from": "=0.4.0",
+                    "to": "=0.5.0"
+                }],
+                "changelog_finalize": true
+            },
+            "homebrew_tap": null,
+            "license": null,
+            "description": null,
+            "homebrew_platforms": []
+        });
+        assert!(decode_plan(&plan, "bad").is_err());
+    }
+
+    #[test]
+    fn legacy_member_only_bump_plan_remains_readable_after_workspace_root_support() {
+        let plan = serde_json::json!({
+            "plan_id": "legacy-v7",
             "contract_schema_version": 4,
             "head_sha": "abc",
             "version": "0.5.0",
@@ -418,8 +456,9 @@ mod tests {
             "homebrew_platforms": []
         });
 
-        let decoded = decode_plan(&plan, "legacy-v6").expect("v6 bump plan remains loadable");
-        assert_eq!(decoded.bump.unwrap().pin_rewrites.len(), 1);
+        let decoded = decode_plan(&plan, "legacy-v7").expect("v7 bump plan remains loadable");
+        let rewrite = &decoded.bump.as_ref().unwrap().pin_rewrites[0];
+        assert!(!rewrite.workspace_root);
         assert_eq!(decoded.phases.last(), Some(&PlanPhase::Verify));
     }
 }

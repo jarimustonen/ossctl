@@ -173,14 +173,24 @@ pub struct BumpPlan {
 /// deterministically after proving every explicit declaration in the set equivalent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PinRewrite {
-    /// The workspace member whose manifest carries the pin (the dependent crate).
+    /// The workspace member whose manifest carries the pin (the dependent crate), or
+    /// `workspace` when [`Self::workspace_root`] identifies the root manifest.
     pub in_package: String,
+    /// Whether this rewrite is owned by root `[workspace.dependencies]` rather than a
+    /// member manifest. Omitted when false to keep legacy member-only JSON unchanged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub workspace_root: bool,
     /// The pinned intra-workspace dependency crate (the pin's subject).
     pub dependency: String,
     /// The current pin requirement (`=<from_version>`).
     pub from: String,
     /// The rewritten pin requirement (`=<to_version>`).
     pub to: String,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's callback ABI passes `&T`.
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// The semantic version-bump level a human requests with `--bump` — the *only*

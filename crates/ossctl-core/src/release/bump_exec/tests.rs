@@ -170,6 +170,7 @@ fn bump_plan() -> BumpPlan {
         to_version: "0.5.0".into(),
         pin_rewrites: vec![PinRewrite {
             in_package: "acme".into(),
+            workspace_root: false,
             dependency: "acme-core".into(),
             from: "=0.4.0".into(),
             to: "=0.5.0".into(),
@@ -229,6 +230,45 @@ fn applies_version_pin_changelog_and_commits() {
         !calls.iter().any(|c| c.starts_with("git push")),
         "the executor must not push the branch: {calls:?}"
     );
+}
+
+#[test]
+fn applies_inherited_workspace_pin_before_local_path_checks() {
+    let dir = temp_workspace();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/core\", \"crates/cli\"]\n\n[workspace.package]\nversion = \"0.4.0\"\nedition = \"2021\"\n\n[workspace.dependencies]\nacme-core = {\n  path = \"crates/core\",\n  version = \"=0.4.0\"\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("crates/cli/Cargo.toml"),
+        "[package]\nname = \"acme\"\nversion.workspace = true\n\n[dependencies]\nacme-core.workspace = true\n",
+    )
+    .unwrap();
+    let mut plan = bump_plan();
+    plan.pin_rewrites = vec![PinRewrite {
+        in_package: "workspace".into(),
+        workspace_root: true,
+        dependency: "acme-core".into(),
+        from: "=0.4.0".into(),
+        to: "=0.5.0".into(),
+    }];
+    let runner = FakeRunner::new("abc123def456");
+    let (clock, reg) = (FakeClock, NoRegistry);
+
+    apply_bump(&ctx(&runner, &clock, &reg, dir.path()), &plan, "2026-08-13").unwrap();
+
+    let root = std::fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+    assert!(
+        root.contains("[workspace.package]\nversion = \"0.5.0\""),
+        "workspace version retained across the root pin rewrite: {root}"
+    );
+    assert!(
+        root.contains("version = \"=0.5.0\""),
+        "root pin rewritten: {root}"
+    );
+    let cli = std::fs::read_to_string(dir.path().join("crates/cli/Cargo.toml")).unwrap();
+    assert!(cli.contains("acme-core.workspace = true"));
 }
 
 #[test]

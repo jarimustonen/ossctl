@@ -661,9 +661,9 @@ fn push_member_dir(
 /// [`member_dependency_edges`] treats only `path`/`workspace` dependencies as edges
 /// (a registry dep sharing a member's name is not an edge, so no false constraint /
 /// false cycle), and reads the plain, target-specific, sub-table, and dotted-key
-/// dependency forms plus inline `package = "…"` renames. Its two documented blind
-/// spots (a rename inherited through the root `[workspace.dependencies]`, and a
-/// multi-line inline table) each fail closed the same way.
+/// dependency forms plus inline `package = "…"` renames. Release-pin discovery is
+/// parser-backed separately, so a declaration shape this ordering scanner misses can
+/// no longer leave an exact internal pin stale during an engine-owned bump.
 ///
 /// One parsed workspace member before the publishability filter — the intermediate
 /// [`detect_rust_workspace`] reduces to the published [`WorkspaceMember`] set.
@@ -689,6 +689,20 @@ fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace>
         return None;
     }
     let ws_pkg = toml_section(&root_text, "workspace.package");
+    let mut workspace_pin_reqs: std::collections::BTreeMap<String, Vec<Option<String>>> =
+        std::collections::BTreeMap::new();
+    let mut pin_parse_error = None;
+    match crate::release::bump::cargo_workspace_pin_declarations(&root_text) {
+        Ok(declarations) => {
+            for declaration in declarations {
+                workspace_pin_reqs
+                    .entry(declaration.package)
+                    .or_default()
+                    .push(declaration.requirement);
+            }
+        }
+        Err(error) => pin_parse_error = Some(format!("Cargo.toml: {error}")),
+    }
 
     // First pass: parse every named member (name, version, publishability, edges).
     let mut raw: Vec<RawMember> = Vec::new();
@@ -705,10 +719,16 @@ fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace>
             version,
             publishable: member_publishable_to_crates_io(&text),
             deps: member_dependency_edges(&text),
-            pins: crate::release::bump::cargo_pin_declarations(&text)
-                .into_iter()
-                .map(|d| (d.package, d.requirement))
-                .collect(),
+            pins: match crate::release::bump::cargo_pin_declarations(&text) {
+                Ok(declarations) => declarations
+                    .into_iter()
+                    .map(|d| (d.package, d.requirement))
+                    .collect(),
+                Err(error) => {
+                    pin_parse_error.get_or_insert_with(|| format!("{rel}/Cargo.toml: {error}"));
+                    Vec::new()
+                }
+            },
         });
     }
 
@@ -766,7 +786,11 @@ fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace>
     if members.is_empty() {
         return None;
     }
-    Some(RustWorkspace { members })
+    Some(RustWorkspace {
+        members,
+        workspace_pin_reqs,
+        pin_parse_error,
+    })
 }
 
 /// Whether a Cargo member manifest permits publishing to crates.io — the same
@@ -873,13 +897,12 @@ enum DepTable {
 /// Dev-dependencies are excluded (they never gate publish order and can legitimately
 /// cycle).
 ///
-/// **Known blind spots (each fails a cut CLOSED, never mis-publishes — see
-/// `detect_rust_workspace`):** a dependency inheriting a *rename* through the root
-/// `[workspace.dependencies]` (`alias.workspace = true` where the root maps `alias`
-/// to a differently-named crate) resolves to `alias`, missing the edge; a *multi-line*
-/// inline table is read only by its first physical line; a dotted `dep.version = "…"`
-/// requirement on a line separate from `dep.path` is not captured (so that edge's pin is
-/// left un-rewritten — fail closed).
+/// **Known ordering blind spots (each fails a cut CLOSED, never mis-publishes — see
+/// `detect_rust_workspace`):** a dependency inheriting a *rename* through root
+/// `[workspace.dependencies]` can miss the edge, and a multi-line inline table is read
+/// only by its first physical line. Exact-pin ownership does not share these blind
+/// spots: the parser-backed bump scanner resolves root inheritance, dotted keys, and
+/// multiline inline tables independently and seals their rewrites before cut.
 fn member_dependency_edges(text: &str) -> Vec<(String, Option<String>)> {
     let mut state = DepTable::Other;
     let mut out: Vec<(String, Option<String>)> = Vec::new();
@@ -2218,6 +2241,31 @@ mod tests {
             cli.pin_reqs.get("octl-core"),
             Some(&vec![Some("=0.4.0".to_string())])
         );
+    }
+
+    #[test]
+    fn rust_workspace_records_inherited_root_exact_pin() {
+        let root = "[workspace]\nmembers = [\"core\", \"cli\"]\n\
+                    [workspace.package]\nversion = \"0.4.0\"\n\
+                    [workspace.dependencies]\ncore = {\npath = \"core\",\nversion = \"=0.4.0\"\n}\n";
+        let core = "[package]\nname = \"core\"\nversion.workspace = true\n";
+        let cli = "[package]\nname = \"cli\"\nversion.workspace = true\n\n[dependencies]\ncore.workspace = true\n";
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", root)
+            .file("/repo/core/Cargo.toml", core)
+            .file("/repo/cli/Cargo.toml", cli);
+        let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
+
+        assert_eq!(
+            ws.workspace_pin_reqs.get("core"),
+            Some(&vec![Some("=0.4.0".to_string())])
+        );
+        let cli = ws
+            .members
+            .iter()
+            .find(|member| member.package == "cli")
+            .unwrap();
+        assert_eq!(cli.workspace_deps, vec!["core".to_string()]);
     }
 
     #[test]

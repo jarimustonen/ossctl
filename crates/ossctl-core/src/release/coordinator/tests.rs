@@ -3831,6 +3831,7 @@ fn bump_plan() -> ReleasePlan {
             to_version: "0.5.0".into(),
             pin_rewrites: vec![PinRewrite {
                 in_package: "acme".into(),
+                workspace_root: false,
                 dependency: "acme-core".into(),
                 from: "=0.4.0".into(),
                 to: "=0.5.0".into(),

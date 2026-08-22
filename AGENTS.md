@@ -133,7 +133,8 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
   already false-red'd an issuectl cut on a transient 503); omitting the target entirely
   under-declares a channel users install from. Full fleet picture:
   `homebase/issues/cross-repo-release-standardisation/audit-2026-08-17.md`.
-- **`SEAL_VERSION` is 6.** The sealed plan's pre-image includes the phase sequence, so a
+- **`SEAL_VERSION` is 8.** The sealed plan's pre-image includes the phase sequence and
+  complete engine-owned bump edit set, so a
   phase-model change is a deliberate `SEAL_VERSION` event per `release/plan.rs`'s evolution
   rule — never a silent hash change. Live consequence of the 5→6 bump (0.8.0, when `verify`
   joined the phase list): a plan sealed by an older binary can no longer be cut and must be

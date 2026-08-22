@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
 
+### Fixed
+- **Engine-owned Cargo bumps now rewrite exact internal pins inherited from root
+  `[workspace.dependencies]`.** Discovery and execution share a parser-backed TOML
+  model, including dotted keys and multiline inline tables, so local `path` resolution
+  cannot hide a stale registry requirement. Because this widens the sealed bump edit
+  set, release-plan `SEAL_VERSION` advances from 7 to 8; older plans remain readable
+  for resume but require re-planning before a fresh cut
+  (`bump-inherited-workspace-pins`).
+
 ## [0.10.0] - 2026-08-20
 
 ### Added

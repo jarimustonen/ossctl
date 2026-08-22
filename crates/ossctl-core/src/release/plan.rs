@@ -696,13 +696,11 @@ fn changelog_is_finalizable(contract: &Contract) -> bool {
 /// Derive the intra-workspace `=`-version pin rewrites the bump applies in lockstep
 /// with the workspace version.
 ///
-/// For each publishable workspace member and each of its intra-workspace dependency
-/// edges (`M` depends on `D`, both members), the workspace's `=`-pinning convention
-/// (the bin's `lib = "=<workspace version>"`, `release-rust-workspace-multicrate`)
-/// means `M`'s manifest carries a `D = "=<from_version>"` pin that must become
-/// `D = "=<to_version>"`. Emitted deterministically (sorted by dependent then
-/// dependency), one per edge; empty for a single-crate workspace or a repo with no
-/// detected workspace graph.
+/// For each publishable workspace member, exact internal pins may live either in its
+/// own dependency tables or once in root `[workspace.dependencies]` and be inherited
+/// with `workspace = true`. Both locations are sealed and rewritten from
+/// `=<from_version>` to `=<to_version>`. Entries are emitted deterministically; the
+/// set is empty for a single-crate workspace or a repo with no detected workspace graph.
 ///
 /// **Precise, not over-broad** (`release-rust-workspace-multicrate` facet 3, llm-review):
 /// a rewrite is emitted **only** when the member's manifest declares that edge's
@@ -712,8 +710,47 @@ fn changelog_is_finalizable(contract: &Contract) -> bool {
 /// repeated declarations form one deterministic rewrite set; a mix of exact and
 /// different/path-only requirements is refused here before sealing. A caret/range/
 /// `workspace = true`/independently-versioned edge with no exact lockstep declaration
-/// is **skipped**, so the bump never clobbers it. The executor applies the same
+/// is skipped, while a different exact requirement is refused before sealing. The
+/// executor applies the same
 /// equivalence rule to the sealed manifest text before replacing every match.
+fn exact_pin_count(
+    owner: &str,
+    dependency: &str,
+    requirements: &[Option<String>],
+    from_pin: &str,
+    from_version: &str,
+) -> Result<Option<usize>, crate::release::bump::BumpError> {
+    let explicit = requirements.iter().filter(|req| req.is_some()).count();
+    let matching = requirements
+        .iter()
+        .filter(|req| req.as_deref() == Some(from_pin))
+        .count();
+    if matching == 0 {
+        if requirements
+            .iter()
+            .flatten()
+            .any(|requirement| requirement.trim_start().starts_with('='))
+        {
+            return Err(crate::release::bump::BumpError {
+                version: from_version.to_string(),
+                reason: format!(
+                    "{owner} declares exact internal pin `{dependency}` at a version other than `{from_pin}` — refusing to leave it outside the sealed edit set"
+                ),
+            });
+        }
+        return Ok(None);
+    }
+    if matching != explicit {
+        return Err(crate::release::bump::BumpError {
+            version: from_version.to_string(),
+            reason: format!(
+                "{owner} declares `{dependency}` with explicit requirements that differ from `{from_pin}` — refusing to seal an ambiguous pin rewrite"
+            ),
+        });
+    }
+    Ok(Some(matching))
+}
+
 fn derive_pin_rewrites(
     facts: &Facts,
     from_version: &str,
@@ -722,6 +759,14 @@ fn derive_pin_rewrites(
     let Some(workspace) = facts.rust_workspace.as_ref() else {
         return Ok(Vec::new());
     };
+    if let Some(reason) = &workspace.pin_parse_error {
+        return Err(crate::release::bump::BumpError {
+            version: from_version.to_string(),
+            reason: format!(
+                "cannot seal exact Cargo pin edits because a workspace manifest could not be parsed: {reason}"
+            ),
+        });
+    }
     let is_member: BTreeSet<&str> = workspace
         .members
         .iter()
@@ -739,39 +784,57 @@ fn derive_pin_rewrites(
             // and target-specific tables. Rewrite one sealed dependency set only when
             // every declaration is provably the same exact lockstep pin. This is the
             // same equivalence rule the cut-time rewriter enforces.
-            let explicit = requirements.iter().filter(|req| req.is_some()).count();
-            let matching = requirements
-                .iter()
-                .filter(|req| req.as_deref() == Some(from_pin.as_str()))
-                .count();
-            if matching == 0 {
+            let owner = format!("crate `{}`", member.package);
+            if exact_pin_count(&owner, dep, requirements, &from_pin, from_version)?.is_none() {
                 continue;
-            }
-            if matching != explicit {
-                let conflicts = explicit - matching;
-                return Err(crate::release::bump::BumpError {
-                    version: from_version.to_string(),
-                    reason: format!(
-                        "crate `{}` declares `{dep}` with {conflicts} explicit requirement(s) that differ from `{from_pin}` — refusing to seal an ambiguous pin rewrite",
-                        member.package
-                    ),
-                });
             }
             rewrites.push(PinRewrite {
                 in_package: member.package.clone(),
+                workspace_root: false,
                 dependency: dep.clone(),
                 from: from_pin.clone(),
                 to: format!("={to_version}"),
             });
         }
     }
+    for (dep, requirements) in &workspace.workspace_pin_reqs {
+        if !is_member.contains(dep.as_str()) {
+            continue;
+        }
+        if exact_pin_count(
+            "root `[workspace.dependencies]`",
+            dep,
+            requirements,
+            &from_pin,
+            from_version,
+        )?
+        .is_none()
+        {
+            continue;
+        }
+        rewrites.push(PinRewrite {
+            in_package: "workspace".to_string(),
+            workspace_root: true,
+            dependency: dep.clone(),
+            from: from_pin.clone(),
+            to: format!("={to_version}"),
+        });
+    }
     rewrites.sort_unstable_by(|a, b| {
-        (&a.in_package, &a.dependency).cmp(&(&b.in_package, &b.dependency))
+        (a.workspace_root, &a.in_package, &a.dependency).cmp(&(
+            b.workspace_root,
+            &b.in_package,
+            &b.dependency,
+        ))
     });
     // Defensive dedup: a well-formed facts graph lists each (member, dep) edge once, so
     // this is a no-op in practice; it guards against a facts parser that emitted a
     // duplicate edge producing a duplicated rewrite.
-    rewrites.dedup_by(|a, b| a.in_package == b.in_package && a.dependency == b.dependency);
+    rewrites.dedup_by(|a, b| {
+        a.workspace_root == b.workspace_root
+            && a.in_package == b.in_package
+            && a.dependency == b.dependency
+    });
     Ok(rewrites)
 }
 
@@ -1150,11 +1213,11 @@ const SEAL_DOMAIN: &str = "ossctl.release-plan";
 /// wire-envelope versions. Bump this (never silently) whenever the shape changes or an
 /// unchanged sealed field gains a different effect, so approvals made under distinct
 /// interpretations always occupy disjoint plan-id spaces.
-// v7 changes a sealed PinRewrite's execution semantics from one declaration to a
-// provably-equivalent declaration set. Older plan documents remain readable from the
-// durable store for resume, but a fresh cut deliberately refuses their old address:
-// an approval made under the single-match interpretation must be re-planned.
-const SEAL_VERSION: u32 = 7;
+// v8 extends the sealed edit set to exact internal pins owned by root
+// `[workspace.dependencies]`. Older plan documents remain readable for resume, but a
+// fresh cut refuses their old address: a v7 approval could otherwise execute without
+// rewriting an inherited pin that local path resolution hides.
+const SEAL_VERSION: u32 = 8;
 
 /// The canonical hashed pre-image (see the module docs for the exact contents).
 /// A dedicated struct rather than an ad-hoc byte concatenation so the field set

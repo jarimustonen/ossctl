@@ -178,6 +178,12 @@ pub struct Facts {
 pub struct RustWorkspace {
     /// The publishable workspace members, in declaration order.
     pub members: Vec<WorkspaceMember>,
+    /// Exact/local declarations owned by the root `[workspace.dependencies]` table,
+    /// keyed by resolved package name. Off-wire like the workspace graph itself.
+    pub workspace_pin_reqs: std::collections::BTreeMap<String, Vec<Option<String>>>,
+    /// Parser error encountered while gathering the sealed pin model. Planning must
+    /// refuse rather than equate this with an empty declaration set.
+    pub pin_parse_error: Option<String>,
 }
 
 /// One crates.io-publishable Cargo workspace member and its intra-workspace
@@ -197,8 +203,9 @@ pub struct WorkspaceMember {
     /// The **literal version requirement string** this member's manifest declares
     /// for each intra-workspace dependency that carries one, keyed by dependency
     /// crate name (e.g. `{"octl-core": "=0.4.0"}` for `octl-core = { path = "…",
-    /// version = "=0.4.0" }`). Only edges present in [`Self::workspace_deps`] appear,
-    /// and only when the manifest declares an explicit `version` on the dependency —
+    /// version = "=0.4.0" }`). Only local declarations whose resolved package is
+    /// another publishable member appear, and only when the manifest declares an
+    /// explicit `version` on the dependency —
     /// a path-only or `workspace = true`-inherited edge (whose requirement is not
     /// literally in this manifest) is **absent**, not defaulted.
     ///

@@ -195,13 +195,21 @@ pub fn apply_bump(
     if !bump.pin_rewrites.is_empty() {
         let members = member_manifest_paths(root)?;
         for pin in &bump.pin_rewrites {
-            let manifest = members.get(&pin.in_package).ok_or_else(|| {
-                BumpExecError::MemberManifestNotFound {
-                    package: pin.in_package.clone(),
-                }
-            })?;
+            let manifest = if pin.workspace_root {
+                &root_manifest
+            } else {
+                members.get(&pin.in_package).ok_or_else(|| {
+                    BumpExecError::MemberManifestNotFound {
+                        package: pin.in_package.clone(),
+                    }
+                })?
+            };
             let text = read(manifest)?;
-            let rewritten = bump::rewrite_pin(&text, &pin.dependency, &pin.from, &pin.to)?;
+            let rewritten = if pin.workspace_root {
+                bump::rewrite_workspace_pin(&text, &pin.dependency, &pin.from, &pin.to)?
+            } else {
+                bump::rewrite_pin(&text, &pin.dependency, &pin.from, &pin.to)?
+            };
             write(manifest, &rewritten)?;
         }
     }

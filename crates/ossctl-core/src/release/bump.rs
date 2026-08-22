@@ -163,6 +163,11 @@ pub enum BumpEditError {
         /// Total number of explicit version declarations inspected.
         count: usize,
     },
+    /// A Cargo manifest could not be parsed by the shared discovery/edit parser.
+    ManifestUnparseable {
+        /// Parser diagnostic suitable for an actionable plan/cut refusal.
+        reason: String,
+    },
     /// The CHANGELOG had no `## [Unreleased]` section to finalize, but the contract's
     /// changelog mode said the engine should finalize one — fail closed rather than
     /// tag a release whose notes were never promoted.
@@ -196,6 +201,12 @@ impl std::fmt::Display for BumpEditError {
                 "`{dependency}` has {count} explicit version declarations that are not all \
                  `{from}` — refusing to rewrite an ambiguous pin set"
             ),
+            Self::ManifestUnparseable { reason } => {
+                write!(
+                    f,
+                    "could not parse Cargo manifest while discovering exact pins: {reason}"
+                )
+            }
             Self::ChangelogUnreleasedNotFound => write!(
                 f,
                 "the contract asks the engine to finalize the CHANGELOG, but no `## [Unreleased]` \
@@ -302,187 +313,101 @@ fn set_section_version(manifest: &str, section: &str, from: &str, to: &str) -> O
     replaced.then_some(out)
 }
 
-/// One local Cargo dependency declaration discovered by the shared plan/cut scanner.
+/// One local Cargo dependency declaration discovered by the shared plan/cut parser.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PinDeclaration {
     /// Resolved package name (`package = "…"` when renamed, otherwise the table key).
     pub(crate) package: String,
     /// Literal version requirement, or `None` for a path/workspace-only declaration.
     pub(crate) requirement: Option<String>,
-    /// Zero-based physical line containing the version value, when one exists.
-    version_line: Option<usize>,
 }
 
 /// Parse local dependency declarations from normal, dev, build, and target-specific
-/// Cargo dependency tables. Planning and cut execution deliberately call this same
-/// scanner so they classify exactly the same declaration set, including aliases.
-pub(crate) fn cargo_pin_declarations(manifest: &str) -> Vec<PinDeclaration> {
-    enum Table {
-        Other,
-        Inline,
-        Sub {
-            key: String,
-            package: Option<String>,
-            local: bool,
-            requirement: Option<String>,
-            version_line: Option<usize>,
-        },
+/// Cargo dependency tables. `toml_edit` owns the TOML grammar, so dotted keys and
+/// multiline inline tables have the same meaning during discovery and execution.
+pub(crate) fn cargo_pin_declarations(manifest: &str) -> Result<Vec<PinDeclaration>, String> {
+    pin_declarations(manifest, false)
+}
+
+/// Parse the root `[workspace.dependencies]` declarations. These declarations are
+/// edit targets in their own right: a member's `{ workspace = true }` use contains no
+/// version literal, while the exact internal pin lives here.
+pub(crate) fn cargo_workspace_pin_declarations(
+    manifest: &str,
+) -> Result<Vec<PinDeclaration>, String> {
+    pin_declarations(manifest, true)
+}
+
+fn pin_declarations(manifest: &str, workspace_only: bool) -> Result<Vec<PinDeclaration>, String> {
+    use toml_edit::{DocumentMut, Item};
+
+    fn declaration(key: &str, item: &Item, require_local: bool) -> Option<PinDeclaration> {
+        let fields = item.as_table_like()?;
+        let local = fields.get("path").and_then(Item::as_str).is_some()
+            || fields.get("workspace").and_then(Item::as_bool) == Some(true);
+        if require_local && !local {
+            return None;
+        }
+        Some(PinDeclaration {
+            package: fields
+                .get("package")
+                .and_then(Item::as_str)
+                .unwrap_or(key)
+                .to_string(),
+            requirement: fields
+                .get("version")
+                .and_then(Item::as_str)
+                .map(str::to_string),
+        })
     }
 
-    fn flush(table: &mut Table, out: &mut Vec<PinDeclaration>) {
-        if let Table::Sub {
-            key,
-            package,
-            local: true,
-            requirement,
-            version_line,
-        } = table
-        {
-            out.push(PinDeclaration {
-                package: package.clone().unwrap_or_else(|| key.clone()),
-                requirement: requirement.clone(),
-                version_line: *version_line,
-            });
+    fn collect_member_tables(doc: &DocumentMut, out: &mut Vec<PinDeclaration>) {
+        const KINDS: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+        for kind in KINDS {
+            if let Some(deps) = doc.get(kind).and_then(Item::as_table_like) {
+                out.extend(
+                    deps.iter()
+                        .filter_map(|(name, dep)| declaration(name, dep, true)),
+                );
+            }
         }
-        *table = Table::Other;
-    }
-
-    let mut table = Table::Other;
-    let mut out = Vec::new();
-    for (line_no, line) in manifest.lines().enumerate() {
-        let trimmed = strip_comment(line).trim();
-        if let Some(header) = section_header(trimmed) {
-            flush(&mut table, &mut out);
-            table = if dependency_inline_table(header) {
-                Table::Inline
-            } else if let Some(key) = dependency_subtable_key(header) {
-                Table::Sub {
-                    key: key.to_string(),
-                    package: None,
-                    local: false,
-                    requirement: None,
-                    version_line: None,
-                }
-            } else {
-                Table::Other
-            };
-            continue;
-        }
-
-        match &mut table {
-            Table::Inline => {
-                let Some(eq) = trimmed.find('=') else {
+        if let Some(targets) = doc.get("target").and_then(Item::as_table_like) {
+            for (_, target) in targets.iter() {
+                let Some(target) = target.as_table_like() else {
                     continue;
                 };
-                let key = trimmed[..eq].trim().trim_matches(['"', '\'']);
-                let value = trimmed[eq + 1..].trim_start();
-                if key.is_empty()
-                    || !value.starts_with('{')
-                    || !(scan_key_string(value, "path").is_some()
-                        || scan_key_bool(value, "workspace") == Some(true))
-                {
-                    continue;
-                }
-                let requirement = scan_key_string(value, "version");
-                out.push(PinDeclaration {
-                    package: scan_key_string(value, "package").unwrap_or_else(|| key.to_string()),
-                    version_line: requirement.as_ref().map(|_| line_no),
-                    requirement,
-                });
-            }
-            Table::Sub {
-                package,
-                local,
-                requirement,
-                version_line,
-                ..
-            } => {
-                if line_starts_with_key(trimmed, "package") && package.is_none() {
-                    *package = scan_key_string(trimmed, "package");
-                } else if line_starts_with_key(trimmed, "path") {
-                    *local |= scan_key_string(trimmed, "path").is_some();
-                } else if line_starts_with_key(trimmed, "workspace") {
-                    *local |= scan_key_bool(trimmed, "workspace") == Some(true);
-                } else if line_starts_with_key(trimmed, "version") && requirement.is_none() {
-                    *requirement = scan_key_string(trimmed, "version");
-                    if requirement.is_some() {
-                        *version_line = Some(line_no);
-                    }
-                }
-            }
-            Table::Other => {}
-        }
-    }
-    flush(&mut table, &mut out);
-    out
-}
-
-/// Whether `header` is a whole dependency table containing inline declarations.
-fn dependency_inline_table(header: &str) -> bool {
-    matches!(
-        header,
-        "dependencies" | "dev-dependencies" | "build-dependencies"
-    ) || (header.starts_with("target.")
-        && [".dependencies", ".dev-dependencies", ".build-dependencies"]
-            .iter()
-            .any(|suffix| header.ends_with(suffix)))
-}
-
-/// The declaration key when `header` is a supported dependency subtable.
-fn dependency_subtable_key(header: &str) -> Option<&str> {
-    for prefix in ["dependencies.", "dev-dependencies.", "build-dependencies."] {
-        if let Some(key) = header.strip_prefix(prefix) {
-            return nonempty_dep_key(key);
-        }
-    }
-    if header.starts_with("target.") {
-        for marker in [
-            ".dependencies.",
-            ".dev-dependencies.",
-            ".build-dependencies.",
-        ] {
-            if let Some(idx) = header.rfind(marker) {
-                return nonempty_dep_key(&header[idx + marker.len()..]);
-            }
-        }
-    }
-    None
-}
-
-fn nonempty_dep_key(key: &str) -> Option<&str> {
-    let key = key.trim().trim_matches(['"', '\'']);
-    (!key.is_empty() && !key.contains('.')).then_some(key)
-}
-
-/// Read a bare boolean whole-key value.
-fn scan_key_bool(s: &str, key: &str) -> Option<bool> {
-    let mut search = 0;
-    while let Some(rel) = s[search..].find(key) {
-        let pos = search + rel;
-        let before_is_ident = s[..pos]
-            .chars()
-            .next_back()
-            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-');
-        if !before_is_ident {
-            if let Some(rest) = s[pos + key.len()..].trim_start().strip_prefix('=') {
-                let rest = rest.trim_start();
-                for (literal, value) in [("true", true), ("false", false)] {
-                    if let Some(tail) = rest.strip_prefix(literal) {
-                        let tail = tail.trim_start();
-                        if tail.is_empty()
-                            || tail.starts_with(',')
-                            || tail.starts_with('}')
-                            || tail.starts_with('#')
-                        {
-                            return Some(value);
-                        }
+                for kind in KINDS {
+                    if let Some(deps) = target.get(kind).and_then(Item::as_table_like) {
+                        out.extend(
+                            deps.iter()
+                                .filter_map(|(name, dep)| declaration(name, dep, true)),
+                        );
                     }
                 }
             }
         }
-        search = pos + key.len();
     }
-    None
+
+    let doc = manifest
+        .parse::<DocumentMut>()
+        .map_err(|error| format!("Cargo manifest TOML could not be parsed: {error}"))?;
+    let mut out = Vec::new();
+    if workspace_only {
+        if let Some(deps) = doc
+            .get("workspace")
+            .and_then(Item::as_table_like)
+            .and_then(|workspace| workspace.get("dependencies"))
+            .and_then(Item::as_table_like)
+        {
+            out.extend(
+                deps.iter()
+                    .filter_map(|(name, dep)| declaration(name, dep, false)),
+            );
+        }
+    } else {
+        collect_member_tables(&doc, &mut out);
+    }
+    Ok(out)
 }
 
 /// Rewrite a single intra-workspace `=`-pin (`dependency = "…, version = \"<from>\""`)
@@ -505,13 +430,102 @@ pub fn rewrite_pin(
     from: &str,
     to: &str,
 ) -> Result<String, BumpEditError> {
-    // Planning and execution share this exact declaration scanner. Path-only local
-    // declarations carry no version to rewrite and are neutral; every explicit
-    // requirement must equal the sealed `from` value.
-    let declarations: Vec<PinDeclaration> = cargo_pin_declarations(manifest)
-        .into_iter()
-        .filter(|d| d.package == dependency)
-        .collect();
+    rewrite_pin_inner(manifest, dependency, from, to, false)
+}
+
+/// Rewrite an exact internal pin owned by the root `[workspace.dependencies]` table.
+pub fn rewrite_workspace_pin(
+    manifest: &str,
+    dependency: &str,
+    from: &str,
+    to: &str,
+) -> Result<String, BumpEditError> {
+    rewrite_pin_inner(manifest, dependency, from, to, true)
+}
+
+fn rewrite_deps(
+    deps: &mut dyn toml_edit::TableLike,
+    dependency: &str,
+    from: &str,
+    to: &str,
+    require_local: bool,
+) -> usize {
+    use toml_edit::{Item, Value};
+    let mut rewritten = 0;
+    for (key, item) in deps.iter_mut() {
+        let Some(fields) = item.as_table_like_mut() else {
+            continue;
+        };
+        let local = fields.get("path").and_then(Item::as_str).is_some()
+            || fields.get("workspace").and_then(Item::as_bool) == Some(true);
+        let package = fields
+            .get("package")
+            .and_then(Item::as_str)
+            .unwrap_or(key.get());
+        if package == dependency
+            && (!require_local || local)
+            && fields.get("version").and_then(Item::as_str) == Some(from)
+        {
+            let version = fields
+                .get_mut("version")
+                .and_then(Item::as_value_mut)
+                .expect("a string version is a value");
+            let decor = version.decor().clone();
+            *version = Value::from(to);
+            *version.decor_mut() = decor;
+            rewritten += 1;
+        }
+    }
+    rewritten
+}
+
+fn rewrite_member_tables(
+    doc: &mut toml_edit::DocumentMut,
+    dependency: &str,
+    from: &str,
+    to: &str,
+) -> usize {
+    use toml_edit::Item;
+    const KINDS: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+    let mut rewritten = 0;
+    for kind in KINDS {
+        if let Some(deps) = doc.get_mut(kind).and_then(Item::as_table_like_mut) {
+            rewritten += rewrite_deps(deps, dependency, from, to, true);
+        }
+    }
+    if let Some(targets) = doc.get_mut("target").and_then(Item::as_table_like_mut) {
+        for (_, target) in targets.iter_mut() {
+            let Some(target) = target.as_table_like_mut() else {
+                continue;
+            };
+            for kind in KINDS {
+                if let Some(deps) = target.get_mut(kind).and_then(Item::as_table_like_mut) {
+                    rewritten += rewrite_deps(deps, dependency, from, to, true);
+                }
+            }
+        }
+    }
+    rewritten
+}
+
+fn rewrite_pin_inner(
+    manifest: &str,
+    dependency: &str,
+    from: &str,
+    to: &str,
+    workspace_only: bool,
+) -> Result<String, BumpEditError> {
+    use toml_edit::{DocumentMut, Item};
+
+    let declarations: Vec<PinDeclaration> = (if workspace_only {
+        cargo_workspace_pin_declarations(manifest)
+    } else {
+        cargo_pin_declarations(manifest)
+    })
+    .map_err(|reason| BumpEditError::ManifestUnparseable { reason })?
+    .into_iter()
+    .filter(|d| d.package == dependency)
+    .collect();
     let explicit = declarations
         .iter()
         .filter(|d| d.requirement.is_some())
@@ -534,39 +548,29 @@ pub fn rewrite_pin(
         });
     }
 
-    let version_lines: std::collections::BTreeSet<usize> = declarations
-        .iter()
-        .filter(|d| d.requirement.as_deref() == Some(from))
-        .filter_map(|d| d.version_line)
-        .collect();
-    let mut out = String::with_capacity(manifest.len() + to.len());
-    let ends_with_newline = manifest.ends_with('\n');
-    let mut rewritten_count = 0;
-    let mut lines = manifest.lines().enumerate().peekable();
-    while let Some((line_no, line)) = lines.next() {
-        if version_lines.contains(&line_no) {
-            let Some(rewritten) = replace_exact_string_value(line, "version", from, to) else {
-                return Err(BumpEditError::PinAmbiguous {
-                    dependency: dependency.to_string(),
-                    from: from.to_string(),
-                    count: explicit,
-                });
-            };
-            out.push_str(&rewritten);
-            rewritten_count += 1;
-        } else {
-            out.push_str(line);
-        }
-        push_line_ending(&mut out, lines.peek().is_some(), ends_with_newline);
-    }
-    if rewritten_count != matching {
+    let mut doc =
+        manifest
+            .parse::<DocumentMut>()
+            .map_err(|error| BumpEditError::ManifestUnparseable {
+                reason: error.to_string(),
+            })?;
+    let rewritten = if workspace_only {
+        doc.get_mut("workspace")
+            .and_then(Item::as_table_like_mut)
+            .and_then(|workspace| workspace.get_mut("dependencies"))
+            .and_then(Item::as_table_like_mut)
+            .map_or(0, |deps| rewrite_deps(deps, dependency, from, to, false))
+    } else {
+        rewrite_member_tables(&mut doc, dependency, from, to)
+    };
+    if rewritten != matching {
         return Err(BumpEditError::PinAmbiguous {
             dependency: dependency.to_string(),
             from: from.to_string(),
             count: explicit,
         });
     }
-    Ok(out)
+    Ok(doc.to_string())
 }
 
 /// Finalize a Keep-a-Changelog CHANGELOG: promote the `## [Unreleased]` section's
@@ -886,6 +890,58 @@ mod tests {
             "[dependencies.ossctl-core]\npath = \"../ossctl-core\"\nversion = \"=0.4.0\"\n";
         let out = rewrite_pin(manifest, "ossctl-core", "=0.4.0", "=0.5.0").unwrap();
         assert!(out.contains("version = \"=0.5.0\""));
+    }
+
+    #[test]
+    fn rewrites_dotted_dependency_keys() {
+        let manifest = "[dependencies]\ncore.path = \"../core\"\ncore.version = \"=0.4.0\"\n";
+        let out = rewrite_pin(manifest, "core", "=0.4.0", "=0.5.0").unwrap();
+        assert!(out.contains("core.version = \"=0.5.0\""), "{out}");
+    }
+
+    #[test]
+    fn rewrites_multiline_inline_workspace_dependency() {
+        let manifest = "[workspace.dependencies]\ncore = {\n  path = \"crates/core\",\n  version = \"=0.4.0\"\n}\n";
+        let declarations = cargo_workspace_pin_declarations(manifest).unwrap();
+        assert_eq!(declarations.len(), 1);
+        let out = rewrite_workspace_pin(manifest, "core", "=0.4.0", "=0.5.0").unwrap();
+        assert!(out.contains("version = \"=0.5.0\""), "{out}");
+    }
+
+    #[test]
+    fn rewrites_dotted_workspace_dependency_keys() {
+        let manifest =
+            "[workspace.dependencies]\ncore.path = \"crates/core\"\ncore.version = \"=0.4.0\"\n";
+        let out = rewrite_workspace_pin(manifest, "core", "=0.4.0", "=0.5.0").unwrap();
+        assert!(out.contains("core.version = \"=0.5.0\""), "{out}");
+    }
+
+    #[test]
+    fn root_exact_pin_without_path_is_still_an_edit_target() {
+        let manifest = "[workspace.dependencies]\ncore = { version = \"=0.4.0\" }\n";
+        let declarations = cargo_workspace_pin_declarations(manifest).unwrap();
+        assert_eq!(declarations[0].requirement.as_deref(), Some("=0.4.0"));
+        let out = rewrite_workspace_pin(manifest, "core", "=0.4.0", "=0.5.0").unwrap();
+        assert!(out.contains("version = \"=0.5.0\""), "{out}");
+    }
+
+    #[test]
+    fn rewrite_is_scoped_to_cargo_tables_and_local_declarations() {
+        let manifest = "[dependencies]\ncore = { path = \"../core\", version = \"=0.4.0\" }\n[dev-dependencies]\nregistry-core = { package = \"core\", version = \"=0.4.0\" }\n[package.metadata.tool.dependencies]\ncore = { path = \"schema/core\", version = \"=0.4.0\" }\n";
+        let out = rewrite_pin(manifest, "core", "=0.4.0", "=0.5.0").unwrap();
+        assert_eq!(out.matches("=0.5.0").count(), 1, "{out}");
+        assert_eq!(out.matches("=0.4.0").count(), 2, "{out}");
+    }
+
+    #[test]
+    fn rewrite_preserves_version_value_comments() {
+        let manifest =
+            "[dependencies.core]\npath = \"../core\"\nversion = \"=0.4.0\" # release-managed\n";
+        let out = rewrite_pin(manifest, "core", "=0.4.0", "=0.5.0").unwrap();
+        assert!(
+            out.contains("version = \"=0.5.0\" # release-managed"),
+            "{out}"
+        );
     }
 
     #[test]
