@@ -2,7 +2,7 @@
 created: 2026-08-20
 updated: 2026-08-22
 type: bug
-status: in-progress
+status: fixed
 priority: high
 provenance: ai-review
 source_ref: orchestratectl:01m0fathfnk4dexmz93kqnkeag/review-finding:sha1:caa04773eaf5fac25945826ffc382b42b96466bb
@@ -22,6 +22,10 @@ labels:
 lane: plan-seal
 lane_seq: 10
 collision: [crates/ossctl-core/src/release/plan.rs, crates/ossctl-core/src/release/bump.rs]
+commits:
+- hash: d0203d948f8c08435179946df936640e66895130
+  summary: 'fix(release): own inherited workspace pins'
+closed: 2026-08-22
 ---
 
 # Release bump can leave inherited exact workspace pins stale
@@ -70,3 +74,9 @@ Same class as intake-bug-ossctl-d38ddf598fd5, which stint #24 just fixed: plan-t
 Note the fix likely touches the seal pre-image again — SEAL_VERSION is now 7 after the sibling fix. Check whether widening the pin edit set changes the pre-image; if so that is another deliberate SEAL_VERSION event, not a silent hash change.
 
 Reopen/close condition: close as fixed when a workspace whose member inherits an exact internal pin from root [workspace.dependencies] either has that pin rewritten by the bump, or is refused at PLAN time with an actionable error naming the unsupported shape. Also cover dotted-key and multiline inline declarations, which the same scanner currently misses. Close as wontfix only if inherited exact internal pins are proven unrepresentable in a cuttable contract — record the reasoning.
+
+## Resolution
+
+### 2026-08-22T19:24:14Z · @issuectl
+
+Fixed with parser-backed root/member pin discovery and execution, plan-time refusal for parser failures or mismatched exact pins, dotted and multiline coverage, SEAL_VERSION 8, and the full repository gate. Multi-model review findings were assessed; seven localized findings were applied and no reachable residual met the filing bar.
