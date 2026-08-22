@@ -3,7 +3,7 @@ created: 2026-08-21
 updated: 2026-08-23
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: high
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:d2d40ad8-c9c6-439e-a39c-da8b68092d92
@@ -11,8 +11,12 @@ lane: homebrew-observer
 lane_seq: 10
 collision: [crates/ossctl-core/src/release/adapters/homebrew.rs, crates/ossctl-core/src/release/reconcile.rs]
 commits:
-- hash: 345d42f
+- hash: e58b06d
   summary: fix delegated Homebrew formula parsing and reconcile destination dispatch
+- hash: 00c56a1
+  summary: apply confirmed review fixes and route-specific failure coverage
+closed: 2026-08-23
+closed_by: orchestratectl:01m0ncp7hmvv0wx1p6ftj0erpy
 ---
 
 # homebrew/binary target verification fails: missing during cut, unknown …
@@ -99,3 +103,16 @@ Two independent dispatch/parsing defects explain the contradictory outcomes:
 2. Standalone reconcile takes a different route. `classify_delegated` in `crates/ossctl-core/src/release/reconcile.rs` dispatches every `cargo-dist` target to `observe_cargo_dist_github_release`, without checking `planned.registry`. For this Homebrew target it therefore queries the GitHub Release manifest using package `project-canon`; the manifest's app identity is `project-canon-cli`, so the observer returns `Unknown`. Reconcile never reads the tap formula. This accounts exactly for later `unknown` despite the same formula being publicly reachable.
 
 **Fix sketch (not implemented):** make formula stanza matching scope-aware: parse/limit the relevant OS and CPU blocks, prefer the nested cargo-dist stanza when present, and require URL/SHA within that exact stanza rather than anywhere after a substring. In reconcile, mirror the coordinator's destination dispatch: for a planned `registry: homebrew` delegated target, use the stored plan's `homebrew_tap`, version, package, and platform set with the Homebrew observer; retain GitHub-manifest observation for `gh-releases`. Add regression fixtures using the exact cargo-dist 0.28.2 formula shape (nested Linux download blocks plus repeated combined install guards), and reconcile tests containing both cargo-dist GitHub and Homebrew targets to prove they independently resolve `matches`; also retain transport-failure ⇒ `Unknown` and genuinely absent/wrong-version/stanza ⇒ `Missing` coverage.
+
+## Acceptance Criteria
+
+- [x] The reported cargo-dist formula verifies `Matches` at the sealed version and platforms.
+- [x] Missing formulas remain `Missing`; observer failures remain `Unknown`.
+- [x] Standalone reconcile observes Homebrew and GitHub Release targets at their own destinations.
+- [x] The exact full repository gate passes.
+
+## Resolution
+
+### 2026-08-22T21:49:31Z · @orchestratectl:01m0ncp7hmvv0wx1p6ftj0erpy
+
+Fixed both diagnosed observer paths. The byte-exact project-canon v0.6.1 cargo-dist 0.28.2 formula now verifies Matches for all sealed Homebrew platforms; 404 remains Missing while 5xx and transport failures remain Unknown; standalone mixed GitHub Release + Homebrew reconciliation observes each target at its own destination. The exact full Rust gate passed, followed by multi-model review and assessed localized fixes.
