@@ -3,7 +3,7 @@ created: 2026-08-21
 updated: 2026-08-22
 type: bug
 reporter: jari
-status: open
+status: in-progress
 priority: high
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:d2d40ad8-c9c6-439e-a39c-da8b68092d92

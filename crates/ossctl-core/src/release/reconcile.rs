@@ -35,7 +35,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::contract::schema::{Adapter, Ecosystem, ReleaseLayout};
+use crate::contract::schema::{Adapter, Ecosystem, Registry, ReleaseLayout};
 use crate::protocol::journal::{PublishReceipt as JournalReceipt, RunState};
 use crate::protocol::plan::{PlanTarget, ReleasePlan};
 use crate::protocol::reconcile::{
@@ -43,7 +43,10 @@ use crate::protocol::reconcile::{
 };
 use crate::protocol::release::{PublishReceipt, VerifyOutcome};
 
-use super::adapters::{observe_cargo_dist_github_release, resolve, EffectCtx, ReleaseAdapter};
+use super::adapters::{
+    homebrew::verify_tap_formula, observe_cargo_dist_github_release, resolve, EffectCtx,
+    ReleaseAdapter,
+};
 use super::journal_target_ids;
 
 /// Reconcile a journaled run's published targets against current registry state.
@@ -242,11 +245,28 @@ fn classify_delegated(
         .as_ref()
         .is_none_or(|run| run.status == DelegatedRunStatus::Success);
     let outcome = if workflow_allows_destination {
-        match (adapter, package.as_deref()) {
-            (Some(Adapter::CargoDist), Some(package)) => {
+        match (adapter, package.as_deref(), planned) {
+            (Some(Adapter::CargoDist), Some(package), Some(target))
+                if target.registry == Registry::Homebrew =>
+            {
+                plan.and_then(|plan| plan.homebrew_tap.as_deref()).map_or(
+                    VerifyOutcome::Unknown,
+                    |tap| {
+                        verify_tap_formula(
+                            ctx,
+                            tap,
+                            package,
+                            &version,
+                            false,
+                            plan.map(|plan| plan.homebrew_platforms.as_slice()),
+                        )
+                    },
+                )
+            }
+            (Some(Adapter::CargoDist), Some(package), _) => {
                 observe_cargo_dist_github_release(ctx, &version, package)
             }
-            (Some(adapter), Some(package)) => {
+            (Some(adapter), Some(package), _) => {
                 let receipt = PublishReceipt {
                     adapter,
                     ecosystem,

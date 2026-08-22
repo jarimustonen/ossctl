@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for resume but require re-planning before a fresh cut
   (`bump-inherited-workspace-pins`).
 - **Delegated release verification now observes the exact tag-triggered GitHub Actions run before checking its destination.** Queued and in-progress workflows are reported as machine-readable `pending` state rather than a missing artifact; failed, cancelled, or timed-out runs stop immediately with their conclusion and failed job names; successful runs continue to the existing registry, GitHub Release, or Homebrew destination check. An unobservable workflow remains `unknown` and red (`verify-delegated-run-state`).
+- Delegated cargo-dist Homebrew targets now recognize cargo-dist 0.28.x's nested
+  platform download stanzas and standalone reconciliation observes the tap formula
+  instead of misrouting Homebrew targets to the GitHub Release manifest
+  (`intake-bug-ossctl-51f9c1ce4cfd`).
 
 ## [0.10.0] - 2026-08-20
 

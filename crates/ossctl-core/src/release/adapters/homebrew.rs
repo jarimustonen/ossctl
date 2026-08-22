@@ -836,6 +836,9 @@ pub(crate) fn verify_tap_formula(
         Ok(response) => response,
         Err(_) => return VerifyOutcome::Unknown,
     };
+    if status == 404 {
+        return VerifyOutcome::Missing;
+    }
     if status != 200 {
         return VerifyOutcome::Unknown;
     }
@@ -891,14 +894,28 @@ pub(crate) fn verify_tap_formula(
     VerifyOutcome::Matches
 }
 
-/// Whether a formula contains a URL and checksum for `condition`. ossctl's
-/// renderer places each platform behind one combined condition, while cargo-dist
-/// 0.28.x nests the CPU condition inside an OS block. Accept both writer formats
-/// while retaining a precise platform-specific assertion.
+/// Whether a formula contains a URL and checksum in the exact block for
+/// `condition`. ossctl's renderer uses one combined condition, while cargo-dist
+/// 0.28.x nests a CPU block inside an OS block and later repeats combined guards
+/// in `install` without download fields. Block-scoped matching prevents those
+/// later guards from shadowing a complete nested download stanza.
 fn formula_has_platform_stanza(formula: &str, condition: &str) -> bool {
-    let has_url_and_sha = |stanza: &str| stanza.contains("url \"") && stanza.contains("sha256 \"");
-    if let Some(start) = formula.find(condition) {
-        return has_url_and_sha(&formula[start..]);
+    fn block_for_condition<'a>(lines: &'a [&str], condition: &str) -> Option<&'a [&'a str]> {
+        let start = lines.iter().position(|line| line.trim() == condition)?;
+        let indent = lines[start].len() - lines[start].trim_start().len();
+        let end = lines[start + 1..].iter().position(|line| {
+            line.trim() == "end" && line.len() - line.trim_start().len() == indent
+        })?;
+        Some(&lines[start + 1..start + 1 + end])
+    }
+
+    fn has_url_and_sha(lines: &[&str]) -> bool {
+        lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("url \""))
+            && lines
+                .iter()
+                .any(|line| line.trim_start().starts_with("sha256 \""))
     }
 
     let (os, cpu) = match condition {
@@ -908,17 +925,19 @@ fn formula_has_platform_stanza(formula: &str, condition: &str) -> bool {
         "if OS.linux? && Hardware::CPU.intel?" => ("if OS.linux?", "if Hardware::CPU.intel?"),
         _ => return false,
     };
-    let Some(os_start) = formula.find(os) else {
-        return false;
-    };
-    let after_os = &formula[os_start + os.len()..];
-    let os_block = after_os
-        .find("\n  if OS.")
-        .map_or(after_os, |end| &after_os[..end]);
-    let Some(cpu_start) = os_block.find(cpu) else {
-        return false;
-    };
-    has_url_and_sha(&os_block[cpu_start..])
+    let lines: Vec<&str> = formula.lines().collect();
+
+    // Prefer cargo-dist's nested download shape. Its later install method uses
+    // combined guards with the same platform identity but deliberately has no URL.
+    if let Some(os_block) = block_for_condition(&lines, os) {
+        if let Some(cpu_block) = block_for_condition(os_block, cpu) {
+            if has_url_and_sha(cpu_block) {
+                return true;
+            }
+        }
+    }
+
+    block_for_condition(&lines, condition).is_some_and(has_url_and_sha)
 }
 
 /// Render a prebuilt-archive Homebrew formula. The archives are fetched and
@@ -1130,6 +1149,45 @@ fn is_sha256_hex(s: &str) -> bool {
 /// name, a path separator (`/`, `\`), a `..` traversal component, or a leading `.`.
 /// The name is otherwise trusted (it reaches `desc`/`bin` via [`ruby_escape`]); this
 /// guards only the filesystem/path uses.
+#[cfg(test)]
+mod platform_stanza_tests {
+    use super::formula_has_platform_stanza;
+
+    const CARGO_DIST_0_28_2_FORMULA: &str =
+        include_str!("../fixtures/project-canon-cargo-dist-0.28.2.rb");
+
+    #[test]
+    fn cargo_dist_nested_downloads_are_not_shadowed_by_install_guards() {
+        for condition in [
+            "if OS.mac? && Hardware::CPU.arm?",
+            "if OS.linux? && Hardware::CPU.arm?",
+            "if OS.linux? && Hardware::CPU.intel?",
+        ] {
+            assert!(
+                formula_has_platform_stanza(CARGO_DIST_0_28_2_FORMULA, condition),
+                "cargo-dist 0.28.2 formula should contain {condition}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_matching_install_guard_without_a_download_stanza_is_not_enough() {
+        let formula = r#"class Tool < Formula
+  version \"1.0.0\"
+  def install
+    if OS.linux? && Hardware::CPU.arm?
+      bin.install \"tool\"
+    end
+  end
+end
+"#;
+        assert!(!formula_has_platform_stanza(
+            formula,
+            "if OS.linux? && Hardware::CPU.arm?"
+        ));
+    }
+}
+
 fn validate_package_name(name: &str) -> Result<(), AdapterError> {
     let bad = name.is_empty()
         || name.starts_with('.')

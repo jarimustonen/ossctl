@@ -75,6 +75,39 @@ impl CommandRunner for CargoDistCmd {
     }
 }
 
+struct FormulaRegistry {
+    status: u16,
+    body: Vec<u8>,
+    urls: RefCell<Vec<String>>,
+}
+impl FormulaRegistry {
+    fn cargo_dist_fixture() -> Self {
+        Self {
+            status: 200,
+            body: include_bytes!("../fixtures/project-canon-cargo-dist-0.28.2.rb").to_vec(),
+            urls: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn with_status(status: u16) -> Self {
+        Self {
+            status,
+            body: Vec::new(),
+            urls: RefCell::new(Vec::new()),
+        }
+    }
+}
+impl RegistryQuery for FormulaRegistry {
+    fn http_get(&self, url: &str) -> io::Result<(u16, Vec<u8>)> {
+        self.urls.borrow_mut().push(url.to_string());
+        Ok((self.status, self.body.clone()))
+    }
+
+    fn published_versions(&self, _ecosystem: &str, _package: &str) -> io::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+}
+
 struct FixedClock;
 impl Clock for FixedClock {
     fn now_unix(&self) -> u64 {
@@ -358,6 +391,118 @@ fn delegated_cargo_dist_uses_the_tagged_release_not_registry_or_title() {
             "gh release download v1.0.0 --pattern dist-manifest.json --output -",
         ]
     );
+}
+
+#[test]
+fn delegated_cargo_dist_reconciles_github_and_homebrew_at_their_own_destinations() {
+    let targets = vec![
+        PlanTarget {
+            ecosystem: Ecosystem::Binary,
+            package: Some("project-canon-cli".to_string()),
+            registry: Registry::GhReleases,
+            adapter: Adapter::CargoDist,
+        },
+        PlanTarget {
+            ecosystem: Ecosystem::Binary,
+            package: Some("project-canon".to_string()),
+            registry: Registry::Homebrew,
+            adapter: Adapter::CargoDist,
+        },
+    ];
+    let ids = crate::release::journal_target_ids(&targets);
+    let plan = ReleasePlan {
+        plan_id: "plan-abc".to_string(),
+        contract_schema_version: 2,
+        head_sha: "abc123".to_string(),
+        version: "0.6.1".to_string(),
+        targets,
+        phases: Vec::new(),
+        bump: None,
+        homebrew_tap: Some("jarimustonen/homebrew-project-canon".to_string()),
+        license: Some("MIT".to_string()),
+        description: None,
+        homebrew_platforms: vec![
+            "aarch64-apple-darwin".to_string(),
+            "aarch64-unknown-linux-musl".to_string(),
+            "x86_64-unknown-linux-musl".to_string(),
+        ],
+    };
+    let mut state = state_with(&[]);
+    state.targets = ids.clone();
+    for id in &ids {
+        state.delegated.insert(id.clone());
+        state
+            .delegated_adapters
+            .insert(id.clone(), "cargo-dist".to_string());
+    }
+    let cmd = CargoDistCmd {
+        view: r#"{"tagName":"v0.6.1","isDraft":false,"assets":[{"name":"dist-manifest.json"},{"name":"project-canon-cli-aarch64-apple-darwin.tar.xz"}]}"#.to_string(),
+        manifest: r#"{"announcement_tag":"v0.6.1","releases":[{"app_name":"project-canon-cli","app_version":"0.6.1","artifacts":["project-canon-cli-aarch64-apple-darwin.tar.xz"]}]}"#.to_string(),
+    };
+    let (clock, reg) = (FixedClock, FormulaRegistry::cargo_dist_fixture());
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: Path::new("/repo"),
+        artifacts: &crate::release::adapters::EMPTY_ARTIFACTS,
+    };
+
+    let report = reconcile_with_plan(&state, Some(&plan), &ctx);
+
+    assert_eq!(report.summary.matches, 2, "{report:?}");
+    assert_eq!(report.summary.unknown, 0);
+    assert!(report
+        .targets
+        .iter()
+        .all(|target| target.outcome == VerifyOutcome::Matches));
+    assert_eq!(reg.urls.borrow().len(), 1, "Homebrew must be observed once");
+    assert!(reg.urls.borrow()[0]
+        .contains("jarimustonen/homebrew-project-canon/HEAD/Formula/project-canon.rb"));
+}
+
+#[test]
+fn delegated_homebrew_distinguishes_missing_from_observer_failure() {
+    let target = PlanTarget {
+        ecosystem: Ecosystem::Binary,
+        package: Some("project-canon".to_string()),
+        registry: Registry::Homebrew,
+        adapter: Adapter::CargoDist,
+    };
+    let plan = ReleasePlan {
+        plan_id: "plan-abc".to_string(),
+        contract_schema_version: 2,
+        head_sha: "abc123".to_string(),
+        version: "0.6.1".to_string(),
+        targets: vec![target],
+        phases: Vec::new(),
+        bump: None,
+        homebrew_tap: Some("jarimustonen/homebrew-project-canon".to_string()),
+        license: None,
+        description: None,
+        homebrew_platforms: vec!["aarch64-apple-darwin".to_string()],
+    };
+    let mut state = state_with(&[]);
+    state.targets = vec!["binary".to_string()];
+    state.delegated.insert("binary".to_string());
+    state
+        .delegated_adapters
+        .insert("binary".to_string(), "cargo-dist".to_string());
+    let cmd = RecordingCmd::default();
+    let clock = FixedClock;
+
+    for (status, expected) in [(404, VerifyOutcome::Missing), (503, VerifyOutcome::Unknown)] {
+        let reg = FormulaRegistry::with_status(status);
+        let ctx = EffectCtx {
+            runner: &cmd,
+            clock: &clock,
+            registry: &reg,
+            repo_root: Path::new("/repo"),
+            artifacts: &crate::release::adapters::EMPTY_ARTIFACTS,
+        };
+        let report = reconcile_with_plan(&state, Some(&plan), &ctx);
+        assert_eq!(only(&report).outcome, expected, "HTTP {status}");
+    }
 }
 
 #[test]
