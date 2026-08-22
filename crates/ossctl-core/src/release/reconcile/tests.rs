@@ -62,14 +62,27 @@ struct CargoDistCmd {
     manifest: String,
 }
 impl CommandRunner for CargoDistCmd {
-    fn run(&self, _program: &str, args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
+    fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
+        let stdout = if program == "git" && args.starts_with(&["rev-list"]) {
+            "abc123\n".to_string()
+        } else if program == "gh" && args.starts_with(&["run", "list"]) {
+            let branch = args
+                .iter()
+                .position(|arg| *arg == "--branch")
+                .and_then(|index| args.get(index + 1))
+                .copied()
+                .unwrap_or("v1.0.0");
+            format!(
+                r#"[{{"databaseId":42,"status":"completed","conclusion":"success","headBranch":"{branch}","headSha":"abc123","url":"https://github.com/acme/tool/actions/runs/42"}}]"#
+            )
+        } else if args.starts_with(&["release", "download"]) {
+            self.manifest.clone()
+        } else {
+            self.view.clone()
+        };
         Ok(CommandOutput {
             status: Some(0),
-            stdout: if args.starts_with(&["release", "download"]) {
-                self.manifest.clone()
-            } else {
-                self.view.clone()
-            },
+            stdout,
             stderr: String::new(),
         })
     }
