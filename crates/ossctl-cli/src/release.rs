@@ -592,10 +592,16 @@ fn render_reconcile_text(report: &ReconcileReport, warnings: &[String]) -> Resul
         )?;
         if let Some(run) = &t.delegated_run {
             crate::output::stdoutln!(
-                "             └─ delegated run: {}{}",
+                "             └─ delegated run: {}{}{}{}",
                 run.status.as_str(),
+                run.conclusion
+                    .as_deref()
+                    .map_or_else(String::new, |value| format!(" ({value})")),
                 run.run_id
-                    .map_or_else(String::new, |id| format!(" (id {id})"))
+                    .map_or_else(String::new, |id| format!(" id={id}")),
+                run.url
+                    .as_deref()
+                    .map_or_else(String::new, |url| format!(" {url}"))
             )?;
         }
         if let Some(detail) = &t.detail {

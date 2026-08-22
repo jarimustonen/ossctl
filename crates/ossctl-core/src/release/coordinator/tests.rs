@@ -259,7 +259,7 @@ impl FakeCmd {
             ["rev-parse", "--abbrev-ref", "HEAD"] => Some("main\n".to_string()),
             ["remote", "get-url", "origin"] => self.origin.clone(),
             ["rev-list", "-n", "1", _] => Some("abc123\n".to_string()),
-            ["grep", "-l", "-e", "cargo publish", "--", ..] => {
+            ["grep", "-l", "-e", "cargo publish", _, "--", ..] => {
                 Some(".github/workflows/publish-crates.yml\n".to_string())
             }
             _ => None,
@@ -4515,7 +4515,17 @@ fn a_terminal_delegated_failure_returns_immediately_with_the_job_cause() {
         artifacts: &EMPTY_ARTIFACTS,
     };
     let before = clock.0.get();
-    let failure = wait_for_delegated_run(&context, Adapter::CargoDist, "1.0.0")
+    let plan = ReleasePlan {
+        targets: vec![plan_target(
+            Ecosystem::Rust,
+            Registry::GhReleases,
+            Adapter::CargoDist,
+        )],
+        ..ci_publish_plan()
+    };
+    let targets = resolve_target_plans(&plan).unwrap();
+    let delegated = targets.iter().map(|target| target.id.clone()).collect();
+    let (_, failure) = wait_for_delegated_runs(&context, &targets, &delegated, "1.0.0")
         .expect("cargo-dist has GitHub run state")
         .expect_err("cancelled run must fail");
     let DelegatedVerifyFailure::Failed(detail) = failure else {
@@ -4526,6 +4536,74 @@ fn a_terminal_delegated_failure_returns_immediately_with_the_job_cause() {
     assert!(
         clock.0.get() - before < DELEGATED_RELEASE_VERIFY_POLL_INTERVAL.as_secs(),
         "terminal failure must not wait for the destination timeout"
+    );
+}
+
+#[test]
+fn a_pending_workflow_cannot_hide_a_later_terminal_failure() {
+    struct MixedRuns;
+    impl CommandRunner for MixedRuns {
+        fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
+            let stdout = if program == "git" && args.starts_with(&["rev-list"]) {
+                "abc123\n".to_string()
+            } else if program == "git" && args.starts_with(&["grep"]) {
+                ".github/workflows/publish-crates.yml\n".to_string()
+            } else if program == "gh" && args.starts_with(&["run", "list"]) {
+                let workflow = args
+                    .iter()
+                    .position(|arg| *arg == "--workflow")
+                    .and_then(|index| args.get(index + 1))
+                    .copied()
+                    .unwrap();
+                if workflow == "publish-crates.yml" {
+                    r#"[{"databaseId":77,"status":"in_progress","conclusion":null,"headBranch":"v1.0.0","headSha":"abc123","url":"https://example/run/77"}]"#.to_string()
+                } else {
+                    r#"[{"databaseId":88,"status":"completed","conclusion":"failure","headBranch":"v1.0.0","headSha":"abc123","url":"https://example/run/88"}]"#.to_string()
+                }
+            } else if program == "gh" && args.starts_with(&["run", "view"]) {
+                r#"{"status":"completed","conclusion":"failure","url":"https://example/run/88","jobs":[{"name":"build-linux","status":"completed","conclusion":"failure"}]}"#.to_string()
+            } else {
+                String::new()
+            };
+            Ok(CommandOutput {
+                status: Some(0),
+                stdout,
+                stderr: String::new(),
+            })
+        }
+    }
+    let clock = FakeClock(Cell::new(1000));
+    let registry = FakeRegistry::empty();
+    let runner = MixedRuns;
+    let context = EffectCtx {
+        runner: &runner,
+        clock: &clock,
+        registry: &registry,
+        repo_root: Path::new("/repo"),
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let plan = ReleasePlan {
+        version: "1.0.0".to_string(),
+        targets: vec![
+            plan_target(Ecosystem::Rust, Registry::CratesIo, Adapter::CargoPublishCi),
+            plan_target(Ecosystem::Rust, Registry::GhReleases, Adapter::CargoDist),
+        ],
+        ..ci_publish_plan()
+    };
+    let targets = resolve_target_plans(&plan).unwrap();
+    let delegated = targets.iter().map(|target| target.id.clone()).collect();
+    let before = clock.0.get();
+    let (target, failure) = wait_for_delegated_runs(&context, &targets, &delegated, "1.0.0")
+        .unwrap()
+        .expect_err("the later failed workflow must win");
+    assert!(target.contains("gh-releases"));
+    let DelegatedVerifyFailure::Failed(detail) = failure else {
+        panic!("expected terminal failure, got {failure:?}");
+    };
+    assert!(detail.contains("build-linux"));
+    assert!(
+        clock.0.get() - before < DELEGATED_RELEASE_VERIFY_POLL_INTERVAL.as_secs(),
+        "the pending workflow caused a sleep before the failed workflow was reported"
     );
 }
 

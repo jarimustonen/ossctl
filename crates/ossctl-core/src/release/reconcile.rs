@@ -231,8 +231,13 @@ fn classify_delegated(
     });
     let ecosystem = planned.map_or(Ecosystem::Binary, |target| target.ecosystem);
     let package = planned.and_then(|target| target.package.clone());
-    let delegated_run =
-        adapter.and_then(|adapter| super::delegated::observe_github_run(ctx, adapter, &version));
+    let delegated_run = state
+        .delegated
+        .contains(target_id)
+        .then(|| {
+            adapter.and_then(|adapter| super::delegated::observe_github_run(ctx, adapter, &version))
+        })
+        .flatten();
     let workflow_allows_destination = delegated_run
         .as_ref()
         .is_none_or(|run| run.status == DelegatedRunStatus::Success);

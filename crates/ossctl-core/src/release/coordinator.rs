@@ -128,6 +128,8 @@
 //! wave-3's `reconcile`; this layer provides the journal-driven skip it builds
 //! on.)
 
+use std::collections::HashSet;
+
 use crate::ports::{CommandRunner, Tagger};
 use crate::protocol::journal::{
     EventKind, JournalEvent, Phase, PhaseOutcome, PublishReceipt as JournalReceipt, RunState,
@@ -1483,46 +1485,100 @@ enum DelegatedVerifyFailure {
     Unknown(String),
 }
 
-/// Wait for the exact GitHub Actions run owned by a GitHub-backed delegated
-/// adapter. `None` means this adapter has no GitHub workflow state to observe.
-fn wait_for_delegated_run(
+fn delegated_failure(
+    status: DelegatedRunStatus,
+    detail: Option<String>,
+) -> Option<DelegatedVerifyFailure> {
+    match status {
+        DelegatedRunStatus::Success => None,
+        DelegatedRunStatus::Pending => Some(DelegatedVerifyFailure::Pending(
+            detail.unwrap_or_else(|| "the delegated workflow is still pending".to_string()),
+        )),
+        DelegatedRunStatus::Failed => Some(DelegatedVerifyFailure::Failed(detail.unwrap_or_else(
+            || "the delegated workflow ended with a terminal failure".to_string(),
+        ))),
+        DelegatedRunStatus::Unknown => Some(DelegatedVerifyFailure::Unknown(
+            detail
+                .unwrap_or_else(|| "the delegated workflow run could not be observed".to_string()),
+        )),
+    }
+}
+
+/// Poll every distinct GitHub-backed delegated workflow once per round. A
+/// terminal failure is returned as soon as that round observes it, so a pending
+/// workflow earlier in target order can never hide a cancelled one. The attempt
+/// cap is independent of wall-clock movement; the elapsed-time check remains the
+/// normal production deadline.
+fn wait_for_delegated_runs(
     ctx: &EffectCtx<'_>,
-    adapter: Adapter,
+    targets: &[TargetPlan],
+    delegated: &std::collections::BTreeSet<String>,
     version: &str,
-) -> Option<Result<(), DelegatedVerifyFailure>> {
+) -> Option<Result<(), (String, DelegatedVerifyFailure)>> {
+    let owners: Vec<(String, Adapter)> = targets
+        .iter()
+        .filter(|target| delegated.contains(&target.id))
+        .filter(|target| {
+            matches!(
+                target.input.target.adapter,
+                Adapter::CargoDist | Adapter::CargoPublishCi
+            )
+        })
+        .map(|target| (target.id.clone(), target.input.target.adapter))
+        .collect();
+    if owners.is_empty() {
+        return None;
+    }
     let start = ctx.clock.now_unix();
-    loop {
-        let run = super::delegated::observe_github_run(ctx, adapter, version)?;
-        match run.status {
-            DelegatedRunStatus::Success => return Some(Ok(())),
-            DelegatedRunStatus::Failed => {
-                return Some(Err(DelegatedVerifyFailure::Failed(
-                    run.detail.unwrap_or_else(|| {
-                        "the delegated workflow ended with a terminal failure".to_string()
-                    }),
-                )))
+    let max_rounds = DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS
+        / DELEGATED_RELEASE_VERIFY_POLL_INTERVAL.as_secs()
+        + 2;
+    let mut ready = HashSet::new();
+    for round in 0..max_rounds {
+        let mut first_pending = None;
+        let mut first_unknown = None;
+        for (target, adapter) in &owners {
+            if ready.contains(adapter) {
+                continue;
             }
-            DelegatedRunStatus::Unknown => {
-                return Some(Err(DelegatedVerifyFailure::Unknown(
-                    run.detail.unwrap_or_else(|| {
-                        "the delegated workflow run could not be observed".to_string()
-                    }),
-                )))
-            }
-            DelegatedRunStatus::Pending => {
-                if ctx.clock.now_unix().saturating_sub(start)
-                    >= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS
-                {
-                    return Some(Err(DelegatedVerifyFailure::Pending(
-                        run.detail.unwrap_or_else(|| {
-                            "the delegated workflow is still pending".to_string()
-                        }),
-                    )));
+            let Some(run) = super::delegated::observe_github_run(ctx, *adapter, version) else {
+                continue;
+            };
+            match delegated_failure(run.status, run.detail) {
+                None => {
+                    ready.insert(*adapter);
                 }
-                ctx.clock.sleep(DELEGATED_RELEASE_VERIFY_POLL_INTERVAL);
+                Some(failure @ DelegatedVerifyFailure::Failed(_)) => {
+                    return Some(Err((target.clone(), failure)));
+                }
+                Some(failure @ DelegatedVerifyFailure::Unknown(_)) => {
+                    first_unknown.get_or_insert_with(|| (target.clone(), failure));
+                }
+                Some(failure @ DelegatedVerifyFailure::Pending(_)) => {
+                    first_pending.get_or_insert_with(|| (target.clone(), failure));
+                }
             }
         }
+        if let Some(unknown) = first_unknown {
+            return Some(Err(unknown));
+        }
+        if ready.len()
+            == owners
+                .iter()
+                .map(|(_, adapter)| adapter)
+                .collect::<HashSet<_>>()
+                .len()
+        {
+            return Some(Ok(()));
+        }
+        let timed_out = round + 1 == max_rounds
+            || ctx.clock.now_unix().saturating_sub(start) >= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS;
+        if timed_out {
+            return Some(Err(first_pending.expect("an unresolved owner is pending")));
+        }
+        ctx.clock.sleep(DELEGATED_RELEASE_VERIFY_POLL_INTERVAL);
     }
+    unreachable!("bounded delegated workflow loop always returns")
 }
 
 /// Observe every destination after dist. A v5 cut is not complete until each
@@ -1566,23 +1622,65 @@ fn verify_phase(
     verification_artifacts.homebrew = homebrew.cloned();
     let verify_ctx = ctx.with_artifacts(&verification_artifacts);
     record(journal, sink, EventKind::PhaseEntered { phase })?;
+    if mode == VerifyMode::CompletionBarrier {
+        if let Some(Err((target, failure))) = wait_for_delegated_runs(
+            &verify_ctx,
+            targets,
+            &journal.state().delegated,
+            &plan.version,
+        ) {
+            record(
+                journal,
+                sink,
+                EventKind::TargetVerified {
+                    target: target.clone(),
+                    outcome: VerifyOutcome::Unknown,
+                },
+            )?;
+            record(
+                journal,
+                sink,
+                EventKind::PhaseCompleted {
+                    phase,
+                    outcome: PhaseOutcome::Failed,
+                },
+            )?;
+            return match failure {
+                DelegatedVerifyFailure::Pending(message) => {
+                    Err(CutError::DelegatedRunPending { target, message })
+                }
+                DelegatedVerifyFailure::Failed(message) => {
+                    Err(CutError::DelegatedRunFailed { target, message })
+                }
+                DelegatedVerifyFailure::Unknown(message) => Err(CutError::PhaseFailed {
+                    phase,
+                    target: Some(target),
+                    message,
+                }),
+            };
+        }
+    }
     let mut first_failure: Option<(String, DelegatedVerifyFailure)> = None;
     for tp in targets {
         if journal.state().verified.get(&tp.id) == Some(&VerifyOutcome::Matches) {
             continue;
         }
-        let delegated_run = journal
-            .state()
-            .delegated
-            .contains(&tp.id)
-            .then(|| wait_for_delegated_run(&verify_ctx, tp.input.target.adapter, &plan.version))
-            .flatten();
-        let delegated_failure = delegated_run.and_then(Result::err);
+        let is_delegated = journal.state().delegated.contains(&tp.id);
+        let delegated_failure = (mode == VerifyMode::ObserveAfterDistFailure && is_delegated)
+            .then(|| {
+                super::delegated::observe_github_run(
+                    &verify_ctx,
+                    tp.input.target.adapter,
+                    &plan.version,
+                )
+            })
+            .flatten()
+            .and_then(|run| delegated_failure(run.status, run.detail));
         let outcome = if delegated_failure.is_some() {
             // A pending/failed/unobservable workflow has not earned a destination
             // verdict. Journal Unknown, never a false Missing.
             VerifyOutcome::Unknown
-        } else if journal.state().delegated.contains(&tp.id) {
+        } else if is_delegated {
             // The observation destination follows the DELEGATED ADAPTER's identity
             // first, then the registry. A delegated **registry** publish
             // (`cargo-publish-ci`: CI runs `cargo publish` on the tag) lands on the
@@ -1657,7 +1755,18 @@ fn verify_phase(
             )?;
             Ok(())
         }
-        (_, Some((target, failure))) => {
+        (VerifyMode::ObserveAfterDistFailure, Some((target, failure))) => fail_phase(
+            journal,
+            sink,
+            phase,
+            Some(target),
+            match failure {
+                DelegatedVerifyFailure::Pending(message)
+                | DelegatedVerifyFailure::Failed(message)
+                | DelegatedVerifyFailure::Unknown(message) => message,
+            },
+        ),
+        (VerifyMode::CompletionBarrier, Some((target, failure))) => {
             record(
                 journal,
                 sink,

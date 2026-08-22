@@ -25,7 +25,7 @@ pub fn observe_github_run(
 ) -> Option<DelegatedRun> {
     let workflow = match adapter {
         Adapter::CargoDist => ".github/workflows/release.yml".to_string(),
-        Adapter::CargoPublishCi => match cargo_publish_workflow(ctx) {
+        Adapter::CargoPublishCi => match cargo_publish_workflow(ctx, version) {
             Ok(path) => path,
             Err(detail) => return Some(DelegatedRun::unknown(None, None, detail)),
         },
@@ -34,7 +34,7 @@ pub fn observe_github_run(
     Some(observe_workflow(ctx, &workflow, version))
 }
 
-fn cargo_publish_workflow(ctx: &EffectCtx<'_>) -> Result<String, String> {
+fn cargo_publish_workflow(ctx: &EffectCtx<'_>, version: &str) -> Result<String, String> {
     let output = ctx
         .runner
         .run(
@@ -44,6 +44,7 @@ fn cargo_publish_workflow(ctx: &EffectCtx<'_>) -> Result<String, String> {
                 "-l",
                 "-e",
                 "cargo publish",
+                &format!("v{version}"),
                 "--",
                 ".github/workflows/*.yml",
                 ".github/workflows/*.yaml",
@@ -84,7 +85,8 @@ fn cargo_publish_workflow(ctx: &EffectCtx<'_>) -> Result<String, String> {
 struct RunRow {
     database_id: u64,
     status: String,
-    conclusion: String,
+    #[serde(default)]
+    conclusion: Option<String>,
     head_branch: String,
     head_sha: String,
     url: String,
@@ -212,7 +214,10 @@ fn observe_workflow(ctx: &EffectCtx<'_>, workflow: &str, version: &str) -> Deleg
 
 #[allow(clippy::too_many_lines)] // keeps terminal run + job evidence assembled in one place
 fn classify_run(ctx: &EffectCtx<'_>, workflow: &str, run: RunRow) -> DelegatedRun {
-    if run.status != "completed" {
+    if matches!(
+        run.status.as_str(),
+        "queued" | "in_progress" | "waiting" | "requested" | "pending"
+    ) {
         return DelegatedRun {
             provider: "github-actions".to_string(),
             workflow: Some(workflow.to_string()),
@@ -224,18 +229,35 @@ fn classify_run(ctx: &EffectCtx<'_>, workflow: &str, run: RunRow) -> DelegatedRu
             detail: Some(format!("the delegated workflow run is {}", run.status)),
         };
     }
-    if run.conclusion == "success" {
+    if run.status != "completed" {
+        return DelegatedRun::unknown(
+            Some(workflow.to_string()),
+            Some(run.database_id),
+            format!(
+                "GitHub Actions returned unrecognized run status `{}`",
+                run.status
+            ),
+        );
+    }
+    if run.conclusion.as_deref() == Some("success") {
         return DelegatedRun {
             provider: "github-actions".to_string(),
             workflow: Some(workflow.to_string()),
             run_id: Some(run.database_id),
             url: Some(run.url),
             status: DelegatedRunStatus::Success,
-            conclusion: Some(run.conclusion),
+            conclusion: run.conclusion,
             failed_jobs: Vec::new(),
             detail: None,
         };
     }
+    let Some(list_conclusion) = run.conclusion.clone() else {
+        return DelegatedRun::unknown(
+            Some(workflow.to_string()),
+            Some(run.database_id),
+            "GitHub Actions reported a completed run without a conclusion".to_string(),
+        );
+    };
     let id = run.database_id.to_string();
     let view = ctx.runner.run(
         "gh",
@@ -246,6 +268,18 @@ fn classify_run(ctx: &EffectCtx<'_>, workflow: &str, run: RunRow) -> DelegatedRu
         Ok(output) if output.status == Some(0) => {
             match serde_json::from_str::<RunView>(&output.stdout) {
                 Ok(view) => {
+                    if view.conclusion == "success" {
+                        return DelegatedRun {
+                            provider: "github-actions".to_string(),
+                            workflow: Some(workflow.to_string()),
+                            run_id: Some(run.database_id),
+                            url: Some(view.url),
+                            status: DelegatedRunStatus::Success,
+                            conclusion: Some(view.conclusion),
+                            failed_jobs: Vec::new(),
+                            detail: None,
+                        };
+                    }
                     let jobs = view
                         .jobs
                         .into_iter()
@@ -264,7 +298,7 @@ fn classify_run(ctx: &EffectCtx<'_>, workflow: &str, run: RunRow) -> DelegatedRu
                     (view.conclusion, Some(view.url), jobs, None)
                 }
                 Err(error) => (
-                    run.conclusion.clone(),
+                    list_conclusion.clone(),
                     Some(run.url.clone()),
                     Vec::new(),
                     Some(format!("could not parse the failed run's jobs: {error}")),
@@ -272,7 +306,7 @@ fn classify_run(ctx: &EffectCtx<'_>, workflow: &str, run: RunRow) -> DelegatedRu
             }
         }
         Ok(output) => (
-            run.conclusion.clone(),
+            list_conclusion.clone(),
             Some(run.url.clone()),
             Vec::new(),
             Some(format!(
@@ -281,7 +315,7 @@ fn classify_run(ctx: &EffectCtx<'_>, workflow: &str, run: RunRow) -> DelegatedRu
             )),
         ),
         Err(error) => (
-            run.conclusion.clone(),
+            list_conclusion,
             Some(run.url.clone()),
             Vec::new(),
             Some(format!("could not inspect the failed run's jobs: {error}")),
@@ -444,6 +478,26 @@ mod tests {
         .unwrap();
         assert_eq!(run.status, DelegatedRunStatus::Success);
         assert_eq!(run.run_id, Some(99));
+    }
+
+    #[test]
+    fn non_github_delegated_adapters_have_no_github_run_state() {
+        struct NoCommands;
+        impl CommandRunner for NoCommands {
+            fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
+                panic!("non-GitHub adapter invoked {program} {args:?}")
+            }
+        }
+        let (runner, clock, registry) = (NoCommands, ClockFake, RegistryFake);
+        let context = EffectCtx {
+            runner: &runner,
+            clock: &clock,
+            registry: &registry,
+            repo_root: Path::new("/repo"),
+            artifacts: &EMPTY_ARTIFACTS,
+        };
+        assert!(observe_github_run(&context, Adapter::ReleasePlease, "1.0.0").is_none());
+        assert!(observe_github_run(&context, Adapter::GhActionPypiPublish, "1.0.0").is_none());
     }
 
     #[test]
