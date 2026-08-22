@@ -1,8 +1,8 @@
 ---
 created: 2026-08-20
-updated: 2026-08-21
+updated: 2026-08-22
 type: bug
-status: open
+status: in-progress
 priority: high
 provenance: ai-review
 source_ref: orchestratectl:01m0fathfnk4dexmz93kqnkeag/review-finding:sha1:caa04773eaf5fac25945826ffc382b42b96466bb
