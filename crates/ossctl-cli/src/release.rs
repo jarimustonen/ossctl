@@ -573,12 +573,14 @@ fn render_reconcile_text(report: &ReconcileReport, warnings: &[String]) -> Resul
     )?;
     let s = &report.summary;
     crate::output::stdoutln!(
-        "reconciled: {} ({} matches, {} conflicts, {} missing, {} unknown)",
+        "reconciled: {} ({} matches, {} conflicts, {} missing, {} unknown; {} delegated pending, {} delegated failed)",
         s.reconciled,
         s.matches,
         s.conflicts,
         s.missing,
-        s.unknown
+        s.unknown,
+        s.delegated_pending,
+        s.delegated_failed
     )?;
     for t in &report.targets {
         crate::output::stdoutln!(
@@ -588,6 +590,14 @@ fn render_reconcile_text(report: &ReconcileReport, warnings: &[String]) -> Resul
             format!("{}@{}", t.package.as_deref().unwrap_or("<none>"), t.version),
             t.outcome.as_str(),
         )?;
+        if let Some(run) = &t.delegated_run {
+            crate::output::stdoutln!(
+                "             └─ delegated run: {}{}",
+                run.status.as_str(),
+                run.run_id
+                    .map_or_else(String::new, |id| format!(" (id {id})"))
+            )?;
+        }
         if let Some(detail) = &t.detail {
             crate::output::stdoutln!("             └─ {detail}")?;
         }
@@ -2303,6 +2313,18 @@ fn cut_error_to_cli(run_id: &str, err: CutError) -> CliError {
         CutError::Journal(io) => CliError::system(
             "journal_error",
             format!("run {run_id}: could not write the release journal: {io} — the run may be in an unknown state"),
+        ),
+        CutError::DelegatedRunPending { target, message } => CliError::system(
+            "delegated_run_pending",
+            format!(
+                "run {run_id}: delegated target `{target}` is still pending: {message}. Nothing was rolled back; retry `ossctl release verify {run_id}` or resume after the workflow completes"
+            ),
+        ),
+        CutError::DelegatedRunFailed { target, message } => CliError::system(
+            "delegated_run_failed",
+            format!(
+                "run {run_id}: delegated target `{target}` failed in CI: {message}. Nothing was rolled back; fix or rerun the named workflow job, then use `ossctl release resume {run_id}`"
+            ),
         ),
         error @ CutError::PhaseFailed { phase, .. } => {
             let observation_note = if phase == ossctl_core::protocol::journal::Phase::Dist {

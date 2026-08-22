@@ -38,7 +38,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::contract::schema::{Adapter, Ecosystem, ReleaseLayout};
 use crate::protocol::journal::{PublishReceipt as JournalReceipt, RunState};
 use crate::protocol::plan::{PlanTarget, ReleasePlan};
-use crate::protocol::reconcile::{ReconcileReport, ReconcileSummary, TargetReconcile};
+use crate::protocol::reconcile::{
+    DelegatedRun, DelegatedRunStatus, ReconcileReport, ReconcileSummary, TargetReconcile,
+};
 use crate::protocol::release::{PublishReceipt, VerifyOutcome};
 
 use super::adapters::{observe_cargo_dist_github_release, resolve, EffectCtx, ReleaseAdapter};
@@ -83,7 +85,7 @@ pub fn reconcile_with_plan(
 
     for target_id in ids {
         let planned = plan_targets.get(&target_id).copied();
-        let (ecosystem, package, version, outcome, detail) =
+        let (ecosystem, package, version, outcome, detail, delegated_run) =
             if let Some(receipt) = state.published.get(&target_id) {
                 let (outcome, detail) = classify(ctx, receipt, planned);
                 (
@@ -92,6 +94,7 @@ pub fn reconcile_with_plan(
                     receipt.version.clone(),
                     outcome,
                     detail,
+                    None,
                 )
             } else {
                 classify_delegated(ctx, state, &target_id, planned, plan)
@@ -102,6 +105,13 @@ pub fn reconcile_with_plan(
             VerifyOutcome::Missing => summary.missing += 1,
             VerifyOutcome::Unknown => summary.unknown += 1,
         }
+        if let Some(run) = delegated_run.as_ref() {
+            match run.status {
+                DelegatedRunStatus::Pending => summary.delegated_pending += 1,
+                DelegatedRunStatus::Failed => summary.delegated_failed += 1,
+                DelegatedRunStatus::Success | DelegatedRunStatus::Unknown => {}
+            }
+        }
         targets.push(TargetReconcile {
             target: target_id,
             ecosystem,
@@ -109,6 +119,7 @@ pub fn reconcile_with_plan(
             version,
             outcome,
             detail,
+            delegated_run,
         });
     }
     summary.reconciled = targets.len();
@@ -209,6 +220,7 @@ fn classify_delegated(
     String,
     VerifyOutcome,
     Option<String>,
+    Option<DelegatedRun>,
 ) {
     let version = plan.map_or_else(|| state.version.clone(), |plan| plan.version.clone());
     let adapter = planned.map(|target| target.adapter).or_else(|| {
@@ -219,33 +231,48 @@ fn classify_delegated(
     });
     let ecosystem = planned.map_or(Ecosystem::Binary, |target| target.ecosystem);
     let package = planned.and_then(|target| target.package.clone());
-    let outcome = match (adapter, package.as_deref()) {
-        (Some(Adapter::CargoDist), Some(package)) => {
-            observe_cargo_dist_github_release(ctx, &version, package)
+    let delegated_run =
+        adapter.and_then(|adapter| super::delegated::observe_github_run(ctx, adapter, &version));
+    let workflow_allows_destination = delegated_run
+        .as_ref()
+        .is_none_or(|run| run.status == DelegatedRunStatus::Success);
+    let outcome = if workflow_allows_destination {
+        match (adapter, package.as_deref()) {
+            (Some(Adapter::CargoDist), Some(package)) => {
+                observe_cargo_dist_github_release(ctx, &version, package)
+            }
+            (Some(adapter), Some(package)) => {
+                let receipt = PublishReceipt {
+                    adapter,
+                    ecosystem,
+                    package: package.to_string(),
+                    version: version.clone(),
+                    canonical_ref: String::new(),
+                    digest: None,
+                    remote_url: None,
+                    timestamp: 0,
+                };
+                resolve(adapter)
+                    .verify(ctx, &receipt)
+                    .unwrap_or(VerifyOutcome::Unknown)
+            }
+            _ => VerifyOutcome::Unknown,
         }
-        (Some(adapter), Some(package)) => {
-            let receipt = PublishReceipt {
-                adapter,
-                ecosystem,
-                package: package.to_string(),
-                version: version.clone(),
-                canonical_ref: String::new(),
-                digest: None,
-                remote_url: None,
-                timestamp: 0,
-            };
-            resolve(adapter)
-                .verify(ctx, &receipt)
-                .unwrap_or(VerifyOutcome::Unknown)
-        }
-        _ => VerifyOutcome::Unknown,
+    } else {
+        VerifyOutcome::Unknown
     };
+    let detail = delegated_run
+        .as_ref()
+        .filter(|run| run.status != DelegatedRunStatus::Success)
+        .and_then(|run| run.detail.clone())
+        .or_else(|| detail_for(outcome, ecosystem, adapter));
     (
         ecosystem.as_str().to_string(),
         package,
         version,
         outcome,
-        detail_for(outcome, ecosystem, adapter),
+        detail,
+        delegated_run,
     )
 }
 

@@ -134,6 +134,7 @@ use crate::protocol::journal::{
     JOURNAL_SCHEMA_VERSION,
 };
 use crate::protocol::plan::ReleasePlan;
+use crate::protocol::reconcile::DelegatedRunStatus;
 use crate::protocol::release::{PublishReceipt as AdapterReceipt, VerifyOutcome};
 
 use super::adapters::{
@@ -198,6 +199,22 @@ pub enum CutError {
     /// commit is unavailable there is nothing safe to publish from
     /// (`release-cut-clean-checkout`). Nothing external has happened.
     Checkout(String),
+    /// A GitHub-backed delegated workflow is still queued/in progress after the
+    /// bounded observation window. Distinct so callers can retry rather than
+    /// treating it as a missing destination.
+    DelegatedRunPending {
+        /// Delegated target id.
+        target: String,
+        /// Exact run/workflow context.
+        message: String,
+    },
+    /// A GitHub-backed delegated workflow ended in failure/cancellation.
+    DelegatedRunFailed {
+        /// Delegated target id.
+        target: String,
+        /// Actionable conclusion and failed job names.
+        message: String,
+    },
 }
 
 impl std::fmt::Display for CutError {
@@ -222,6 +239,12 @@ impl std::fmt::Display for CutError {
                     f,
                     "could not check out the sealed commit to publish from: {m}"
                 )
+            }
+            Self::DelegatedRunPending { target, message } => {
+                write!(f, "verify-phase pending on target `{target}`: {message}")
+            }
+            Self::DelegatedRunFailed { target, message } => {
+                write!(f, "verify-phase failed on target `{target}`: {message}")
             }
         }
     }
@@ -1453,6 +1476,55 @@ enum VerifyMode {
     ObserveAfterDistFailure,
 }
 
+#[derive(Debug)]
+enum DelegatedVerifyFailure {
+    Pending(String),
+    Failed(String),
+    Unknown(String),
+}
+
+/// Wait for the exact GitHub Actions run owned by a GitHub-backed delegated
+/// adapter. `None` means this adapter has no GitHub workflow state to observe.
+fn wait_for_delegated_run(
+    ctx: &EffectCtx<'_>,
+    adapter: Adapter,
+    version: &str,
+) -> Option<Result<(), DelegatedVerifyFailure>> {
+    let start = ctx.clock.now_unix();
+    loop {
+        let run = super::delegated::observe_github_run(ctx, adapter, version)?;
+        match run.status {
+            DelegatedRunStatus::Success => return Some(Ok(())),
+            DelegatedRunStatus::Failed => {
+                return Some(Err(DelegatedVerifyFailure::Failed(
+                    run.detail.unwrap_or_else(|| {
+                        "the delegated workflow ended with a terminal failure".to_string()
+                    }),
+                )))
+            }
+            DelegatedRunStatus::Unknown => {
+                return Some(Err(DelegatedVerifyFailure::Unknown(
+                    run.detail.unwrap_or_else(|| {
+                        "the delegated workflow run could not be observed".to_string()
+                    }),
+                )))
+            }
+            DelegatedRunStatus::Pending => {
+                if ctx.clock.now_unix().saturating_sub(start)
+                    >= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS
+                {
+                    return Some(Err(DelegatedVerifyFailure::Pending(
+                        run.detail.unwrap_or_else(|| {
+                            "the delegated workflow is still pending".to_string()
+                        }),
+                    )));
+                }
+                ctx.clock.sleep(DELEGATED_RELEASE_VERIFY_POLL_INTERVAL);
+            }
+        }
+    }
+}
+
 /// Observe every destination after dist. A v5 cut is not complete until each
 /// receipt or CI-delegation has an observed-good result; Unknown is deliberately
 /// a barrier failure, never an implicit success.
@@ -1476,6 +1548,7 @@ enum VerifyMode {
 ///    surface that this barrier would then not observe.
 ///
 /// A change to any of those three is what would make this vacuous pass unsound.
+#[allow(clippy::too_many_lines)] // phase barrier intentionally keeps every target verdict together
 fn verify_phase(
     journal: &mut Journal<'_>,
     sink: &mut dyn ProgressSink,
@@ -1493,12 +1566,23 @@ fn verify_phase(
     verification_artifacts.homebrew = homebrew.cloned();
     let verify_ctx = ctx.with_artifacts(&verification_artifacts);
     record(journal, sink, EventKind::PhaseEntered { phase })?;
-    let mut first_failure: Option<(String, String)> = None;
+    let mut first_failure: Option<(String, DelegatedVerifyFailure)> = None;
     for tp in targets {
         if journal.state().verified.get(&tp.id) == Some(&VerifyOutcome::Matches) {
             continue;
         }
-        let outcome = if journal.state().delegated.contains(&tp.id) {
+        let delegated_run = journal
+            .state()
+            .delegated
+            .contains(&tp.id)
+            .then(|| wait_for_delegated_run(&verify_ctx, tp.input.target.adapter, &plan.version))
+            .flatten();
+        let delegated_failure = delegated_run.and_then(Result::err);
+        let outcome = if delegated_failure.is_some() {
+            // A pending/failed/unobservable workflow has not earned a destination
+            // verdict. Journal Unknown, never a false Missing.
+            VerifyOutcome::Unknown
+        } else if journal.state().delegated.contains(&tp.id) {
             // The observation destination follows the DELEGATED ADAPTER's identity
             // first, then the registry. A delegated **registry** publish
             // (`cargo-publish-ci`: CI runs `cargo publish` on the tag) lands on the
@@ -1540,19 +1624,24 @@ fn verify_phase(
                 outcome,
             },
         )?;
-        let failure = match outcome {
+        let failure = delegated_failure.or_else(|| match outcome {
             VerifyOutcome::Matches => None,
-            VerifyOutcome::Unknown => {
-                Some(format!("could not observe {} at its destination", tp.id))
-            }
-            VerifyOutcome::Missing => Some(format!("{} is missing at its destination", tp.id)),
-            VerifyOutcome::Conflicts => {
-                Some(format!("{} conflicts with its recorded receipt", tp.id))
-            }
-        };
+            VerifyOutcome::Unknown => Some(DelegatedVerifyFailure::Unknown(format!(
+                "could not observe {} at its destination",
+                tp.id
+            ))),
+            VerifyOutcome::Missing => Some(DelegatedVerifyFailure::Unknown(format!(
+                "{} is missing at its destination",
+                tp.id
+            ))),
+            VerifyOutcome::Conflicts => Some(DelegatedVerifyFailure::Unknown(format!(
+                "{} conflicts with its recorded receipt",
+                tp.id
+            ))),
+        });
         if first_failure.is_none() {
-            if let Some(message) = failure {
-                first_failure = Some((tp.id.clone(), message));
+            if let Some(failure) = failure {
+                first_failure = Some((tp.id.clone(), failure));
             }
         }
     }
@@ -1568,8 +1657,28 @@ fn verify_phase(
             )?;
             Ok(())
         }
-        (_, Some((target, message))) => {
-            fail_phase(journal, sink, phase, Some(target), message)
+        (_, Some((target, failure))) => {
+            record(
+                journal,
+                sink,
+                EventKind::PhaseCompleted {
+                    phase,
+                    outcome: PhaseOutcome::Failed,
+                },
+            )?;
+            match failure {
+                DelegatedVerifyFailure::Pending(message) => {
+                    Err(CutError::DelegatedRunPending { target, message })
+                }
+                DelegatedVerifyFailure::Failed(message) => {
+                    Err(CutError::DelegatedRunFailed { target, message })
+                }
+                DelegatedVerifyFailure::Unknown(message) => Err(CutError::PhaseFailed {
+                    phase,
+                    target: Some(target),
+                    message,
+                }),
+            }
         }
         (VerifyMode::ObserveAfterDistFailure, None) => fail_phase(
             journal,

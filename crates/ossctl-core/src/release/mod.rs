@@ -13,6 +13,7 @@ pub mod adapters;
 pub mod bump;
 pub mod bump_exec;
 pub mod coordinator;
+pub mod delegated;
 pub mod distribution;
 pub mod journal;
 pub mod plan;

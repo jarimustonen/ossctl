@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set, release-plan `SEAL_VERSION` advances from 7 to 8; older plans remain readable
   for resume but require re-planning before a fresh cut
   (`bump-inherited-workspace-pins`).
+- **Delegated release verification now observes the exact tag-triggered GitHub Actions run before checking its destination.** Queued and in-progress workflows are reported as machine-readable `pending` state rather than a missing artifact; failed, cancelled, or timed-out runs stop immediately with their conclusion and failed job names; successful runs continue to the existing registry, GitHub Release, or Homebrew destination check. An unobservable workflow remains `unknown` and red (`verify-delegated-run-state`).
 
 ## [0.10.0] - 2026-08-20
 

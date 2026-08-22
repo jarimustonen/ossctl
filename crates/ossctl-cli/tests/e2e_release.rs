@@ -180,10 +180,21 @@ fn delegated_release_with_zero_assets_fails_verify_and_is_posthoc_observable() {
     let repo = TempRepo::new("approved");
     repo.use_cargo_dist_target();
     let shims = Shims::new();
-    shims.set(
+    shims.set_script(
         "gh",
-        0,
-        r#"{"tagName":"v0.1.0","isDraft":false,"assets":[]}"#,
+        r#"#!/bin/sh
+printf 'gh' >> "$SHIM_DIR/log"
+for arg in "$@"; do printf ' <%s>' "$arg" >> "$SHIM_DIR/log"; done
+printf '\n' >> "$SHIM_DIR/log"
+if [ "$1 $2" = "run list" ]; then
+  sha=$(git rev-parse HEAD)
+  printf '[{"databaseId":42,"status":"completed","conclusion":"success","headBranch":"v0.1.0","headSha":"%s","url":"https://example/actions/runs/42"}]' "$sha"
+elif [ "$1 $2" = "release view" ]; then
+  printf '{"tagName":"v0.1.0","isDraft":false,"assets":[]}'
+else
+  printf '{}'
+fi
+"#,
     );
     let plan = plan_id(&repo, &shims);
 

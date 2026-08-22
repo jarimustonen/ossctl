@@ -175,6 +175,17 @@ impl Shims {
         .expect("write shim stdout");
     }
 
+    pub fn set_script(&self, command: &str, script: &str) {
+        let path = self.dir.path().join(command);
+        fs::write(&path, script).expect("write custom shim script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                .expect("make custom shim executable");
+        }
+    }
+
     pub fn log(&self) -> String {
         fs::read_to_string(self.dir.path().join("log")).expect("read shim log")
     }

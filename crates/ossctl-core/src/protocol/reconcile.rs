@@ -67,6 +67,91 @@ pub struct TargetReconcile {
     /// clean `matches`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// The exact delegated workflow run associated with this release tag, when
+    /// the adapter is backed by GitHub Actions. Additive and absent for
+    /// engine-owned or non-GitHub delegated targets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delegated_run: Option<DelegatedRun>,
+}
+
+/// Machine-readable state of a GitHub Actions run that owns a delegated publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedRunStatus {
+    /// The matching run has not appeared yet, or is queued/in progress.
+    Pending,
+    /// The matching run completed successfully; destination verification follows.
+    Success,
+    /// The matching run reached a terminal non-success conclusion.
+    Failed,
+    /// The run could not be resolved or observed reliably.
+    Unknown,
+}
+
+impl DelegatedRunStatus {
+    /// Stable wire spelling used by text output too.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Success => "success",
+            Self::Failed => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// One failed or cancelled job from a terminal delegated workflow run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DelegatedJobFailure {
+    /// GitHub Actions job name.
+    pub name: String,
+    /// Terminal GitHub Actions conclusion (`failure`, `cancelled`, `timed_out`, …).
+    pub conclusion: String,
+}
+
+/// Exact GitHub Actions run evidence for a delegated target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DelegatedRun {
+    /// Workflow provider. Currently always `github-actions`.
+    pub provider: String,
+    /// Repo-relative workflow path, when it could be resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
+    /// GitHub Actions database id, once the matching run is visible.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<u64>,
+    /// Browser URL for the matching workflow run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Machine-readable lifecycle state, distinct from destination `outcome`.
+    pub status: DelegatedRunStatus,
+    /// Terminal GitHub Actions conclusion, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conclusion: Option<String>,
+    /// Failed/cancelled jobs for a terminal non-success run.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failed_jobs: Vec<DelegatedJobFailure>,
+    /// Human-readable context for pending, failed, or unknown state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl DelegatedRun {
+    /// Construct an unobservable run without fabricating an id or conclusion.
+    #[must_use]
+    pub(crate) fn unknown(workflow: Option<String>, run_id: Option<u64>, detail: String) -> Self {
+        Self {
+            provider: "github-actions".to_string(),
+            workflow,
+            run_id,
+            url: None,
+            status: DelegatedRunStatus::Unknown,
+            conclusion: None,
+            failed_jobs: Vec::new(),
+            detail: Some(detail),
+        }
+    }
 }
 
 /// Rollup counts across all reconciled targets — the four [`VerifyOutcome`]
@@ -88,4 +173,8 @@ pub struct ReconcileSummary {
     pub missing: usize,
     /// Targets the reconcile could not be performed for.
     pub unknown: usize,
+    /// Delegated GitHub Actions runs that are queued, in progress, or not visible yet.
+    pub delegated_pending: usize,
+    /// Delegated GitHub Actions runs that ended in terminal failure/cancellation.
+    pub delegated_failed: usize,
 }

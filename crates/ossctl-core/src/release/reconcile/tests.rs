@@ -28,7 +28,21 @@ impl CommandRunner for RecordingCmd {
         self.calls
             .borrow_mut()
             .push(format!("{program} {}", args.join(" ")));
-        let stdout = if program == "gh" && args.starts_with(&["release", "download"]) {
+        let stdout = if program == "git" && args.starts_with(&["rev-list"]) {
+            "abc123\n".to_string()
+        } else if program == "git" && args.starts_with(&["grep"]) {
+            ".github/workflows/publish-crates.yml\n".to_string()
+        } else if program == "gh" && args.starts_with(&["run", "list"]) {
+            let branch = args
+                .iter()
+                .position(|arg| *arg == "--branch")
+                .and_then(|index| args.get(index + 1))
+                .copied()
+                .unwrap_or("v1.0.0");
+            format!(
+                r#"[{{"databaseId":42,"status":"completed","conclusion":"success","headBranch":"{branch}","headSha":"abc123","url":"https://github.com/acme/tool/actions/runs/42"}}]"#
+            )
+        } else if program == "gh" && args.starts_with(&["release", "download"]) {
             r#"{"announcement_tag":"v1.0.0","releases":[{"app_name":"project-canon-cli","app_version":"1.0.0","artifacts":["tool-aarch64-apple-darwin.tar.xz","tool-aarch64-unknown-linux-musl.tar.xz","tool-x86_64-unknown-linux-musl.tar.xz","tool-installer.sh"]}]}"#.to_string()
         } else if program == "gh" {
             r#"{"tagName":"v1.0.0","name":"1.0.0 - 2026-08-17","isDraft":false,"assets":[{"name":"dist-manifest.json"},{"name":"tool-aarch64-apple-darwin.tar.xz"},{"name":"tool-aarch64-unknown-linux-musl.tar.xz"},{"name":"tool-x86_64-unknown-linux-musl.tar.xz"},{"name":"tool-installer.sh"}]}"#.to_string()
@@ -338,6 +352,8 @@ fn delegated_cargo_dist_uses_the_tagged_release_not_registry_or_title() {
     assert_eq!(
         cmd.calls.borrow().as_slice(),
         &[
+            "git rev-list -n 1 v1.0.0",
+            "gh run list --workflow release.yml --branch v1.0.0 --event push --json databaseId,status,conclusion,headBranch,headSha,url --limit 20",
             "gh release view v1.0.0 --json assets,isDraft,tagName",
             "gh release download v1.0.0 --pattern dist-manifest.json --output -",
         ]

@@ -258,6 +258,10 @@ impl FakeCmd {
             ["rev-parse", "HEAD"] => self.bump_commit.as_ref().map(|sha| format!("{sha}\n")),
             ["rev-parse", "--abbrev-ref", "HEAD"] => Some("main\n".to_string()),
             ["remote", "get-url", "origin"] => self.origin.clone(),
+            ["rev-list", "-n", "1", _] => Some("abc123\n".to_string()),
+            ["grep", "-l", "-e", "cargo publish", "--", ..] => {
+                Some(".github/workflows/publish-crates.yml\n".to_string())
+            }
             _ => None,
         }?;
         Some(CommandOutput {
@@ -327,6 +331,7 @@ impl FakeCmd {
     }
 }
 impl CommandRunner for FakeCmd {
+    #[allow(clippy::too_many_lines)] // centralized command fixture for coordinator scenarios
     fn run(&self, program: &str, args: &[&str], cwd: &Path) -> io::Result<CommandOutput> {
         let line = format!("{program} {}", args.join(" "));
         self.calls.borrow_mut().push(line.clone());
@@ -341,6 +346,23 @@ impl CommandRunner for FakeCmd {
         }
         if let Some(output) = self.clone_tap_checkout(program, args) {
             return Ok(output);
+        }
+        // Serve the exact successful tag-triggered workflow run before destination
+        // observation. Dedicated tests override this for pending/failure states.
+        if program == "gh" && args.starts_with(&["run", "list"]) {
+            let branch = args
+                .iter()
+                .position(|arg| *arg == "--branch")
+                .and_then(|index| args.get(index + 1))
+                .copied()
+                .unwrap_or("v1.0.0");
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: format!(
+                    r#"[{{"databaseId":42,"status":"completed","conclusion":"success","headBranch":"{branch}","headSha":"abc123","url":"https://github.com/acme/tool/actions/runs/42"}}]"#
+                ),
+                stderr: String::new(),
+            });
         }
         // Serve observed GitHub Release assets to the mandatory verify phase.
         if program == "gh" && args.starts_with(&["release", "view"]) && args.contains(&"--json") {
@@ -1560,6 +1582,20 @@ impl CommandRunner for WorkspaceCmd {
     fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
         let line = format!("{program} {}", args.join(" "));
         self.calls.borrow_mut().push(line.clone());
+        if program == "git" && args.starts_with(&["rev-list"]) {
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: "abc123\n".to_string(),
+                stderr: String::new(),
+            });
+        }
+        if program == "gh" && args.starts_with(&["run", "list"]) {
+            return Ok(CommandOutput {
+                status: Some(0),
+                stdout: r#"[{"databaseId":42,"status":"completed","conclusion":"success","headBranch":"v1.2.3","headSha":"abc123","url":"https://github.com/acme/tool/actions/runs/42"}]"#.to_string(),
+                stderr: String::new(),
+            });
+        }
         if program == "gh" && args.starts_with(&["release", "view"]) && args.contains(&"--json") {
             return Ok(CommandOutput {
                 status: Some(0),
@@ -4444,6 +4480,52 @@ fn an_outage_at_the_deadline_does_not_erase_an_answered_absence() {
     assert_eq!(
         verify_delegated_registry(&ctx, &ci_adapter_target()),
         VerifyOutcome::Missing
+    );
+}
+
+#[test]
+fn a_terminal_delegated_failure_returns_immediately_with_the_job_cause() {
+    struct FailedRun;
+    impl CommandRunner for FailedRun {
+        fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
+            let stdout = if program == "git" && args.starts_with(&["rev-list"]) {
+                "abc123\n"
+            } else if program == "gh" && args.starts_with(&["run", "list"]) {
+                r#"[{"databaseId":88,"status":"completed","conclusion":"cancelled","headBranch":"v1.0.0","headSha":"abc123","url":"https://example/run/88"}]"#
+            } else if program == "gh" && args.starts_with(&["run", "view"]) {
+                r#"{"status":"completed","conclusion":"cancelled","url":"https://example/run/88","jobs":[{"name":"build (aarch64-unknown-linux-musl)","status":"completed","conclusion":"cancelled"}]}"#
+            } else {
+                ""
+            };
+            Ok(CommandOutput {
+                status: Some(0),
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+            })
+        }
+    }
+    let clock = FakeClock(Cell::new(1000));
+    let registry = FakeRegistry::empty();
+    let runner = FailedRun;
+    let context = EffectCtx {
+        runner: &runner,
+        clock: &clock,
+        registry: &registry,
+        repo_root: Path::new("/repo"),
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let before = clock.0.get();
+    let failure = wait_for_delegated_run(&context, Adapter::CargoDist, "1.0.0")
+        .expect("cargo-dist has GitHub run state")
+        .expect_err("cancelled run must fail");
+    let DelegatedVerifyFailure::Failed(detail) = failure else {
+        panic!("expected terminal failure, got {failure:?}");
+    };
+    assert!(detail.contains("build (aarch64-unknown-linux-musl)"));
+    assert!(detail.contains("cancelled"));
+    assert!(
+        clock.0.get() - before < DELEGATED_RELEASE_VERIFY_POLL_INTERVAL.as_secs(),
+        "terminal failure must not wait for the destination timeout"
     );
 }
 
