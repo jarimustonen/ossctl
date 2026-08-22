@@ -8,6 +8,11 @@ provenance: agent:issuectl-stint-wrapup
 lane: verify-observers
 lane_seq: 10
 collision: [crates/ossctl-core/src/release/coordinator.rs]
+commits:
+- hash: cc6491b7f24560b80373b98a6fc6905727555da6
+  summary: 'fix(release): observe delegated workflow runs'
+- hash: c0146ac27ed4620dc7db1bf876012a8655e6acfa
+  summary: 'chore(issue): start delegated run verification fix'
 ---
 
 # release verify infers delivery from the destination, not the delegated run: pending and failed are indistinguishable
