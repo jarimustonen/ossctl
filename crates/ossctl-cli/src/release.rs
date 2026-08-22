@@ -21,7 +21,9 @@ use ossctl_core::protocol::plan::ReleasePlan;
 use ossctl_core::protocol::reconcile::ReconcileReport;
 use ossctl_core::release::adapters::{verification_artifacts, EffectCtx, EMPTY_ARTIFACTS};
 use ossctl_core::release::coordinator::{self, CutError, ProgressSink};
-use ossctl_core::release::distribution::{find_undeclared_distribution, UndeclaredDistribution};
+use ossctl_core::release::distribution::{
+    delegated_publish_workflow_warnings, find_undeclared_distribution, UndeclaredDistribution,
+};
 use ossctl_core::release::journal::{self, Journal, JournalPaths};
 
 use crate::cli::ReleaseAction;
@@ -370,6 +372,14 @@ pub fn plan(args: &PlanArgs, format: OutputFormat) -> Result<(), CliError> {
     // mid-cut.
     warnings.extend(ossctl_core::release::plan::delegated_dependency_messages(
         &ossctl_core::release::plan::delegated_dependency_conflicts(&plan, &facts),
+    ));
+    // A delegated crates.io target depends on the pushed tag waking a CI publisher.
+    // Keep this advisory because static workflow inspection cannot prove shell scripts
+    // or remote reusable workflows, but make the missing trigger visible before the
+    // irreversible tag phase.
+    warnings.extend(delegated_publish_workflow_warnings(
+        &normalized.contract.targets,
+        &facts.distribution_surface,
     ));
     // A target whose package is still null after facts-resolution is ambiguous
     // (a monorepo with several crates of one ecosystem): the executor will infer
@@ -2946,6 +2956,7 @@ mod tests {
             has_cargo_dist: true,
             cargo_dist_evidence: vec!["dist-workspace.toml".to_string()],
             tag_triggered_workflows: vec!["release.yml".to_string()],
+            tag_triggered_cargo_publish_workflows: vec![],
         });
         let err = ensure_declared_distribution(&contract, &facts).unwrap_err();
         assert_eq!(err.code, "undeclared_distribution");

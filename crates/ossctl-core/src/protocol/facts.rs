@@ -33,6 +33,13 @@ pub struct DistributionSurface {
     pub cargo_dist_evidence: Vec<String>,
     /// GitHub workflow filenames whose `push` trigger includes tags.
     pub tag_triggered_workflows: Vec<String>,
+    /// Tag-triggered workflows that directly run `cargo publish` or reach it
+    /// through a repository-local reusable workflow call.
+    ///
+    /// This additive evidence lets release planning warn about an ineffective
+    /// `cargo-publish-ci` delegation without treating a heuristic as a hard
+    /// refusal. Filenames are relative to `.github/workflows`.
+    pub tag_triggered_cargo_publish_workflows: Vec<String>,
 }
 
 /// What one Cargo manifest says about publishing to crates.io.

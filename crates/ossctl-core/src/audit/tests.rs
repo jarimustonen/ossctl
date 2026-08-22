@@ -251,6 +251,7 @@ fn facts_with(maturity: Maturity, has_ci: bool, bot: Option<&str>) -> Facts {
             has_cargo_dist: false,
             cargo_dist_evidence: vec![],
             tag_triggered_workflows: vec![],
+            tag_triggered_cargo_publish_workflows: vec![],
         },
         rust_workspace: None,
     }

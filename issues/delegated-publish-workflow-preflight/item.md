@@ -1,8 +1,8 @@
 ---
 created: 2026-08-17
-updated: 2026-08-21
+updated: 2026-08-23
 type: improvement
-status: open
+status: in-progress
 priority: normal
 lane: plan-seal
 lane_seq: 20

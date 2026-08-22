@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TestPyPI report an honest `Unknown` until a Python registry client is available
   instead of falsely reporting missing Release assets
   (`delegated-registry-verify-destination`).
+- `release plan` now warns before tagging when a `cargo-publish-ci` target has no
+  detectable tag-triggered Cargo publish workflow. Detection covers direct publish
+  steps and repository-local reusable workflows while remaining advisory for
+  uninspectable CI shapes (`delegated-publish-workflow-preflight`).
 - **Engine-owned Cargo bumps now rewrite exact internal pins inherited from root
   `[workspace.dependencies]`.** Discovery and execution share a parser-backed TOML
   model, including dotted keys and multiline inline tables, so local `path` resolution
