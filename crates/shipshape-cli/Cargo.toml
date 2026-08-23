@@ -1,8 +1,9 @@
 [package]
-# Published to crates.io as `shipshape` so `cargo install shipshape` resolves. The
-# package name differs from its directory (`crates/shipshape-cli`) on purpose —
-# Cargo permits this, and docs/AGENTS.md reference the directory path widely.
-name = "shipshape"
+# Published to crates.io as `shipshape-cli` because the unrelated Docker crate
+# already owns `shipshape`. The package still installs only the canonical
+# `shipshape` executable declared below: package and command identities are
+# deliberately distinct.
+name = "shipshape-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,7 +20,9 @@ readme = "README.md"
 publish = true
 
 [package.metadata.dist]
-dist = true
+# The non-published `shipshape` wrapper owns release artifacts so cargo-dist does
+# not derive `shipshape-cli-*` asset names from this registry package.
+dist = false
 
 [[bin]]
 name = "shipshape"
@@ -29,7 +32,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-shipshape-core = { path = "../shipshape-core", version = "=0.10.1" }
+shipshape-core = { path = "../shipshape-core", version = "=0.11.0" }
 clap = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }

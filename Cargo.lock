@@ -604,7 +604,14 @@ dependencies = [
 
 [[package]]
 name = "shipshape"
-version = "0.10.1"
+version = "0.11.0"
+dependencies = [
+ "shipshape-cli",
+]
+
+[[package]]
+name = "shipshape-cli"
+version = "0.11.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -619,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "shipshape-core"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "serde",
  "serde_json",

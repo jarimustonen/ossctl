@@ -1940,7 +1940,7 @@ fn release_plan_refuses_a_stale_self_cut_by_default() {
     assert_eq!(value["error"]["code"], "stale_binary");
     let message = value["error"]["message"].as_str().unwrap();
     assert!(message.contains("STALE BINARY"));
-    assert!(message.contains("cargo build --release -p shipshape"));
+    assert!(message.contains("cargo build --release -p shipshape-cli"));
 }
 
 /// `release cut` refuses the same stale self-cut executable before it derives or

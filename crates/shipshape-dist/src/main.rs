@@ -1,4 +1,4 @@
-//! `shipshape` binary entry point for the crates.io `shipshape-cli` package.
+//! cargo-dist entry point for Shipshape-named release artifacts.
 
 use std::process::ExitCode;
 

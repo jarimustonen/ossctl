@@ -17,7 +17,8 @@ make an interrupted irreversible release impossible to resume.
 
 The locked new identities are:
 
-- product, executable, and CLI package: `shipshape`;
+- product and executable: `shipshape`;
+- CLI registry package: `shipshape-cli` (installs executable `shipshape`);
 - core crate: `shipshape-core` (Rust import `shipshape_core`);
 - bundled skill namespace: `/shipshape-*`.
 
@@ -28,16 +29,21 @@ all historical release records remain valid.
 
 ### 1. Canonical package and command names change without executable aliases
 
-The workspace publishes `shipshape` and `shipshape-core`; the only canonical binary is
-`shipshape`. New source installs use `cargo install shipshape`. Distribution archives,
-installers, formulas, CLI help, user agent, and generated artifacts use Shipshape.
+The workspace publishes `shipshape-cli` and `shipshape-core`; the only canonical binary is
+`shipshape`. New source installs use `cargo install shipshape-cli`, which installs that
+binary through the package's explicit `[[bin]]`. A non-published Cargo package named
+`shipshape` is the cargo-dist naming wrapper: both binaries call the same
+`shipshape_cli::run` implementation, while cargo-dist derives `shipshape-*` archives and
+`shipshape-installer.sh` from the wrapper's package name. Distribution archives,
+installers, formulas, CLI help, user agent, and generated artifacts therefore use
+Shipshape. Package identity is a registry coordinate, not product branding.
 
 The already-published `ossctl` and `ossctl-core` crate lines remain available at their
 published 0.10.x versions but are frozen. The sole exception is completing a release run
 that was already in flight at migration time; resume may publish its sealed legacy
 version to finish an otherwise torn irreversible release. Shipshape does not ship an
 `ossctl` alias or an
-`ossctl-core` facade. An alias would cause `cargo install shipshape` and cargo-dist to
+`ossctl-core` facade. An alias would cause the maintained package and cargo-dist to
 install or package two product commands indefinitely, while a facade would imply a
 second supported library API and release order. Existing installations keep working at
 their old version; moving to the maintained line is an explicit uninstall/install step.
@@ -99,7 +105,7 @@ rename adds no guessed conversion of package names or journal facts.
 The existing GitHub repository coordinate remains
 `jarimustonen/ossctl` until an external repository migration is separately chosen.
 That coordinate is not rewritten in source links, old release notes, or repository
-metadata. New crates.io coordinates are `shipshape` and `shipshape-core`. New release
+metadata. New crates.io coordinates are `shipshape-cli` and `shipshape-core`. New release
 assets and the Homebrew formula are named `shipshape`; the contract points at the new
 `homebrew-shipshape` tap, which must exist before the first Shipshape cut.
 
@@ -118,19 +124,39 @@ and green:
    the engine use its verified-asset
    direct-write path instead of opening a first-formula PR that cannot be observed on
    the default branch until merged.
-2. Build Shipshape from merged `main`, seal a fresh plan, and cut the first Shipshape
-   release. Publish `shipshape-core` before `shipshape`; let cargo-dist create the four
-   platform artifacts; let the engine write and verify the new formula.
-3. Verify crates.io, GitHub assets/install script, and the new tap through the release
+2. Resolve the torn 0.11.0 cut before planning: confirm read-only verification still
+   reports `shipshape-core` 0.11.0 as `Matches`. Reconfirm the recorded absence of
+   later side effects with `git show-ref --verify refs/tags/v0.11.0`,
+   `git ls-remote --tags origin refs/tags/v0.11.0`, and `gh release view v0.11.0`
+   (all must report absent); if any exists, stop and reconcile rather than deleting or
+   reusing it. Then run
+   `shipshape release abandon 01M0QJKSEJZ0Z3JQGN0Q9ADE0Y --reason "shipshape registry name is owned by an unrelated crate; replaced by shipshape-cli"`.
+   Never resume the old plan: it authenticates the impossible `shipshape` registry target.
+3. Build merged `main` with `cargo build --release -p shipshape-cli`. The recovery
+   commit already carries workspace version 0.11.0 and the dated 0.11.0 changelog, so
+   seal a fresh **non-bump** `shipshape release plan`; inspect that version is 0.11.0,
+   the only crates.io upload is `shipshape-cli`, and GitHub Release/Homebrew names
+   remain `shipshape`. Cut that fresh plan. Cargo packaging resolves the
+   already-published exact `shipshape-core = "=0.11.0"` dependency, so no duplicate
+   core upload occurs. The non-bump run remains resumable if a later barrier fails.
+4. Let cargo-dist create the four platform artifacts; let the engine write and verify
+   the new formula. After verified branch advancement, restore `shipshape-core` to
+   `publish = true`, restore it as the first crates.io target in `OSS-RELEASE.md`, run
+   the full green gate, and commit/push that steady-state cleanup before any later
+   release plan. Do not start cleanup while the replacement run is incomplete: resume
+   still needs the sealed recovery contract. The CLI's exact core pin remains the
+   normal lockstep pin and the next engine-owned bump rewrites it with the restored
+   workspace edge.
+5. Verify crates.io, GitHub assets/install script, and the new tap through the release
    engine. Do not remove the old installation before this passes.
-4. Apply the declared Homebase fleet unit to install `shipshape` while retaining the
+6. Apply the declared Homebase fleet unit to install `shipshape` while retaining the
    working `ossctl` rollback binary. Verify `shipshape version --json` and `shipshape
    doctor --json`. Do not use a source-tree install as persistent setup.
-5. Run `shipshape skill install --agent all`, verify all ten `shipshape-*` entries, then
+7. Run `shipshape skill install --agent all`, verify all ten `shipshape-*` entries, then
    remove the corresponding `oss-*` files from Claude, pi, and Codex homes. Preserve any
    unrelated or locally authored skills. Only after those checks remove any unmanaged
    stale `ossctl` binary.
-6. Keep the old crates, releases, tap, changelog sections, and git-common-dir storage
+8. Keep the old crates, releases, tap, changelog sections, and git-common-dir storage
    readable. They are historical and compatibility state, not cleanup candidates.
 
 If any channel verification fails, retain the old command and skill catalog and resume

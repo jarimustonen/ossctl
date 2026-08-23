@@ -3336,13 +3336,18 @@ mod tests {
         );
     }
 
-    /// The repository's own contract already carries the explicit target, so this
-    /// safety floor must leave its four-target release path unchanged.
+    /// The 0.11.0 replacement contract carries one registry package target plus
+    /// two product-named distribution targets. The already-published core is not
+    /// synthesized back into this authored recovery contract by normalization.
     #[test]
-    fn shipshape_contract_keeps_its_four_explicit_targets() {
+    fn shipshape_replacement_contract_keeps_its_three_explicit_targets() {
         let n = norm(include_str!("../../../../OSS-RELEASE.md"));
         assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
-        assert_eq!(n.contract.targets.len(), 4);
+        assert_eq!(n.contract.targets.len(), 3);
+        assert!(n.contract.targets.iter().any(|target| {
+            target.registry == Registry::CratesIo
+                && target.package.as_deref() == Some("shipshape-cli")
+        }));
         assert!(n.contract.targets.iter().any(|target| {
             target.registry == Registry::Homebrew && target.adapter == Adapter::HomebrewTap
         }));

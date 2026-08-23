@@ -253,7 +253,7 @@ fn compiled_provenance_warning(
     if !has_git_commit_provenance(compiled_commit) {
         return Err(CliError::user(
             "unverifiable_binary_provenance",
-            "CANNOT VERIFY BINARY: this shipshape executable was built without git commit provenance, so it cannot safely cut shipshape itself. Build this shipshape checkout with `cargo build --release -p shipshape` before planning or cutting a self-release",
+            "CANNOT VERIFY BINARY: this shipshape executable was built without git commit provenance, so it cannot safely cut shipshape itself. Build this shipshape checkout with `cargo build --release -p shipshape-cli` before planning or cutting a self-release",
         ));
     }
     if compiled_commit.eq_ignore_ascii_case(head_sha) {
@@ -261,7 +261,7 @@ fn compiled_provenance_warning(
     }
 
     let message = format!(
-        "STALE BINARY: this shipshape executable was built from commit {compiled_commit}, but shipshape's release tree is at {head_sha}. Rebuild this shipshape checkout with `cargo build --release -p shipshape` before planning or cutting a self-release"
+        "STALE BINARY: this shipshape executable was built from commit {compiled_commit}, but shipshape's release tree is at {head_sha}. Rebuild this shipshape checkout with `cargo build --release -p shipshape-cli` before planning or cutting a self-release"
     );
     if allow_stale_binary {
         Ok(Some(format!(
@@ -2130,6 +2130,7 @@ fn derive_release_plan(
     bump_arg: Option<&str>,
 ) -> Result<ReleasePlan, CliError> {
     let current_version = resolve_version(contract, facts)?;
+    enforce_shipshape_recovery_window(contract, facts, &current_version, bump_arg)?;
     // The current/derived version becomes the `v{version}` git tag — validate its shape
     // even though it came from the manifest (a manifest could carry a tag-unsafe string).
     validate_version(&current_version)?;
@@ -2157,6 +2158,76 @@ fn derive_release_plan(
             &current_version,
         )),
     }
+}
+
+/// Keep the temporary Shipshape 0.11.0 recovery contract self-expiring.
+///
+/// This exact product-specific shape exists only because core 0.11.0 already landed.
+/// It may seal the prepared non-bump replacement once. A later version/tag requires
+/// restoring the normal core target first. Resume reconstructs through a separate path,
+/// so a tagged non-bump run can still finish after an interruption.
+fn enforce_shipshape_recovery_window(
+    contract: &Contract,
+    facts: &shipshape_core::protocol::facts::Facts,
+    current_version: &str,
+    bump_arg: Option<&str>,
+) -> Result<(), CliError> {
+    let cli_target = contract.targets.iter().any(|target| {
+        target.ecosystem == shipshape_core::contract::schema::Ecosystem::Rust
+            && target.registry == shipshape_core::contract::schema::Registry::CratesIo
+            && target.package.as_deref() == Some("shipshape-cli")
+    });
+    if !cli_target {
+        return Ok(());
+    }
+    let core_target = contract.targets.iter().any(|target| {
+        target.registry == shipshape_core::contract::schema::Registry::CratesIo
+            && target.package.as_deref() == Some("shipshape-core")
+    });
+    let core_publishable = facts.rust_workspace.as_ref().is_some_and(|workspace| {
+        workspace
+            .members
+            .iter()
+            .any(|member| member.package == "shipshape-core")
+    });
+    if core_target {
+        return if core_publishable {
+            Ok(())
+        } else {
+            Err(CliError::user(
+                "shipshape_recovery_cleanup_incomplete",
+                "shipshape-core is restored as a crates.io target but its manifest is not publishable; restore publish = true before planning",
+            ))
+        };
+    }
+    let core_version = facts.packages.iter().find_map(|package| {
+        (package.package.as_deref() == Some("shipshape-core"))
+            .then_some(package.version.as_deref())
+            .flatten()
+    });
+    let crates_targets: Vec<&str> = contract
+        .targets
+        .iter()
+        .filter(|target| target.registry == shipshape_core::contract::schema::Registry::CratesIo)
+        .filter_map(|target| target.package.as_deref())
+        .collect();
+    if current_version != "0.11.0"
+        || core_version != Some("0.11.0")
+        || bump_arg.is_some()
+        || crates_targets != ["shipshape-cli"]
+    {
+        return Err(CliError::user(
+            "shipshape_recovery_window",
+            "the temporary Shipshape recovery contract may seal only the prepared non-bump 0.11.0 replacement; restore shipshape-core publish = true and its crates.io target before any other plan",
+        ));
+    }
+    if facts.tags.iter().any(|tag| tag == "v0.11.0") {
+        return Err(CliError::user(
+            "shipshape_recovery_cleanup_required",
+            "v0.11.0 already exists while the recovery run may still need attention; resume that run if incomplete, otherwise restore shipshape-core publish = true and its crates.io target before planning another release",
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve the release version from the workspace manifest (the single source of
@@ -2840,7 +2911,9 @@ mod tests {
         Distribution, DistributionAdapter, DocsSite, Ecosystem, Maturity, ProvenanceLevel,
         Registry, Release, ReleaseLayout, ReleaseModel, Target, VersioningBase,
     };
-    use shipshape_core::protocol::facts::{DistributionSurface, Facts, MaturitySignals};
+    use shipshape_core::protocol::facts::{
+        DistributionSurface, Facts, MaturitySignals, RustWorkspace, WorkspaceMember,
+    };
     use shipshape_core::protocol::journal::EventKind;
 
     /// A minimal approved `Contract` carrying the given distributions — enough to
@@ -2887,7 +2960,9 @@ mod tests {
         let error = compiled_provenance_warning(true, "unknown", COMMIT_A, false).unwrap_err();
         assert_eq!(error.code, "unverifiable_binary_provenance");
         assert!(error.message.contains("CANNOT VERIFY BINARY"));
-        assert!(error.message.contains("cargo build --release -p shipshape"));
+        assert!(error
+            .message
+            .contains("cargo build --release -p shipshape-cli"));
     }
 
     #[test]
@@ -2999,6 +3074,83 @@ mod tests {
             distribution_surface: surface,
             rust_workspace: None,
         }
+    }
+
+    #[test]
+    fn shipshape_recovery_window_allows_only_the_untagged_non_bump_0_11_plan() {
+        let mut contract = contract_with_distributions(vec![]);
+        contract.targets.push(Target {
+            ecosystem: Ecosystem::Rust,
+            package: Some("shipshape-cli".into()),
+            registry: Registry::CratesIo,
+            adapter: Adapter::CargoPublish,
+        });
+        let mut facts = facts_with_surface(DistributionSurface {
+            has_cargo_dist: false,
+            cargo_dist_evidence: vec![],
+            tag_triggered_workflows: vec![],
+            tag_triggered_cargo_publish_workflows: vec![],
+        });
+        facts
+            .packages
+            .push(shipshape_core::protocol::facts::Package {
+                ecosystem: Ecosystem::Rust,
+                manifest: "crates/shipshape-core/Cargo.toml".into(),
+                package: Some("shipshape-core".into()),
+                version: Some("0.11.0".into()),
+            });
+
+        assert!(enforce_shipshape_recovery_window(&contract, &facts, "0.11.0", None).is_ok());
+        let mut missing_core = facts.clone();
+        missing_core.packages.clear();
+        assert_eq!(
+            enforce_shipshape_recovery_window(&contract, &missing_core, "0.11.0", None)
+                .unwrap_err()
+                .code,
+            "shipshape_recovery_window"
+        );
+        assert_eq!(
+            enforce_shipshape_recovery_window(&contract, &facts, "0.11.0", Some("patch"))
+                .unwrap_err()
+                .code,
+            "shipshape_recovery_window"
+        );
+        facts.tags.push("v0.11.0".into());
+        assert_eq!(
+            enforce_shipshape_recovery_window(&contract, &facts, "0.11.0", None)
+                .unwrap_err()
+                .code,
+            "shipshape_recovery_cleanup_required"
+        );
+
+        facts.tags.clear();
+        contract.targets.insert(
+            0,
+            Target {
+                ecosystem: Ecosystem::Rust,
+                package: Some("shipshape-core".into()),
+                registry: Registry::CratesIo,
+                adapter: Adapter::CargoPublish,
+            },
+        );
+        assert_eq!(
+            enforce_shipshape_recovery_window(&contract, &facts, "0.11.0", None)
+                .unwrap_err()
+                .code,
+            "shipshape_recovery_cleanup_incomplete"
+        );
+        facts.rust_workspace = Some(RustWorkspace {
+            members: vec![WorkspaceMember {
+                package: "shipshape-core".into(),
+                version: Some("0.11.0".into()),
+                workspace_deps: vec![],
+                dep_reqs: std::collections::BTreeMap::new(),
+                pin_reqs: std::collections::BTreeMap::new(),
+            }],
+            workspace_pin_reqs: std::collections::BTreeMap::new(),
+            pin_parse_error: None,
+        });
+        assert!(enforce_shipshape_recovery_window(&contract, &facts, "0.11.0", None).is_ok());
     }
 
     #[test]

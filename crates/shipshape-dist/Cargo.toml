@@ -1,0 +1,34 @@
+[package]
+# cargo-dist derives app/archive/installer names from the Cargo package name.
+# This non-published wrapper preserves the Shipshape product coordinate while the
+# crates.io-installable implementation uses the available `shipshape-cli` name.
+name = "shipshape"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[features]
+dist-bin = []
+
+[package.metadata.dist]
+dist = true
+features = ["dist-bin"]
+
+[[bin]]
+name = "shipshape"
+path = "src/main.rs"
+required-features = ["dist-bin"]
+
+[lints]
+workspace = true
+
+[dependencies]
+shipshape-cli = { path = "../shipshape-cli", version = "=0.11.0" }

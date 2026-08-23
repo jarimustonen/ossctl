@@ -220,6 +220,12 @@ disagree or carry no version it refuses (`version_inconsistent_tree` /
 `version_undeterminable` / `version_source_unreadable`) — relay the error and fix
 the manifest rather than re-passing a flag.
 
+Before sealing, preserve each target's authored identity. A Cargo registry package
+may deliberately differ from its installed command (for example, package
+`shipshape-cli` declares binary `shipshape`). Use the Cargo package for crates.io,
+but keep the command/product name for GitHub Release assets and Homebrew formulas;
+never infer that renaming one coordinate renames every channel.
+
 **3. Seal the plan.** The binary derives the version from the manifest, computes a
 content-addressed plan, and **exits at the approval boundary** rather than
 prompting (ADR-0001 §3):

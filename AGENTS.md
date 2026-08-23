@@ -10,7 +10,8 @@ of this binary (the binary is the source of truth, §17).
 **Status: source migration complete; external Shipshape rollout follows merge.** The
 published ossctl 0.10.x line remains the rollback path until the conductor completes
 ADR-0005's verified channel and machine-convergence sequence. The maintained channels
-are crates.io (`shipshape` + `shipshape-core`), GitHub Releases (cargo-dist: macOS and
+are crates.io (`shipshape-cli` + `shipshape-core`; the former installs binary
+`shipshape`), GitHub Releases (cargo-dist: macOS and
 Linux, arm64+x86_64, `.sh` installer), and the Homebrew tap. **No Windows** (maintainer
 decision 2026-08-17; deliberate, documented in `DEFAULT_CROSS_PLATFORM_TARGETS`).
 Version history: `CHANGELOG.md` + git tags.
@@ -29,8 +30,9 @@ The architecture lives in accepted ADRs under [`docs/adr/`](docs/adr/) — read 
 writing any code; they are the spec, not background:
 
 - [`0001-founding-architecture.md`](docs/adr/0001-founding-architecture.md) — CLI command
-  taxonomy, the two-crate workspace (`shipshape-core` lib + the `shipshape` bin crate in
-  `crates/shipshape-cli/`), the binary↔skill boundary.
+  taxonomy, the published core+CLI split (`shipshape-core` + `shipshape-cli` in
+  `crates/shipshape-cli/`), and the binary↔skill boundary. ADR-0005 adds the
+  non-published `shipshape` cargo-dist naming wrapper; it is not a third public API.
 - [`0002-release-engine-adapter-model.md`](docs/adr/0002-release-engine-adapter-model.md)
   — the `ReleaseAdapter` trait + enum registry, the phase-barrier coordinator, the sealed
   content-addressed `plan_id` approval seam, and (amendments) the cargo interleave and the
@@ -89,12 +91,14 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
        correct-looking entry in the WRONG section — this happened into an already-published
        version's block, which would have shipped wrong release notes and rewritten the
        history of a version already on crates.io. Union-merge cannot catch it.
-  2. **Build a fresh binary from the tree**: `cargo build --release -p shipshape` (the bin
-     crate is **`shipshape`**, NOT `shipshape-cli` — `-p shipshape-cli` silently no-ops). `plan`
+  2. **Build a fresh binary from the tree**: `cargo build --release -p shipshape-cli` (the
+     Cargo package is **`shipshape-cli`** while its only binary remains `shipshape`). `plan`
      and `cut` refuse when the binary's compiled commit differs from tree `HEAD`
      (`--allow-stale-binary` is the escape hatch for deliberate cross-tree use).
   3. `shipshape release plan --bump major|minor|patch` — seals the plan (bump version,
      `=`-pin rewrites, CHANGELOG finalize plan) and persists it in the plan store.
+     **One-time 0.11.0 collision recovery:** follow ADR-0005's pre-bumped, non-bump
+     replacement sequence instead; bump runs are not the recovery path.
      Inspect the JSON. There is **no `--version` flag** (version derives from the
      manifest; `--bump` computes the next one).
   4. `shipshape release cut --plan <id>` — the `--bump` flag is optional (the cut recovers

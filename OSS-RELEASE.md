@@ -4,8 +4,9 @@ status: approved
 maturity: mvp
 ecosystems: [rust]
 targets:
-  - {ecosystem: rust, package: shipshape-core, registry: crates.io, adapter: cargo-publish}
-  - {ecosystem: rust, package: shipshape, registry: crates.io, adapter: cargo-publish}
+  # Recovery contract for 0.11.0: shipshape-core 0.11.0 already exists on crates.io.
+  # The post-cut cleanup restores it as the first cargo-publish target for later versions.
+  - {ecosystem: rust, package: shipshape-cli, registry: crates.io, adapter: cargo-publish}
   - {ecosystem: rust, package: shipshape, registry: gh-releases, adapter: cargo-dist}
   - {ecosystem: rust, package: shipshape, registry: homebrew, adapter: homebrew-tap}
 distribution:
@@ -45,21 +46,28 @@ docs_site: none
   test matrix + MSRV 1.85), tests, README and AGENTS docs; but a single committer and no
   ≥1.0 release / no SemVer tag yet, so not `production`. Not `spike` (CI + a versioned
   manifest rule that out). Matches `infer-repo-facts.py`'s `inferred_maturity: mvp`.
-- **ecosystems: [rust]** — one Cargo workspace (`crates/shipshape-core` lib + `crates/shipshape-cli`
-  bin `shipshape`). `binary`/`homebrew` are distribution *targets*, never ecosystems, so this
-  stays `[rust]`.
+- **ecosystems: [rust]** — one Cargo workspace with the two published crates
+  (`shipshape-core` + `shipshape-cli`) and a non-published `crates/shipshape-dist`
+  cargo-dist naming wrapper. Both CLI packages call the same implementation and expose
+  bin `shipshape`. `binary`/`homebrew` are distribution *targets*, never ecosystems, so
+  this stays `[rust]`.
 - **targets** — the three release channels this project's own adapters are built for:
-  - **crates.io / `cargo-publish`** (`package: shipshape`) — the `crates/shipshape-cli`
-    package (Cargo package and binary both named `shipshape`) that produces the `shipshape`
-    binary, so `cargo install shipshape` resolves. `shipshape` depends on the exact registry
-    version `shipshape-core = "=0.10.1"`, so publish `shipshape-core` first (both crates are
-    `publish = true`).
-  - **gh-releases / `cargo-dist`** (`package: shipshape`) — prebuilt binaries.
-    `crates/shipshape-cli/Cargo.toml` has `[package.metadata.dist]` and the root `Cargo.toml`
-    has a `[profile.dist]`, so cargo-dist is the pinned adapter, not `manual`.
+  - **crates.io / `cargo-publish`** (`package: shipshape-cli`) — the available registry
+    coordinate for `crates/shipshape-cli`; its `[[bin]]` remains `shipshape`, so
+    `cargo install shipshape-cli` installs command `shipshape`. The unrelated Docker crate
+    owns the crates.io name `shipshape`. For the replacement 0.11.0 cut only,
+    `shipshape-core` is omitted as a publish target because that exact version already
+    landed in interrupted run `01M0QJKSEJZ0Z3JQGN0Q9ADE0Y`; the exact dependency makes
+    Cargo resolve that registry artifact while verifying the packaged CLI, without
+    uploading it again. Restore the core target and `publish = true` after verification.
+  - **gh-releases / `cargo-dist`** (`package: shipshape`) — prebuilt binaries; this is the
+    executable/artifact identity, deliberately not the Cargo registry coordinate.
+    The non-published `crates/shipshape-dist` package owns `[package.metadata.dist]` and
+    calls `shipshape_cli::run`; the root `Cargo.toml` has `[profile.dist]`, so cargo-dist
+    is the pinned adapter, not `manual`.
   - **homebrew / `homebrew-tap`** (`package: shipshape`) — a personal tap is the norm for a
     pre-1.0 solo CLI; `homebrew-core` requires notability this project has not yet earned.
-- **versioning: semver** — workspace is `0.10.1` and heading toward a real 1.0; plain SemVer,
+- **versioning: semver** — workspace is `0.11.0` and heading toward a real 1.0; plain SemVer,
   not `zerover` (which would cap major at 0 permanently). Flip to `zerover` if you intend to
   stay 0.x indefinitely.
 - **changelog.mode: curated / source: issuectl-trailers** — single committer, so a monolithic
@@ -72,7 +80,7 @@ docs_site: none
   the bump automatically. Kept `false` (ask for the bump) for a conservative first cut under a
   gated model; flip to `true` once you trust the derivation.
 - **release.model: gated** — solo maintainer wants a human checkpoint at cut time; never `auto`.
-- **release.layout: single** — one product, one shared `workspace.package.version` (0.10.1);
+- **release.layout: single** — one product, one shared `workspace.package.version` (0.11.0);
   not independently-versioned packages, so not `monorepo`.
 - **provenance_level: keyless** — CI-published; keyless attestation (crates.io trusted
   publishing / GH `attest`) is free.
@@ -86,10 +94,14 @@ docs_site: none
   want, but the manifest's explicit choice is honored here rather than silently overridden.
 
 ## Release notes
-- **Publish ordering (crates.io):** both crates are now `publish = true`, and the CLI package
-  is named `shipshape` (so `cargo install shipshape` resolves). `shipshape` depends on the exact
-  registry version `shipshape-core = "=0.10.1"`, so the cut must publish `shipshape-core` first, wait
-  for the index to see it, then publish `shipshape`.
+- **0.11.0 collision recovery:** abandon impossible run `01M0QJKSEJZ0Z3JQGN0Q9ADE0Y`,
+  then seal a fresh **non-bump** plan from merged main, whose manifests and dated
+  changelog are already at 0.11.0. Its only crates.io upload is `shipshape-cli`
+  0.11.0; packaging resolves the already-published exact dependency
+  `shipshape-core = "=0.11.0"`. GitHub Release and Homebrew targets stay `shipshape`.
+  After the verified cut advances main, restore `shipshape-core` to `publish = true`
+  and restore its first crates.io target
+  before any later plan.
 - **`LICENSE`** — present at the repo root (MIT) and symlinked into each crate directory so the
   text ships inside both published `.crate` tarballs.
 - **crates.io publish is irreversible** — `cargo yank` is the only withdrawal, and a yanked

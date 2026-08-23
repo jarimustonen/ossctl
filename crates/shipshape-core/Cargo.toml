@@ -13,9 +13,11 @@ categories.workspace = true
 # README/LICENSE are symlinks to the repo-root files so a single source of truth
 # still ships inside the published `.crate` tarball (and renders on crates.io).
 readme = "README.md"
-# Published to crates.io: `shipshape` depends on it, and crates.io requires all
-# dependencies to be published crates.
-publish = true
+# Recovery bridge: 0.11.0 is already irreversibly published. Excluding this
+# member from the planner's publishable workspace graph prevents a fresh 0.11.0
+# replacement plan from attempting a second upload. Restore `publish = true`
+# immediately after the verified replacement cut.
+publish = false
 
 [lints]
 workspace = true

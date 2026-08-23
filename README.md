@@ -34,7 +34,7 @@ Homebrew tap/secret setup guidance from the approved contract.
   release reaches crates.io:
 
   ```sh
-  cargo install shipshape
+  cargo install shipshape-cli
   ```
 
 The manifests preserve the portable source-install path. The first crates.io release
@@ -51,8 +51,10 @@ macOS (arm64 / x86_64) and Linux (statically-linked `musl`, arm64 / x86_64).
 
 **Source migration complete; first Shipshape release pending.** The founding
 architecture is recorded in [`docs/adr/`](docs/adr/). After ADR-0005's rollout,
-[crates.io](https://crates.io/crates/shipshape) will carry `shipshape` +
-`shipshape-core`, with prebuilt artifacts on this repository's GitHub Releases. See
+[crates.io](https://crates.io/crates/shipshape-cli) will carry `shipshape-cli` +
+`shipshape-core`, with prebuilt artifacts on this repository's GitHub Releases. The
+`shipshape-cli` package installs the command `shipshape`; product, executable, release
+asset, and formula names remain Shipshape. See
 [`CHANGELOG.md`](CHANGELOG.md) for the release history.
 
 ## Repository facts
@@ -92,7 +94,8 @@ splitting the single-cut lock.
 
 `ossctl` and `ossctl-core` 0.10.x remain available but are frozen; they are not aliases
 for the maintained Shipshape packages. Install the new command with `cargo install
-shipshape`. After verifying the first Shipshape release and `shipshape version --json`,
+shipshape-cli`; Cargo installs its declared `shipshape` binary. After verifying the first
+Shipshape release and `shipshape version --json`,
 replace the declared fleet unit rather than leaving two persistent binaries.
 
 The bundled skill catalog contains only the ten canonical `shipshape-*` names. A known

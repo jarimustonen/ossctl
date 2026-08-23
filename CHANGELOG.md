@@ -7,10 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
+<!-- oss-changelog:unreleased-end -->
+
+## [0.11.0] - 2026-08-23
 
 ### Changed
-- **The product is now Shipshape.** The canonical executable/package is `shipshape`, the
-  core crate is `shipshape-core`, and all ten bundled skills use `/shipshape-*` names.
+- **The product is now Shipshape.** The canonical executable is `shipshape`, the
+  registry package is `shipshape-cli`, the core crate is `shipshape-core`, and all ten bundled skills use `/shipshape-*` names.
   Existing release plans and journals remain readable in the permanent
   `git-common-dir/ossctl` compatibility namespace without JSON, journal, or seal-version
   changes; legacy skill names fail with migration guidance. Distribution moves to the
@@ -20,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`rename-ossctl-shipshape`).
 
 ### Fixed
+- **The first Shipshape release now uses the available crates.io package
+  `shipshape-cli` while continuing to install and distribute command `shipshape`.** The
+  0.11.0 recovery contract reuses the already-published `shipshape-core` 0.11.0 and
+  uploads only the CLI package, preserving Shipshape asset/formula names and all legacy
+  plan/journal compatibility. ADR-0005 records the exact abandon, replacement-cut, and
+  post-cut steady-state restoration sequence (`shipshape-crates-io`).
 - Successful release cuts now fast-forward the remote default branch to the verified
   release commit as a final resumable barrier, preventing engine-owned bump commits
   from remaining tag-only. Divergence and permission failures stay red with recovery
@@ -31,7 +40,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GitHub release bodies. The complete finalization intent is sealed under
   `SEAL_VERSION` 9 while older stored plans remain readable for resume
   (`changelog-finalize-markers`).
-<!-- oss-changelog:unreleased-end -->
 
 ## [0.10.1] - 2026-08-23
 
