@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
+
+### Changed
+- **Prebuilt support now covers exactly macOS arm64 and Linux musl arm64/x86_64.**
+  Intel macOS joins Windows as deliberately unsupported; source installation remains.
+  Contract defaults, cargo-dist generation, readiness checks, Homebrew rendering and
+  verification, bundled skills, and active project policy no longer promise or accept an
+  Intel archive. ADR-0005 records the superseding decision and the safe manual recovery
+  for the partially released v0.11.0 (`drop-intel-macos`).
 <!-- oss-changelog:unreleased-end -->
 
 ## [0.11.0] - 2026-08-23

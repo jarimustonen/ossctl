@@ -590,7 +590,7 @@ fn publish_none_repo_is_audited_without_any_publish_gap() {
 fn distribution_without_linux_target_is_producer_gap() {
     // An explicit, macOS-only platform set builds no Linux binary → gap.
     let mut contract = contract_at(Maturity::Mvp);
-    contract.distributions = vec![dist_with(&["aarch64-apple-darwin", "x86_64-apple-darwin"])];
+    contract.distributions = vec![dist_with(&["aarch64-apple-darwin"])];
     let fs = FakeFs::default()
         .file("/repo/README.md", "# tool\n")
         .file("/repo/LICENSE", "MIT\n");
@@ -682,7 +682,6 @@ fn distribution_with_linux_target_yields_no_gap() {
     let mut contract = contract_at(Maturity::Mvp);
     contract.distributions = vec![dist_with(&[
         "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
         "aarch64-unknown-linux-musl",
         "x86_64-unknown-linux-musl",
     ])];

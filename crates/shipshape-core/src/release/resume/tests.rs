@@ -120,7 +120,11 @@ fn rust_plan() -> ReleasePlan {
         homebrew_tap: None,
         license: None,
         description: Some("Test release tool".into()),
-        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
+        homebrew_platforms: vec![
+            "aarch64-apple-darwin".into(),
+            "aarch64-unknown-linux-musl".into(),
+            "x86_64-unknown-linux-musl".into(),
+        ],
     }
 }
 
@@ -140,7 +144,11 @@ fn two_target_plan() -> ReleasePlan {
         homebrew_tap: None,
         license: None,
         description: Some("Test release tool".into()),
-        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
+        homebrew_platforms: vec![
+            "aarch64-apple-darwin".into(),
+            "aarch64-unknown-linux-musl".into(),
+            "x86_64-unknown-linux-musl".into(),
+        ],
     }
 }
 
@@ -623,7 +631,11 @@ fn cargo_dist_plan() -> ReleasePlan {
         homebrew_tap: None,
         license: None,
         description: Some("Test release tool".into()),
-        homebrew_platforms: vec!["aarch64-apple-darwin".into()],
+        homebrew_platforms: vec![
+            "aarch64-apple-darwin".into(),
+            "aarch64-unknown-linux-musl".into(),
+            "x86_64-unknown-linux-musl".into(),
+        ],
     }
 }
 

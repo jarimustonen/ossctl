@@ -16,7 +16,6 @@ distribution:
   homebrew_tap: jarimustonen/homebrew-shipshape
   platforms:
     - aarch64-apple-darwin
-    - x86_64-apple-darwin
     - aarch64-unknown-linux-musl
     - x86_64-unknown-linux-musl
 versioning: semver

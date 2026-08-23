@@ -21,7 +21,6 @@ fn dist(installers: Vec<Installer>, platforms: Vec<&str>) -> Distribution {
 fn cross_platform() -> Vec<&'static str> {
     vec![
         "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
         "aarch64-unknown-linux-musl",
         "x86_64-unknown-linux-musl",
     ]

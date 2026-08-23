@@ -282,9 +282,9 @@ monorepo emit one install group per entry, keyed by its `package`. From each dis
   at the repo's Releases page for a manual download of the per-platform archive + its
   checksums, and **note the platform coverage** derived from `platforms[]` (the target-triple
   set). Summarize the triples in human terms — e.g. `aarch64-apple-darwin` +
-  `x86_64-apple-darwin` + `aarch64-unknown-linux-musl` + `x86_64-unknown-linux-musl` →
-  "prebuilt binaries for **macOS (arm64, x86_64)** and **Linux (static musl; arm64,
-  x86_64)**". Render the coverage strictly from the triples present — do not claim an OS or
+  `aarch64-unknown-linux-musl` + `x86_64-unknown-linux-musl` → "prebuilt binaries for
+  **macOS arm64** and **Linux (static musl; arm64, x86_64)**". Render the coverage strictly
+  from the triples present — do not claim an OS or
   arch the set does not list (an explicit `platforms[]` may be Linux-less or Windows-bearing;
   read what is there).
 - **Homebrew is cross-platform too.** When a `homebrew` install snippet is emitted (from a

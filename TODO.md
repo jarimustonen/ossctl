@@ -5,6 +5,16 @@ Pointers to open issues. Descriptions and plans live in the linked
 
 ## 🔄 Continue here (handoff)
 
+_**2026-08-23 release recovery supersedes the older handoff below.** Shipshape v0.11.0
+has both crates on crates.io and immutable tag `v0.11.0`; cargo-dist workflow
+`32652510525` completed macOS arm64 plus Linux musl arm64/x86_64, then was cancelled
+while Intel macOS remained queued. Intel macOS is now deliberately unsupported, as is
+Windows; source install remains. Run `01M0QQMW8Y6SWRR2G383M0KVJX` was sealed with the old
+four-platform promise and must be abandoned, never resumed. After this change merges and
+main is green, execute `docs/recovery/v0.11.0-three-platform.md` exactly to publish the
+three observed archives, write the engine-owned formula with real checksums, and verify
+crates.io, the GitHub Release, and the tap._
+
 _Handoff written 2026-08-21 (stint #24 wrap). New agent: read this, then continue with a
 fresh `/stint-start`. Main is clean + pushed. Live: **0.10.0 on all four channels**, each
 observed by the cut's own verify phase (crates.io ×2, GitHub Release 11 assets, tap

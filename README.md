@@ -28,7 +28,7 @@ Homebrew tap/secret setup guidance from the approved contract.
 
 ## Install
 
-`shipshape` runs on **macOS and Linux** (arm64 and x86_64). Pick whichever path fits:
+`shipshape` runs on **macOS arm64** and **Linux arm64/x86_64**. Pick whichever path fits:
 
 - **Cargo** (source build, all platforms) — use after the first verified Shipshape
   release reaches crates.io:
@@ -45,7 +45,7 @@ live.
 From the first Shipshape release onward, prebuilt cross-platform binaries and a shell
 installer will be produced with [cargo-dist](https://opensource.axo.dev/cargo-dist/).
 Download the installer or a matching archive from this repository's GitHub Releases for
-macOS (arm64 / x86_64) and Linux (statically-linked `musl`, arm64 / x86_64).
+macOS arm64 and Linux (statically-linked `musl`, arm64 / x86_64). Intel macOS and Windows receive no prebuilt artifacts; source installation remains available wherever the Rust workspace and its dependencies build.
 
 ## Status
 

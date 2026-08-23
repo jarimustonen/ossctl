@@ -3699,7 +3699,7 @@ mod tests {
     fn msi_installer_without_windows_platform_warns() {
         let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
                     distribution:\n  adapter: cargo-dist\n  installers: [msi]\n  \
-                    platforms: [x86_64-apple-darwin, x86_64-unknown-linux-musl]\n---\n";
+                    platforms: [aarch64-apple-darwin, x86_64-unknown-linux-musl]\n---\n";
         let n = norm(text);
         assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
         assert!(
@@ -3773,7 +3773,7 @@ mod tests {
     fn npm_and_shell_installers_never_cross_check_warn() {
         let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust, node]\n\
                     distribution:\n  adapter: cargo-dist\n  installers: [shell, npm]\n  \
-                    platforms: [x86_64-apple-darwin]\n---\n";
+                    platforms: [aarch64-apple-darwin]\n---\n";
         let n = norm(text);
         assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
         assert!(
@@ -3806,16 +3806,14 @@ mod tests {
         );
     }
 
-    /// shipshape's own contract shape — installers `[shell, powershell]` with a
-    /// platform set spanning Windows + macOS + Linux — produces no cross-check
-    /// warning (both installers are agnostic here, and every OS is covered anyway).
+    /// shipshape's maintained three-platform contract shape produces no
+    /// installer/platform cross-check warning.
     #[test]
     fn shipshape_own_contract_shape_no_cross_check_warning() {
         let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
-                    distribution:\n  adapter: cargo-dist\n  installers: [shell, powershell]\n  \
-                    platforms: [aarch64-apple-darwin, x86_64-apple-darwin, \
-                    x86_64-unknown-linux-musl, aarch64-unknown-linux-musl, \
-                    x86_64-pc-windows-msvc]\n---\n";
+                    distribution:\n  adapter: cargo-dist\n  installers: [shell]\n  \
+                    platforms: [aarch64-apple-darwin, \
+                    x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]\n---\n";
         let n = norm(text);
         assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
         assert!(
@@ -4505,7 +4503,6 @@ mod tests {
             d.platforms,
             vec![
                 "aarch64-apple-darwin",
-                "x86_64-apple-darwin",
                 "aarch64-unknown-linux-musl",
                 "x86_64-unknown-linux-musl",
             ]
@@ -4555,7 +4552,7 @@ mod tests {
     fn distribution_platforms_dedup_preserves_order() {
         let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
                     distribution:\n  adapter: cargo-dist\n  \
-                    platforms: [aarch64-apple-darwin, x86_64-apple-darwin, aarch64-apple-darwin]\n---\n";
+                    platforms: [aarch64-apple-darwin, x86_64-unknown-linux-musl, aarch64-apple-darwin]\n---\n";
         let d = norm(text)
             .contract
             .distributions
@@ -4564,7 +4561,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             d.platforms,
-            vec!["aarch64-apple-darwin", "x86_64-apple-darwin"]
+            vec!["aarch64-apple-darwin", "x86_64-unknown-linux-musl"]
         );
     }
 
@@ -4588,7 +4585,7 @@ mod tests {
     #[test]
     fn distribution_platforms_non_list_rejected() {
         let text = "---\nstatus: approved\nmaturity: production\necosystems: [rust]\n\
-                    distribution:\n  adapter: cargo-dist\n  platforms: x86_64-apple-darwin\n---\n";
+                    distribution:\n  adapter: cargo-dist\n  platforms: aarch64-apple-darwin\n---\n";
         assert_error_contains(&norm(text), "must be a list of target-triple strings");
     }
 

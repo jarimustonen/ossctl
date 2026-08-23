@@ -6,8 +6,8 @@ description: >-
   `shipshape dist generate` to write `dist-workspace.toml` and cargo-dist's
   tag-triggered `release.yml`, and writes `docs/DISTRIBUTION.md` with the
   Homebrew tap scaffold and required `HOMEBREW_TAP_TOKEN` secret guidance.
-  Contract-driven and cross-platform: requires macOS arm64+x86_64 and Linux
-  musl arm64+x86_64 coverage. Marker-anchored and never clobbers human edits
+  Contract-driven and cross-platform: requires macOS arm64 and Linux musl
+  arm64+x86_64 coverage; Intel macOS and Windows are deliberately unsupported. Marker-anchored and never clobbers human edits
   without `--force`; never emits personal runner overrides. Thin caller of the
   `shipshape` binary. Use for "set up cargo-dist", "generate release workflow",
   "add Homebrew distribution", or "refresh distribution infrastructure".
@@ -87,13 +87,13 @@ JSON. Stop unless all of these hold:
 3. If a Homebrew target is declared, it uses `adapter: homebrew-tap` and the
    distribution supplies a nonempty `homebrew_tap` (`owner/repo`). Conversely,
    do not document a tap where no Homebrew target exists.
-4. `platforms` includes **all four** required triples:
-   `aarch64-apple-darwin`, `x86_64-apple-darwin`,
-   `aarch64-unknown-linux-musl`, and `x86_64-unknown-linux-musl`.
+4. `platforms` includes **all three** required triples:
+   `aarch64-apple-darwin`, `aarch64-unknown-linux-musl`, and
+   `x86_64-unknown-linux-musl`; it does not include the unsupported Intel macOS target.
 
 A missing target is a contract error to correct in `/shipshape-init`; do not fill it in
-from prose. Extra supported targets, such as Windows, are retained. A missing one
-of the four required macOS/Linux targets is a release gap: stop before writing.
+from prose. A missing one of the three required macOS/Linux targets is a release gap:
+stop before writing.
 
 ## Workflow
 
@@ -149,9 +149,10 @@ never hand-edit `release.yml`.
 
 ### Platform guarantee
 
-This channel publishes prebuilt binaries for macOS (arm64 and x86_64) and static
-musl Linux (arm64 and x86_64). Do not remove one of those targets without replacing
-its install path: a single-OS story is incomplete.
+This channel publishes prebuilt binaries for macOS arm64 and static musl Linux
+(arm64 and x86_64). Intel macOS and Windows use source installation only. Do not
+remove one of the supported targets without replacing its install path: a single-OS
+story is incomplete.
 
 ### Homebrew tap setup
 
@@ -209,7 +210,7 @@ maintainer.
 ## Critical rules
 
 - Gate on `shipshape contract show --json --require-approved`; never parse contract prose.
-- Require macOS arm64+x86_64 and Linux musl arm64+x86_64 before emitting a channel.
+- Require macOS arm64 and Linux musl arm64+x86_64 before emitting a channel.
 - `shipshape dist generate` owns `dist-workspace.toml` and cargo-dist owns `release.yml`.
   Never hand-write the workflow.
 - Preflight all paths, preserve human files, use markers, backups, and atomic writes.

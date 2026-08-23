@@ -2322,13 +2322,24 @@ fn homebrew_artifacts(
             license: license.map(str::to_string),
             description: Some("Test release tool".into()),
             version: "1.0.0".into(),
-            platforms: vec!["aarch64-apple-darwin".into()],
+            platforms: vec![
+                "aarch64-apple-darwin".into(),
+                "aarch64-unknown-linux-musl".into(),
+                "x86_64-unknown-linux-musl".into(),
+            ],
         }),
-        homebrew_assets: vec![HomebrewAsset {
-            triple: "aarch64-apple-darwin".into(),
+        homebrew_assets: [
+            "aarch64-apple-darwin",
+            "aarch64-unknown-linux-musl",
+            "x86_64-unknown-linux-musl",
+        ]
+        .into_iter()
+        .map(|triple| HomebrewAsset {
+            triple: triple.into(),
             url: url.to_string(),
             sha256: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into(),
-        }],
+        })
+        .collect(),
     }
 }
 
@@ -2357,11 +2368,18 @@ fn read_created_formula(name: &str, version: &str) -> (std::path::PathBuf, Strin
 /// mirrors what the adapter renders, so a test can seed a fake tap clone with the
 /// current (matching or differing) formula.
 fn rendered_formula(name: &str, url: &str, sha256: &str, license: Option<&str>) -> String {
-    let assets = [HomebrewAsset {
-        triple: "aarch64-apple-darwin".into(),
+    let assets: Vec<HomebrewAsset> = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-musl",
+        "x86_64-unknown-linux-musl",
+    ]
+    .into_iter()
+    .map(|triple| HomebrewAsset {
+        triple: triple.into(),
         url: url.into(),
         sha256: sha256.into(),
-    }];
+    })
+    .collect();
     super::homebrew::render_formula(
         name,
         "1.0.0",
@@ -3390,11 +3408,6 @@ fn homebrew_prebuilt_formula_renders_each_supported_platform_without_rust() {
         HomebrewAsset {
             triple: "aarch64-apple-darwin".into(),
             url: "https://example/aarch64-apple-darwin.tar.xz".into(),
-            sha256: sha.into(),
-        },
-        HomebrewAsset {
-            triple: "x86_64-apple-darwin".into(),
-            url: "https://example/x86_64-apple-darwin.tar.xz".into(),
             sha256: sha.into(),
         },
         HomebrewAsset {

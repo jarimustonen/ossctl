@@ -656,7 +656,7 @@ pub fn validate_plan(plan: &ReleasePlan) -> Result<(), CutError> {
         })
     {
         return Err(CutError::Plan(
-            "Homebrew formula has no Homebrew-servable cargo-dist platforms; supported platforms are macOS aarch64/x86_64 and Linux musl aarch64/x86_64; refusing to write a formula with no installable archive".into(),
+            "Homebrew formula has no Homebrew-servable cargo-dist platforms; supported platforms are macOS and Linux musl; refusing to write a formula with no installable archive".into(),
         ));
     }
     Ok(())
@@ -2305,7 +2305,7 @@ fn fetch_homebrew_assets(
         });
     }
     if assets.is_empty() {
-        return Err("Homebrew formula has no Homebrew-servable cargo-dist platforms; supported platforms are macOS aarch64/x86_64 and Linux musl aarch64/x86_64; refusing to write a formula with no installable archive".to_string());
+        return Err("Homebrew formula has no Homebrew-servable cargo-dist platforms; refusing to write a formula with no installable archive".to_string());
     }
     Ok(assets)
 }

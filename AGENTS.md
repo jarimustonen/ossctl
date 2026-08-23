@@ -161,10 +161,11 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
   and personal self-hosted CI infrastructure are homebase concerns — keep them out of
   shipshape's issues/TODO/handoff. The `hauis` override in `dist-workspace.toml` is the
   documented repo-local exception.
-- **Cross-platform is a hard requirement (macOS AND Linux, arm64 + x86_64).** Every tool
-  the `/shipshape-*` family produces — and shipshape itself — must offer a source path
-  (`cargo install`) plus prebuilt binaries/installers covering macOS and statically-linked
-  musl Linux. A macOS-only or Linux-only install story is a release gap.
+- **Cross-platform is a hard requirement (macOS arm64 AND Linux musl arm64+x86_64).** Every
+  tool the `/shipshape-*` family produces — and shipshape itself — must offer a source path
+  (`cargo install`) plus prebuilt binaries/installers for those three targets. Windows and
+  Intel macOS are deliberately unsupported as prebuilt channels; a macOS-only or Linux-only
+  install story is a release gap.
 - **No Code of Conduct — deliberate** (maintainer decision). `shipshape audit` listing it as
   a `recommended` gap is expected and accepted; do not propose adding one.
 - **Live-version check:** `shipshape version --json`.

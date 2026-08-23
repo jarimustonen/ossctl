@@ -26,7 +26,7 @@ ci = "github"
 # (The tap write token exists and is not a constraint on either side.)
 installers = ["shell"]
 # Cross-platform binary matrix (Rust target-triple syntax): macOS and Linux,
-# each on arm64 + x86_64. The Linux targets use `musl`, not `gnu`, so the
+# macOS on arm64 and Linux on arm64 + x86_64. The Linux targets use `musl`, not `gnu`, so the
 # binaries are statically linked and run on any distro regardless of its glibc
 # vintage — shipshape is pure Rust with no C dependencies, so musl is a clean fit
 # and avoids a `GLIBC_x.y not found` cliff on older LTS systems.
@@ -37,14 +37,9 @@ installers = ["shell"]
 # repo had opted into it explicitly, and that opt-in is now withdrawn.
 targets = [
     "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
     "aarch64-unknown-linux-musl",
     "x86_64-unknown-linux-musl",
 ]
-# The arm64 macOS build uses the repository-local self-hosted runner below. The
-# Intel macOS target remains on cargo-dist's GitHub-hosted runner, avoiding an
-# unsupported cross-build on the Homebrew-Rust self-host while preserving the
-# required prebuilt Intel install path.
 # Where to host releases.
 hosting = "github"
 # Generate GitHub build-provenance attestations for the release artifacts
@@ -65,7 +60,7 @@ pr-run-mode = "skip"
 # self-hosted Apple-silicon runner rather than GitHub-hosted macOS. This runner
 # is configured only for this repository, and the generic `self-hosted` label is
 # intentional because it is the sole self-hosted runner registered here. The
-# runner is arm64 and cross-compiles x86_64-apple-darwin. This sub-table MUST
+# runner is arm64. This sub-table MUST
 # stay at the end: a `[dist.*]` table placed among `[dist]` scalar keys would
 # swallow every following key.
 [dist.github-custom-runners]

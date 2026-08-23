@@ -263,7 +263,6 @@ fn skill_install_shipshape_dist_writes_distribution_manual() {
     assert!(installed.contains("HOMEBREW_TAP_TOKEN"));
     for target in [
         "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
         "aarch64-unknown-linux-musl",
         "x86_64-unknown-linux-musl",
     ] {
@@ -272,6 +271,11 @@ fn skill_install_shipshape_dist_writes_distribution_manual() {
             "cross-platform target is documented: {target}"
         );
     }
+    assert!(installed.contains("Intel macOS"));
+    assert!(
+        !installed.contains("x86_64-apple-darwin"),
+        "the maintained skill must not list the withdrawn Intel target"
+    );
     for forbidden in [
         "builder-host",
         "github-custom-runners",

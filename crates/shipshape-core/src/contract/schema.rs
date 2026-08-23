@@ -43,22 +43,15 @@ pub const KNOWN_SCHEMA_VERSION: u32 = 2;
 /// The changelog fragment directory materialized when the config omits it.
 pub const DEFAULT_FRAGMENT_DIR: &str = "changelog/fragments";
 
-/// The cross-platform default [`Distribution::platforms`] set materialized when a
-/// distribution block omits `platforms`: macOS (`aarch64` + `x86_64`) and Linux
-/// (`aarch64` + `x86_64`). This is the KEYSTONE of the cross-platform install
-/// requirement — a distribution that OMITS `platforms` covers Linux **by
-/// default**, so a repo that never thinks about it still ships Linux binaries. (A
-/// repo that sets `platforms` explicitly owns its own coverage; the cross-platform
-/// `audit` — not this default — flags a Linux-less explicit set.) musl over gnu for
-/// Linux: for a pure-Rust CLI a musl target links statically and sidesteps the
-/// glibc-version cliff — though choosing a musl *target* does not by itself
-/// guarantee a static build, and a repo with C/native dependencies (`openssl-sys`,
-/// `libgit2`, …) may need to override to gnu. Windows is a deliberate omission (a
-/// bonus a repo opts into by listing it explicitly, never the default). The set
-/// always contains at least one Linux triple.
-pub const DEFAULT_CROSS_PLATFORM_TARGETS: [&str; 4] = [
+/// The maintained prebuilt platform set materialized when a
+/// [`Distribution::platforms`] field is omitted: macOS arm64 and Linux musl
+/// `arm64+x86_64`. This is the KEYSTONE of the cross-platform install requirement:
+/// omission still covers both macOS and Linux. Intel macOS and Windows are
+/// deliberately outside the maintained prebuilt surface; source installation
+/// remains available. A repo with C/native dependencies may explicitly substitute
+/// Linux `gnu` targets, and the audit still checks OS coverage.
+pub const DEFAULT_CROSS_PLATFORM_TARGETS: [&str; 3] = [
     "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
     "aarch64-unknown-linux-musl",
     "x86_64-unknown-linux-musl",
 ];
@@ -358,11 +351,8 @@ pub struct Distribution {
     /// not defaulted), so a distribution that doesn't specify platforms still covers
     /// Linux (the cross-platform install requirement). An explicit set is validated
     /// per triple and de-duplicated, preserving the author's order. Validation is
-    /// STRUCTURAL, not semantic — a well-formed triple whose OS component stays
-    /// inspectable, so the cross-platform `audit` can flag a Linux-less explicit set;
-    /// the normalizer guarantees only that the field is present and every triple
-    /// well-formed, never that the set covers any particular OS or that the toolchain
-    /// will build it.
+    /// structural: the cross-platform `audit` flags an explicit set that omits macOS
+    /// or Linux, while each project remains authoritative about extra platforms.
     pub platforms: Vec<String>,
     /// Preserved unknown keys inside the `distribution` block under a known
     /// `schema_version` (forward-compat), so an older reader round-trips a newer

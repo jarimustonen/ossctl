@@ -146,11 +146,10 @@ narrower target set:
 - **`distribution.platforms` → cargo-dist `[dist] targets`.** The contract's
   platform list is a set of Rust target-triples. Copy it verbatim into `targets`.
   When the contract **omits** `platforms`, the normalizer's cross-platform
-  default applies — `aarch64-apple-darwin`, `x86_64-apple-darwin`,
-  `aarch64-unknown-linux-musl`, `x86_64-unknown-linux-musl` (macOS arm64 + x86_64
-  and **statically-linked musl Linux** arm64 + x86_64). **Never emit a
-  macOS-only matrix.** Add `x86_64-pc-windows-msvc` only when the contract lists
-  it.
+  default applies — `aarch64-apple-darwin`, `aarch64-unknown-linux-musl`, and
+  `x86_64-unknown-linux-musl` (macOS arm64 and **statically-linked musl Linux**
+  arm64 + x86_64). **Never emit a macOS-only matrix.** Intel macOS is refused;
+  Windows is not a maintained prebuilt channel.
 - **`distribution.installers` → cargo-dist `[dist] installers`.** Ensure `shell`
   is present so the generated curl-installer covers **both macOS and Linux** on
   the Unix side; carry `powershell`/`msi` through only when a Windows triple is in

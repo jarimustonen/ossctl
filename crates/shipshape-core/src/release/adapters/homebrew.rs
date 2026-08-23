@@ -853,10 +853,11 @@ pub(crate) fn verify_tap_formula(
     {
         return VerifyOutcome::Missing;
     }
-    // Every Homebrew-servable platform declared by a stored plan must retain a
-    // URL+sha stanza. Pre-plan-store journals cannot recover that exact set; for
-    // them require at least one complete supported-platform stanza rather than
-    // falling back to the old structurally-unobservable `Unknown` result.
+    // Every Homebrew-servable platform declared by the sealed plan must retain a
+    // URL+sha stanza, and no extra servable stanza may silently broaden the plan's
+    // public support claim. Historical four-platform plans therefore remain
+    // verifiable against what they actually shipped. Pre-plan-store journals cannot
+    // recover an exact set, so their observed complete stanzas remain the evidence.
     let expected = expected_platforms
         .filter(|platforms| !platforms.is_empty())
         .or_else(|| {
@@ -865,29 +866,35 @@ pub(crate) fn verify_tap_formula(
                 .as_ref()
                 .map(|homebrew| homebrew.platforms.as_slice())
         });
-    let observed = [
+    let all_conditions = [
         "if OS.mac? && Hardware::CPU.arm?",
         "if OS.mac? && Hardware::CPU.intel?",
         "if OS.linux? && Hardware::CPU.arm?",
         "if OS.linux? && Hardware::CPU.intel?",
     ];
-    let conditions: Vec<&str> = match expected {
-        Some(platforms) => platforms
+    if let Some(platforms) = expected {
+        let expected_conditions: Vec<&str> = platforms
             .iter()
             .filter_map(|triple| homebrew_platform_condition(triple))
-            .collect(),
-        None => observed
-            .into_iter()
-            .filter(|condition| formula.contains(condition))
-            .collect(),
-    };
-    if conditions.is_empty() {
-        return VerifyOutcome::Missing;
-    }
-    for condition in conditions {
-        if !formula_has_platform_stanza(&formula, condition) {
+            .collect();
+        if expected_conditions.is_empty() {
             return VerifyOutcome::Missing;
         }
+        for condition in all_conditions {
+            let should_exist = expected_conditions.contains(&condition);
+            let does_exist = formula_has_platform_stanza(&formula, condition);
+            if should_exist && !does_exist {
+                return VerifyOutcome::Missing;
+            }
+            if !should_exist && does_exist {
+                return VerifyOutcome::Conflicts;
+            }
+        }
+    } else if !all_conditions
+        .iter()
+        .any(|condition| formula_has_platform_stanza(&formula, condition))
+    {
+        return VerifyOutcome::Missing;
     }
     VerifyOutcome::Matches
 }
@@ -993,7 +1000,24 @@ pub(crate) fn homebrew_platform_condition(triple: &str) -> Option<&'static str> 
 /// a source-build fallback or an unchecked formula.
 fn verified_assets<'a>(ctx: &'a EffectCtx<'a>) -> Result<&'a [HomebrewAsset], AdapterError> {
     let assets = &ctx.artifacts.homebrew_assets;
-    if assets.is_empty()
+    let expected: Vec<&str> = ctx
+        .artifacts
+        .homebrew
+        .as_ref()
+        .map(|formula| {
+            formula
+                .platforms
+                .iter()
+                .filter(|triple| homebrew_platform_condition(triple).is_some())
+                .map(String::as_str)
+                .collect()
+        })
+        .unwrap_or_default();
+    if expected.is_empty()
+        || assets.len() != expected.len()
+        || expected
+            .iter()
+            .any(|required| !assets.iter().any(|asset| asset.triple == *required))
         || assets
             .iter()
             .any(|a| !is_sha256_hex(&a.sha256) || a.url.is_empty())

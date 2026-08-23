@@ -112,10 +112,39 @@ assets and the Homebrew formula are named `shipshape`; the contract points at th
 Distribution continues to provide a source install and prebuilt macOS arm64/x86_64 and
 Linux musl arm64/x86_64 binaries. Windows remains deliberately unsupported.
 
-## Post-merge rollout order
+## Amendment (2026-08-23) — three-platform prebuilt support and v0.11.0 recovery
 
-The conductor performs external changes only after this repository migration is merged
-and green:
+The maintainer withdrew Intel macOS from the prebuilt support contract after the
+`v0.11.0` cargo-dist run spent hours queued for that target. The maintained binary set is
+now exactly:
+
+- `aarch64-apple-darwin`;
+- `aarch64-unknown-linux-musl`;
+- `x86_64-unknown-linux-musl`.
+
+Source installation remains available wherever Rust supports the workspace. Windows and
+Intel macOS are deliberately unsupported as prebuilt channels. This amendment supersedes
+the four-platform requirement in Decision §5 and the original rollout steps below without
+rewriting their historical record.
+
+The state is already irreversible: both Shipshape crates are on crates.io, tag `v0.11.0`
+is on the remote, and cargo-dist workflow `32652510525` completed and attested the three
+supported local archives before it was cancelled. The old engine run
+`01M0QQMW8Y6SWRR2G383M0KVJX` was sealed with four platforms. It must be explicitly
+**abandoned before any manual channel mutation** and never resumed under this changed
+promise. The conductor then follows
+[`docs/recovery/v0.11.0-three-platform.md`](../recovery/v0.11.0-three-platform.md), which
+pins the tag commit and workflow artifact IDs, validates checksums, creates the missing
+GitHub Release at the existing tag, writes the engine-owned three-platform formula, and
+observes crates.io, Release assets, and the tap. No engine journal is made green by that
+manual fallback; abandonment is the honest terminal record of the superseded plan.
+
+## Superseded original rollout order (historical; do not execute)
+
+The following was the pre-release plan before the tag and crate publishes occurred. It is
+retained as decision history, but the amendment and recovery document above are binding.
+The original conductor would have performed external changes only after this repository
+migration was merged and green:
 
 1. Create and permission `jarimustonen/homebrew-shipshape`; do not mutate the old tap.
    Seed `Formula/shipshape.rb` with this exact first line before the cut:
