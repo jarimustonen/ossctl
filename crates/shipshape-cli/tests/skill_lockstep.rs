@@ -28,6 +28,13 @@ fn skills_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("skills")
 }
 
+fn repo_root() -> Option<PathBuf> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest_dir.parent()?.parent()?;
+    (root.join("Cargo.toml").is_file() && root.join("OSS-RELEASE.md").is_file())
+        .then(|| root.to_path_buf())
+}
+
 /// Every `skills/<name>/SKILL.template.md` on disk.
 fn bundled_templates() -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
@@ -143,6 +150,98 @@ fn referenced_commands_and_flags_exist() {
             check_command(&name, &cmd);
         }
     }
+}
+
+/// The registry package and cargo-dist wrapper deliberately share a binary name,
+/// so repository automation must select the package coordinate, not the product
+/// coordinate. This also runs in the workspace-wide test job, independently of
+/// the named lockstep job whose selector it protects.
+#[test]
+fn repository_workflows_select_the_registry_cli_package() {
+    let Some(root) = repo_root() else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI must run this repository guard from a complete source checkout"
+        );
+        return;
+    };
+
+    let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect("source checkout must track the CI workflow");
+    let lockstep = ci
+        .lines()
+        .map(str::trim)
+        .find(|line| {
+            !line.starts_with('#')
+                && line.contains("cargo test")
+                && line.contains("--test skill")
+                && line.contains("--test skill_lockstep")
+        })
+        .expect("the named lockstep job must run both skill integration tests");
+    assert!(
+        command_selects_package(lockstep, "shipshape-cli"),
+        "the lockstep job must select Cargo package `shipshape-cli`: {lockstep}"
+    );
+    assert!(
+        !command_selects_package(lockstep, "shipshape"),
+        "the lockstep job must not select the cargo-dist wrapper: {lockstep}"
+    );
+
+    let publish = std::fs::read_to_string(root.join(".github/workflows/publish-crates.yml"))
+        .expect("source checkout must track the crates.io publish workflow");
+    let mut publishes_cli = false;
+    for line in publish.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') || line.starts_with("publish()") {
+            continue;
+        }
+        let tokens = shellish_tokens(line);
+        for pair in tokens.windows(2) {
+            if matches!(pair[0].as_str(), "-p" | "--package") {
+                assert_ne!(
+                    pair[1], "shipshape",
+                    "crates.io workflow selects the non-published cargo-dist wrapper: {line}"
+                );
+            }
+        }
+        let helper_arg = match tokens.as_slice() {
+            [verb, package, ..] if verb == "publish" => Some(package),
+            [condition, verb, package, ..] if condition == "if" && verb == "publish" => {
+                Some(package)
+            }
+            _ => None,
+        };
+        if let Some(package) = helper_arg {
+            assert!(
+                matches!(package.as_str(), "shipshape-core" | "shipshape-cli"),
+                "publish helper calls must use a literal registry package: {line}"
+            );
+            publishes_cli |= package == "shipshape-cli";
+        }
+    }
+    assert!(
+        publishes_cli,
+        "the crates.io workflow must publish Cargo package `shipshape-cli`"
+    );
+}
+
+fn shellish_tokens(line: &str) -> Vec<String> {
+    line.split_whitespace()
+        .map(|token| {
+            token
+                .trim_matches(|c: char| matches!(c, '\'' | '"' | ';' | '(' | ')' | ','))
+                .to_string()
+        })
+        .collect()
+}
+
+fn command_selects_package(command: &str, package: &str) -> bool {
+    let tokens = shellish_tokens(command);
+    tokens
+        .windows(2)
+        .any(|pair| matches!(pair[0].as_str(), "-p" | "--package") && pair[1] == package)
+        || tokens.iter().any(|token| {
+            token == &format!("-p={package}") || token == &format!("--package={package}")
+        })
 }
 
 /// Self-guard: the gate must reject a command that names a flag the CLI lacks,

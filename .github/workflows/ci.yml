@@ -126,7 +126,7 @@ jobs:
       # substituted, and install+print are golden-tested. The `test` job already
       # runs these; this named job makes the lockstep guarantee an explicit,
       # required check rather than one buried in the full suite.
-      - run: cargo test --locked -p shipshape --test skill --test skill_lockstep
+      - run: cargo test --locked -p shipshape-cli --test skill --test skill_lockstep
 
   doc:
     name: docs
