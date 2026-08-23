@@ -1,22 +1,13 @@
 ---
 name: oss-ci
 description: >-
-  GENERATES a repository's contribution-quality CI — the GitHub Actions
-  workflow(s) plus the supporting gate files (dependency-bot config,
-  pre-commit, CI-security lints) — tuned to the ecosystems and maturity tier in
-  `OSS-RELEASE.md`. Reads the contract via `ossctl contract show
-  --require-approved`; emits `.github/workflows/ci.yml` (rust→cargo
-  fmt/clippy/test; node→npm ci/test; python→pytest; multi-ecosystem→per-job),
-  `.github/dependabot.yml` OR `renovate.json`, `.pre-commit-config.yaml`, and
-  the CI-security-lint workflows (codeql/zizmor/actionlint) at production tier.
-  Tier-aware: a spike gets nothing (CI is the gap to reach mvp); mvp gets a lean
-  test+lint workflow + status badge + dep-bot; production adds a coverage gate,
-  pre-commit, security lints, and branch-protection guidance. Returns the
-  workflow name + badge URL to the orchestrator (`/oss-readme` renders the row).
-  Owns `ci*.yml` — NEVER the tag-triggered `release*.yml` (that is
-  `/oss-release-cut`). Thin caller of the `ossctl` binary (the binary is the
-  source of truth). Use for "add CI to this repo", "generate the GitHub Actions
-  workflow", "set up the PR quality gates".
+  Generates contribution-quality CI from an approved `OSS-RELEASE.md`, tuned
+  to the repository's ecosystems and maturity tier. Emits the GitHub Actions
+  test/lint workflow, dependency-bot config, and tier-appropriate coverage,
+  pre-commit, and security-lint gates. Owns contribution CI files, never the
+  tag-triggered release workflow. A thin caller of `ossctl contract show`; the
+  binary is the source of truth. Use for "add CI to this repo", "generate the
+  GitHub Actions workflow", or "set up the PR quality gates".
 allowed-tools: Bash, Glob, Grep, Read, Write
 cli_version: "{{CLI_VERSION}}"
 schema_version: {{SKILL_SCHEMA_VERSION}}
