@@ -3878,6 +3878,7 @@ fn bump_plan() -> ReleasePlan {
                 to: "=0.5.0".into(),
             }],
             changelog_finalize: true,
+            changelog: None,
             bump_hook: None,
         }),
         homebrew_tap: None,

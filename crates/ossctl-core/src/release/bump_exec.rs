@@ -61,7 +61,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::protocol::plan::BumpPlan;
+use crate::contract::schema::{ChangelogMode, ChangelogSource};
+use crate::protocol::plan::{BumpPlan, ChangelogFinalizePlan};
 use crate::release::adapters::EffectCtx;
 use crate::release::bump::{self, BumpEditError};
 
@@ -98,6 +99,8 @@ pub enum BumpExecError {
     },
     /// `cargo update --workspace` (the lockfile refresh) failed.
     LockRefresh(String),
+    /// Trailer-derived changelog compilation could not be run or its JSON was invalid.
+    ChangelogCompile(String),
     /// The declared `bump_hook` exited non-zero.
     Hook {
         /// The exit code (or a signal note).
@@ -134,6 +137,7 @@ impl std::fmt::Display for BumpExecError {
                  sealed checkout"
             ),
             Self::LockRefresh(m) => write!(f, "refreshing Cargo.lock failed: {m}"),
+            Self::ChangelogCompile(m) => write!(f, "compiling changelog notes failed: {m}"),
             Self::Hook { status, stderr } => {
                 write!(f, "the bump_hook failed ({status}): {stderr}")
             }
@@ -224,14 +228,41 @@ pub fn apply_bump(
         refresh_lockfile(ctx)?;
     }
 
-    // 4. Finalize the CHANGELOG when the contract's mode asked for it and a CHANGELOG
-    //    exists. A declared-but-missing `## [Unreleased]` fails closed (via the transform).
+    // 4. Finalize the CHANGELOG when the contract's mode asked for it. Missing files
+    //    and malformed marker state fail before any publish rather than silently cutting
+    //    a release without its promised notes.
     if bump.changelog_finalize {
         let changelog = root.join("CHANGELOG.md");
-        if changelog.exists() {
+        if changelog.is_file() {
             let text = read(&changelog)?;
-            let finalized = bump::finalize_changelog(&text, &bump.to_version, effective_date)?;
+            let (finalized, consumed) = if let Some(plan) = &bump.changelog {
+                let (compiled, consumed) = compile_changelog(ctx, plan)?;
+                (
+                    bump::finalize_marker_changelog(
+                        &text,
+                        &bump.to_version,
+                        effective_date,
+                        &compiled,
+                    )?,
+                    consumed,
+                )
+            } else {
+                // Stored v8-and-earlier approvals retain their sealed header-only
+                // semantics when resumed; fresh v9 plans always carry `changelog`.
+                (
+                    bump::finalize_changelog(&text, &bump.to_version, effective_date)?,
+                    Vec::new(),
+                )
+            };
             write(&changelog, &finalized)?;
+            for fragment in consumed {
+                std::fs::remove_file(&fragment).map_err(|source| BumpExecError::Fs {
+                    path: fragment,
+                    source,
+                })?;
+            }
+        } else if bump.changelog.is_some() {
+            return Err(BumpEditError::ChangelogUnreleasedNotFound.into());
         }
     }
 
@@ -256,6 +287,208 @@ pub fn apply_bump(
         commit,
         effective_date: effective_date.to_string(),
     })
+}
+
+/// Compile every configured release-note producer before the marker transform. Fragment
+/// files are returned as a consume set and are deleted only after the rewritten changelog
+/// has been written successfully in the throwaway checkout.
+fn compile_changelog(
+    ctx: &EffectCtx<'_>,
+    plan: &ChangelogFinalizePlan,
+) -> Result<(String, Vec<PathBuf>), BumpExecError> {
+    let mut sources = Vec::new();
+    let mut consumed = Vec::new();
+
+    match plan.mode {
+        ChangelogMode::Fragment => {
+            collect_fragments(ctx.repo_root, plan, &mut sources, &mut consumed)?;
+        }
+        ChangelogMode::Curated => {}
+        ChangelogMode::Automated => {
+            return Err(BumpExecError::ChangelogCompile(
+                "an automated changelog cannot carry engine finalization intent".into(),
+            ));
+        }
+    }
+
+    match plan.source {
+        ChangelogSource::IssuectlTrailers => {
+            let range = plan.issuectl_range.as_deref().ok_or_else(|| {
+                BumpExecError::ChangelogCompile(
+                    "the sealed changelog plan has no issuectl revision range".into(),
+                )
+            })?;
+            let root = ctx.repo_root.to_string_lossy();
+            if let Ok(output) = ctx.runner.run(
+                "issuectl",
+                &["changelog", range, "--json", "--root", &root],
+                ctx.repo_root,
+            ) {
+                if output.status == Some(0) {
+                    if let Ok(notes) = render_issuectl_notes(&output.stdout) {
+                        if !notes.is_empty() {
+                            sources.push(notes);
+                        }
+                    }
+                }
+            }
+            // The bundled skill's documented manual fallback is deliberate: a missing,
+            // failing, or incompatible issuectl leaves authored/fragment notes in force.
+        }
+        ChangelogSource::Manual | ChangelogSource::ConventionalCommits => {}
+    }
+
+    Ok((
+        sources
+            .into_iter()
+            .map(|source| source.trim().to_string())
+            .filter(|source| !source.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        consumed,
+    ))
+}
+
+fn collect_fragments(
+    root: &Path,
+    plan: &ChangelogFinalizePlan,
+    sources: &mut Vec<String>,
+    consumed: &mut Vec<PathBuf>,
+) -> Result<(), BumpExecError> {
+    let dir = root.join(&plan.fragment_dir);
+    if !dir.exists() {
+        return Ok(());
+    }
+    let metadata = std::fs::symlink_metadata(&dir).map_err(|source| BumpExecError::Fs {
+        path: dir.clone(),
+        source,
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(BumpExecError::ChangelogCompile(format!(
+            "fragment directory `{}` must be a real directory inside the checkout",
+            plan.fragment_dir
+        )));
+    }
+    let canonical_root = std::fs::canonicalize(root).map_err(|source| BumpExecError::Fs {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let canonical_dir = std::fs::canonicalize(&dir).map_err(|source| BumpExecError::Fs {
+        path: dir.clone(),
+        source,
+    })?;
+    if !canonical_dir.starts_with(&canonical_root) {
+        return Err(BumpExecError::ChangelogCompile(format!(
+            "fragment directory `{}` resolves outside the checkout",
+            plan.fragment_dir
+        )));
+    }
+    let entries = std::fs::read_dir(&dir).map_err(|source| BumpExecError::Fs {
+        path: dir.clone(),
+        source,
+    })?;
+    let mut paths = entries
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|source| BumpExecError::Fs {
+                    path: dir.clone(),
+                    source,
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.sort();
+    for path in paths {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.')
+            || name.eq_ignore_ascii_case("README.md")
+            || !path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+        {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&path).map_err(|source| BumpExecError::Fs {
+            path: path.clone(),
+            source,
+        })?;
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        let contents = read(&path)?;
+        if !contents.trim().is_empty() {
+            sources.push(contents);
+            consumed.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Validate issuectl's JSON envelope and render its issue groups as stable markdown.
+fn render_issuectl_notes(json: &str) -> Result<String, BumpExecError> {
+    let value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| BumpExecError::ChangelogCompile(format!("invalid issuectl JSON: {e}")))?;
+    if value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+    {
+        return Err(BumpExecError::ChangelogCompile(
+            "issuectl JSON has an unsupported schema_version".into(),
+        ));
+    }
+    let groups = value
+        .get("data")
+        .and_then(|data| data.get("groups"))
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            BumpExecError::ChangelogCompile("issuectl JSON has no data.groups object".into())
+        })?;
+    let mut categories: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+    for (kind, issues) in groups {
+        let heading = match kind.as_str() {
+            "feature" => "Added",
+            "bug" => "Fixed",
+            _ => "Changed",
+        };
+        let issues = issues.as_array().ok_or_else(|| {
+            BumpExecError::ChangelogCompile(format!("issuectl group `{kind}` is not an array"))
+        })?;
+        for issue in issues {
+            let title = issue
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    BumpExecError::ChangelogCompile(format!(
+                        "issuectl group `{kind}` has an item without title"
+                    ))
+                })?;
+            let slug = issue
+                .get("slug")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    BumpExecError::ChangelogCompile(format!(
+                        "issuectl group `{kind}` has an item without slug"
+                    ))
+                })?;
+            categories
+                .entry(heading)
+                .or_default()
+                .push(format!("- {title} (`{slug}`)."));
+        }
+    }
+    let mut rendered = Vec::new();
+    for (heading, mut bullets) in categories {
+        bullets.sort();
+        bullets.dedup();
+        if !bullets.is_empty() {
+            rendered.push(format!("### {heading}\n\n{}", bullets.join("\n")));
+        }
+    }
+    Ok(rendered.join("\n\n"))
 }
 
 /// Read a checkout file, mapping I/O errors to [`BumpExecError::Fs`].

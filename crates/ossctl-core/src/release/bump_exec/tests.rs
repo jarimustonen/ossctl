@@ -10,8 +10,9 @@ use std::path::Path;
 use tempfile::TempDir;
 
 use super::*;
+use crate::contract::schema::{ChangelogMode, ChangelogSource};
 use crate::ports::{Clock, CommandOutput, CommandRunner, RegistryQuery};
-use crate::protocol::plan::{BumpLevel, BumpPlan, PinRewrite};
+use crate::protocol::plan::{BumpLevel, BumpPlan, ChangelogFinalizePlan, PinRewrite};
 use crate::release::adapters::{EffectCtx, EMPTY_ARTIFACTS};
 
 /// A fake runner that records calls and returns success by default. `git rev-parse
@@ -23,6 +24,7 @@ struct FakeRunner {
     bump_commit: String,
     fail_substr: Option<String>,
     hook_fail: bool,
+    issuectl_json: Option<String>,
     /// A callback run when `sh -c <hook>` fires, so a test can model a hook that edits
     /// files in the checkout (e.g. regenerating a snapshot, or maliciously re-versioning).
     hook_effect: Option<HookEffect>,
@@ -38,6 +40,7 @@ impl FakeRunner {
             bump_commit: bump_commit.to_string(),
             fail_substr: None,
             hook_fail: false,
+            issuectl_json: None,
             hook_effect: None,
         }
     }
@@ -68,6 +71,13 @@ impl CommandRunner for FakeRunner {
                 } else {
                     String::new()
                 },
+            });
+        }
+        if program == "issuectl" {
+            return Ok(CommandOutput {
+                status: Some(i32::from(self.issuectl_json.is_none())),
+                stdout: self.issuectl_json.clone().unwrap_or_default(),
+                stderr: String::new(),
             });
         }
         if program == "git" && args == ["rev-parse", "HEAD"] {
@@ -176,6 +186,7 @@ fn bump_plan() -> BumpPlan {
             to: "=0.5.0".into(),
         }],
         changelog_finalize: true,
+        changelog: None,
         bump_hook: None,
     }
 }
@@ -230,6 +241,201 @@ fn applies_version_pin_changelog_and_commits() {
         !calls.iter().any(|c| c.starts_with("git push")),
         "the executor must not push the branch: {calls:?}"
     );
+}
+
+#[test]
+fn fragment_finalize_reproduces_and_repairs_the_project_canon_cut_failure() {
+    let dir = temp_workspace();
+    std::fs::write(
+        dir.path().join("CHANGELOG.md"),
+        "# Changelog\n\n<!-- oss-changelog:unreleased-start -->\n## [Unreleased]\n\n### Added\n\n### Changed\n\n### Fixed\n<!-- oss-changelog:unreleased-end -->\n\n## [0.4.0] - 2026-08-01\n\nOld notes.\n",
+    )
+    .unwrap();
+    let fragments = dir.path().join("changelog/fragments");
+    std::fs::create_dir_all(&fragments).unwrap();
+    std::fs::write(fragments.join("README.md"), "Fragment instructions.\n").unwrap();
+    let fragment = fragments.join("agent-skills-terminology.md");
+    std::fs::write(
+        &fragment,
+        "### Changed\n\n- Describe skills using Agent Skills terminology.\n",
+    )
+    .unwrap();
+
+    let mut runner = FakeRunner::new("projectcanon062");
+    runner.issuectl_json = Some(
+        r#"{"schema_version":1,"data":{"groups":{"improvement":[{"slug":"skill-description-length-check","title":"Enforce the skill description limit"}]}}}"#.into(),
+    );
+    let (clock, reg) = (FakeClock, NoRegistry);
+    let mut plan = bump_plan();
+    plan.changelog = Some(ChangelogFinalizePlan {
+        mode: ChangelogMode::Fragment,
+        source: ChangelogSource::IssuectlTrailers,
+        fragment_dir: "changelog/fragments".into(),
+        issuectl_range: Some("v0.4.0..HEAD".into()),
+    });
+
+    apply_bump(&ctx(&runner, &clock, &reg, dir.path()), &plan, "2026-08-23").unwrap();
+
+    let changelog = std::fs::read_to_string(dir.path().join("CHANGELOG.md")).unwrap();
+    let marker_end = changelog
+        .find("<!-- oss-changelog:unreleased-end -->")
+        .unwrap();
+    let release = changelog.find("## [0.5.0] - 2026-08-23").unwrap();
+    assert!(
+        release > marker_end,
+        "release escaped marker block: {changelog}"
+    );
+    assert!(changelog.contains("Describe skills using Agent Skills terminology"));
+    assert!(changelog.contains("Enforce the skill description limit"));
+    assert_eq!(
+        changelog.matches("### Changed").count(),
+        2,
+        "skeleton + one merged release section: {changelog}"
+    );
+    assert_eq!(
+        changelog
+            .matches("<!-- oss-changelog:unreleased-end -->")
+            .count(),
+        1
+    );
+    assert!(!fragment.exists(), "compiled fragment must be consumed");
+    assert!(
+        fragments.join("README.md").exists(),
+        "README is not a fragment"
+    );
+    assert!(runner
+        .calls
+        .borrow()
+        .iter()
+        .any(|call| { call.starts_with("issuectl changelog v0.4.0..HEAD --json --root") }));
+}
+
+#[test]
+fn invalid_issuectl_output_falls_back_to_fragments() {
+    let dir = temp_workspace();
+    std::fs::write(
+        dir.path().join("CHANGELOG.md"),
+        "<!-- oss-changelog:unreleased-start -->\n## [Unreleased]\n### Added\n### Changed\n### Fixed\n<!-- oss-changelog:unreleased-end -->\n",
+    )
+    .unwrap();
+    let fragments = dir.path().join("changelog/fragments");
+    std::fs::create_dir_all(&fragments).unwrap();
+    std::fs::write(
+        fragments.join("fallback.md"),
+        "### Fixed\n\n- Fragment fallback.\n",
+    )
+    .unwrap();
+    let mut runner = FakeRunner::new("fallback123");
+    runner.issuectl_json = Some("not-json".into());
+    let (clock, reg) = (FakeClock, NoRegistry);
+    let mut plan = bump_plan();
+    plan.changelog = Some(ChangelogFinalizePlan {
+        mode: ChangelogMode::Fragment,
+        source: ChangelogSource::IssuectlTrailers,
+        fragment_dir: "changelog/fragments".into(),
+        issuectl_range: Some("v0.4.0..HEAD".into()),
+    });
+
+    apply_bump(&ctx(&runner, &clock, &reg, dir.path()), &plan, "2026-08-23").unwrap();
+    let changelog = std::fs::read_to_string(dir.path().join("CHANGELOG.md")).unwrap();
+    assert!(changelog.contains("- Fragment fallback."));
+    assert!(!fragments.join("fallback.md").exists());
+}
+
+#[test]
+fn missing_changelog_fails_and_preserves_fragments() {
+    let dir = temp_workspace();
+    std::fs::remove_file(dir.path().join("CHANGELOG.md")).unwrap();
+    let fragments = dir.path().join("changelog/fragments");
+    std::fs::create_dir_all(&fragments).unwrap();
+    let fragment = fragments.join("pending.md");
+    std::fs::write(&fragment, "### Fixed\n\n- Pending.\n").unwrap();
+    let runner = FakeRunner::new("unused");
+    let (clock, reg) = (FakeClock, NoRegistry);
+    let mut plan = bump_plan();
+    plan.changelog = Some(ChangelogFinalizePlan {
+        mode: ChangelogMode::Fragment,
+        source: ChangelogSource::Manual,
+        fragment_dir: "changelog/fragments".into(),
+        issuectl_range: None,
+    });
+
+    let err = apply_bump(&ctx(&runner, &clock, &reg, dir.path()), &plan, "2026-08-23").unwrap_err();
+    assert!(matches!(
+        err,
+        BumpExecError::Edit(BumpEditError::ChangelogUnreleasedNotFound)
+    ));
+    assert!(fragment.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn fragment_directory_cannot_escape_through_an_intermediate_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let dir = temp_workspace();
+    std::fs::write(
+        dir.path().join("CHANGELOG.md"),
+        "<!-- oss-changelog:unreleased-start -->\n## [Unreleased]\n### Added\n### Changed\n### Fixed\n<!-- oss-changelog:unreleased-end -->\n",
+    )
+    .unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let external_fragments = external.path().join("fragments");
+    std::fs::create_dir_all(&external_fragments).unwrap();
+    let outside = external_fragments.join("outside.md");
+    std::fs::write(&outside, "### Fixed\n\n- Outside.\n").unwrap();
+    symlink(external.path(), dir.path().join("changelog")).unwrap();
+    let runner = FakeRunner::new("unused");
+    let (clock, reg) = (FakeClock, NoRegistry);
+    let mut plan = bump_plan();
+    plan.changelog = Some(ChangelogFinalizePlan {
+        mode: ChangelogMode::Fragment,
+        source: ChangelogSource::Manual,
+        fragment_dir: "changelog/fragments".into(),
+        issuectl_range: None,
+    });
+
+    let err = apply_bump(&ctx(&runner, &clock, &reg, dir.path()), &plan, "2026-08-23").unwrap_err();
+    assert!(matches!(err, BumpExecError::ChangelogCompile(_)));
+    assert!(outside.exists(), "outside fragment must never be consumed");
+}
+
+#[test]
+fn conflicting_finalize_keeps_fragment_for_a_safe_retry() {
+    let dir = temp_workspace();
+    std::fs::write(
+        dir.path().join("CHANGELOG.md"),
+        "<!-- oss-changelog:unreleased-start -->\n## [Unreleased]\n### Added\n### Changed\n### Fixed\n<!-- oss-changelog:unreleased-end -->\n\n## [0.5.0] - 2026-08-22\n\nExisting.\n",
+    )
+    .unwrap();
+    let fragments = dir.path().join("changelog/fragments");
+    std::fs::create_dir_all(&fragments).unwrap();
+    let fragment = fragments.join("pending.md");
+    std::fs::write(&fragment, "### Fixed\n\n- Pending fix.\n").unwrap();
+    let runner = FakeRunner::new("unused");
+    let (clock, reg) = (FakeClock, NoRegistry);
+    let mut plan = bump_plan();
+    plan.changelog = Some(ChangelogFinalizePlan {
+        mode: ChangelogMode::Fragment,
+        source: ChangelogSource::Manual,
+        fragment_dir: "changelog/fragments".into(),
+        issuectl_range: None,
+    });
+
+    let err = apply_bump(&ctx(&runner, &clock, &reg, dir.path()), &plan, "2026-08-23").unwrap_err();
+    assert!(matches!(
+        err,
+        BumpExecError::Edit(BumpEditError::ChangelogReleaseConflict { .. })
+    ));
+    assert!(
+        fragment.exists(),
+        "a failed finalize must not consume fragments"
+    );
+    assert!(!runner
+        .calls
+        .borrow()
+        .iter()
+        .any(|call| call.starts_with("git commit")));
 }
 
 #[test]

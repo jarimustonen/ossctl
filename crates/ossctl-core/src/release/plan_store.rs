@@ -11,8 +11,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::contract::schema::Contract;
-use crate::contract::schema::{Adapter, Ecosystem, Registry};
-use crate::protocol::plan::{BumpLevel, BumpPlan, PinRewrite, PlanPhase, PlanTarget, ReleasePlan};
+use crate::contract::schema::{Adapter, ChangelogMode, ChangelogSource, Ecosystem, Registry};
+use crate::protocol::plan::{
+    BumpLevel, BumpPlan, ChangelogFinalizePlan, PinRewrite, PlanPhase, PlanTarget, ReleasePlan,
+};
 use crate::release::journal::JournalPaths;
 use crate::release::plan::{seal_bytes, seal_id_from_bytes};
 
@@ -259,6 +261,26 @@ fn corrupt(id: &str, detail: impl Into<String>) -> PlanStoreError {
         detail: detail.into(),
     }
 }
+fn decode_changelog_plan(
+    value: Option<&Value>,
+    id: &str,
+) -> Result<Option<ChangelogFinalizePlan>, PlanStoreError> {
+    let Some(changelog) = value.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    Ok(Some(ChangelogFinalizePlan {
+        mode: ChangelogMode::parse(str_at(changelog, "mode", id)?)
+            .ok_or_else(|| corrupt(id, "invalid changelog mode"))?,
+        source: ChangelogSource::parse(str_at(changelog, "source", id)?)
+            .ok_or_else(|| corrupt(id, "invalid changelog source"))?,
+        fragment_dir: str_at(changelog, "fragment_dir", id)?.into(),
+        issuectl_range: changelog
+            .get("issuectl_range")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }))
+}
+
 fn bool_at_or_false(v: &Value, key: &str, id: &str) -> Result<bool, PlanStoreError> {
     match v.get(key) {
         None => Ok(false),
@@ -331,6 +353,7 @@ fn decode_plan(v: &Value, id: &str) -> Result<ReleasePlan, PlanStoreError> {
                 .get("changelog_finalize")
                 .and_then(Value::as_bool)
                 .ok_or_else(|| corrupt(id, "invalid changelog_finalize"))?,
+            changelog: decode_changelog_plan(b.get("changelog"), id)?,
             bump_hook: b
                 .get("bump_hook")
                 .and_then(Value::as_str)

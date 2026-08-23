@@ -79,7 +79,9 @@ use serde::Serialize;
 
 use crate::contract::schema::{ChangelogMode, Contract, Ecosystem, Registry};
 use crate::protocol::facts::Facts;
-use crate::protocol::plan::{BumpLevel, BumpPlan, PinRewrite, PlanPhase, PlanTarget, ReleasePlan};
+use crate::protocol::plan::{
+    BumpLevel, BumpPlan, ChangelogFinalizePlan, PinRewrite, PlanPhase, PlanTarget, ReleasePlan,
+};
 
 /// Build and seal a [`ReleasePlan`] from an already-normalized `contract` and
 /// detected `facts`, at git `head_sha`, for the chosen `version`.
@@ -126,7 +128,7 @@ pub fn build_with_bump(
     level: BumpLevel,
 ) -> Result<ReleasePlan, crate::release::bump::BumpError> {
     let to_version = crate::release::bump::bump_version(level, from_version)?;
-    let bump = derive_bump_plan(contract, facts, level, from_version, &to_version)?;
+    let bump = derive_bump_plan(contract, facts, head_sha, level, from_version, &to_version)?;
     Ok(build_inner(
         contract,
         facts,
@@ -656,6 +658,7 @@ fn bump_aware_phases(has_bump: bool) -> Vec<PlanPhase> {
 fn derive_bump_plan(
     contract: &Contract,
     facts: &Facts,
+    head_sha: &str,
     level: BumpLevel,
     from_version: &str,
     to_version: &str,
@@ -666,6 +669,12 @@ fn derive_bump_plan(
         to_version: to_version.to_string(),
         pin_rewrites: derive_pin_rewrites(facts, from_version, to_version)?,
         changelog_finalize: changelog_is_finalizable(contract),
+        changelog: changelog_is_finalizable(contract).then(|| ChangelogFinalizePlan {
+            mode: contract.changelog.mode,
+            source: contract.changelog.source,
+            fragment_dir: contract.changelog.fragment_dir.clone(),
+            issuectl_range: issuectl_range(contract, facts, head_sha, from_version),
+        }),
         // Copied from the (already-hashed) contract so the executor need not re-read it;
         // being a copy of a hashed value it adds no new content to the address beyond
         // its presence on the bump plan.
@@ -686,6 +695,28 @@ fn derive_bump_plan(
 /// e.g. a "none"/"off" that means *no* changelog to finalize — must make a deliberate
 /// choice here rather than silently defaulting to engine-finalized (which would seal a
 /// bump plan that promotes a changelog that does not exist).
+fn issuectl_range(
+    contract: &Contract,
+    facts: &Facts,
+    head_sha: &str,
+    from_version: &str,
+) -> Option<String> {
+    use crate::contract::schema::ChangelogSource;
+
+    if contract.changelog.source != ChangelogSource::IssuectlTrailers {
+        return None;
+    }
+    let expected = format!("v{from_version}");
+    Some(if facts.tags.iter().any(|tag| tag == &expected) {
+        format!("{expected}..{head_sha}")
+    } else {
+        // The coordinator always creates `v<version>` tags. Its absence identifies
+        // the first engine release for this manifest line, where the bundled skill
+        // deliberately compiles the reachable history.
+        head_sha.to_string()
+    })
+}
+
 fn changelog_is_finalizable(contract: &Contract) -> bool {
     match contract.changelog.mode {
         ChangelogMode::Curated | ChangelogMode::Fragment => true,
@@ -1213,11 +1244,10 @@ const SEAL_DOMAIN: &str = "ossctl.release-plan";
 /// wire-envelope versions. Bump this (never silently) whenever the shape changes or an
 /// unchanged sealed field gains a different effect, so approvals made under distinct
 /// interpretations always occupy disjoint plan-id spaces.
-// v8 extends the sealed edit set to exact internal pins owned by root
-// `[workspace.dependencies]`. Older plan documents remain readable for resume, but a
-// fresh cut refuses their old address: a v7 approval could otherwise execute without
-// rewriting an inherited pin that local path resolution hides.
-const SEAL_VERSION: u32 = 8;
+// v9 seals the complete changelog-finalization intent. Older plan documents remain
+// readable for resume and retain the v8 header-only transform; a fresh plan binds the
+// marker-aware structure, fragment directory, and trailer source it will execute.
+const SEAL_VERSION: u32 = 9;
 
 /// The canonical hashed pre-image (see the module docs for the exact contents).
 /// A dedicated struct rather than an ad-hoc byte concatenation so the field set

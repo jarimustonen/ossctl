@@ -157,6 +157,11 @@ pub struct BumpPlan {
     /// changelog *mode* that governs the finalize is already part of the hashed
     /// contract. `false` only when the contract declares no changelog machinery.
     pub changelog_finalize: bool,
+    /// The complete marker-aware changelog finalization intent for plans sealed by
+    /// v9 or later. Older stored plans omit this field and retain their legacy
+    /// header-only transform when resumed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changelog: Option<ChangelogFinalizePlan>,
     /// The contract-declared command the engine runs in the clean checkout after the
     /// version edits (`release.bump_hook`), so version-embedding artifacts (test
     /// snapshots that embed the version) regenerate against the new version before the
@@ -167,10 +172,24 @@ pub struct BumpPlan {
     pub bump_hook: Option<String>,
 }
 
+/// Contract-derived changelog inputs sealed into the engine-owned bump edit set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChangelogFinalizePlan {
+    /// Whether entries are curated in-place or compiled from fragment files.
+    pub mode: crate::contract::schema::ChangelogMode,
+    /// The contract-selected source for generated entries.
+    pub source: crate::contract::schema::ChangelogSource,
+    /// Repo-relative directory whose fragment files are compiled and consumed.
+    pub fragment_dir: String,
+    /// Exact revision range passed to `issuectl changelog`. Sealed at plan time so
+    /// adding or moving a tag after approval cannot change the release notes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuectl_range: Option<String>,
+}
+
 /// One intra-workspace `=`-version pin **set** the [`PlanPhase::Bump`] phase rewrites
-/// in lockstep with the workspace version (e.g. every normal/dev/build declaration of
-/// the bin crate's `lib-core = "=0.1.5"` → `lib-core = "=0.1.6"`). Derived
-/// deterministically after proving every explicit declaration in the set equivalent.
+/// in lockstep with the workspace version. Derived deterministically after proving
+/// every explicit declaration in the set equivalent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PinRewrite {
     /// The workspace member whose manifest carries the pin (the dependent crate), or

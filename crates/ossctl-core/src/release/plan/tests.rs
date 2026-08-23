@@ -248,7 +248,7 @@ fn plan_id_golden_vector() {
     let plan = build(&rust_contract(), &rust_facts(), HEAD, "1.2.0");
     assert_eq!(
         plan.plan_id,
-        "e198253dc6357d09e80fc49a152c9bf7031cf0ee921eb612661d1ed5e4ab94f5"
+        "ddb494bb7aa1cf67373a8c21a84d5c62ee9666476ebe0b06f991c546f990fcb0"
     );
 }
 
@@ -276,7 +276,7 @@ fn plan_id_golden_vector_with_distribution() {
     let plan = build(&contract, &rust_facts(), HEAD, "1.2.0");
     assert_eq!(
         plan.plan_id,
-        "69429a493f61e6c16267a309e737f1bd2c9ff5db43500537699f0dd4ef0ace39"
+        "9f32faeb6fcdb0f595be16d5bdbf42799070026ac8a705458256d32e7cc8c955"
     );
     // The tap threads into the plan from the sole distribution.
     assert_eq!(plan.homebrew_tap.as_deref(), Some("acme/homebrew-acme"));
@@ -1574,7 +1574,14 @@ fn the_bump_finalizes_a_curated_changelog_but_not_an_automated_one() {
     // curated/fragment: the engine promotes `[Unreleased]`. automated: a release bot
     // owns the CHANGELOG, so the engine must not also rewrite it.
     let curated = bump_plan(BumpLevel::Patch);
-    assert!(curated.bump.unwrap().changelog_finalize);
+    let curated_bump = curated.bump.unwrap();
+    assert!(curated_bump.changelog_finalize);
+    let changelog = curated_bump
+        .changelog
+        .expect("fresh plans seal changelog inputs");
+    assert_eq!(changelog.mode, ChangelogMode::Curated);
+    assert_eq!(changelog.source, ChangelogSource::Manual);
+    assert_eq!(changelog.fragment_dir, "changelog/fragments");
 
     let mut c = rust_contract();
     c.changelog.mode = ChangelogMode::Automated;
@@ -1586,7 +1593,32 @@ fn the_bump_finalizes_a_curated_changelog_but_not_an_automated_one() {
     )];
     let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
     let auto = build_with_bump(&c, &f, HEAD, "0.1.6", BumpLevel::Patch).unwrap();
-    assert!(!auto.bump.unwrap().changelog_finalize);
+    let auto_bump = auto.bump.unwrap();
+    assert!(!auto_bump.changelog_finalize);
+    assert!(auto_bump.changelog.is_none());
+}
+
+#[test]
+fn trailer_range_uses_the_engine_previous_tag_and_sealed_head() {
+    let mut contract = rust_contract();
+    contract.changelog.source = ChangelogSource::IssuectlTrailers;
+    let mut facts = rust_facts();
+    facts.tags = vec![
+        "nightly".into(),
+        "v0.1.0".into(),
+        "v0.2.0-rc.1".into(),
+        "v0.1.5".into(),
+    ];
+    let plan = build_with_bump(&contract, &facts, HEAD, "0.1.0", BumpLevel::Patch).unwrap();
+    assert_eq!(
+        plan.bump
+            .unwrap()
+            .changelog
+            .unwrap()
+            .issuectl_range
+            .as_deref(),
+        Some("v0.1.0..0123456789abcdef0123456789abcdef01234567")
+    );
 }
 
 #[test]

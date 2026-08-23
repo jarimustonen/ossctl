@@ -172,6 +172,15 @@ pub enum BumpEditError {
     /// changelog mode said the engine should finalize one — fail closed rather than
     /// tag a release whose notes were never promoted.
     ChangelogUnreleasedNotFound,
+    /// Marker-aware finalization requires exactly one ordered marker pair.
+    ChangelogMarkersMalformed,
+    /// The requested release heading already exists while new notes remain to cut.
+    ChangelogReleaseConflict {
+        /// Version whose existing section conflicts with the pending notes.
+        version: String,
+    },
+    /// Finalization found neither authored entries nor compiled fragment/trailer notes.
+    ChangelogNotesEmpty,
 }
 
 impl std::fmt::Display for BumpEditError {
@@ -211,6 +220,18 @@ impl std::fmt::Display for BumpEditError {
                 f,
                 "the contract asks the engine to finalize the CHANGELOG, but no `## [Unreleased]` \
                  section was found to promote"
+            ),
+            Self::ChangelogMarkersMalformed => write!(
+                f,
+                "the CHANGELOG must contain exactly one ordered oss-changelog Unreleased marker pair"
+            ),
+            Self::ChangelogReleaseConflict { version } => write!(
+                f,
+                "the CHANGELOG already contains a release heading for `{version}` while pending notes remain"
+            ),
+            Self::ChangelogNotesEmpty => write!(
+                f,
+                "the CHANGELOG has no authored, fragment, or trailer-derived notes to release"
             ),
         }
     }
@@ -613,8 +634,194 @@ pub fn finalize_changelog(text: &str, version: &str, date: &str) -> Result<Strin
     }
 }
 
+/// Finalize a marker-owned changelog region without allowing the released section or
+/// marker comments to enter the release notes. `compiled_notes` contains any fragment
+/// and trailer-derived material gathered by the effectful executor.
+pub fn finalize_marker_changelog(
+    text: &str,
+    version: &str,
+    date: &str,
+    compiled_notes: &str,
+) -> Result<String, BumpEditError> {
+    const START: &str = "<!-- oss-changelog:unreleased-start -->";
+    const END: &str = "<!-- oss-changelog:unreleased-end -->";
+    const SKELETON: &str = "<!-- oss-changelog:unreleased-start -->\n## [Unreleased]\n\n### Added\n\n### Changed\n\n### Fixed\n<!-- oss-changelog:unreleased-end -->";
+
+    let starts: Vec<_> = text.match_indices(START).map(|(i, _)| i).collect();
+    let ends: Vec<_> = text.match_indices(END).map(|(i, _)| i).collect();
+    if starts.is_empty() && ends.is_empty() {
+        let marked = wrap_unreleased_markers(text)?;
+        return finalize_marker_changelog(&marked, version, date, compiled_notes);
+    }
+    if starts.len() != 1 || ends.len() != 1 || starts[0] >= ends[0] {
+        return Err(BumpEditError::ChangelogMarkersMalformed);
+    }
+    let start = starts[0];
+    let end = ends[0];
+    let region = &text[start + START.len()..end];
+    if !region.lines().any(is_unreleased_header) {
+        return Err(BumpEditError::ChangelogUnreleasedNotFound);
+    }
+    if region.lines().any(is_release_heading) {
+        return Err(BumpEditError::ChangelogMarkersMalformed);
+    }
+
+    let notes = release_note_content(&[region, compiled_notes]);
+    let heading_prefix = format!("## [{version}]");
+    let existing = text
+        .lines()
+        .any(|line| line.trim().starts_with(&heading_prefix));
+    if existing {
+        if notes.is_empty() {
+            return Ok(text.to_string());
+        }
+        return Err(BumpEditError::ChangelogReleaseConflict {
+            version: version.to_string(),
+        });
+    }
+    if notes.is_empty() {
+        return Err(BumpEditError::ChangelogNotesEmpty);
+    }
+
+    let after_marker = end + END.len();
+    let prefix = text[..start].trim_end_matches('\n');
+    let suffix = text[after_marker..].trim_start_matches('\n');
+    let mut out = String::with_capacity(text.len() + notes.len() + version.len() + 64);
+    if !prefix.is_empty() {
+        out.push_str(prefix);
+        out.push_str("\n\n");
+    }
+    out.push_str(SKELETON);
+    out.push_str("\n\n## [");
+    out.push_str(version);
+    out.push_str("] - ");
+    out.push_str(date);
+    out.push_str("\n\n");
+    out.push_str(&notes);
+    if !suffix.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(suffix.trim_end_matches('\n'));
+    }
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// Remove structural marker/header lines and empty category headings from one note
+/// source. This is also the final defense that marker comments cannot leak into a
+/// cargo-dist announcement body.
+fn release_note_content(sources: &[&str]) -> String {
+    use std::collections::BTreeMap;
+
+    const START: &str = "<!-- oss-changelog:unreleased-start -->";
+    const END: &str = "<!-- oss-changelog:unreleased-end -->";
+    const ORDER: [&str; 6] = [
+        "Added",
+        "Changed",
+        "Deprecated",
+        "Removed",
+        "Fixed",
+        "Security",
+    ];
+    let mut preamble = Vec::new();
+    let mut sections: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for source in sources {
+        let mut current: Option<String> = None;
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if trimmed == START || trimmed == END || is_unreleased_header(line) {
+                continue;
+            }
+            if let Some(heading) = trimmed.strip_prefix("### ") {
+                current = Some(heading.to_string());
+                sections.entry(heading.to_string()).or_default();
+            } else if let Some(heading) = &current {
+                sections
+                    .entry(heading.clone())
+                    .or_default()
+                    .push(line.to_string());
+            } else {
+                preamble.push(line.to_string());
+            }
+        }
+    }
+
+    let mut kept = Vec::new();
+    let preamble = preamble.join("\n").trim().to_string();
+    if !preamble.is_empty() {
+        kept.push(preamble);
+    }
+    let mut headings: Vec<_> = sections.keys().cloned().collect();
+    headings.sort_by_key(|heading| {
+        ORDER
+            .iter()
+            .position(|candidate| candidate == heading)
+            .unwrap_or(ORDER.len())
+    });
+    for heading in headings {
+        let body = sections.remove(&heading).expect("heading came from map");
+        let body = collapse_blank_lines(&body.join("\n"));
+        if !body.is_empty() {
+            kept.push(format!("### {heading}\n\n{body}"));
+        }
+    }
+    kept.join("\n\n")
+}
+
+fn collapse_blank_lines(text: &str) -> String {
+    let mut out = Vec::new();
+    let mut previous_blank = false;
+    for line in text.trim().lines() {
+        let blank = line.trim().is_empty();
+        if blank && previous_blank {
+            continue;
+        }
+        out.push(line);
+        previous_blank = blank;
+    }
+    out.join("\n")
+}
+
+fn wrap_unreleased_markers(text: &str) -> Result<String, BumpEditError> {
+    let mut offset = 0;
+    let mut header_start = None;
+    let mut section_end = text.len();
+    for line in text.split_inclusive('\n') {
+        if header_start.is_none() && is_unreleased_header(line.trim_end_matches('\n')) {
+            header_start = Some(offset);
+        } else if header_start.is_some()
+            && (is_release_heading(line) || is_link_definition(line.trim()))
+        {
+            section_end = offset;
+            break;
+        }
+        offset += line.len();
+    }
+    let header_start = header_start.ok_or(BumpEditError::ChangelogUnreleasedNotFound)?;
+    let mut marked = String::with_capacity(text.len() + 100);
+    marked.push_str(&text[..header_start]);
+    marked.push_str("<!-- oss-changelog:unreleased-start -->\n");
+    marked.push_str(&text[header_start..section_end]);
+    if !marked.ends_with('\n') {
+        marked.push('\n');
+    }
+    marked.push_str("<!-- oss-changelog:unreleased-end -->\n");
+    marked.push_str(text[section_end..].trim_start_matches('\n'));
+    Ok(marked)
+}
+
 /// Whether `line` is a `## [Unreleased]` header (Keep a Changelog), tolerant of
 /// surrounding whitespace and `Unreleased` letter-case.
+fn is_release_heading(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("## ") && !trimmed.starts_with("### ") && !is_unreleased_header(line)
+}
+
+fn is_link_definition(line: &str) -> bool {
+    line.starts_with('[') && line.contains("]: ")
+}
+
 fn is_unreleased_header(line: &str) -> bool {
     let t = line.trim();
     let Some(rest) = t.strip_prefix("##") else {
@@ -1022,6 +1229,91 @@ mod tests {
         assert_eq!(
             finalize_changelog(text, "0.5.0", "2026-08-13"),
             Err(BumpEditError::ChangelogUnreleasedNotFound)
+        );
+    }
+
+    #[test]
+    fn marker_finalize_places_release_outside_markers_and_strips_markers_from_notes() {
+        let text = "# Changelog\n\n<!-- oss-changelog:unreleased-start -->\n## [Unreleased]\n\n### Added\n\n### Changed\n\n### Fixed\n<!-- oss-changelog:unreleased-end -->\n\n## [0.6.1] - 2026-08-21\n\nOld.\n";
+        let compiled =
+            "### Changed\n\n- Agent Skills terminology.\n<!-- oss-changelog:unreleased-end -->\n";
+        let out = finalize_marker_changelog(text, "0.6.2", "2026-08-23", compiled).unwrap();
+        let end = out.find("<!-- oss-changelog:unreleased-end -->").unwrap();
+        let release = out.find("## [0.6.2] - 2026-08-23").unwrap();
+        assert!(
+            release > end,
+            "released section must be outside markers: {out}"
+        );
+        assert_eq!(
+            out.matches("<!-- oss-changelog:unreleased-end -->").count(),
+            1
+        );
+        assert!(out.contains("### Changed\n\n- Agent Skills terminology."));
+        assert_eq!(out.matches("### Changed").count(), 2, "skeleton + release");
+        assert!(out.contains("## [0.6.1] - 2026-08-21"));
+    }
+
+    #[test]
+    fn marker_finalize_is_idempotent_only_when_no_notes_are_pending() {
+        let text = "<!-- oss-changelog:unreleased-start -->\n## [Unreleased]\n\n### Added\n### Changed\n### Fixed\n<!-- oss-changelog:unreleased-end -->\n\n## [0.6.2] - 2026-08-23\n\n- shipped\n";
+        assert_eq!(
+            finalize_marker_changelog(text, "0.6.2", "2026-08-23", "").unwrap(),
+            text
+        );
+        assert!(matches!(
+            finalize_marker_changelog(text, "0.6.2", "2026-08-23", "- pending"),
+            Err(BumpEditError::ChangelogReleaseConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn marker_finalize_migrates_a_markerless_changelog() {
+        let text = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Authored fix.\n\n## 0.9.0 - 2026-08-01\n\nOld.\n\n[unreleased]: https://example.test/compare/v0.9.0...HEAD\n";
+        let out =
+            finalize_marker_changelog(text, "1.0.0", "2026-08-23", "### Fixed\n\n- Trailer fix.")
+                .unwrap();
+        assert!(out.contains("<!-- oss-changelog:unreleased-start -->"));
+        assert!(
+            out.contains(
+                "## [1.0.0] - 2026-08-23\n\n### Fixed\n\n- Authored fix.\n\n- Trailer fix."
+            ),
+            "{out}"
+        );
+        assert_eq!(out.matches("### Fixed").count(), 2, "skeleton + release");
+        assert!(out.contains("## 0.9.0 - 2026-08-01"));
+        assert!(out.contains("[unreleased]: https://example.test/compare/v0.9.0...HEAD"));
+    }
+
+    #[test]
+    fn markerless_unreleased_does_not_promote_link_definitions() {
+        let text = "## [Unreleased]\n\n### Added\n\n- First release.\n\n[unreleased]: https://example.test/compare/v0.1.0...HEAD\n";
+        let out = finalize_marker_changelog(text, "0.1.0", "2026-08-23", "").unwrap();
+        let release = out.find("## [0.1.0] - 2026-08-23").unwrap();
+        let link = out.find("[unreleased]: https://example.test").unwrap();
+        assert!(link > release);
+        assert!(!out[release..link].contains("[unreleased]:"));
+    }
+
+    #[test]
+    fn marker_finalize_refuses_a_dated_release_inside_unreleased() {
+        let broken = "<!-- oss-changelog:unreleased-start -->\n## [Unreleased]\n\n## [0.6.2] - 2026-08-23\n\n### Fixed\n- old\n<!-- oss-changelog:unreleased-end -->\n";
+        assert_eq!(
+            finalize_marker_changelog(broken, "0.6.3", "2026-08-24", "- new"),
+            Err(BumpEditError::ChangelogMarkersMalformed)
+        );
+    }
+
+    #[test]
+    fn marker_finalize_refuses_malformed_markers_and_empty_releases() {
+        let malformed = "<!-- oss-changelog:unreleased-start -->\n## [Unreleased]\n";
+        assert_eq!(
+            finalize_marker_changelog(malformed, "1.0.0", "2026-08-23", "- note"),
+            Err(BumpEditError::ChangelogMarkersMalformed)
+        );
+        let empty = "<!-- oss-changelog:unreleased-start -->\n## [Unreleased]\n### Added\n### Changed\n### Fixed\n<!-- oss-changelog:unreleased-end -->\n";
+        assert_eq!(
+            finalize_marker_changelog(empty, "1.0.0", "2026-08-23", ""),
+            Err(BumpEditError::ChangelogNotesEmpty)
         );
     }
 }
