@@ -2,10 +2,9 @@
 created: 2026-08-23
 updated: 2026-08-23
 type: bug
-status: fixed
+status: open
 priority: high
 lane: release-engine
-closed: 2026-08-23
 commits:
 - hash: ed3df46
   summary: target registry CLI package in CI and release workflows
@@ -37,3 +36,12 @@ _Add rationale for reopening here._
 ### 2026-08-23T16:11:28Z · @conductor
 
 Reopened after main CI run 32650811109: skill↔CLI lockstep still invokes `cargo test --locked -p shipshape --test skill --test skill_lockstep`; after the registry package rename those tests belong to package `shipshape-cli`. All other CI jobs passed. Release remains halted until the workflow is corrected and main CI is green.
+
+### 2026-08-23T20:45:50Z · @conductor
+
+Post-cut cleanup is now unblocked. v0.11.0 recovery verified crates.io shipshape-core + shipshape-cli, GitHub Release exactly three supported platforms, and Homebrew formula; old four-platform run remains abandoned. Restore shipshape-core publish=true and the first cargo-publish target for future releases, remove temporary recovery-only contract wording, run full gate/CI, then close.
+
+
+## Reopen Notes — 2026-08-23
+
+_Add rationale for reopening here._
