@@ -2,7 +2,7 @@
 created: 2026-08-23
 updated: 2026-08-23
 type: chore
-status: done
+status: open
 priority: high
 lane: release-engine
 commits:
@@ -10,7 +10,6 @@ commits:
   summary: 'fix(release): drop Intel macOS prebuilt support'
 - hash: d5fc507
   summary: preserve exact fallback formula bytes
-closed: 2026-08-23
 ---
 
 # Drop Intel macOS release target
@@ -39,3 +38,12 @@ _Add rationale for reopening here._
 ### 2026-08-23T19:32:48Z · @conductor
 
 Reopened after fallback execute wrote the correct GitHub Release and Homebrew formula but failed its final byte comparison. Root cause: `gh api --jq ... @base64d` appends a newline, so the observed file has one extra byte. Raw `.content | tr -d "\\n" | base64 --decode` proves the published formula is correct (1042 bytes, sha256 28c40c39f4090448314e5ceae8faf97de35640a9b3e1cf9a4fc1bcb700666e5f) and contains no Intel stanza. Fix the observer and rerun retry-safe verification.
+
+### 2026-08-23T20:01:45Z · @conductor
+
+Reopened after retry reached existing Release conflict check. Reproduction proved cargo-dist global manifest regeneration is intentionally/non-portably non-deterministic: source.tar.gz checksum changes from gzip timestamp; cargo_version_line changes with local Cargo; upload_files embeds random temp path. The published Release assets remain correct. Retry must semantically verify existing source archive against immutable tag, actual asset checksums/manifest topology, exact supported platform set, and no Intel claims instead of requiring regenerated global artifacts byte-for-byte.
+
+
+## Reopen Notes — 2026-08-23
+
+_Add rationale for reopening here._
