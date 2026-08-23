@@ -5,6 +5,7 @@ type: bug
 reporter: jari
 status: open
 priority: high
+lane: release-engine
 ---
 
 # release cut changelog_finalize breaks the marker block and skips fragments

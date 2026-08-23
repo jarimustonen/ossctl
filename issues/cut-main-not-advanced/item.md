@@ -5,6 +5,7 @@ type: bug
 reporter: jari
 status: open
 priority: normal
+lane: release-engine
 ---
 
 # release cut leaves the bump commit tag-only; main stays at the pre-release version
