@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
 
+## [0.10.1] - 2026-08-23
+
 ### Fixed
 - Delegated verification now uses one 20-minute barrier window total across
   workflow-state checks and all CI-owned destinations, polling destinations fairly
