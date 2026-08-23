@@ -2,7 +2,7 @@
 created: 2026-08-23
 updated: 2026-08-23
 type: chore
-status: open
+status: done
 priority: high
 lane: release-engine
 commits:
@@ -10,6 +10,9 @@ commits:
   summary: 'fix(release): drop Intel macOS prebuilt support'
 - hash: d5fc507
   summary: preserve exact fallback formula bytes
+- hash: 772ee79
+  summary: verify fallback retries semantically
+closed: 2026-08-23
 ---
 
 # Drop Intel macOS release target
@@ -27,6 +30,11 @@ Removed Intel macOS from the active three-platform product policy, preserved his
 ### 2026-08-23T19:57:31Z · @issuectl
 
 Fixed the fallback formula observer to decode GitHub Contents base64 outside jq without adding bytes, fail closed on missing or malformed content, and preserve the destination atomically. Regression coverage proves wrapped and trailing-newline exactness plus malformed-content behavior. Prepare-only recovery and the full repository gate passed; external execute remains for the conductor after merge and CI.
+
+### 2026-08-23T20:41:31Z · @issuectl
+
+Existing v0.11.0 Release retries now verify the exact eleven assets semantically: platform bytes remain pinned, source tar contents match TAG_SHA after gzip decompression, installer bytes and three-target topology are exact, manifest variance is narrowly validated/pinned, Release metadata and digests are exact, and formula bytes remain exact. Prepare-only, regression fixtures, multi-model review/assessment, shellcheck, and the full Rust green gate passed; no channel was mutated by this worker.
+
 
 
 ## Reopen Notes — 2026-08-23
