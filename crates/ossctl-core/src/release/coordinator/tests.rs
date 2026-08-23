@@ -606,10 +606,15 @@ impl Tagger for FakeTagger {
 #[derive(Default)]
 struct RecordingSink {
     kinds: Vec<EventKind>,
+    waits: Vec<VerifyWaitProgress>,
 }
 impl ProgressSink for RecordingSink {
     fn event(&mut self, event: &JournalEvent) {
         self.kinds.push(event.kind.clone());
+    }
+
+    fn verify_wait(&mut self, progress: &VerifyWaitProgress) {
+        self.waits.push(progress.clone());
     }
 }
 
@@ -4529,6 +4534,60 @@ fn a_delegated_cargo_dist_target_is_still_observed_as_a_github_release() {
     );
 }
 
+fn verify_delegated_destination(
+    ctx: &EffectCtx<'_>,
+    plan: &ReleasePlan,
+    target: &AdapterTarget,
+) -> VerifyOutcome {
+    let mut single = plan.clone();
+    single.targets = vec![PlanTarget {
+        ecosystem: target.target.ecosystem,
+        package: Some(target.package.clone()),
+        registry: target.target.registry,
+        adapter: target.target.adapter,
+    }];
+    let targets = resolve_target_plans(&single).unwrap();
+    let delegated = targets.iter().map(|target| target.id.clone()).collect();
+    let mut window = DelegatedVerifyWindow::new(ctx);
+    verify_delegated_destinations(
+        ctx,
+        &single,
+        &targets,
+        &delegated,
+        &std::collections::BTreeMap::new(),
+        &mut window,
+        &mut NullSink,
+    )
+    .get(&targets[0].id)
+    .copied()
+    .unwrap()
+}
+
+fn verify_delegated_homebrew(
+    ctx: &EffectCtx<'_>,
+    plan: &ReleasePlan,
+    package: &str,
+) -> VerifyOutcome {
+    verify_delegated_destination(
+        ctx,
+        plan,
+        &AdapterTarget {
+            target: crate::contract::schema::Target {
+                ecosystem: Ecosystem::Rust,
+                package: Some(package.to_string()),
+                registry: Registry::Homebrew,
+                adapter: Adapter::CargoDist,
+            },
+            package: package.to_string(),
+            version: plan.version.clone(),
+        },
+    )
+}
+
+fn verify_delegated_registry(ctx: &EffectCtx<'_>, target: &AdapterTarget) -> VerifyOutcome {
+    verify_delegated_destination(ctx, &ci_publish_plan(), target)
+}
+
 /// The delegated target fixture the observer-level tests poll for.
 fn ci_adapter_target() -> AdapterTarget {
     AdapterTarget {
@@ -4541,6 +4600,152 @@ fn ci_adapter_target() -> AdapterTarget {
         package: "tool".into(),
         version: "1.0.0".into(),
     }
+}
+
+#[test]
+fn three_delegated_destinations_share_one_bounded_window_and_stream_progress() {
+    // The realistic cargo-dist shape has one Release target, one Homebrew target,
+    // and one cargo-publish-ci registry target. None appears here. Every unresolved
+    // destination must be sampled round-robin throughout one total window.
+    struct UnreachableRelease;
+    impl CommandRunner for UnreachableRelease {
+        fn run(&self, _program: &str, _args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
+            Err(io::Error::other("GitHub unreachable"))
+        }
+    }
+    let clock = FakeClock(Cell::new(1000));
+    let runner = UnreachableRelease;
+    let registry = UnreachableRegistry;
+    let context = EffectCtx {
+        runner: &runner,
+        clock: &clock,
+        registry: &registry,
+        repo_root: Path::new("/repo"),
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let plan = ReleasePlan {
+        targets: vec![
+            plan_target(Ecosystem::Rust, Registry::GhReleases, Adapter::CargoDist),
+            plan_target(Ecosystem::Rust, Registry::Homebrew, Adapter::CargoDist),
+            plan_target(Ecosystem::Rust, Registry::CratesIo, Adapter::CargoPublishCi),
+        ],
+        homebrew_tap: Some("acme/homebrew-tap".into()),
+        ..ci_publish_plan()
+    };
+    let targets = resolve_target_plans(&plan).unwrap();
+    let delegated = targets.iter().map(|target| target.id.clone()).collect();
+    let expected = targets
+        .iter()
+        .map(|target| {
+            let fragment = match target.input.target.registry {
+                Registry::GhReleases => "GitHub Release",
+                Registry::Homebrew => "Homebrew tap",
+                Registry::CratesIo => "crates.io registry",
+                other => panic!("unexpected destination: {other:?}"),
+            };
+            (target.id.clone(), fragment)
+        })
+        .collect::<Vec<_>>();
+    let mut sink = RecordingSink::default();
+    let mut window = DelegatedVerifyWindow::new(&context);
+    let before = clock.0.get();
+
+    let outcomes = verify_delegated_destinations(
+        &context,
+        &plan,
+        &targets,
+        &delegated,
+        &std::collections::BTreeMap::new(),
+        &mut window,
+        &mut sink,
+    );
+    assert!(outcomes
+        .values()
+        .all(|outcome| *outcome == VerifyOutcome::Unknown));
+
+    let elapsed = clock.0.get() - before;
+    assert!(
+        elapsed <= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS + 10,
+        "round-robin observers exceeded one window: {elapsed}s"
+    );
+    for (target, destination_fragment) in expected {
+        let updates = sink
+            .waits
+            .iter()
+            .filter(|progress| progress.target == target)
+            .collect::<Vec<_>>();
+        assert!(
+            updates.len() >= 2
+                && updates
+                    .iter()
+                    .all(|progress| progress.destination.contains(destination_fragment))
+                && updates
+                    .windows(2)
+                    .all(|pair| pair[1].elapsed_secs > pair[0].elapsed_secs)
+                && updates.iter().all(|progress| progress.remaining_secs > 0),
+            "missing bounded-cadence progress for {target}: {updates:?}"
+        );
+    }
+    let per_target_bound = usize::try_from(
+        DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS / DELEGATED_RELEASE_VERIFY_PROGRESS_INTERVAL_SECS + 1,
+    )
+    .unwrap();
+    assert!(
+        sink.waits.len() <= per_target_bound * targets.len(),
+        "progress cadence became noisy: {} updates",
+        sink.waits.len()
+    );
+}
+
+#[test]
+fn an_already_verified_delegated_target_is_not_reobserved_on_resume() {
+    let clock = FakeClock(Cell::new(1000));
+    let runner = FakeCmd::new();
+    let registry = UnreachableRegistry;
+    let context = EffectCtx {
+        runner: &runner,
+        clock: &clock,
+        registry: &registry,
+        repo_root: Path::new("/repo"),
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let plan = ReleasePlan {
+        targets: vec![plan_target(
+            Ecosystem::Rust,
+            Registry::GhReleases,
+            Adapter::CargoDist,
+        )],
+        ..ci_publish_plan()
+    };
+    let targets = resolve_target_plans(&plan).unwrap();
+    let delegated = targets.iter().map(|target| target.id.clone()).collect();
+    let verified = targets
+        .iter()
+        .map(|target| (target.id.clone(), VerifyOutcome::Matches))
+        .collect();
+    let mut window = DelegatedVerifyWindow::new(&context);
+    let mut sink = RecordingSink::default();
+
+    let outcomes = verify_delegated_destinations(
+        &context,
+        &plan,
+        &targets,
+        &delegated,
+        &verified,
+        &mut window,
+        &mut sink,
+    );
+
+    assert!(outcomes.is_empty());
+    assert!(sink.waits.is_empty());
+    assert!(
+        !runner
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("gh release view")),
+        "resume re-observed an already durable match: {:?}",
+        runner.calls()
+    );
 }
 
 #[test]
@@ -4641,9 +4846,17 @@ fn a_terminal_delegated_failure_returns_immediately_with_the_job_cause() {
     };
     let targets = resolve_target_plans(&plan).unwrap();
     let delegated = targets.iter().map(|target| target.id.clone()).collect();
-    let (_, failure) = wait_for_delegated_runs(&context, &targets, &delegated, "1.0.0")
-        .expect("cargo-dist has GitHub run state")
-        .expect_err("cancelled run must fail");
+    let mut window = DelegatedVerifyWindow::new(&context);
+    let (_, failure) = wait_for_delegated_runs(
+        &context,
+        &targets,
+        &delegated,
+        "1.0.0",
+        &mut window,
+        &mut NullSink,
+    )
+    .expect("cargo-dist has GitHub run state")
+    .expect_err("cancelled run must fail");
     let DelegatedVerifyFailure::Failed(detail) = failure else {
         panic!("expected terminal failure, got {failure:?}");
     };
@@ -4709,9 +4922,17 @@ fn a_pending_workflow_cannot_hide_a_later_terminal_failure() {
     let targets = resolve_target_plans(&plan).unwrap();
     let delegated = targets.iter().map(|target| target.id.clone()).collect();
     let before = clock.0.get();
-    let (target, failure) = wait_for_delegated_runs(&context, &targets, &delegated, "1.0.0")
-        .unwrap()
-        .expect_err("the later failed workflow must win");
+    let mut window = DelegatedVerifyWindow::new(&context);
+    let (target, failure) = wait_for_delegated_runs(
+        &context,
+        &targets,
+        &delegated,
+        "1.0.0",
+        &mut window,
+        &mut NullSink,
+    )
+    .unwrap()
+    .expect_err("the later failed workflow must win");
     assert!(target.contains("gh-releases"));
     let DelegatedVerifyFailure::Failed(detail) = failure else {
         panic!("expected terminal failure, got {failure:?}");

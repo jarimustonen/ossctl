@@ -20,7 +20,7 @@ use ossctl_core::protocol::journal::{
 use ossctl_core::protocol::plan::ReleasePlan;
 use ossctl_core::protocol::reconcile::ReconcileReport;
 use ossctl_core::release::adapters::{verification_artifacts, EffectCtx, EMPTY_ARTIFACTS};
-use ossctl_core::release::coordinator::{self, CutError, ProgressSink};
+use ossctl_core::release::coordinator::{self, CutError, ProgressSink, VerifyWaitProgress};
 use ossctl_core::release::distribution::{
     delegated_publish_workflow_warnings, find_undeclared_distribution, UndeclaredDistribution,
 };
@@ -2411,6 +2411,32 @@ impl<W: Write> ProgressSink for StreamSink<W> {
             self.stopped = true;
         }
     }
+
+    fn verify_wait(&mut self, progress: &VerifyWaitProgress) {
+        if self.stopped {
+            return;
+        }
+        // JSONL stdout remains a stream of schema-v1 JournalEvent facts. Mixing a
+        // non-durable advisory kind into it would break strict existing consumers;
+        // machine callers can poll `release show`, while text mode gets liveness.
+        if self.json {
+            return;
+        }
+        let line = format!(
+            "  waiting: {} — {} ({}, {}s elapsed, {}s remaining)",
+            progress.target,
+            progress.destination,
+            progress.state,
+            progress.elapsed_secs,
+            progress.remaining_secs
+        );
+        if writeln!(self.out, "{line}")
+            .and_then(|()| self.out.flush())
+            .is_err()
+        {
+            self.stopped = true;
+        }
+    }
 }
 
 /// Emit the `run_created` fact to the stream before the coordinator runs, so the
@@ -3062,6 +3088,30 @@ mod tests {
             assert_eq!(v["kind"], "run_created");
             assert_eq!(v["schema_version"], JOURNAL_SCHEMA_VERSION);
         }
+    }
+
+    #[test]
+    fn stream_sink_preserves_jsonl_schema_and_renders_text_verify_progress() {
+        let progress = VerifyWaitProgress {
+            target: "tool@crates.io".into(),
+            destination: "crates.io registry tool@1.0.0".into(),
+            state: "missing".into(),
+            elapsed_secs: 60,
+            remaining_secs: 1140,
+        };
+        let mut json = Vec::new();
+        StreamSink::new(&mut json, true).verify_wait(&progress);
+        assert!(
+            json.is_empty(),
+            "advisory progress must not enter the JournalEvent JSONL stream"
+        );
+
+        let mut text = Vec::new();
+        StreamSink::new(&mut text, false).verify_wait(&progress);
+        let text = String::from_utf8(text).unwrap();
+        assert!(text.contains("tool@crates.io"));
+        assert!(text.contains("crates.io registry tool@1.0.0"));
+        assert!(text.contains("60s elapsed, 1140s remaining"));
     }
 
     /// A minimal `Parser` wrapper so `AbandonArgs` can be exercised through clap's

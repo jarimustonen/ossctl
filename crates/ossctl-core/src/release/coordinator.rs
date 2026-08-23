@@ -148,8 +148,9 @@ use super::journal::Journal;
 use super::journal_target_ids;
 use crate::contract::schema::{Adapter, Registry, Target};
 
-/// A destination for the coordinator's progress events, so a real cut can stream
-/// them (`--output=jsonl`, §12) while the same events are durably journalled.
+/// A destination for coordinator output: durable facts can stream as JSONL while
+/// advisory wait updates can provide text-mode liveness without changing that
+/// public journal-event stream.
 ///
 /// The coordinator calls [`Self::event`] with each fact **after** it has been
 /// appended to the journal (never before — a streamed event the journal did not
@@ -158,6 +159,26 @@ use crate::contract::schema::{Adapter, Registry, Target};
 pub trait ProgressSink {
     /// Handle one just-journalled event (e.g. write it as a JSONL line).
     fn event(&mut self, event: &JournalEvent);
+
+    /// Handle an advisory verify-wait update. Unlike [`Self::event`], this is not
+    /// a durable release fact. The default keeps existing sinks compatible.
+    fn verify_wait(&mut self, _progress: &VerifyWaitProgress) {}
+}
+
+/// Advisory progress emitted at a bounded cadence while verify waits for a
+/// CI-owned destination. It is separate from durable journal facts by design.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct VerifyWaitProgress {
+    /// Stable id of the target whose destination is pending.
+    pub target: String,
+    /// Destination currently being observed (workflow, registry, Release, or tap).
+    pub destination: String,
+    /// Current non-terminal observation state.
+    pub state: String,
+    /// Seconds consumed from the shared verify window.
+    pub elapsed_secs: u64,
+    /// Seconds left in the shared verify window.
+    pub remaining_secs: u64,
 }
 
 /// A [`ProgressSink`] that discards every event — for callers (and tests) that
@@ -1468,6 +1489,76 @@ const DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS: u64 = 20 * 60;
 /// [`Clock::sleep`](crate::ports::Clock::sleep) so tests advance virtual time.
 const DELEGATED_RELEASE_VERIFY_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(15);
+/// Less frequent than polls: enough to prove liveness without noisy logs.
+const DELEGATED_RELEASE_VERIFY_PROGRESS_INTERVAL_SECS: u64 = 60;
+
+const DELEGATED_RELEASE_VERIFY_MAX_SLEEPS: u64 =
+    DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS / DELEGATED_RELEASE_VERIFY_POLL_INTERVAL.as_secs() + 2;
+
+/// One per-invocation wall-time and fallback-attempt budget shared by workflow
+/// preflight and every delegated destination in this verify phase. A resume starts
+/// a fresh window, preserving the existing retry behavior.
+struct DelegatedVerifyWindow {
+    start: u64,
+    sleeps: u64,
+    next_progress_at: std::collections::HashMap<String, u64>,
+}
+
+impl DelegatedVerifyWindow {
+    fn new(ctx: &EffectCtx<'_>) -> Self {
+        Self {
+            start: ctx.clock.now_unix(),
+            sleeps: 0,
+            next_progress_at: std::collections::HashMap::new(),
+        }
+    }
+
+    fn snapshot(&self, ctx: &EffectCtx<'_>) -> (u64, u64) {
+        let elapsed = ctx.clock.now_unix().saturating_sub(self.start);
+        (
+            elapsed,
+            DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS.saturating_sub(elapsed),
+        )
+    }
+
+    fn sleep(&mut self, ctx: &EffectCtx<'_>) -> bool {
+        let (_, remaining) = self.snapshot(ctx);
+        if remaining == 0 || self.sleeps >= DELEGATED_RELEASE_VERIFY_MAX_SLEEPS {
+            return false;
+        }
+        ctx.clock.sleep(std::time::Duration::from_secs(
+            remaining.min(DELEGATED_RELEASE_VERIFY_POLL_INTERVAL.as_secs()),
+        ));
+        self.sleeps += 1;
+        true
+    }
+
+    fn stream_wait(
+        &mut self,
+        sink: &mut dyn ProgressSink,
+        ctx: &EffectCtx<'_>,
+        target: &str,
+        destination: String,
+        state: &str,
+    ) {
+        let (elapsed_secs, remaining_secs) = self.snapshot(ctx);
+        if remaining_secs == 0 {
+            return;
+        }
+        let next = self.next_progress_at.entry(target.to_string()).or_default();
+        if elapsed_secs < *next {
+            return;
+        }
+        sink.verify_wait(&VerifyWaitProgress {
+            target: target.to_string(),
+            destination,
+            state: state.to_string(),
+            elapsed_secs,
+            remaining_secs,
+        });
+        *next = elapsed_secs.saturating_add(DELEGATED_RELEASE_VERIFY_PROGRESS_INTERVAL_SECS);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VerifyMode {
@@ -1514,7 +1605,10 @@ fn wait_for_delegated_runs(
     targets: &[TargetPlan],
     delegated: &std::collections::BTreeSet<String>,
     version: &str,
+    window: &mut DelegatedVerifyWindow,
+    sink: &mut dyn ProgressSink,
 ) -> Option<Result<(), (String, DelegatedVerifyFailure)>> {
+    let mut seen = HashSet::new();
     let owners: Vec<(String, Adapter)> = targets
         .iter()
         .filter(|target| delegated.contains(&target.id))
@@ -1524,18 +1618,15 @@ fn wait_for_delegated_runs(
                 Adapter::CargoDist | Adapter::CargoPublishCi
             )
         })
+        .filter(|target| seen.insert(target.input.target.adapter))
         .map(|target| (target.id.clone(), target.input.target.adapter))
         .collect();
     if owners.is_empty() {
         return None;
     }
-    let start = ctx.clock.now_unix();
-    let max_rounds = DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS
-        / DELEGATED_RELEASE_VERIFY_POLL_INTERVAL.as_secs()
-        + 2;
     let mut ready = HashSet::new();
-    for round in 0..max_rounds {
-        let mut first_pending = None;
+    loop {
+        let mut pending = Vec::new();
         let mut first_unknown = None;
         for (target, adapter) in &owners {
             if ready.contains(adapter) {
@@ -1555,30 +1646,172 @@ fn wait_for_delegated_runs(
                     first_unknown.get_or_insert_with(|| (target.clone(), failure));
                 }
                 Some(failure @ DelegatedVerifyFailure::Pending(_)) => {
-                    first_pending.get_or_insert_with(|| (target.clone(), failure));
+                    pending.push((target.clone(), *adapter, failure));
                 }
             }
         }
         if let Some(unknown) = first_unknown {
             return Some(Err(unknown));
         }
-        if ready.len()
-            == owners
-                .iter()
-                .map(|(_, adapter)| adapter)
-                .collect::<HashSet<_>>()
-                .len()
-        {
+        if ready.len() == owners.len() {
             return Some(Ok(()));
         }
-        let timed_out = round + 1 == max_rounds
-            || ctx.clock.now_unix().saturating_sub(start) >= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS;
-        if timed_out {
-            return Some(Err(first_pending.expect("an unresolved owner is pending")));
+        for (target, adapter, _) in &pending {
+            window.stream_wait(
+                sink,
+                ctx,
+                target,
+                format!("GitHub Actions workflow ({})", adapter.as_str()),
+                "pending",
+            );
         }
-        ctx.clock.sleep(DELEGATED_RELEASE_VERIFY_POLL_INTERVAL);
+        if !window.sleep(ctx) {
+            let (target, _, failure) = pending
+                .into_iter()
+                .next()
+                .expect("an unresolved workflow owner is pending");
+            return Some(Err((target, failure)));
+        }
     }
-    unreachable!("bounded delegated workflow loop always returns")
+}
+
+struct DelegatedDestinationState<'a> {
+    target: &'a TargetPlan,
+    outcome: VerifyOutcome,
+    ever_reachable: bool,
+    settled: bool,
+}
+
+fn delegated_destination_label(plan: &ReleasePlan, target: &AdapterTarget) -> String {
+    match (target.target.adapter, target.target.registry) {
+        (_, Registry::Homebrew) => format!(
+            "Homebrew tap {} formula {}@{}",
+            plan.homebrew_tap.as_deref().unwrap_or("<unconfigured>"),
+            target.package,
+            plan.version
+        ),
+        (Adapter::CargoDist, _) => {
+            format!(
+                "GitHub Release v{} assets for {}",
+                plan.version, target.package
+            )
+        }
+        (Adapter::CargoPublishCi, _) | (_, Registry::Npm | Registry::Pypi | Registry::TestPypi) => {
+            format!(
+                "{} registry {}@{}",
+                target.target.registry.as_str(),
+                target.package,
+                target.version
+            )
+        }
+        _ => format!(
+            "GitHub Release v{} assets for {}",
+            plan.version, target.package
+        ),
+    }
+}
+
+fn observe_delegated_destination_once(
+    ctx: &EffectCtx<'_>,
+    plan: &ReleasePlan,
+    state: &mut DelegatedDestinationState<'_>,
+) {
+    let target = &state.target.input;
+    state.outcome = match (target.target.adapter, target.target.registry) {
+        (_, Registry::Homebrew) => {
+            let Some(tap) = plan.homebrew_tap.as_deref() else {
+                debug_assert!(false, "delegated Homebrew target planned without a tap");
+                state.outcome = VerifyOutcome::Unknown;
+                state.settled = true;
+                return;
+            };
+            super::adapters::homebrew::verify_tap_formula(
+                ctx,
+                tap,
+                &target.package,
+                &plan.version,
+                false,
+                Some(&plan.homebrew_platforms),
+            )
+        }
+        (Adapter::CargoDist, _) => {
+            observe_cargo_dist_github_release(ctx, &plan.version, &target.package)
+        }
+        (Adapter::CargoPublishCi, _) | (_, Registry::Npm | Registry::Pypi | Registry::TestPypi) => {
+            match ctx
+                .registry
+                .published_versions(target.ecosystem().as_str(), &target.package)
+            {
+                Ok(versions) => {
+                    state.ever_reachable = true;
+                    if versions.iter().any(|version| version == &target.version) {
+                        VerifyOutcome::Matches
+                    } else {
+                        VerifyOutcome::Missing
+                    }
+                }
+                Err(_) if state.ever_reachable => VerifyOutcome::Missing,
+                Err(_) => VerifyOutcome::Unknown,
+            }
+        }
+        _ => observe_cargo_dist_github_release(ctx, &plan.version, &target.package),
+    };
+    state.settled = matches!(
+        (target.target.registry, state.outcome),
+        (_, VerifyOutcome::Matches) | (Registry::GhReleases, VerifyOutcome::Conflicts)
+    );
+}
+
+/// Poll all unresolved CI-owned destinations once per round under the remaining
+/// shared barrier window. Round-robin polling prevents plan order from starving a
+/// later registry or tap and preserves each destination's accumulated truth.
+fn verify_delegated_destinations(
+    ctx: &EffectCtx<'_>,
+    plan: &ReleasePlan,
+    targets: &[TargetPlan],
+    delegated: &std::collections::BTreeSet<String>,
+    verified: &std::collections::BTreeMap<String, VerifyOutcome>,
+    window: &mut DelegatedVerifyWindow,
+    sink: &mut dyn ProgressSink,
+) -> std::collections::HashMap<String, VerifyOutcome> {
+    let mut states: Vec<DelegatedDestinationState<'_>> = targets
+        .iter()
+        .filter(|target| delegated.contains(&target.id))
+        .filter(|target| verified.get(&target.id) != Some(&VerifyOutcome::Matches))
+        .map(|target| DelegatedDestinationState {
+            target,
+            outcome: VerifyOutcome::Unknown,
+            ever_reachable: false,
+            settled: false,
+        })
+        .collect();
+    if states.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    loop {
+        for state in states.iter_mut().filter(|state| !state.settled) {
+            observe_delegated_destination_once(ctx, plan, state);
+        }
+        if states.iter().all(|state| state.settled) {
+            break;
+        }
+        for state in states.iter().filter(|state| !state.settled) {
+            window.stream_wait(
+                sink,
+                ctx,
+                &state.target.id,
+                delegated_destination_label(plan, &state.target.input),
+                state.outcome.as_str(),
+            );
+        }
+        if !window.sleep(ctx) {
+            break;
+        }
+    }
+    states
+        .into_iter()
+        .map(|state| (state.target.id.clone(), state.outcome))
+        .collect()
 }
 
 /// Observe every destination after dist. A v5 cut is not complete until each
@@ -1622,12 +1855,15 @@ fn verify_phase(
     verification_artifacts.homebrew = homebrew.cloned();
     let verify_ctx = ctx.with_artifacts(&verification_artifacts);
     record(journal, sink, EventKind::PhaseEntered { phase })?;
+    let mut window = DelegatedVerifyWindow::new(&verify_ctx);
     if mode == VerifyMode::CompletionBarrier {
         if let Some(Err((target, failure))) = wait_for_delegated_runs(
             &verify_ctx,
             targets,
             &journal.state().delegated,
             &plan.version,
+            &mut window,
+            sink,
         ) {
             record(
                 journal,
@@ -1660,6 +1896,19 @@ fn verify_phase(
             };
         }
     }
+    let delegated_outcomes = if mode == VerifyMode::CompletionBarrier {
+        verify_delegated_destinations(
+            &verify_ctx,
+            plan,
+            targets,
+            &journal.state().delegated,
+            &journal.state().verified,
+            &mut window,
+            sink,
+        )
+    } else {
+        std::collections::HashMap::new()
+    };
     let mut first_failure: Option<(String, DelegatedVerifyFailure)> = None;
     for tp in targets {
         if journal.state().verified.get(&tp.id) == Some(&VerifyOutcome::Matches) {
@@ -1681,7 +1930,21 @@ fn verify_phase(
             // verdict. Journal Unknown, never a false Missing.
             VerifyOutcome::Unknown
         } else if is_delegated {
-            verify_delegated_destination(&verify_ctx, plan, &tp.input)
+            if mode == VerifyMode::CompletionBarrier {
+                delegated_outcomes
+                    .get(&tp.id)
+                    .copied()
+                    .unwrap_or(VerifyOutcome::Unknown)
+            } else {
+                let mut state = DelegatedDestinationState {
+                    target: tp,
+                    outcome: VerifyOutcome::Unknown,
+                    ever_reachable: false,
+                    settled: false,
+                };
+                observe_delegated_destination_once(&verify_ctx, plan, &mut state);
+                state.outcome
+            }
         } else if let Some(receipt) = journal.state().published.get(&tp.id) {
             let receipt = AdapterReceipt {
                 adapter: tp.input.target.adapter,
@@ -1781,143 +2044,6 @@ fn verify_phase(
             None,
             "all declared destinations match, but the preceding dist barrier failed and the run remains resumable".to_string(),
         ),
-    }
-}
-
-/// Observe a CI-delegated target at the destination it actually publishes to.
-/// Package-registry adapters use the registry observer; cargo-dist remains on its
-/// GitHub Release (or Homebrew formula) surface even for an odd registry declaration.
-/// Keeping this dispatch after [`wait_for_delegated_runs`] preserves the stronger
-/// workflow-state-first rule: a pending or failed workflow never degrades into a
-/// false destination `Missing` verdict.
-fn verify_delegated_destination(
-    ctx: &EffectCtx<'_>,
-    plan: &ReleasePlan,
-    target: &AdapterTarget,
-) -> VerifyOutcome {
-    match (target.target.adapter, target.target.registry) {
-        (_, Registry::Homebrew) => verify_delegated_homebrew(ctx, plan, &target.package),
-        // cargo-dist publishes Release assets regardless of an odd-but-expressible
-        // registry declaration. Its adapter identity therefore takes precedence over
-        // the package-registry destination cases below.
-        (Adapter::CargoDist, _) => verify_delegated_release(ctx, plan, &target.package),
-        (Adapter::CargoPublishCi, _) | (_, Registry::Npm | Registry::Pypi | Registry::TestPypi) => {
-            verify_delegated_registry(ctx, target)
-        }
-        _ => verify_delegated_release(ctx, plan, &target.package),
-    }
-}
-
-/// Observe a cargo-dist CI-owned Homebrew formula. Unlike the engine-owned tap
-/// adapter, cargo-dist does not carry ossctl's ownership marker, but it must still
-/// expose the sealed release version and expected platform archive stanzas.
-fn verify_delegated_homebrew(
-    ctx: &EffectCtx<'_>,
-    plan: &ReleasePlan,
-    package: &str,
-) -> VerifyOutcome {
-    let Some(tap) = plan.homebrew_tap.as_deref() else {
-        debug_assert!(false, "delegated Homebrew target planned without a tap");
-        return VerifyOutcome::Unknown;
-    };
-    let start = ctx.clock.now_unix();
-    loop {
-        let outcome = super::adapters::homebrew::verify_tap_formula(
-            ctx,
-            tap,
-            package,
-            &plan.version,
-            false,
-            Some(&plan.homebrew_platforms),
-        );
-        if outcome == VerifyOutcome::Matches
-            || ctx.clock.now_unix().saturating_sub(start) >= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS
-        {
-            return outcome;
-        }
-        ctx.clock.sleep(DELEGATED_RELEASE_VERIFY_POLL_INTERVAL);
-    }
-}
-
-/// Poll the package registry until a **CI-delegated registry publish** is visible —
-/// the observation half of the tag-only cut (`release-ci-publish-mode`).
-///
-/// For a `cargo-publish-ci` target the engine never publishes: the tag push triggers
-/// the workflow that runs `cargo publish` with the repo's registry secret. So the
-/// only thing that can make such a target green is *seeing the version on the
-/// index*, which this does with the same bounded wait the delegated GitHub Release
-/// observer uses (CI needs minutes: queue + build + publish + index propagation).
-/// The engine does not race CI, and it does not assume: an unobserved target ends
-/// the cut red.
-///
-/// Outcome discipline (ADR-0002's verify amendment, the reconcile table's
-/// never-guess rule):
-/// - the target's sealed version appears in the registry's published set ⇒
-///   [`VerifyOutcome::Matches`]
-/// - the window elapses with the registry having **answered at least once** and the
-///   version absent ⇒ [`VerifyOutcome::Missing`] (CI did not publish it — a real,
-///   actionable failure)
-/// - the window elapses with **every** lookup failing (an outage, or an ecosystem the
-///   [`RegistryQuery`](crate::ports::RegistryQuery) port has no client for) ⇒
-///   [`VerifyOutcome::Unknown`] — never a false `Missing`. Both are barrier failures,
-///   but the operator needs to know which one happened, so the verdict accumulates
-///   over the whole window rather than sampling the final poll.
-///
-/// No digest comparison: there is no engine receipt for a delegated publish (nothing
-/// was uploaded from here), so presence at the sealed version is the strongest
-/// available observation. That is the same bar the delegated Release/tap observers
-/// meet. Presence alone would be weak evidence if the version could pre-date the cut —
-/// which is why the cargo adapter's dry-run REFUSES a delegated target whose version is
-/// already on the registry ([`AdapterError::DelegatedVersionAlreadyPublished`]), pre-tag.
-/// Together the two make "present after the tag" mean "CI published it".
-///
-/// [`AdapterError::DelegatedVersionAlreadyPublished`]: super::adapters::AdapterError::DelegatedVersionAlreadyPublished
-fn verify_delegated_registry(ctx: &EffectCtx<'_>, target: &AdapterTarget) -> VerifyOutcome {
-    let ecosystem = target.ecosystem().as_str();
-    let start = ctx.clock.now_unix();
-    // ACCUMULATED, not sampled: the Missing-vs-Unknown verdict is about the whole
-    // window, not the last poll. A single transient failure on the final request of a
-    // 20-minute window in which the registry answered "absent" throughout would
-    // otherwise be reported as an outage — sending the operator to re-run verify when
-    // the real answer is "CI never published it".
-    let mut ever_reachable = false;
-    loop {
-        if let Ok(versions) = ctx.registry.published_versions(ecosystem, &target.package) {
-            ever_reachable = true;
-            if versions.iter().any(|v| v == &target.version) {
-                return VerifyOutcome::Matches;
-            }
-        }
-        if ctx.clock.now_unix().saturating_sub(start) >= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS {
-            return if ever_reachable {
-                VerifyOutcome::Missing
-            } else {
-                VerifyOutcome::Unknown
-            };
-        }
-        ctx.clock.sleep(DELEGATED_RELEASE_VERIFY_POLL_INTERVAL);
-    }
-}
-
-/// Poll a cargo-dist owned GitHub Release until its manifest-declared package
-/// inventory is visible. Failures remain retryable inside the bounded window, but
-/// the final outcome preserves `Unknown`/`Conflicts` rather than laundering an
-/// observation failure into `Missing` after the irreversible tag push.
-fn verify_delegated_release(
-    ctx: &EffectCtx<'_>,
-    plan: &ReleasePlan,
-    package: &str,
-) -> VerifyOutcome {
-    let start = ctx.clock.now_unix();
-    loop {
-        let outcome = observe_cargo_dist_github_release(ctx, &plan.version, package);
-        if matches!(outcome, VerifyOutcome::Matches | VerifyOutcome::Conflicts) {
-            return outcome;
-        }
-        if ctx.clock.now_unix().saturating_sub(start) >= DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS {
-            return outcome;
-        }
-        ctx.clock.sleep(DELEGATED_RELEASE_VERIFY_POLL_INTERVAL);
     }
 }
 

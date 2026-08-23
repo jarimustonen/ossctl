@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Delegated verification now uses one 20-minute barrier window total across
+  workflow-state checks and all CI-owned destinations, polling destinations fairly
+  and rendering bounded-cadence text progress with the target, destination, state,
+  elapsed time, and remaining time. JSONL remains the unchanged journal-fact stream
+  (`delegated-verify-window-ux`).
 - **Delegated npm publishes are now verified at npm, while delegated Python
   publishes no longer fall through to GitHub Release asset verification.** PyPI and
   TestPyPI report an honest `Unknown` until a Python registry client is available
