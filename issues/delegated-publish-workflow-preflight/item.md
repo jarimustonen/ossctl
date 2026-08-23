@@ -2,11 +2,17 @@
 created: 2026-08-17
 updated: 2026-08-23
 type: improvement
-status: in-progress
+status: done
 priority: normal
 lane: plan-seal
 lane_seq: 20
 collision: [crates/ossctl-core/src/release/distribution.rs, crates/ossctl-core/src/release/plan.rs]
+commits:
+- hash: 4c6e34bec388b09f8a8b2c86145d07ff42e9d912
+  summary: 'fix(release): tighten delegated workflow evidence'
+- hash: 3a105bc278dffd334c888534f4b23a95af19df33
+  summary: 'fix(release): warn when delegated Cargo workflow is missing'
+closed: 2026-08-23
 ---
 
 # release cut does not check that a CI-delegated publish workflow exists
@@ -36,3 +42,9 @@ compare the existing dead-tap advisory.
 a repo with no tag-triggered publish workflow surfaces a warning naming the missing
 workflow. Close as wontfix if the detection proves too heuristic to be trustworthy (e.g.
 it cannot see a reusable/called workflow) — record which shape defeated it.
+
+## Resolution
+
+### 2026-08-23T00:27:36Z · @issuectl
+
+Implemented a plan-time advisory naming the missing tag-triggered Cargo publish workflow. Detection covers direct publish steps and valid repository-local reusable workflow calls; missing, dispatch-only, direct, and reusable cases are hermetically tested. The exact full gate passed after review fixes.
