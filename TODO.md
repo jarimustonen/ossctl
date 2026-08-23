@@ -193,6 +193,12 @@ priority silently outranks `lane_seq` in dag ordering — visible in `issuectl d
 
 ## Scheduling
 
+**Deliberate unlaned collection issue:** `oss-publicize-skill` stays open outside the DAG.
+It is not executable backlog yet: append observations from at least one more real de-stealth
+pass to that issue, then make the documented A/B/C extraction decision. Do not assign a lane
+or start implementation before the second data point. Its appearance in open-and-unlaned
+triage is expected until that evidence has been collected.
+
 Canonical scheduling lives in `issuectl` frontmatter (`lane:`, `lane_seq:`, `blocked_by:`,
 `collision:`). Do not maintain a markdown DAG or adjacent backlog in this file.
 
