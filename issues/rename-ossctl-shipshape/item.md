@@ -2,10 +2,14 @@
 created: 2026-08-23
 updated: 2026-08-23
 type: chore
-status: open
+status: fixed
 priority: high
 size: XL
 lane: repo-wide-rename
+commits:
+- hash: 0bba339
+  summary: rename the product, crates, CLI, skills, and distribution to Shipshape
+closed: 2026-08-23
 ---
 
 # Rename ossctl to Shipshape
@@ -61,3 +65,27 @@ The bundled catalog becomes:
 ## Implementation guidance
 
 This is a repository-wide rename with a large collision surface. Implement it as a planned migration, not a mechanical global search-and-replace.
+
+## Outcome
+
+Delivered in `0bba339`. Accepted [ADR-0005](../../docs/adr/0005-shipshape-product-migration.md)
+records the migration and compatibility boundary. `shipshape` and `shipshape-core` are
+the canonical package identities, and the bundled catalog contains exactly the ten
+`shipshape-*` skills. Known old skill names fail with actionable `skill_renamed`
+guidance.
+
+Existing release plans, journals, locks, canonical JSON, event schemas, seal semantics,
+`OSS-RELEASE.md`, and changelog markers remain compatible. The deliberate
+`git-common-dir/ossctl` storage namespace and `ossctl.release-plan` hash domain are
+permanent protocol identifiers; old and new Homebrew ownership markers are both
+accepted. No schema or `SEAL_VERSION` bump was needed.
+
+Distribution retains source installation plus prebuilt macOS and Linux arm64/x86_64
+coverage, with no Windows. The first-release tap bootstrap and external channel/fleet
+convergence order are explicit in ADR-0005 and remain conductor actions, not unfinished
+repository code.
+
+The full repository green gate passed after a two-round four-model `/llm-review` and
+`/assess-findings`; all confirmed migration findings were applied. No follow-up issue was
+filed because the remaining review concerns were either disproven by the coordinator path
+or failed the repository's reachability/damage bar.
