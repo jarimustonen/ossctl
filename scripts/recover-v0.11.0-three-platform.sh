@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=scripts/lib/github-content-decode.sh
+source "$script_dir/lib/github-content-decode.sh"
+
 # Safe, pinned fallback for the cancelled v0.11.0 cargo-dist run. By default this
 # only prepares and validates local material. External writes require both
 # --execute and the explicit environment acknowledgement below.
@@ -37,7 +41,7 @@ expected_sha256=(
   83313adf0e1bc91cffb78fea7146f3ecc8280a58b57180c5a0d1cbb3989d9d86
 )
 
-for command in git gh jq curl unzip tar shasum cargo; do
+for command in git gh jq curl unzip tar shasum cargo base64 tr; do
   command -v "$command" >/dev/null || { echo "missing required command: $command" >&2; exit 69; }
 done
 repo_root=$(git rev-parse --show-toplevel)
@@ -311,8 +315,12 @@ done
 gh release view "$TAG" --repo "$REPO" --json assets \
   --jq '.assets[].name' | sort >"$work/final-assets"
 diff -u "$expected_assets" "$work/final-assets"
-gh api "repos/$TAP/contents/Formula/shipshape.rb" \
-  --jq '.content | gsub("\\n"; "") | @base64d' >"$work/observed-formula.rb"
+formula_response="$work/formula-content.json"
+gh api "repos/$TAP/contents/Formula/shipshape.rb" >"$formula_response"
+decode_nonempty_github_content "$formula_response" "$work/observed-formula.rb" || {
+  echo "published formula content is missing, malformed, or not base64" >&2
+  exit 69
+}
 cmp "$formula" "$work/observed-formula.rb"
 if grep -qE 'x86_64-apple-darwin|OS\.mac\? && Hardware::CPU\.intel\?' \
   "$work/observed-formula.rb"; then
