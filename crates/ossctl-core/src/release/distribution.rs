@@ -62,31 +62,37 @@ pub fn delegated_publish_workflow_warnings(
     targets: &[Target],
     surface: &DistributionSurface,
 ) -> Vec<String> {
-    let delegated_packages = targets
+    let delegated_targets = targets
         .iter()
-        .filter(|target| target.adapter == Adapter::CargoPublishCi)
-        .map(|target| {
-            target
-                .package
-                .as_deref()
-                .unwrap_or("<unresolved rust package>")
+        .filter(|target| {
+            target.adapter == Adapter::CargoPublishCi && target.registry == Registry::CratesIo
         })
         .collect::<Vec<_>>();
-    if delegated_packages.is_empty() || !surface.tag_triggered_cargo_publish_workflows.is_empty() {
+    if delegated_targets.is_empty() || !surface.tag_triggered_cargo_publish_workflows.is_empty() {
         return Vec::new();
     }
 
+    let mut delegated_packages = delegated_targets
+        .iter()
+        .filter_map(|target| target.package.as_deref())
+        .collect::<Vec<_>>();
+    delegated_packages.sort_unstable();
+    delegated_packages.dedup();
+    let subject = if delegated_packages.is_empty() {
+        "an unresolved rust package".to_string()
+    } else {
+        delegated_packages.join(", ")
+    };
     let trigger_context = if surface.tag_triggered_workflows.is_empty() {
         "no tag-triggered workflows were detected".to_string()
     } else {
         format!(
-            "the detected tag-triggered workflows ({}) do not run it",
+            "no directly inspectable Cargo publish path was found in the detected tag-triggered workflows ({})",
             surface.tag_triggered_workflows.join(", ")
         )
     };
     vec![format!(
-        "cargo-publish-ci delegates crates.io publication for {} to CI, but no tag-triggered Cargo publish workflow was detected under .github/workflows; {trigger_context}. Add an `on: push: tags:` workflow that runs `cargo publish` directly or calls a repository-local reusable publish workflow, then re-plan",
-        delegated_packages.join(", ")
+        "cargo-publish-ci delegates crates.io publication for {subject} to CI, but no tag-triggered Cargo publish workflow was detected under .github/workflows; {trigger_context}. Add an `on: push: tags:` workflow that runs `cargo publish` directly or calls a repository-local reusable publish workflow, then re-plan"
     )]
 }
 

@@ -336,9 +336,15 @@ fn workflow_reaches_cargo_publish(
     }
 
     visiting.push(name.to_string());
-    let reaches_publish = local_workflow_calls(text)
-        .iter()
-        .any(|called| workflow_reaches_cargo_publish(called, workflows, visiting));
+    let reaches_publish = local_workflow_calls(text).iter().any(|called| {
+        workflows
+            .iter()
+            .find(|(candidate, _)| candidate == called)
+            .is_some_and(|(_, callee)| {
+                workflow_accepts_calls(callee)
+                    && workflow_reaches_cargo_publish(called, workflows, visiting)
+            })
+    });
     visiting.pop();
     reaches_publish
 }
@@ -362,11 +368,84 @@ fn workflow_runs_cargo_publish(text: &str) -> bool {
 }
 
 fn command_runs_cargo_publish(command: &str) -> bool {
-    command
-        .split_ascii_whitespace()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .any(|tokens| tokens == ["cargo", "publish"])
+    command.lines().any(|line| {
+        let uncommented = line.split('#').next().unwrap_or("");
+        uncommented
+            .split([';', '\n'])
+            .flat_map(|part| part.split("&&"))
+            .flat_map(|part| part.split("||"))
+            .any(command_segment_runs_cargo_publish)
+    })
+}
+
+fn command_segment_runs_cargo_publish(segment: &str) -> bool {
+    let tokens = segment.split_ascii_whitespace().collect::<Vec<_>>();
+    let mut index = tokens
+        .iter()
+        .position(|token| *token == "cargo")
+        .unwrap_or(tokens.len());
+    if index == tokens.len()
+        || tokens[..index]
+            .iter()
+            .any(|token| !token.contains('=') || token.starts_with('-'))
+    {
+        return false;
+    }
+    index += 1;
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.starts_with('+'))
+    {
+        index += 1;
+    }
+    if tokens.get(index) != Some(&"publish") {
+        return false;
+    }
+
+    let options = &tokens[index + 1..];
+    if options.iter().any(|option| {
+        matches!(*option, "--dry-run" | "--help" | "-h" | "--index")
+            || option.starts_with("--index=")
+    }) {
+        return false;
+    }
+    for (option_index, option) in options.iter().enumerate() {
+        if let Some(registry) = option.strip_prefix("--registry=") {
+            if registry != "crates-io" {
+                return false;
+            }
+        } else if *option == "--registry"
+            && options.get(option_index + 1).copied() != Some("crates-io")
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn workflow_accepts_calls(text: &str) -> bool {
+    let mut on_indent = None;
+    for line in text.lines() {
+        let uncommented = line.split('#').next().unwrap_or("");
+        if uncommented.trim().is_empty() {
+            continue;
+        }
+        let indent = uncommented.len() - uncommented.trim_start().len();
+        let key = uncommented.trim();
+        if key == "on:" {
+            on_indent = Some(indent);
+            continue;
+        }
+        if let Some(on) = on_indent {
+            if indent <= on {
+                return false;
+            }
+            if key == "workflow_call:" {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn local_workflow_calls(text: &str) -> Vec<String> {
@@ -2914,6 +2993,34 @@ mod tests {
     }
 
     #[test]
+    fn cargo_publish_command_requires_a_real_crates_io_publish() {
+        for command in [
+            "cargo publish --dry-run",
+            "cargo publish --help",
+            "cargo publish --registry internal",
+            "cargo publish --index https://example.invalid",
+            "echo cargo publish",
+            "# cargo publish",
+        ] {
+            assert!(
+                !command_runs_cargo_publish(command),
+                "{command:?} is not credible crates.io publish evidence"
+            );
+        }
+        for command in [
+            "cargo publish --locked",
+            "cargo +stable publish --locked",
+            "cd crates/demo && cargo publish --registry crates-io",
+            "CARGO_TERM_COLOR=always cargo publish; echo done",
+        ] {
+            assert!(
+                command_runs_cargo_publish(command),
+                "{command:?} should be credible crates.io publish evidence"
+            );
+        }
+    }
+
+    #[test]
     fn tag_triggered_local_reusable_cargo_publish_workflow_is_detected() {
         let fs = FakeFs::default()
             .file(
@@ -2930,6 +3037,22 @@ mod tests {
             surface.tag_triggered_cargo_publish_workflows,
             vec!["release.yml"]
         );
+    }
+
+    #[test]
+    fn local_workflow_without_workflow_call_is_not_credible_publish_evidence() {
+        let fs = FakeFs::default()
+            .file(
+                "/repo/.github/workflows/release.yml",
+                "on:\n  push:\n    tags:\n      - 'v*'\njobs:\n  crates:\n    uses: ./.github/workflows/publish.yml\n",
+            )
+            .file(
+                "/repo/.github/workflows/publish.yml",
+                "on:\n  workflow_dispatch:\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo publish --locked\n",
+            );
+        let surface = gather(repo(), &fs, &FakeGit::default()).distribution_surface;
+        assert_eq!(surface.tag_triggered_workflows, vec!["release.yml"]);
+        assert!(surface.tag_triggered_cargo_publish_workflows.is_empty());
     }
 
     #[test]
