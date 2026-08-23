@@ -98,7 +98,7 @@ pub enum ContractAction {
 pub enum ReleaseAction {
     /// Compute and seal a content-addressed release plan.
     Plan(crate::release::PlanArgs),
-    /// Execute a sealed plan; refuses on repo drift.
+    /// Execute a sealed plan, verify destinations, then fast-forward the remote default branch.
     Cut(crate::release::CutArgs),
     /// Reconcile and continue an interrupted run.
     Resume(crate::release::ResumeArgs),

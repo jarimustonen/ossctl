@@ -67,7 +67,7 @@ pub struct PlanArgs {
 
 /// Arguments for `release cut`.
 ///
-/// `release plan` is read-only and persists nothing, so `cut` re-derives the plan
+/// `release plan` persists an immutable approval artifact, and `cut` re-derives the plan
 /// from the *current* repo state (the version is derived from the workspace
 /// manifest, the single source of truth), then refuses unless the recomputed
 /// `plan_id` equals the approved `--plan` (drift check, ADR-0002 §3). Like `plan`,
@@ -75,7 +75,9 @@ pub struct PlanArgs {
 #[derive(Args, Debug)]
 pub struct CutArgs {
     /// The sealed plan id to execute (from `release plan`). The cut refuses if the
-    /// current repository no longer hashes to it.
+    /// current repository no longer hashes to it. After destination verification it
+    /// fast-forwards the remote default branch to the release commit; divergence or
+    /// push-permission failure leaves the run resumable and never force-pushes.
     #[arg(long, value_name = "PLAN_ID")]
     pub plan: String,
     /// Repository root to cut the release in (default: current directory).
@@ -1619,7 +1621,7 @@ pub fn resume(args: &ResumeArgs, format: OutputFormat) -> Result<(), CliError> {
     match coordinator::execute(&mut journal, &plan, &ctx, &tagger, &mut sink) {
         Ok(()) => {
             if !matches!(format, OutputFormat::Json) {
-                render_cut_success(&args.run_id, &plan)?;
+                render_cut_success(&args.run_id, &plan, journal.state())?;
             }
             Ok(())
         }
@@ -2012,7 +2014,7 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     match coordinator::execute(&mut journal, &current, &ctx, &tagger, &mut sink) {
         Ok(()) => {
             if !matches!(format, OutputFormat::Json) {
-                render_cut_success(&run_id, &current)?;
+                render_cut_success(&run_id, &current, journal.state())?;
             }
             Ok(())
         }
@@ -2497,6 +2499,12 @@ fn render_event_line(event: &JournalEvent) -> String {
         }
         EventKind::TagCreatedLocal { tag } => format!("  tag created: {tag}"),
         EventKind::TagPushedRemote { tag } => format!("  tag pushed: {tag}"),
+        EventKind::DefaultBranchSelected { branch } => {
+            format!("  default branch selected: {branch}")
+        }
+        EventKind::DefaultBranchAdvanced { branch, commit } => {
+            format!("  default branch advanced: {branch} -> {commit}")
+        }
         EventKind::GithubReleaseCreated { tag, url } => match url {
             Some(u) => format!("  release: {tag} ({u})"),
             None => format!("  release: {tag}"),
@@ -2509,11 +2517,22 @@ fn render_event_line(event: &JournalEvent) -> String {
 }
 
 /// Text summary printed after a successful cut (json mode's summary is the stream).
-fn render_cut_success(run_id: &str, plan: &ReleasePlan) -> Result<(), CliError> {
+fn render_cut_success(
+    run_id: &str,
+    plan: &ReleasePlan,
+    state: &ossctl_core::protocol::journal::RunState,
+) -> Result<(), CliError> {
     crate::output::stdoutln!()?;
     crate::output::stdoutln!("release complete — run {run_id}")?;
     crate::output::stdoutln!("version: {}", plan.version)?;
     crate::output::stdoutln!("tag:     v{}", plan.version)?;
+    if let Some(branch) = &state.default_branch {
+        crate::output::stdoutln!(
+            "branch:  origin/{} contained {} at completion",
+            branch.branch,
+            branch.commit
+        )?;
+    }
     // Publish-none must not read as a successful publish: a zero-target plan is a
     // TAG-ONLY cut (no registry publish, no GitHub Release), so say that rather than
     // reporting "published 0 target(s)" — which invites the reader to assume a

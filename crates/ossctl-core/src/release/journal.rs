@@ -178,6 +178,7 @@ pub fn reduce(events: &[JournalEvent]) -> RunState {
 /// [`RunStatus::Abandoned`], further events are ignored (the watermark still
 /// advances so a later legitimate replay is consistent), so a corrupt log cannot
 /// mutate a run past its terminal fact.
+#[allow(clippy::too_many_lines)] // one exhaustive reducer keeps event semantics auditable
 pub fn apply(state: &mut RunState, event: &JournalEvent) {
     // Watermark: never fold an event already accounted for. `seq` starts at 1,
     // so the first event (seq 1) always applies against the initial mark of 0.
@@ -207,6 +208,12 @@ pub fn apply(state: &mut RunState, event: &JournalEvent) {
             state.head_sha.clone_from(head_sha);
             state.bump_inputs.clone_from(bump);
             state.created_ts = event.ts;
+            state.terminal_phase = Some(match event.schema_version {
+                0 | 1 => Phase::Tag,
+                2..=4 => Phase::Dist,
+                5 => Phase::Verify,
+                _ => Phase::AdvanceBranch,
+            });
             state.status = RunStatus::InProgress;
         }
         EventKind::BumpApplied {
@@ -240,15 +247,7 @@ pub fn apply(state: &mut RunState, event: &JournalEvent) {
             // v2 `Tag Ok` (schema_version >= 2) does NOT complete: a Dist barrier
             // always follows it, and completing early would freeze the projection
             // before Dist runs.
-            let completes = match phase {
-                // v1–v4 runs predate the mandatory verify barrier, so their
-                // successful dist completion remains terminal on replay.
-                Phase::Dist => event.schema_version < 5,
-                // v5 runs are terminal only after every target is observed.
-                Phase::Verify => true,
-                Phase::Tag => event.schema_version < 2,
-                _ => false,
-            };
+            let completes = state.terminal_phase == Some(*phase);
             if completes && *outcome == PhaseOutcome::Ok {
                 state.status = RunStatus::Completed;
             }
@@ -279,6 +278,15 @@ pub fn apply(state: &mut RunState, event: &JournalEvent) {
         }
         EventKind::TagPushedRemote { tag } => {
             state.tags.entry(tag.clone()).or_default().pushed_remote = true;
+        }
+        EventKind::DefaultBranchSelected { branch } => {
+            state.selected_default_branch = Some(branch.clone());
+        }
+        EventKind::DefaultBranchAdvanced { branch, commit } => {
+            state.default_branch = Some(crate::protocol::journal::DefaultBranchState {
+                branch: branch.clone(),
+                commit: commit.clone(),
+            });
         }
         EventKind::GithubReleaseCreated { tag, url } => {
             let t = state.tags.entry(tag.clone()).or_default();
@@ -1227,8 +1235,12 @@ mod tests {
     }
 
     #[test]
-    fn verify_phase_ok_completes_a_v5_run_dist_ok_alone_does_not() {
-        let mut state = reduce(&sample_events());
+    fn verify_phase_ok_completes_a_v5_run_even_when_a_v6_binary_resumes_it() {
+        let mut events = sample_events();
+        // Run semantics are fixed by run_created, not by the newer binary that
+        // appends a later completion event during resume.
+        events[0].schema_version = 5;
+        let mut state = reduce(&events);
         assert_eq!(state.status, RunStatus::InProgress);
         let mut seq = state.applied_seq;
         let mut push = |state: &mut RunState, phase: Phase| {
@@ -1258,7 +1270,9 @@ mod tests {
 
     #[test]
     fn a_v4_dist_ok_stays_completed_for_backward_compat() {
-        let mut state = reduce(&sample_events());
+        let mut events = sample_events();
+        events[0].schema_version = 4;
+        let mut state = reduce(&events);
         let seq = state.applied_seq + 1;
         apply(
             &mut state,
@@ -1282,7 +1296,9 @@ mod tests {
         // reducer must still read it as Completed, or an upgraded binary would
         // misreport a finished release as InProgress (and disagree with the manifest
         // cache the old reducer wrote as Completed).
-        let mut state = reduce(&sample_events());
+        let mut events = sample_events();
+        events[0].schema_version = 1;
+        let mut state = reduce(&events);
         assert_eq!(state.status, RunStatus::InProgress);
         let seq = state.applied_seq + 1;
         apply(

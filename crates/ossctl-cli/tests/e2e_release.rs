@@ -27,7 +27,8 @@ fn plan_is_deterministic_and_has_the_release_shape() {
             "publish-all",
             "tag",
             "dist",
-            "verify"
+            "verify",
+            "advance-branch"
         ])
     );
     assert!(
@@ -165,6 +166,7 @@ fn a_publish_none_repo_plans_and_cuts_a_tag_only_release() {
         );
     }
     assert!(journal.contains("tag_pushed_remote"));
+    assert!(journal.contains("default_branch_advanced"));
     let verify_ok = journal.lines().any(|line| {
         let event: serde_json::Value = serde_json::from_str(line).expect("journal event JSON");
         event["kind"] == "phase_completed" && event["phase"] == "verify" && event["outcome"] == "ok"

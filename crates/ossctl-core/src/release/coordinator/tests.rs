@@ -593,6 +593,22 @@ impl Tagger for FakeTagger {
         }
         Ok(())
     }
+    fn default_branch(&self) -> io::Result<String> {
+        self.calls.borrow_mut().push("select:main".to_string());
+        if self.fail_step == Some("select") {
+            return Err(io::Error::other("cannot resolve default branch"));
+        }
+        Ok("main".to_string())
+    }
+    fn advance_branch(&self, branch: &str, commit: &str) -> io::Result<()> {
+        self.calls
+            .borrow_mut()
+            .push(format!("advance:{branch}@{commit}"));
+        if self.fail_step == Some("advance") {
+            return Err(io::Error::other("cannot fast-forward main"));
+        }
+        Ok(())
+    }
     fn create_github_release(&self, tag: &str, _title: &str) -> io::Result<Option<String>> {
         self.calls.borrow_mut().push(format!("release:{tag}"));
         if self.fail_step == Some("release") {
@@ -911,7 +927,13 @@ fn tags_exactly_once_after_all_publishes_and_completes_the_run() {
     // Exactly one tag, driven through its three steps in order.
     assert_eq!(
         tagger.calls(),
-        vec!["create:v1.2.3@deadbeef", "push:v1.2.3", "release:v1.2.3"]
+        vec![
+            "create:v1.2.3@deadbeef",
+            "push:v1.2.3",
+            "release:v1.2.3",
+            "select:main",
+            "advance:main@deadbeef",
+        ]
     );
 
     let state = journal.state();
@@ -1110,6 +1132,51 @@ fn a_tag_push_failure_journals_the_local_tag_and_stops() {
     );
 }
 
+#[test]
+fn default_branch_failure_is_red_and_resume_retries_only_the_safe_final_step() {
+    let store = FakeStore::default();
+    let clock = FakeClock(Cell::new(1000));
+    let idgen = FakeIdGen("RUN01".into());
+    let cmd = FakeCmd::new();
+    let reg = cmd.registry();
+    let root = PathBuf::from("/repo");
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: &root,
+        artifacts: &EMPTY_ARTIFACTS,
+    };
+    let mut sink = NullSink;
+    let mut journal = new_journal(&store, &clock, &idgen);
+
+    let failing = FakeTagger::failing("advance");
+    let error = execute(&mut journal, &two_target_plan(), &ctx, &failing, &mut sink).unwrap_err();
+    assert!(matches!(
+        error,
+        CutError::PhaseFailed {
+            phase: Phase::AdvanceBranch,
+            ..
+        }
+    ));
+    assert_eq!(journal.state().status, RunStatus::InProgress);
+    assert!(phase_completed_ok(journal.state(), Phase::Verify));
+    assert!(journal.state().default_branch.is_none());
+
+    let resumed = FakeTagger::new();
+    execute(&mut journal, &two_target_plan(), &ctx, &resumed, &mut sink).unwrap();
+    assert_eq!(journal.state().status, RunStatus::Completed);
+    assert_eq!(resumed.calls(), vec!["advance:main@deadbeef"]);
+    assert_eq!(
+        journal
+            .state()
+            .default_branch
+            .as_ref()
+            .map(|b| b.branch.as_str()),
+        Some("main")
+    );
+}
+
 // ── Resume-ready journal state (idempotent re-entry) ─────────────────────────
 
 #[test]
@@ -1173,7 +1240,13 @@ fn re_execution_resumes_without_re_publishing_landed_targets() {
     assert!(state.published.contains_key("rust") && state.published.contains_key("node"));
     assert_eq!(
         tagger.calls(),
-        vec!["create:v1.2.3@deadbeef", "push:v1.2.3", "release:v1.2.3"]
+        vec![
+            "create:v1.2.3@deadbeef",
+            "push:v1.2.3",
+            "release:v1.2.3",
+            "select:main",
+            "advance:main@deadbeef",
+        ]
     );
 }
 
@@ -2860,7 +2933,15 @@ fn a_publish_none_plan_cuts_a_tag_only_release_and_creates_no_github_release() {
         !tag.github_release && !tag.github_release_delegated,
         "a publish-none cut recorded a Release disposition"
     );
-    assert_eq!(tagger.calls(), vec!["create:v1.0.0@d", "push:v1.0.0"]);
+    assert_eq!(
+        tagger.calls(),
+        vec![
+            "create:v1.0.0@d",
+            "push:v1.0.0",
+            "select:main",
+            "advance:main@d",
+        ]
+    );
     assert!(
         !sink.kinds.iter().any(|e| matches!(
             e,
@@ -3039,7 +3120,15 @@ fn a_ci_delegated_plan_delegates_the_github_release_and_never_creates_it() {
         "coordinator created a GitHub Release despite CI delegation: {:?}",
         tagger.calls()
     );
-    assert_eq!(tagger.calls(), vec!["create:v1.0.0@d", "push:v1.0.0"]);
+    assert_eq!(
+        tagger.calls(),
+        vec![
+            "create:v1.0.0@d",
+            "push:v1.0.0",
+            "select:main",
+            "advance:main@d",
+        ]
+    );
     // Exactly one delegation event was streamed (and no created event), after the push,
     // and it names the owning adapter (cargo-dist) for the operator record.
     let k = &sink.kinds;
@@ -3133,7 +3222,10 @@ fn a_resumed_delegated_run_completes_without_ever_creating_the_release() {
         "resume must delegate the Release, never create it"
     );
     // The already-created local tag was NOT re-created; only the push was retried.
-    assert_eq!(resume_tagger.calls(), vec!["push:v1.0.0"]);
+    assert_eq!(
+        resume_tagger.calls(),
+        vec!["push:v1.0.0", "select:main", "advance:main@d"]
+    );
     // Neither attempt's tagger ever created a Release.
     assert!(
         !first_tagger

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Successful release cuts now fast-forward the remote default branch to the verified
+  release commit as a final resumable barrier, preventing engine-owned bump commits
+  from remaining tag-only. Divergence and permission failures stay red with recovery
+  guidance and are never force-pushed; release-plan `SEAL_VERSION` advances to 10
+  (`cut-main-not-advanced`).
 - Release cuts now keep dated sections outside the marker-bounded `[Unreleased]`
   skeleton, compile and safely consume configured fragments together with
   issuectl-trailer notes, and prevent marker comments from leaking into cargo-dist

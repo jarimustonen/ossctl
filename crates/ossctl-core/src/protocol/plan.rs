@@ -61,8 +61,8 @@ pub struct ReleasePlan {
     /// resolved from detected repo facts where possible.
     pub targets: Vec<PlanTarget>,
     /// The coordinator phase sequence a cut drives (ADR-0002 §2): dry-run-all →
-    /// build-all → publish-all → tag → dist → verify. The final verification barrier
-    /// observes every publish target at its destination before the run is complete.
+    /// build-all → publish-all → tag → dist → verify → advance-branch. Verification
+    /// observes every publish target before the final branch-containment barrier.
     /// When the
     /// plan owns a version bump ([`Self::bump`] is `Some`), a leading
     /// [`PlanPhase::Bump`] is prepended — the engine sets the workspace version,
@@ -283,8 +283,11 @@ pub enum PlanPhase {
     /// finalized with the real, post-tag-computed `sha256`.
     Dist,
     /// Post-cut verification: every published or CI-delegated target is observed at
-    /// its destination. A cut is complete only after this barrier succeeds.
+    /// its destination.
     Verify,
+    /// Fast-forward the remote default branch to the release commit. A cut is
+    /// complete only after this final barrier succeeds.
+    AdvanceBranch,
 }
 
 impl From<crate::protocol::journal::Phase> for PlanPhase {
@@ -306,6 +309,7 @@ impl PlanPhase {
             crate::protocol::journal::Phase::Tag => Self::Tag,
             crate::protocol::journal::Phase::Dist => Self::Dist,
             crate::protocol::journal::Phase::Verify => Self::Verify,
+            crate::protocol::journal::Phase::AdvanceBranch => Self::AdvanceBranch,
         }
     }
 
@@ -321,6 +325,7 @@ impl PlanPhase {
             Self::Tag => "tag",
             Self::Dist => "dist",
             Self::Verify => "verify",
+            Self::AdvanceBranch => "advance-branch",
         }
     }
 
@@ -334,9 +339,10 @@ impl PlanPhase {
         Self::from_coordinator(crate::protocol::journal::Phase::CUT_SEQUENCE[3]),
         Self::from_coordinator(crate::protocol::journal::Phase::CUT_SEQUENCE[4]),
         Self::from_coordinator(crate::protocol::journal::Phase::CUT_SEQUENCE[5]),
+        Self::from_coordinator(crate::protocol::journal::Phase::CUT_SEQUENCE[6]),
     ];
 
-    /// The invariant phase order a cut drives, dry-run-all → verify (borrowed view
+    /// The invariant phase order a cut drives, dry-run-all → advance-branch (borrowed view
     /// of [`Self::SEQUENCE`]; no allocation).
     #[must_use]
     pub fn sequence() -> &'static [PlanPhase] {

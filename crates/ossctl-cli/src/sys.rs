@@ -1011,6 +1011,20 @@ impl RealTagger {
         )))
     }
 
+    /// Classify `git merge-base --is-ancestor`: exit 0/1 are yes/no; any other
+    /// status is an operational failure, never evidence of divergence.
+    fn is_ancestor(&self, ancestor: &str, descendant: &str) -> io::Result<bool> {
+        let out = self.run(
+            "git",
+            &["merge-base", "--is-ancestor", ancestor, descendant],
+        )?;
+        match out.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Self::check(out, "git merge-base --is-ancestor").map(|_| false),
+        }
+    }
+
     /// The commit a local tag resolves to (`git rev-parse <tag>^{commit}`), or
     /// `None` if the tag does not exist. Used to make [`Self::create_tag`]
     /// idempotent: an already-present tag at the sealed commit is success, one
@@ -1055,6 +1069,65 @@ impl Tagger for RealTagger {
         let refspec = format!("refs/tags/{tag}:refs/tags/{tag}");
         let out = self.run("git", &["push", "origin", &refspec])?;
         Self::check(out, "git push")?;
+        Ok(())
+    }
+
+    fn default_branch(&self) -> io::Result<String> {
+        // Resolve the remote's live default branch rather than inspecting the
+        // current checkout: resume may run from a detached sealed worktree.
+        let remote = Self::check(
+            self.run("git", &["ls-remote", "--symref", "origin", "HEAD"])?,
+            "resolve origin default branch",
+        )?;
+        let output = String::from_utf8_lossy(&remote.stdout);
+        output
+            .lines()
+            .find_map(|line| {
+                let (reference, _) = line.strip_prefix("ref: ")?.split_once('\t')?;
+                reference.strip_prefix("refs/heads/").map(str::to_string)
+            })
+            .ok_or_else(|| io::Error::other("origin did not advertise a symbolic default branch; configure the repository's default branch (or run `git remote set-head origin -a` when the remote is already configured), then run `ossctl release resume <run_id>`"))
+    }
+
+    fn advance_branch(&self, branch: &str, commit: &str) -> io::Result<()> {
+        let branch_ref = format!("refs/heads/{branch}");
+        Self::check(
+            self.run("git", &["check-ref-format", &branch_ref])?,
+            "validate selected default branch",
+        )?;
+        Self::check(
+            self.run(
+                "git",
+                &["rev-parse", "--verify", &format!("{commit}^{{commit}}")],
+            )?,
+            "resolve release commit",
+        )?;
+        // Fetch only the selected branch tip into FETCH_HEAD. This works in linked
+        // and detached worktrees without moving any local branch.
+        Self::check(
+            self.run("git", &["fetch", "--no-tags", "origin", &branch_ref])?,
+            "fetch selected origin default branch",
+        )?;
+        let fetched = Self::check(
+            self.run("git", &["rev-parse", "--verify", "FETCH_HEAD^{commit}"])?,
+            "resolve fetched default branch",
+        )?;
+        let remote_commit = String::from_utf8_lossy(&fetched.stdout).trim().to_string();
+
+        // Already advanced (or advanced further) is idempotent success.
+        if self.is_ancestor(commit, &remote_commit)? {
+            return Ok(());
+        }
+        if !self.is_ancestor(&remote_commit, commit)? {
+            return Err(io::Error::other(format!(
+                "origin/{branch} at {remote_commit} has diverged from release commit {commit}; create and push a merge commit that contains {commit} to origin/{branch}, then run `ossctl release resume <run_id>` (or abandon and re-plan)"
+            )));
+        }
+        let refspec = format!("{commit}:{branch_ref}");
+        Self::check(
+            self.run("git", &["push", "--porcelain", "origin", &refspec])?,
+            &format!("fast-forward origin/{branch} (never forced); the remote rejected the update (check branch protection, push permission, network, or concurrent divergence), then run `ossctl release resume <run_id>`"),
+        )?;
         Ok(())
     }
 
@@ -1684,6 +1757,98 @@ mod tests {
         let url = serve_once(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n");
         let (status, _) = RealRegistryQuery::http_get(&url).unwrap();
         assert_eq!(status, 503);
+    }
+
+    fn git(repo: &Path, args: &[&str]) -> std::process::Output {
+        Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command")
+    }
+
+    fn release_repo() -> (tempfile::TempDir, PathBuf, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let origin = temp.path().join("origin.git");
+        assert!(
+            git(temp.path(), &["init", "--bare", origin.to_str().unwrap()])
+                .status
+                .success()
+        );
+        assert!(git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"])
+            .status
+            .success());
+        let repo = temp.path().join("repo");
+        assert!(
+            git(temp.path(), &["init", "-b", "main", repo.to_str().unwrap()])
+                .status
+                .success()
+        );
+        assert!(git(&repo, &["config", "user.email", "test@example.com"])
+            .status
+            .success());
+        assert!(git(&repo, &["config", "user.name", "Test"])
+            .status
+            .success());
+        std::fs::write(repo.join("version"), "0.1.0\n").unwrap();
+        assert!(git(&repo, &["add", "."]).status.success());
+        assert!(git(&repo, &["commit", "-m", "base"]).status.success());
+        assert!(git(
+            &repo,
+            &["remote", "add", "origin", origin.to_str().unwrap()]
+        )
+        .status
+        .success());
+        assert!(git(&repo, &["push", "-u", "origin", "main"])
+            .status
+            .success());
+        std::fs::write(repo.join("version"), "0.2.0\n").unwrap();
+        assert!(git(&repo, &["commit", "-am", "release"]).status.success());
+        let commit = String::from_utf8(git(&repo, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        (temp, repo, commit)
+    }
+
+    #[test]
+    fn default_branch_advance_reproduces_and_repairs_the_tag_only_bump_state() {
+        let (_temp, repo, release_commit) = release_repo();
+        // The release commit exists locally but origin/main is still pre-release —
+        // the project-canon v0.6.2 failure shape. Detached HEAD proves the operation
+        // is based on origin's advertised default branch, not checkout state.
+        assert!(git(&repo, &["checkout", "--detach", &release_commit])
+            .status
+            .success());
+        let tagger = RealTagger::new(&repo);
+        let branch = tagger.default_branch().unwrap();
+        assert_eq!(branch, "main");
+        tagger.advance_branch(&branch, &release_commit).unwrap();
+        tagger
+            .advance_branch(&branch, &release_commit)
+            .expect("retry after a lost journal write is idempotent");
+        let remote =
+            String::from_utf8(git(&repo, &["ls-remote", "origin", "refs/heads/main"]).stdout)
+                .unwrap();
+        assert!(remote.starts_with(&release_commit));
+    }
+
+    #[test]
+    fn default_branch_advance_refuses_divergence_without_force() {
+        let (_temp, repo, release_commit) = release_repo();
+        assert!(git(&repo, &["checkout", "main~1"]).status.success());
+        std::fs::write(repo.join("other"), "concurrent\n").unwrap();
+        assert!(git(&repo, &["add", "."]).status.success());
+        assert!(git(&repo, &["commit", "-m", "concurrent"]).status.success());
+        assert!(git(&repo, &["push", "origin", "HEAD:refs/heads/main"])
+            .status
+            .success());
+        let error = RealTagger::new(&repo)
+            .advance_branch("main", &release_commit)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("has diverged"), "{error}");
+        assert!(error.contains("release resume"), "{error}");
     }
 
     #[test]

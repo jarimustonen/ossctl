@@ -1244,10 +1244,10 @@ const SEAL_DOMAIN: &str = "ossctl.release-plan";
 /// wire-envelope versions. Bump this (never silently) whenever the shape changes or an
 /// unchanged sealed field gains a different effect, so approvals made under distinct
 /// interpretations always occupy disjoint plan-id spaces.
-// v9 seals the complete changelog-finalization intent. Older plan documents remain
-// readable for resume and retain the v8 header-only transform; a fresh plan binds the
-// marker-aware structure, fragment directory, and trailer source it will execute.
-const SEAL_VERSION: u32 = 9;
+// v10 seals the final advance-branch barrier. Older plan documents remain readable
+// for resume; a fresh plan binds the guarantee that a verified release commit is
+// fast-forwarded onto the remote default branch before the run completes.
+const SEAL_VERSION: u32 = 10;
 
 /// The canonical hashed pre-image (see the module docs for the exact contents).
 /// A dedicated struct rather than an ad-hoc byte concatenation so the field set

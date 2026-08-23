@@ -293,6 +293,20 @@ fn str_at<'a>(v: &'a Value, key: &str, id: &str) -> Result<&'a str, PlanStoreErr
         .and_then(Value::as_str)
         .ok_or_else(|| corrupt(id, format!("missing or invalid {key}")))
 }
+fn decode_phase(value: &Value, id: &str) -> Result<PlanPhase, PlanStoreError> {
+    match value.as_str() {
+        Some("bump") => Ok(PlanPhase::Bump),
+        Some("dry-run-all") => Ok(PlanPhase::DryRunAll),
+        Some("build-all") => Ok(PlanPhase::BuildAll),
+        Some("publish-all") => Ok(PlanPhase::PublishAll),
+        Some("tag") => Ok(PlanPhase::Tag),
+        Some("dist") => Ok(PlanPhase::Dist),
+        Some("verify") => Ok(PlanPhase::Verify),
+        Some("advance-branch") => Ok(PlanPhase::AdvanceBranch),
+        _ => Err(corrupt(id, "invalid phase")),
+    }
+}
+
 fn decode_plan(v: &Value, id: &str) -> Result<ReleasePlan, PlanStoreError> {
     let targets = v
         .get("targets")
@@ -316,16 +330,7 @@ fn decode_plan(v: &Value, id: &str) -> Result<ReleasePlan, PlanStoreError> {
         .and_then(Value::as_array)
         .ok_or_else(|| corrupt(id, "invalid phases"))?
         .iter()
-        .map(|p| match p.as_str() {
-            Some("bump") => Ok(PlanPhase::Bump),
-            Some("dry-run-all") => Ok(PlanPhase::DryRunAll),
-            Some("build-all") => Ok(PlanPhase::BuildAll),
-            Some("publish-all") => Ok(PlanPhase::PublishAll),
-            Some("tag") => Ok(PlanPhase::Tag),
-            Some("dist") => Ok(PlanPhase::Dist),
-            Some("verify") => Ok(PlanPhase::Verify),
-            _ => Err(corrupt(id, "invalid phase")),
-        })
+        .map(|phase| decode_phase(phase, id))
         .collect::<Result<Vec<_>, _>>()?;
     let bump = match v.get("bump") {
         None | Some(Value::Null) => None,

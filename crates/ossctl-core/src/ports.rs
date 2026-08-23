@@ -276,6 +276,15 @@ pub trait Tagger {
     /// already-present identical remote tag is success; `Err` on a real push
     /// failure (network, auth, a conflicting remote ref).
     fn push_tag(&self, tag: &str) -> io::Result<()>;
+    /// Resolve the branch currently advertised as the remote's default. The
+    /// coordinator journals this selection before mutation so resume never selects
+    /// a second branch after a crash.
+    fn default_branch(&self) -> io::Result<String>;
+    /// Fast-forward the selected remote `branch` to `commit`. This is the final cut
+    /// step, after destination verification. An implementation must treat a branch
+    /// that already contains `commit` as success, and must never force-push or
+    /// overwrite a divergent branch.
+    fn advance_branch(&self, branch: &str, commit: &str) -> io::Result<()>;
     /// Create the GitHub Release for `tag` (titled `title`), returning its URL
     /// when the host reports one. Idempotent-friendly: an already-existing Release
     /// is success (returning its URL); `Err` on a real creation failure.

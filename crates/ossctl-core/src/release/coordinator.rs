@@ -1,9 +1,9 @@
 //! Phase-barrier coordinator: ordering, phase barriers, and tag ownership
 //! (ADR-0002 §2).
 //!
-//! Drives every configured ecosystem adapter through the five barriers
-//! **dry-run-all → build-all → publish-all → tag-once → dist (post-tag
-//! finalize)**, with tagging owned by the coordinator alone (never an adapter).
+//! Drives every configured ecosystem adapter through the sealed barriers
+//! **dry-run-all → build-all → publish-all → tag-once → dist → verify →
+//! advance-branch**, with tagging owned by the coordinator alone (never an adapter).
 //! This is the one stateful,
 //! partially-irreversible operation in `ossctl`; the guarantees it enforces are:
 //!
@@ -87,9 +87,11 @@
 //!   tag-once: the coordinator resolves the pushed tag archive, computes its real
 //!   `sha256`, and hands it to the Homebrew adapter so the generated `.rb` carries a
 //!   correct hash (no draft-PR placeholder). It runs for every cut (a no-op when
-//!   there is no post-tag target) and leads into the final verify barrier; only
-//!   `verify ok` flips the run to
-//!   [`RunStatus::Completed`](crate::protocol::journal::RunStatus::Completed).
+//!   there is no post-tag target) and leads into verification.
+//! - **Verified release commit reaches the default branch.** After every declared
+//!   destination is observed, the remote default branch is selected and journalled,
+//!   then fast-forwarded to the sealed release commit without force. Only
+//!   `advance_branch ok` completes a v6 run; resume reuses the selected branch.
 //! - **No auto-rollback.** On any failure the coordinator *stops and journals
 //!   precisely what landed* — it never undoes a published artifact. Recovery is
 //!   the human's, through `release verify` / `release resume` (wave-3), which read
@@ -109,12 +111,13 @@
 //! phase_entered publish ; target_published …(receipt each) / target_delegated …(CI-owned) ; phase_completed publish ok
 //! phase_entered tag     ; tag_created_local ; tag_pushed_remote ; github_release_created (or github_release_delegated when a CI-delegated target owns the Release) ; phase_completed tag ok
 //! phase_entered dist    ; target_published …(homebrew, real sha256) ; phase_completed dist ok
+//! phase_entered verify  ; target_verified … ; phase_completed verify ok
+//! phase_entered advance_branch ; default_branch_selected ; default_branch_advanced ; phase_completed advance_branch ok
 //! ```
 //!
-//! `run_created` is written by [`Journal::create`] before [`execute`] runs; the
-//! final `phase_completed dist ok` is what flips the run to
-//! [`RunStatus::Completed`](crate::protocol::journal::RunStatus::Completed) in the
-//! reducer.
+//! `run_created` is written by [`Journal::create`] before [`execute`] runs; for a
+//! v6 run the final `phase_completed advance_branch ok` flips the run to
+//! [`RunStatus::Completed`](crate::protocol::journal::RunStatus::Completed).
 //!
 //! # Resume-readiness (idempotent re-entry)
 //!
@@ -471,7 +474,16 @@ pub fn execute(
     // its real sha256. Runs for every cut (a no-op when there is no post-tag
     // target); the following verify barrier is the only completion signal. (`repo_slug` /
     // `homebrew` were moved into `artifacts` above; re-read them from there.)
-    dist_then_verify(journal, sink, ctx, &targets, plan, &artifacts)
+    dist_then_verify(journal, sink, ctx, &targets, plan, &artifacts)?;
+    if plan
+        .phases
+        .contains(&crate::protocol::plan::PlanPhase::AdvanceBranch)
+    {
+        advance_branch_phase(journal, sink, tagger, &tag_commit)
+    } else {
+        // Legacy sealed plans retain their approved execution semantics.
+        Ok(())
+    }
 }
 
 /// Finalize post-tag distribution and always gather destination evidence after an
@@ -536,6 +548,89 @@ fn dist_then_verify(
         // Never continue effects after the journal itself failed.
         Err(other) => Err(other),
     }
+}
+
+/// Fast-forward the remote default branch to the release commit only after every
+/// declared destination has been observed. The journal fact makes retries and
+/// resume idempotent; the [`Tagger`] implementation must reject divergence and
+/// must never force-push.
+fn advance_branch_phase(
+    journal: &mut Journal<'_>,
+    sink: &mut dyn ProgressSink,
+    tagger: &dyn Tagger,
+    tag_commit: &str,
+) -> Result<(), CutError> {
+    let phase = Phase::AdvanceBranch;
+    if phase_completed_ok(journal.state(), phase) {
+        return Ok(());
+    }
+    record(journal, sink, EventKind::PhaseEntered { phase })?;
+    let branch = if let Some(branch) = journal.state().selected_default_branch.clone() {
+        branch
+    } else {
+        let branch = match tagger.default_branch() {
+            Ok(branch) => branch,
+            Err(error) => {
+                return fail_phase(
+                    journal,
+                    sink,
+                    phase,
+                    None,
+                    format!("resolve remote default branch: {error}"),
+                );
+            }
+        };
+        record(
+            journal,
+            sink,
+            EventKind::DefaultBranchSelected {
+                branch: branch.clone(),
+            },
+        )?;
+        branch
+    };
+    match journal.state().default_branch.as_ref() {
+        Some(evidence) if evidence.branch == branch && evidence.commit == tag_commit => {}
+        Some(evidence) => {
+            return fail_phase(
+                journal,
+                sink,
+                phase,
+                None,
+                format!(
+                    "journal branch evidence conflicts with this release: recorded {} at {}, expected {} at {}",
+                    evidence.branch, evidence.commit, branch, tag_commit
+                ),
+            );
+        }
+        None => {
+            if let Err(error) = tagger.advance_branch(&branch, tag_commit) {
+                return fail_phase(
+                    journal,
+                    sink,
+                    phase,
+                    None,
+                    format!("advance origin/{branch} to {tag_commit}: {error}"),
+                );
+            }
+            record(
+                journal,
+                sink,
+                EventKind::DefaultBranchAdvanced {
+                    branch,
+                    commit: tag_commit.to_string(),
+                },
+            )?;
+        }
+    }
+    record(
+        journal,
+        sink,
+        EventKind::PhaseCompleted {
+            phase,
+            outcome: PhaseOutcome::Ok,
+        },
+    )
 }
 
 /// Preflight a plan **without** touching external state or creating a run: check
@@ -938,9 +1033,12 @@ fn reversible_phase(
                     sink.extend(built.artifacts);
                 }
             }),
-            Phase::Bump | Phase::Publish | Phase::Tag | Phase::Dist | Phase::Verify => {
-                unreachable!("reversible_phase only runs dry_run/build")
-            }
+            Phase::Bump
+            | Phase::Publish
+            | Phase::Tag
+            | Phase::Dist
+            | Phase::Verify
+            | Phase::AdvanceBranch => unreachable!("reversible_phase only runs dry_run/build"),
         };
         match outcome {
             Ok(()) => {
@@ -2282,7 +2380,7 @@ fn target_cleared(state: &RunState, phase: Phase, target: &str) -> bool {
         Phase::Build => state.built.contains(target),
         Phase::Publish | Phase::Dist => state.published.contains_key(target),
         Phase::Verify => state.verified.get(target) == Some(&VerifyOutcome::Matches),
-        Phase::Bump | Phase::Tag => false,
+        Phase::Bump | Phase::Tag | Phase::AdvanceBranch => false,
     }
 }
 

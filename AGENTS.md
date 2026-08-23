@@ -94,9 +94,9 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
      → publish-all (crates.io, dep-ordered, index-waited) → tag (GitHub Release delegated
      to cargo-dist CI) → dist (engine tap-write, real per-platform sha256s) → verify
      (all targets observed: index, Release assets, tap formula)`.
-  5. Post-cut: fast-forward local `main` to the bump commit and push it (the tag push
-     carries the commit to the remote, but not the branch ref). A manual spot-check of
-     the channels is optional — the verify phase already observed them.
+  5. Post-cut: the engine's final `advance-branch` barrier fast-forwards the remote
+     default branch to the bump commit after verify; it never force-pushes. A manual
+     spot-check of the channels is optional — the verify phase already observed them.
   - **hauis note:** macOS aarch64 CI builds run on the personal `hauis` self-hosted
     runner. If it 400s:
     `ssh hauis 'git config --global --unset-all "http.https://github.com/.extraheader"'`
@@ -133,7 +133,7 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
   already false-red'd an issuectl cut on a transient 503); omitting the target entirely
   under-declares a channel users install from. Full fleet picture:
   `homebase/issues/cross-repo-release-standardisation/audit-2026-08-17.md`.
-- **`SEAL_VERSION` is 9.** The sealed plan's pre-image includes the phase sequence and
+- **`SEAL_VERSION` is 10.** The sealed plan's pre-image includes the phase sequence and
   complete engine-owned bump edit set, so a
   phase-model change is a deliberate `SEAL_VERSION` event per `release/plan.rs`'s evolution
   rule — never a silent hash change. Live consequence of the 5→6 bump (0.8.0, when `verify`

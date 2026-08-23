@@ -211,6 +211,30 @@ The contract floors the combination at normalization: `cargo-publish-ci` require
 `registry: crates.io` and `ecosystem: rust`. A mis-declared target would otherwise tag
 first and fail verify second — after the irreversible step.
 
+## Amendment (2026-08-23) — verified cuts advance the remote default branch
+
+A fresh cut has one final sealed barrier after `verify`: `advance-branch`. The engine
+resolves `origin`'s advertised symbolic `HEAD`, journals that branch selection before
+mutation, fetches the selected branch tip without moving a local branch, and advances
+the remote branch to the release commit with an ordinary fully-qualified push. Resume
+reuses the durable selection rather than resolving a potentially different branch.
+The push is fast-forward-only by git's normal ref-update rule; the engine never forces.
+This works from detached sealed checkouts and linked
+worktrees because neither branch discovery nor the source commit depends on the
+checked-out branch.
+
+The branch is advanced only after every publish destination is observed. A divergence,
+permission denial, missing symbolic default branch, or network failure records
+`advance_branch failed` and leaves the run resumable; already-published artifacts and
+verification evidence remain intact. Resume skips all completed barriers and retries
+only this idempotent final step. A remote branch that already contains the release
+commit is success, covering a crash after the push but before its journal event.
+
+This closes a production failure where an engine-owned bump commit was tagged and
+published but the default branch stayed at the old version, causing the next plan to
+compute an already-published version. Adding a barrier changes approved execution
+semantics, so `SEAL_VERSION` advances from 9 to 10.
+
 ## Amendment (2026-08-17) — publish-none: the tag-only cut, a THIRD Release disposition
 
 A repo may legitimately publish **nothing**: a private, never-published service that is

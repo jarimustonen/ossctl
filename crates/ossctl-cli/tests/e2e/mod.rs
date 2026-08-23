@@ -56,6 +56,10 @@ impl TempRepo {
             "origin",
             repo.remote.path().to_str().expect("utf-8 remote path"),
         ]);
+        // Real release cuts start from a pushed default branch. Keep the fixture's
+        // bare remote shape-accurate so the final advance-branch barrier can resolve
+        // origin's symbolic HEAD and fast-forward it.
+        repo.git(&["push", "-u", "origin", "HEAD"]);
         repo
     }
 

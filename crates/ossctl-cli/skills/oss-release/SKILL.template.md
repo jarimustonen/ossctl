@@ -244,6 +244,16 @@ the `run_id` from its output** — every reconciliation command below needs it:
 ossctl release cut --plan <PLAN_ID> --json || exit
 ```
 
+A successful cut does not leave the bump commit reachable only from its tag. After
+all publish destinations verify green, the engine resolves `origin`'s advertised
+default branch and pushes the release commit to it with an ordinary
+fast-forward-only ref update. It never force-pushes and does not depend on the
+current checkout being attached to that branch, so sealed resume worktrees behave
+the same as the original checkout. A divergent branch, missing default-branch
+advertisement, network error, or permission denial leaves the run resumable in the
+final `advance_branch` phase. Fix the reported cause and run `release resume`; do
+not publish or retag by hand.
+
 On a **drift refusal** the cut never started: have the user reconcile the working
 tree, then re-run `release plan` (a new `plan_id`) and re-render the boundary.
 
@@ -268,6 +278,7 @@ complete the missing publish out of band).
 ## Success criteria
 
 - **Bootstrap:** `ossctl audit --json` reports no blocking core gaps.
-- **Cut-release:** the run reaches a terminal `published` + `tagged` state,
-  confirmed by `ossctl release show <RUN_ID> --json`.
+- **Cut-release:** the run reaches terminal `completed` only after publishes and
+  destinations verify, the tag lands, and the remote default branch contains the
+  release commit, confirmed by `ossctl release show <RUN_ID> --json`.
 - The contract validates throughout: `ossctl contract validate --json` exits 0.

@@ -69,11 +69,14 @@ use serde::{Deserialize, Serialize};
 /// **v5** (2026-08-17): adds the mandatory post-cut [`Phase::Verify`] barrier
 /// and [`EventKind::TargetVerified`] observations. v4 journals remain complete at
 /// `dist ok`; v5 journals require `verify ok` before completion.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 5;
+/// **v6** (2026-08-23): adds [`Phase::AdvanceBranch`] and
+/// [`EventKind::DefaultBranchAdvanced`]. v5 journals remain complete at `verify ok`;
+/// v6 journals require the release commit to land on the remote default branch.
+pub const JOURNAL_SCHEMA_VERSION: u32 = 6;
 
 /// The coordinator phases, in barrier order (ADR-0002): the derived
 /// `PartialOrd`/`Ord` follows declaration order, so `Bump < DryRun < Build <
-/// Publish < Tag < Dist < Verify` — the order the projection sorts phase records in.
+/// Publish < Tag < Dist < Verify < AdvanceBranch` — the order the projection sorts phase records in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
@@ -102,21 +105,25 @@ pub enum Phase {
     /// uniform (ADR-0002 §2, extended by `release-engine-cut-cargo-dist-flow`).
     Dist,
     /// Post-cut observation: every published or CI-delegated target is checked at
-    /// its destination. v5 runs complete only after this barrier succeeds.
+    /// its destination.
     Verify,
+    /// Fast-forward the remote default branch to the release commit after every
+    /// destination has been observed. v6 runs complete only after this succeeds.
+    AdvanceBranch,
 }
 
 impl Phase {
     /// The coordinator's invariant no-bump barrier sequence. This is the single
     /// source for the plan's public phase list as well as the journal's ordering;
     /// a bump-owning plan prepends [`Self::Bump`].
-    pub const CUT_SEQUENCE: [Self; 6] = [
+    pub const CUT_SEQUENCE: [Self; 7] = [
         Self::DryRun,
         Self::Build,
         Self::Publish,
         Self::Tag,
         Self::Dist,
         Self::Verify,
+        Self::AdvanceBranch,
     ];
 
     /// The wire string for this phase (matches the `Serialize` derive), so text
@@ -131,6 +138,7 @@ impl Phase {
             Self::Tag => "tag",
             Self::Dist => "dist",
             Self::Verify => "verify",
+            Self::AdvanceBranch => "advance_branch",
         }
     }
 
@@ -144,7 +152,7 @@ impl Phase {
     pub fn is_publish_or_later(self) -> bool {
         match self {
             Self::Bump | Self::DryRun | Self::Build => false,
-            Self::Publish | Self::Tag | Self::Dist | Self::Verify => true,
+            Self::Publish | Self::Tag | Self::Dist | Self::Verify | Self::AdvanceBranch => true,
         }
     }
 }
@@ -243,6 +251,17 @@ pub struct TagState {
     /// is disposable and rebuilt from the log anyway).
     #[serde(default)]
     pub github_release_delegated: bool,
+}
+
+/// Durable evidence that the release commit is contained by the remote default
+/// branch. Kept separate from tag state because branch advancement happens only
+/// after destination verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefaultBranchState {
+    /// Remote default branch name.
+    pub branch: String,
+    /// Release commit advanced onto the branch.
+    pub commit: String,
 }
 
 /// The engine-owned bump inputs a `--bump` run persists so `release resume` can
@@ -409,6 +428,18 @@ pub enum EventKind {
         /// The tag name.
         tag: String,
     },
+    /// The remote default branch was selected for this run before any branch mutation.
+    DefaultBranchSelected {
+        /// Remote default branch name (for example `main`).
+        branch: String,
+    },
+    /// The release commit was fast-forwarded onto the selected remote default branch.
+    DefaultBranchAdvanced {
+        /// Remote default branch name (for example `main`).
+        branch: String,
+        /// The release commit now contained by that branch.
+        commit: String,
+    },
     /// The GitHub Release for the tag was created.
     GithubReleaseCreated {
         /// The tag name.
@@ -503,6 +534,12 @@ impl EventKind {
             Self::TargetVerified { target, .. } => format!("verified:{target}"),
             Self::TagCreatedLocal { tag } => format!("tag_created_local:{tag}"),
             Self::TagPushedRemote { tag } => format!("tag_pushed_remote:{tag}"),
+            Self::DefaultBranchSelected { branch } => {
+                format!("default_branch_selected:{branch}")
+            }
+            Self::DefaultBranchAdvanced { branch, commit } => {
+                format!("default_branch_advanced:{branch}:{commit}")
+            }
             Self::GithubReleaseCreated { tag, .. } => format!("github_release_created:{tag}"),
             Self::GithubReleaseDelegated { tag, .. } => format!("github_release_delegated:{tag}"),
             Self::RunAbandoned { .. } => "run_abandoned".to_string(),
@@ -582,6 +619,17 @@ pub struct RunState {
     pub verified: BTreeMap<String, crate::protocol::release::VerifyOutcome>,
     /// Release tags → their landing progress.
     pub tags: BTreeMap<String, TagState>,
+    /// Terminal phase fixed by the `run_created` event's schema generation. This
+    /// keeps a legacy run's completion semantics stable when a newer binary appends
+    /// events during resume.
+    #[serde(default)]
+    pub terminal_phase: Option<Phase>,
+    /// Remote default branch selected immutably for this run before mutation.
+    #[serde(default)]
+    pub selected_default_branch: Option<String>,
+    /// Remote default branch advanced by this run, with the release commit.
+    #[serde(default)]
+    pub default_branch: Option<DefaultBranchState>,
     /// The reason recorded by a `run_abandoned` event, if any.
     pub abandon_reason: Option<String>,
     /// Timestamp of the `RunCreated` event.
@@ -617,6 +665,9 @@ impl RunState {
             delegated_adapters: BTreeMap::new(),
             verified: BTreeMap::new(),
             tags: BTreeMap::new(),
+            terminal_phase: None,
+            selected_default_branch: None,
+            default_branch: None,
             abandon_reason: None,
             created_ts: 0,
             updated_ts: 0,

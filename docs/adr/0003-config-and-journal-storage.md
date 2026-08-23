@@ -84,6 +84,20 @@ Resume continues **from the first incomplete step**; "already-done and matching"
 - **Two representations** (event log + materialized manifest). Accepted: the manifest is strictly derived and disposable, so there is one source of truth; the cost buys O(1) status queries for `release show`.
 - **Reconciliation ambiguity** (`Missing` after a recorded publish) is resolved conservatively as a **hard stop + human surface**, never a blind re-publish — trading some automation for safety on irreversible steps.
 
+## Amendment — 2026-08-23: default-branch advancement evidence
+
+Journal schema v6 adds the final `advance_branch` phase,
+`default_branch_selected { branch }`, and
+`default_branch_advanced { branch, commit }`. A v6 run reaches `Completed` only on
+`advance_branch ok`; v5 journals remain terminal at `verify ok`, including when a
+newer binary writes their final event during resume (the terminal phase is fixed by
+the run-created schema, not each event writer). Selection is journalled before the
+remote mutation and reused on resume, so one run cannot switch branches across a
+crash. The advancement fact is written after the remote fast-forward and makes
+resume idempotent: if a crash loses the local event, the retry observes that the
+selected remote branch already contains the release commit and records the missing
+evidence without rewriting history.
+
 ## Amendment — 2026-08-17: durable sealed plan store
 
 `release plan` also writes its content-addressed approval document to

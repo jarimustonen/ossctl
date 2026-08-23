@@ -248,7 +248,7 @@ fn plan_id_golden_vector() {
     let plan = build(&rust_contract(), &rust_facts(), HEAD, "1.2.0");
     assert_eq!(
         plan.plan_id,
-        "ddb494bb7aa1cf67373a8c21a84d5c62ee9666476ebe0b06f991c546f990fcb0"
+        "2a30d12745d079a0c0f8170195f8aeff556e012ac4824793cb44245efa99c221"
     );
 }
 
@@ -276,7 +276,7 @@ fn plan_id_golden_vector_with_distribution() {
     let plan = build(&contract, &rust_facts(), HEAD, "1.2.0");
     assert_eq!(
         plan.plan_id,
-        "9f32faeb6fcdb0f595be16d5bdbf42799070026ac8a705458256d32e7cc8c955"
+        "fb77d1dd0ba107b82d86f99736aa04960377b3d9f44b525fb9a3e70c570273f7"
     );
     // The tap threads into the plan from the sole distribution.
     assert_eq!(plan.homebrew_tap.as_deref(), Some("acme/homebrew-acme"));
@@ -443,7 +443,7 @@ fn build_emits_the_coordinator_phase_sequence() {
         .map(PlanPhase::from_coordinator)
         .collect();
     assert_eq!(plan.phases, coordinator_phases);
-    assert_eq!(plan.phases.last(), Some(&PlanPhase::Verify));
+    assert_eq!(plan.phases.last(), Some(&PlanPhase::AdvanceBranch));
     assert_eq!(plan.contract_schema_version, 1);
     assert_eq!(plan.head_sha, HEAD);
     assert_eq!(plan.version, "1.2.0");
