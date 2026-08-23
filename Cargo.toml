@@ -20,7 +20,7 @@ semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-toml = "0.8"
+toml = "1.1"
 toml_edit = "0.23"
 # Minimal blocking HTTP client for the release-path registry-state probes
 # (crates.io sparse index + npm registry). rustls + bundled webpki-roots — no
