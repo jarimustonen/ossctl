@@ -2,10 +2,9 @@
 created: 2026-08-23
 updated: 2026-08-23
 type: bug
-status: fixed
+status: open
 priority: high
 lane: release-engine
-closed: 2026-08-23
 ---
 
 # Shipshape crates.io package name is already owned
@@ -19,3 +18,13 @@ The first Shipshape 0.11.0 cut (run 01M0QJKSEJZ0Z3JQGN0Q9ADE0Y, plan 5fece070...
 ### 2026-08-23T16:08:31Z · @issuectl
 
 Fixed by moving the registry package to shipshape-cli, adding a non-published shipshape cargo-dist naming wrapper, pre-bumping a resumable 0.11.0 recovery tree, and guarding the temporary core omission until verified post-cut cleanup. Full green gate and pinned cargo-dist package/build verification pass.
+
+## Reopen Notes — 2026-08-23
+
+_Add rationale for reopening here._
+
+## Comments
+
+### 2026-08-23T16:11:28Z · @conductor
+
+Reopened after main CI run 32650811109: skill↔CLI lockstep still invokes `cargo test --locked -p shipshape --test skill --test skill_lockstep`; after the registry package rename those tests belong to package `shipshape-cli`. All other CI jobs passed. Release remains halted until the workflow is corrected and main CI is green.
