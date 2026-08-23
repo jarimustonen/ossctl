@@ -225,3 +225,4 @@ own issues. `issuectl list` for the live view.
 - [x] 🐛 Piialiisan bugiraportti: Release bump plan accepts duplicate exact pins then cut fails — FIXED and released in 0.10.0 (SEAL_VERSION 6->7) — jari via Telegram ([`intake-bug-ossctl-d38ddf598fd5`](issues/intake-bug-ossctl-d38ddf598fd5/item.md))
 - [x] 🐛 Piialiisan bugiraportti: Cargo-dist verifier reports existing GitHub Releases missing — closed as a duplicate; evidence folded into `verify-gh-release-missing` — jari via Telegram ([`intake-bug-ossctl-09cd3c1d03d0`](issues/intake-bug-ossctl-09cd3c1d03d0/item.md))
 - [ ] 🐛 Piialiisan bugiraportti: homebrew/binary target verification fails: missing during cut, unknown … — jari via Telegram ([`intake-bug-ossctl-51f9c1ce4cfd`](issues/intake-bug-ossctl-51f9c1ce4cfd/item.md))
+- [ ] 🐛 Piialiisan bugiraportti: Release plan misses tag-triggered Cargo publish workflow — jari via Telegram ([`intake-bug-ossctl-a5febb642dd7`](issues/intake-bug-ossctl-a5febb642dd7/item.md))
