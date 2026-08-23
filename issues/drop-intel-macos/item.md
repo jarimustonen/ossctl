@@ -2,12 +2,15 @@
 created: 2026-08-23
 updated: 2026-08-23
 type: chore
-status: open
+status: done
 priority: high
 lane: release-engine
 commits:
 - hash: caa52c482cc386f0c7a7021089c822b6a437a44b
   summary: 'fix(release): drop Intel macOS prebuilt support'
+- hash: d5fc507
+  summary: preserve exact fallback formula bytes
+closed: 2026-08-23
 ---
 
 # Drop Intel macOS release target
@@ -21,6 +24,11 @@ Maintainer decision 2026-08-23: x86_64-apple-darwin is no longer built or publis
 ### 2026-08-23T19:25:41Z · @issuectl
 
 Removed Intel macOS from the active three-platform product policy, preserved historical sealed-plan verification, rehearsed the pinned v0.11.0 fallback without external writes, and passed the full gate plus cargo-dist generation/plan checks.
+
+### 2026-08-23T19:57:31Z · @issuectl
+
+Fixed the fallback formula observer to decode GitHub Contents base64 outside jq without adding bytes, fail closed on missing or malformed content, and preserve the destination atomically. Regression coverage proves wrapped and trailing-newline exactness plus malformed-content behavior. Prepare-only recovery and the full repository gate passed; external execute remains for the conductor after merge and CI.
+
 
 ## Reopen Notes — 2026-08-23
 
