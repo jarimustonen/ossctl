@@ -4,6 +4,8 @@ set -euo pipefail
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck source=scripts/lib/github-content-decode.sh
 source "$script_dir/lib/github-content-decode.sh"
+# shellcheck source=scripts/lib/v0110-release-verify.sh
+source "$script_dir/lib/v0110-release-verify.sh"
 
 # Safe, pinned fallback for the cancelled v0.11.0 cargo-dist run. By default this
 # only prepares and validates local material. External writes require both
@@ -41,7 +43,7 @@ expected_sha256=(
   83313adf0e1bc91cffb78fea7146f3ecc8280a58b57180c5a0d1cbb3989d9d86
 )
 
-for command in git gh jq curl unzip tar shasum cargo base64 tr; do
+for command in git gh jq curl unzip tar gzip shasum cargo base64 tr; do
   command -v "$command" >/dev/null || { echo "missing required command: $command" >&2; exit 69; }
 done
 repo_root=$(git rev-parse --show-toplevel)
@@ -128,9 +130,7 @@ dist_bin="$work/dist-download/cargo-dist-$dist_target/dist"
   cd "$work/source"
   "$dist_bin" build --tag="$TAG" --artifacts=global --output-format=json >"$work/global-manifest.json"
 )
-for name in shipshape-installer.sh; do
-  cp "$work/source/target/distrib/$name" "$work/release-files/"
-done
+cp "$work/source/target/distrib/shipshape-installer.sh" "$work/release-files/"
 # Global generation must use merged main's three-platform installer config, but
 # the public source artifact must be byte-derived from the immutable tag.
 git archive --format=tar.gz --prefix=shipshape-0.11.0/ "$TAG_SHA" \
@@ -164,8 +164,9 @@ EOF
 
 # Preserve cargo-dist's complete public schema while removing only the withdrawn
 # local artifact records and replacing the stale four-platform announcement.
-jq --rawfile notes "$notes" '
+jq --rawfile notes "$notes" --arg source_sha "$source_sha" '
   .announcement_github_body = $notes
+  | .artifacts["source.tar.gz"].checksums.sha256 = $source_sha
   | .releases[].artifacts |= map(select(contains("x86_64-apple-darwin") | not))
   | .artifacts |= with_entries(select(.key | contains("x86_64-apple-darwin") | not))
   | .artifacts["shipshape-installer.sh"].target_triples
@@ -220,6 +221,17 @@ class Shipshape < Formula
 end
 EOF
 
+expected_assets="$work/expected-assets"
+v0110_expected_asset_names | sort >"$expected_assets"
+find "$work/release-files" -maxdepth 1 -type f -exec basename {} \; | sort >"$work/prepared-assets"
+diff -u "$expected_assets" "$work/prepared-assets" || {
+  echo "prepared recovery does not contain the exact pinned asset set" >&2; exit 65;
+}
+# Rehearse the complete bundle verifier before either a prepare-only success or
+# any absent-Release publication. This uses synthetic destination metadata with
+# digests computed from the pinned local bundle and performs no network writes.
+v0110_verify_local_bundle "$work/release-files" "$notes" "$TAG_SHA" "$repo_root" || exit 65
+
 if [[ $mode == prepare ]]; then
   echo "Prepared and verified the pinned three-platform recovery locally."
   echo "No journal or external channel was mutated. Re-run from merged clean main with:"
@@ -228,29 +240,34 @@ if [[ $mode == prepare ]]; then
 fi
 
 # Complete every read-only conflict check before making the old run terminal.
-expected_assets="$work/expected-assets"
-find "$work/release-files" -maxdepth 1 -type f -exec basename {} \; | sort >"$expected_assets"
 release_state=absent
 release_json="$work/release.json"
 release_error="$work/release.error"
 if gh api "repos/$REPO/releases/tags/$TAG" >"$release_json" 2>"$release_error"; then
   release_state=present
-  jq -e --arg tag "$TAG" --arg title "0.11.0 - 2026-08-23" --rawfile notes "$notes" '
-    .tag_name == $tag and .draft == false and .prerelease == false
-    and .name == $title and .body == $notes
-  ' "$release_json" >/dev/null || { echo "existing Release metadata conflicts" >&2; exit 65; }
-  jq -r '.assets[].name' "$release_json" | sort >"$work/remote-assets"
-  comm -13 "$expected_assets" "$work/remote-assets" | grep -q . && {
-    echo "existing Release has unexpected assets" >&2; exit 65;
-  }
+  v0110_verify_asset_set "$release_json" "$expected_assets" || exit 65
   mkdir "$work/published"
   while IFS= read -r name; do
     [[ -n $name ]] || continue
     gh release download "$TAG" --repo "$REPO" --pattern "$name" -D "$work/published"
-    cmp "$work/release-files/$name" "$work/published/$name" || {
-      echo "existing Release asset differs: $name" >&2; exit 65;
+  done <"$expected_assets"
+  # Platform products remain byte-pinned to the attested workflow evidence.
+  # Global products are verified semantically because cargo-dist embeds a gzip
+  # timestamp, host Cargo version, and random upload staging paths.
+  for i in 0 1 2; do
+    platform=${platforms[$i]}
+    cmp "$work/local/$platform/shipshape-$platform.tar.xz" \
+      "$work/published/shipshape-$platform.tar.xz" || {
+      echo "existing Release platform archive conflicts: $platform" >&2; exit 65;
     }
-  done <"$work/remote-assets"
+    cmp "$work/local/$platform/shipshape-$platform.tar.xz.sha256" \
+      "$work/published/shipshape-$platform.tar.xz.sha256" || {
+      echo "existing Release platform sidecar conflicts: $platform" >&2; exit 65;
+    }
+  done
+  v0110_verify_published_release "$release_json" "$work/published" \
+    "$work/release-files/dist-manifest.json" "$work/release-files/shipshape-installer.sh" \
+    "$notes" "$TAG_SHA" "$repo_root" || exit 65
 elif ! grep -q 'HTTP 404' "$release_error"; then
   cat "$release_error" >&2
   echo "could not classify GitHub Release as present or absent" >&2
@@ -263,13 +280,16 @@ tap_state=absent
 if [[ -e "$work/tap/Formula/shipshape.rb" ]]; then
   if cmp -s "$formula" "$work/tap/Formula/shipshape.rb"; then
     tap_state=matching
-  elif [[ $(cat "$work/tap/Formula/shipshape.rb") == \
-    '# Generated by shipshape; do not edit by hand (template-version: 2)' ]]; then
-    # ADR-0005's authorized first-formula bootstrap is a marker-only file.
-    tap_state=bootstrap
   else
-    echo "tap formula conflicts" >&2
-    exit 65
+    printf '%s\n' '# Generated by shipshape; do not edit by hand (template-version: 2)' \
+      >"$work/bootstrap-formula.rb"
+    if cmp -s "$work/bootstrap-formula.rb" "$work/tap/Formula/shipshape.rb"; then
+      # ADR-0005's authorized first-formula bootstrap has exact bytes.
+      tap_state=bootstrap
+    else
+      echo "tap formula conflicts" >&2
+      exit 65
+    fi
   fi
 fi
 
@@ -289,7 +309,8 @@ if [[ $release_state == absent ]]; then
   gh release create "$TAG" --repo "$REPO" --verify-tag --target "$TAG_SHA" \
     --title "0.11.0 - 2026-08-23" --notes-file "$notes"
 fi
-# Complete a partial prior upload without clobbering matching evidence.
+# Upload the pinned bundle only when the Release was absent. A present Release
+# was required above to contain and verify all eleven assets exactly.
 while IFS= read -r name; do
   [[ -f "$work/published/$name" ]] && continue
   gh release upload "$TAG" --repo "$REPO" "$work/release-files/$name"
@@ -305,16 +326,18 @@ if [[ $tap_state != matching ]]; then
   git -C "$work/tap" push origin HEAD
 fi
 
-# Observation-backed terminal checks: both crates, every supported archive and
-# checksum, the no-Intel manifest, and the exact tap formula bytes.
-for file in "$work/release-files"/*; do
-  url="https://github.com/$REPO/releases/download/$TAG/$(basename "$file")"
-  curl -fsSL "$url" -o "$work/observed-$(basename "$file")"
-  cmp "$file" "$work/observed-$(basename "$file")"
-done
-gh release view "$TAG" --repo "$REPO" --json assets \
-  --jq '.assets[].name' | sort >"$work/final-assets"
-diff -u "$expected_assets" "$work/final-assets"
+# Observation-backed terminal checks re-download the destination. Do not compare
+# regenerated global bytes: verify their pinned content and semantic topology.
+rm -rf "$work/observed-release"
+mkdir "$work/observed-release"
+while IFS= read -r name; do
+  curl -fsSL "https://github.com/$REPO/releases/download/$TAG/$name" \
+    -o "$work/observed-release/$name"
+done <"$expected_assets"
+gh api "repos/$REPO/releases/tags/$TAG" >"$work/final-release.json"
+v0110_verify_published_release "$work/final-release.json" "$work/observed-release" \
+  "$work/release-files/dist-manifest.json" "$work/release-files/shipshape-installer.sh" \
+  "$notes" "$TAG_SHA" "$repo_root"
 formula_response="$work/formula-content.json"
 gh api "repos/$TAP/contents/Formula/shipshape.rb" >"$formula_response"
 decode_nonempty_github_content "$formula_response" "$work/observed-formula.rb" || {
