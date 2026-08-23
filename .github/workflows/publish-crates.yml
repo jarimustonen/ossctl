@@ -13,11 +13,10 @@ name: Publish to crates.io
 # publish needs only the tagged source, not the built binaries).
 #
 # The registry packages are dependency-ordered: `shipshape-core`, then
-# `shipshape-cli`. The recovery tree marks the already-published 0.11.0 core as
-# `publish = false`, so this workflow derives core eligibility from Cargo metadata
-# and skips it until the steady-state cleanup restores publication. Modern `cargo
-# publish` waits for a newly published crate to appear on the index before returning;
-# the explicit retry loop remains belt-and-suspenders for propagation lag.
+# `shipshape-cli`. The CLI's exact core pin means the dependent package can succeed
+# only after core is visible on the registry index. Modern `cargo publish` waits for
+# a newly published crate to appear on the index before returning; the explicit retry
+# loop remains belt-and-suspenders for propagation lag.
 
 on:
   push:
@@ -43,26 +42,12 @@ jobs:
 
       - name: Publish (dry-run)
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry-run == 'true' }}
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          metadata="$(cargo metadata --locked --no-deps --format-version 1)"
-          core_publishable="$(jq -r --arg pkg shipshape-core '
-            [.packages[] | select(.name == $pkg)] as $matches
-            | if ($matches | length) != 1 then
-                error("expected exactly one shipshape-core package")
-              else
-                $matches[0].publish == null
-                or ($matches[0].publish | index("crates-io") != null)
-              end
-          ' <<<"$metadata")"
-          if [ "$core_publishable" = true ]; then
-            cargo publish --locked -p shipshape-core --dry-run
-          else
-            # Recovery: core 0.11.0 is already indexed and intentionally disabled.
-            cargo publish --locked -p shipshape-cli --dry-run
-          fi
+          cargo publish --locked -p shipshape-core --dry-run
+          # The CLI's exact core pin cannot verify against crates.io until core is
+          # indexed. Package it now; the real dep-ordered publish verifies it later.
+          cargo package --locked -p shipshape-cli --no-verify
 
       - name: Publish (dep-order)
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry-run != 'true') }}
@@ -106,22 +91,8 @@ jobs:
             return "$rc"
           }
 
-          metadata="$(cargo metadata --locked --no-deps --format-version 1)"
-          core_publishable="$(jq -r --arg pkg shipshape-core '
-            [.packages[] | select(.name == $pkg)] as $matches
-            | if ($matches | length) != 1 then
-                error("expected exactly one shipshape-core package")
-              else
-                $matches[0].publish == null
-                or ($matches[0].publish | index("crates-io") != null)
-              end
-          ' <<<"$metadata")"
-          if [ "$core_publishable" = true ]; then
-            echo "Publishing shipshape-core…"
-            publish shipshape-core
-          else
-            echo "Skipping shipshape-core: this tree marks it publish=false."
-          fi
+          echo "Publishing shipshape-core…"
+          publish shipshape-core
 
           echo "Publishing shipshape-cli…"
           for attempt in 1 2 3 4 5 6; do

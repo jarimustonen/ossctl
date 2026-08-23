@@ -189,7 +189,15 @@ fn repository_workflows_select_the_registry_cli_package() {
 
     let publish = std::fs::read_to_string(root.join(".github/workflows/publish-crates.yml"))
         .expect("source checkout must track the crates.io publish workflow");
-    let mut publishes_cli = false;
+    assert!(
+        !publish.contains("core_publishable") && !publish.contains("Skipping shipshape-core"),
+        "the one-time recovery gate must not remain in the steady-state workflow"
+    );
+    assert!(
+        publish.contains("cargo package --locked -p shipshape-cli --no-verify"),
+        "dry-run dispatch must package-check the CLI before any irreversible upload"
+    );
+    let mut publish_calls = Vec::new();
     for line in publish.lines().map(str::trim) {
         if line.is_empty() || line.starts_with('#') || line.starts_with("publish()") {
             continue;
@@ -215,12 +223,13 @@ fn repository_workflows_select_the_registry_cli_package() {
                 matches!(package.as_str(), "shipshape-core" | "shipshape-cli"),
                 "publish helper calls must use a literal registry package: {line}"
             );
-            publishes_cli |= package == "shipshape-cli";
+            publish_calls.push(package.clone());
         }
     }
-    assert!(
-        publishes_cli,
-        "the crates.io workflow must publish Cargo package `shipshape-cli`"
+    assert_eq!(
+        publish_calls,
+        vec!["shipshape-core", "shipshape-cli"],
+        "the workflow script must contain one helper call per registry package, core first"
     );
 }
 

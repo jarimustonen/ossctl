@@ -2067,6 +2067,51 @@ mod tests {
         assert_eq!(ws.members[0].version.as_deref(), Some("0.1.6"));
     }
 
+    /// Read the repository's real manifests as a regression fixture. Both public
+    /// crates must remain visible to facts, with the CLI's exact core edge intact;
+    /// otherwise a one-time recovery `publish = false` could silently leak into the
+    /// next release plan.
+    #[test]
+    fn shipshape_workspace_facts_include_both_publishable_crates_and_exact_pin() {
+        let fs = FakeFs::default()
+            .file("/repo/Cargo.toml", include_str!("../../../../Cargo.toml"))
+            .file(
+                "/repo/crates/shipshape-core/Cargo.toml",
+                include_str!("../../Cargo.toml"),
+            )
+            .file(
+                "/repo/crates/shipshape-cli/Cargo.toml",
+                include_str!("../../../shipshape-cli/Cargo.toml"),
+            )
+            .file(
+                "/repo/crates/shipshape-dist/Cargo.toml",
+                include_str!("../../../shipshape-dist/Cargo.toml"),
+            );
+        let ws = detect_rust_workspace(repo(), &fs).expect("publishable workspace");
+        let names: Vec<_> = ws
+            .members
+            .iter()
+            .map(|member| member.package.as_str())
+            .collect();
+        assert_eq!(names, vec!["shipshape-core", "shipshape-cli"]);
+        let core = &ws.members[0];
+        let cli = &ws.members[1];
+        assert_eq!(cli.workspace_deps, vec!["shipshape-core"]);
+        let expected_pin = format!("={}", core.version.as_deref().expect("core version"));
+        assert_eq!(
+            cli.version, core.version,
+            "public crates must stay lockstep"
+        );
+        assert_eq!(
+            cli.dep_reqs.get("shipshape-core").map(String::as_str),
+            Some(expected_pin.as_str())
+        );
+        assert_eq!(
+            cli.pin_reqs.get("shipshape-core"),
+            Some(&vec![Some(expected_pin)])
+        );
+    }
+
     #[test]
     fn rust_workspace_graph_drops_unpublishable_members() {
         // `publish = false` and a non-crates.io registry restriction both exclude a

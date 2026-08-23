@@ -3336,18 +3336,28 @@ mod tests {
         );
     }
 
-    /// The 0.11.0 replacement contract carries one registry package target plus
-    /// two product-named distribution targets. The already-published core is not
-    /// synthesized back into this authored recovery contract by normalization.
+    /// Shipshape's steady-state contract declares both registry crates in dependency
+    /// order, followed by its product-named distribution targets. This reads the real
+    /// contract so the one-time 0.11.0 core omission cannot silently become permanent.
     #[test]
-    fn shipshape_replacement_contract_keeps_its_three_explicit_targets() {
+    fn shipshape_contract_keeps_both_crates_io_targets_in_publish_order() {
         let n = norm(include_str!("../../../../OSS-RELEASE.md"));
         assert!(n.is_valid(), "errors: {:?}", n.problems.errors);
-        assert_eq!(n.contract.targets.len(), 3);
-        assert!(n.contract.targets.iter().any(|target| {
-            target.registry == Registry::CratesIo
-                && target.package.as_deref() == Some("shipshape-cli")
-        }));
+        assert_eq!(n.contract.targets.len(), 4);
+        let crates: Vec<_> = n
+            .contract
+            .targets
+            .iter()
+            .filter(|target| target.registry == Registry::CratesIo)
+            .map(|target| (target.package.as_deref(), target.adapter))
+            .collect();
+        assert_eq!(
+            crates,
+            vec![
+                (Some("shipshape-core"), Adapter::CargoPublish),
+                (Some("shipshape-cli"), Adapter::CargoPublish),
+            ]
+        );
         assert!(n.contract.targets.iter().any(|target| {
             target.registry == Registry::Homebrew && target.adapter == Adapter::HomebrewTap
         }));

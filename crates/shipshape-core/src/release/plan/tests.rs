@@ -966,12 +966,18 @@ fn a_contract_declaring_only_the_bin_yields_the_same_target_set_as_declaring_bot
 }
 
 #[test]
-fn shipshape_replacement_plan_keeps_registry_and_product_names_distinct() {
-    // The 0.11.0 recovery plan publishes only the available registry coordinate
-    // `shipshape-cli`; the already-published core is intentionally absent from the
-    // publishable graph. Distribution targets retain product/binary name `shipshape`.
+fn shipshape_steady_state_plan_publishes_core_then_cli_and_keeps_product_names_distinct() {
+    // After the one-time 0.11.0 recovery, both registry crates are normal publish
+    // units again. The exact workspace edge forces core before CLI, while distribution
+    // targets retain the product/binary name `shipshape`.
     let mut c = rust_contract();
     c.targets = vec![
+        target(
+            Ecosystem::Rust,
+            "shipshape-core",
+            Registry::CratesIo,
+            Adapter::CargoPublish,
+        ),
         target(
             Ecosystem::Rust,
             "shipshape-cli",
@@ -995,6 +1001,12 @@ fn shipshape_replacement_plan_keeps_registry_and_product_names_distinct() {
     f.packages = vec![
         Package {
             ecosystem: Ecosystem::Rust,
+            manifest: "crates/shipshape-core/Cargo.toml".into(),
+            package: Some("shipshape-core".into()),
+            version: Some("0.11.0".into()),
+        },
+        Package {
+            ecosystem: Ecosystem::Rust,
             manifest: "crates/shipshape-cli/Cargo.toml".into(),
             package: Some("shipshape-cli".into()),
             version: Some("0.11.0".into()),
@@ -1007,27 +1019,30 @@ fn shipshape_replacement_plan_keeps_registry_and_product_names_distinct() {
         },
     ];
     f.rust_workspace = Some(RustWorkspace {
-        members: vec![member("shipshape-cli", "0.11.0", &[])],
+        members: vec![
+            member("shipshape-core", "0.11.0", &[]),
+            member("shipshape-cli", "0.11.0", &["shipshape-core"]),
+        ],
         workspace_pin_reqs: std::collections::BTreeMap::new(),
         pin_parse_error: None,
     });
     assert_eq!(
         resolve_release_version(&c, &f).unwrap(),
         "0.11.0",
-        "registry package and product wrapper must project one version"
+        "registry packages and product wrapper must project one version"
     );
 
-    // The plan built WITHOUT the graph (graph = None) and WITH it must be identical.
-    let mut f_no_graph = f.clone();
-    f_no_graph.rust_workspace = None;
-    let with_graph = build(&c, &f, HEAD, "0.11.0");
-    let without_graph = build(&c, &f_no_graph, HEAD, "0.11.0");
-    assert_eq!(with_graph.plan_id, without_graph.plan_id);
+    let plan = build(&c, &f, HEAD, "0.11.0");
     assert_eq!(
-        target_packages(&with_graph),
-        vec![Some("shipshape-cli"), Some("shipshape"), Some("shipshape"),]
+        target_packages(&plan),
+        vec![
+            Some("shipshape-core"),
+            Some("shipshape-cli"),
+            Some("shipshape"),
+            Some("shipshape"),
+        ]
     );
-    assert_eq!(with_graph.targets.len(), 3);
+    assert_eq!(plan.targets.len(), 4);
 }
 
 #[test]
