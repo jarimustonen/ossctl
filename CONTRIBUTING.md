@@ -1,6 +1,6 @@
-# Contributing to ossctl
+# Contributing to shipshape
 
-`ossctl` is an AI-first Rust CLI — the deterministic engine behind the `/oss-*` Claude
+`shipshape` is an AI-first Rust CLI — the deterministic engine behind the `/shipshape-*` Claude
 Code skill family. It takes a repository to open-source release quality and cuts releases
 from it. Contributions are welcome.
 
@@ -25,10 +25,10 @@ You need a stable Rust toolchain (the CI matrix pins an MSRV of 1.85 — see
 
 ```bash
 cargo build --workspace
-cargo run -q --bin ossctl -- version
+cargo run -q --bin shipshape -- version
 ```
 
-The workspace has two crates: `ossctl-core` (the library) and `ossctl-cli` (the `ossctl`
+The workspace has two crates: `shipshape-core` (the library) and `shipshape-cli` (the `shipshape`
 binary). See [`AGENTS.md`](AGENTS.md) and the ADRs for the architecture.
 
 ## The green gate
@@ -58,7 +58,7 @@ Issue: facts-workspace-members
 ```
 
 Keep the summary imperative and concise. Automated commits (Dependabot, and commits emitted
-by `ossctl release cut`) are exempt from the `Issue: <slug>` trailer requirement.
+by `shipshape release cut`) are exempt from the `Issue: <slug>` trailer requirement.
 
 ## Recording a changelog entry
 
@@ -78,5 +78,5 @@ links.
 
 ## Licensing
 
-`ossctl` is licensed under the **MIT** license (see [`LICENSE`](LICENSE)). By contributing,
+`shipshape` is licensed under the **MIT** license (see [`LICENSE`](LICENSE)). By contributing,
 you agree that your contributions are licensed under the same terms (inbound = outbound).

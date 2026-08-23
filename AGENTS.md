@@ -1,17 +1,19 @@
-# ossctl
+# shipshape
 
 Release & readiness coordinator: the deterministic engine that takes any repo to
-OSS release quality — the AI-first Rust CLI behind the `/oss-*` Claude Code skill
-family. `ossctl` owns the normalizer/validator for the project release contract
+OSS release quality — the AI-first Rust CLI behind the `/shipshape-*` Claude Code skill
+family. `shipshape` owns the normalizer/validator for the project release contract
 (`OSS-RELEASE.md`), repo-fact detection, the readiness audit, and the resumable
-per-ecosystem release-cut state machine; the prose `/oss-*` skills are thin callers
+per-ecosystem release-cut state machine; the prose `/shipshape-*` skills are thin callers
 of this binary (the binary is the source of truth, §17).
 
-**Status: public, live.** Current release: see `ossctl version --json` / the git tags.
-Shipped on all four channels — crates.io (`ossctl` + `ossctl-core`), GitHub Releases
-(cargo-dist: macOS aarch64, Linux musl x86_64+aarch64, `.sh` installer), and the
-Homebrew tap. **No Windows** (maintainer decision 2026-08-17; deliberate, documented in
-`DEFAULT_CROSS_PLATFORM_TARGETS`). Version history: `CHANGELOG.md` + git tags.
+**Status: source migration complete; external Shipshape rollout follows merge.** The
+published ossctl 0.10.x line remains the rollback path until the conductor completes
+ADR-0005's verified channel and machine-convergence sequence. The maintained channels
+are crates.io (`shipshape` + `shipshape-core`), GitHub Releases (cargo-dist: macOS and
+Linux, arm64+x86_64, `.sh` installer), and the Homebrew tap. **No Windows** (maintainer
+decision 2026-08-17; deliberate, documented in `DEFAULT_CROSS_PLATFORM_TARGETS`).
+Version history: `CHANGELOG.md` + git tags.
 
 ## CLI Design Principles
 
@@ -27,8 +29,8 @@ The architecture lives in accepted ADRs under [`docs/adr/`](docs/adr/) — read 
 writing any code; they are the spec, not background:
 
 - [`0001-founding-architecture.md`](docs/adr/0001-founding-architecture.md) — CLI command
-  taxonomy, the two-crate workspace (`ossctl-core` lib + the `ossctl` bin crate in
-  `crates/ossctl-cli/`), the binary↔skill boundary.
+  taxonomy, the two-crate workspace (`shipshape-core` lib + the `shipshape` bin crate in
+  `crates/shipshape-cli/`), the binary↔skill boundary.
 - [`0002-release-engine-adapter-model.md`](docs/adr/0002-release-engine-adapter-model.md)
   — the `ReleaseAdapter` trait + enum registry, the phase-barrier coordinator, the sealed
   content-addressed `plan_id` approval seam, and (amendments) the cargo interleave and the
@@ -38,8 +40,14 @@ writing any code; they are the spec, not background:
   `OSS-RELEASE.md` as the project contract; the event-sourced JSONL release journal under
   `git-common-dir/ossctl/releases/<run_id>/`; the remote-is-ground-truth resume/reconcile
   table; and (amendment) the durable **plan store** under `git-common-dir/ossctl/plans/`.
+  The `ossctl` path component is a permanent compatibility namespace (ADR-0005), not a
+  stale product string: do not rename it or the sealed-plan hash domain.
 - [`0004-cargo-adapter-one-target-one-publish-unit.md`](docs/adr/0004-cargo-adapter-one-target-one-publish-unit.md)
   — one target = one publish unit; the coordinator owns cross-target ordering.
+- [`0005-shipshape-product-migration.md`](docs/adr/0005-shipshape-product-migration.md)
+  — canonical Shipshape identities and the compatibility boundary. Never rename the
+  `git-common-dir/ossctl` namespace, `ossctl.release-plan` seal domain,
+  `oss-changelog:*` markers, or `OSS-RELEASE.md` contract filename.
 
 Open an `issuectl` issue before building a feature — do not pre-design beyond the ADRs.
 
@@ -69,7 +77,7 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
   target was OBSERVED at its destination). Still: green gate first, plan first, never
   publish red, report each phase. Trust the refusals — and since the verify phase, the
   green is observation-backed, not assumed.
-- **The ENGINE recipe** (`ossctl release cut` — the primary and proven path; ossctl's own
+- **The ENGINE recipe** (`shipshape release cut` — the primary and proven path; shipshape's own
   contract declares all four targets + the `distribution` block with its tap):
   1. Ensure `CHANGELOG.md` `[Unreleased]` is complete and main is clean + pushed.
      **Two pre-cut checks that a green local gate does NOT cover** (both learned the hard
@@ -81,15 +89,15 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
        correct-looking entry in the WRONG section — this happened into an already-published
        version's block, which would have shipped wrong release notes and rewritten the
        history of a version already on crates.io. Union-merge cannot catch it.
-  2. **Build a fresh binary from the tree**: `cargo build --release -p ossctl` (the bin
-     crate is **`ossctl`**, NOT `ossctl-cli` — `-p ossctl-cli` silently no-ops). `plan`
+  2. **Build a fresh binary from the tree**: `cargo build --release -p shipshape` (the bin
+     crate is **`shipshape`**, NOT `shipshape-cli` — `-p shipshape-cli` silently no-ops). `plan`
      and `cut` refuse when the binary's compiled commit differs from tree `HEAD`
      (`--allow-stale-binary` is the escape hatch for deliberate cross-tree use).
-  3. `ossctl release plan --bump major|minor|patch` — seals the plan (bump version,
+  3. `shipshape release plan --bump major|minor|patch` — seals the plan (bump version,
      `=`-pin rewrites, CHANGELOG finalize plan) and persists it in the plan store.
      Inspect the JSON. There is **no `--version` flag** (version derives from the
      manifest; `--bump` computes the next one).
-  4. `ossctl release cut --plan <id>` — the `--bump` flag is optional (the cut recovers
+  4. `shipshape release cut --plan <id>` — the `--bump` flag is optional (the cut recovers
      the bump disposition from the stored plan). Phases: `bump → dry-run-all → build-all
      → publish-all (crates.io, dep-ordered, index-waited) → tag (GitHub Release delegated
      to cargo-dist CI) → dist (engine tap-write, real per-platform sha256s) → verify
@@ -112,7 +120,8 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
 - **Three publish dispositions — one vocabulary** (0.8.0/0.9.0). Every target declares who
   performs the publish, and the engine's job differs accordingly:
   - **Engine publishes** — `cargo-publish` (crates.io), `homebrew-tap` (engine writes the
-    formula, carrying the first-line marker `# Generated by ossctl; do not edit by hand`).
+    formula, carrying the exact first-line marker
+    `# Generated by shipshape; do not edit by hand (template-version: 2)`).
   - **CI publishes, engine OBSERVES** — `cargo-publish-ci` (crates.io; the cut stops at the
     pushed tag and verify watches the index), `cargo-dist` (gh-releases, and homebrew when
     cargo-dist's own `publish-jobs` owns the tap). The engine writes nothing and requires no
@@ -123,7 +132,7 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
     (nothing to observe, which is categorically NOT `Unknown`). A `distribution:` block
     next to `targets: []` is refused, so a tag-only cut cannot trigger cargo-dist behind
     the plan's back.
-- **Homebrew tap ownership — ossctl is the exception, not the pattern.** ossctl owns its
+- **Homebrew tap ownership — shipshape is the exception, not the pattern.** shipshape owns its
   OWN tap via `homebrew-tap` (its `dist-workspace.toml` has NO `publish-jobs`), and it is
   the only live exercise of that adapter. Every other fleet repo
   (issuectl / glasspad / orchestratectl / project-canon) carries
@@ -143,29 +152,29 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
   decision, 2026-08-05), including tag pushes, whenever `main` is clean and green. This
   repo-scoped grant overrides the global "pushing is the user's step" default. Never
   force-push a shared branch; never push a red tree.
-- **Scope boundary: ossctl the PRODUCT ≠ a maintainer's personal environment.** ossctl
+- **Scope boundary: shipshape the PRODUCT ≠ a maintainer's personal environment.** shipshape
   owns the generic, reusable release/readiness engine. Cross-repository standardisation
   and personal self-hosted CI infrastructure are homebase concerns — keep them out of
-  ossctl's issues/TODO/handoff. The `hauis` override in `dist-workspace.toml` is the
+  shipshape's issues/TODO/handoff. The `hauis` override in `dist-workspace.toml` is the
   documented repo-local exception.
 - **Cross-platform is a hard requirement (macOS AND Linux, arm64 + x86_64).** Every tool
-  the `/oss-*` family produces — and ossctl itself — must offer a source path
+  the `/shipshape-*` family produces — and shipshape itself — must offer a source path
   (`cargo install`) plus prebuilt binaries/installers covering macOS and statically-linked
   musl Linux. A macOS-only or Linux-only install story is a release gap.
-- **No Code of Conduct — deliberate** (maintainer decision). `ossctl audit` listing it as
+- **No Code of Conduct — deliberate** (maintainer decision). `shipshape audit` listing it as
   a `recommended` gap is expected and accepted; do not propose adding one.
-- **Live-version check:** `ossctl version --json`.
+- **Live-version check:** `shipshape version --json`.
 - **Hot files.** Two classes — do not treat them the same:
   - **Append-union-safe — parallel is fine:** `Cargo.toml`, module `mod.rs` files, CLI
     subcommand-dispatch files, the bundled-skill `CATALOG` in
-    `crates/ossctl-cli/src/skill.rs`. Brief each worker to union-resolve (keep all deps /
+    `crates/shipshape-cli/src/skill.rs`. Brief each worker to union-resolve (keep all deps /
     decls / arms / rows). The auto-merge is not guaranteed, though — expect to salvage
     the last-in-line row-adder's merge by hand occasionally.
   - **True shared-logic — sequence strictly, never parallelise:**
-    `crates/ossctl-core/src/contract/schema.rs` (the ONE canonical serde model), any
-    existing shared `crates/ossctl-core/src/protocol/*.rs` module (a NEW file per unit is
-    append-safe), `crates/ossctl-core/src/release/coordinator.rs` +
-    `crates/ossctl-core/src/release/adapters/mod.rs` (the release-engine seam), and the
+    `crates/shipshape-core/src/contract/schema.rs` (the ONE canonical serde model), any
+    existing shared `crates/shipshape-core/src/protocol/*.rs` module (a NEW file per unit is
+    append-safe), `crates/shipshape-core/src/release/coordinator.rs` +
+    `crates/shipshape-core/src/release/adapters/mod.rs` (the release-engine seam), and the
     canonical-JSON contract shape (SCHEMA — ripples to every family member).
 - **Worker-model note:** for units on the coordinator/adapters seam, prefer the stronger
   worker model up front — a weaker model has twice abandoned mid-unit there.
@@ -183,9 +192,9 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
   documented guarantee. When closing one, record the reason **and a reopen condition**.
   Also applies to **deferral justifications** — verify a claimed blocker, never inherit it.
 
-## Companion-skill installer (`ossctl skill install`)
+## Companion-skill installer (`shipshape skill install`)
 
-The bundled `/oss-*` skills install into a per-runtime skills home. `skill install`
+The bundled `/shipshape-*` skills install into a per-runtime skills home. `skill install`
 **dual-homes** by default — with no `--agent`, each `SKILL.md` is written into both
 `~/.claude/skills/<name>/` (Claude Code) and `~/.pi/agent/skills/<name>/` (pi.dev).
 `--agent` narrows it: `claude` | `pi` | `codex` (flat `~/.codex/prompts/<name>.md`) |

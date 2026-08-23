@@ -375,33 +375,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "ossctl"
-version = "0.10.1"
-dependencies = [
- "assert_cmd",
- "clap",
- "ossctl-core",
- "predicates",
- "semver",
- "serde",
- "serde_json",
- "tempfile",
- "ureq",
-]
-
-[[package]]
-name = "ossctl-core"
-version = "0.10.1"
-dependencies = [
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "toml",
- "toml_edit 0.23.10+spec-1.0.0",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -627,6 +600,33 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "shipshape"
+version = "0.10.1"
+dependencies = [
+ "assert_cmd",
+ "clap",
+ "predicates",
+ "semver",
+ "serde",
+ "serde_json",
+ "shipshape-core",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
+name = "shipshape-core"
+version = "0.10.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "toml",
+ "toml_edit 0.23.10+spec-1.0.0",
 ]
 
 [[package]]

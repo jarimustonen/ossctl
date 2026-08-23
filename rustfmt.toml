@@ -1,4 +1,4 @@
-# rustfmt configuration for ossctl.
+# rustfmt configuration for Shipshape.
 #
 # Only *stable* options live here so `cargo fmt --check` is meaningful on the
 # stable toolchain CI uses. Import grouping and wrap_comments are nightly-only

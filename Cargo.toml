@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ossctl-core", "crates/ossctl-cli"]
+members = ["crates/shipshape-core", "crates/shipshape-cli"]
 
 [workspace.package]
 version = "0.10.1"
@@ -10,7 +10,7 @@ license = "MIT"
 authors = []
 repository = "https://github.com/jarimustonen/ossctl"
 homepage = "https://github.com/jarimustonen/ossctl"
-description = "Release & readiness coordinator: the AI-first Rust CLI behind the /oss-* skill family."
+description = "Release & readiness coordinator: the AI-first Rust CLI behind the /shipshape-* skill family."
 keywords = ["cli", "ai", "release", "oss", "readiness"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -25,8 +25,8 @@ toml_edit = "0.23"
 # Minimal blocking HTTP client for the release-path registry-state probes
 # (crates.io sparse index + npm registry). rustls + bundled webpki-roots — no
 # OpenSSL/OS-TLS, so it links cleanly into the static musl cross-platform
-# binaries — and no async runtime (no tokio). cli-only; ossctl-core stays
-# dependency-free. See `RealRegistryQuery` in crates/ossctl-cli/src/sys.rs.
+# binaries — and no async runtime (no tokio). cli-only; shipshape-core stays
+# dependency-free. See `RealRegistryQuery` in crates/shipshape-cli/src/sys.rs.
 ureq = "3"
 assert_cmd = "2"
 predicates = "3"
@@ -42,7 +42,7 @@ inherits = "release"
 lto = "thin"
 
 # Workspace-wide lint policy. Each crate opts in with `lints.workspace = true`.
-# `ossctl-core` additionally layers `missing_docs` via a crate-root
+# `shipshape-core` additionally layers `missing_docs` via a crate-root
 # `#![warn(missing_docs)]` — Cargo rejects mixing `lints.workspace = true` with a
 # per-crate `[lints.rust]` table, so the attribute is the clean path (mirrors
 # octl-core).

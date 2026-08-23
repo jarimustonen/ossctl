@@ -1,0 +1,35 @@
+[package]
+name = "shipshape-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Core library for shipshape: contract normalizer, repo-fact detection, audit scoring, release engine, and the versioned protocol DTOs."
+keywords.workspace = true
+categories.workspace = true
+# README/LICENSE are symlinks to the repo-root files so a single source of truth
+# still ships inside the published `.crate` tarball (and renders on crates.io).
+readme = "README.md"
+# Published to crates.io: `shipshape` depends on it, and crates.io requires all
+# dependencies to be published crates.
+publish = true
+
+[lints]
+workspace = true
+
+# `shipshape-core` owns the ONE canonical serde model (contract/schema.rs) and the
+# public wire DTOs (protocol/). serde drives the wire shape; serde_json is the
+# `extra_fields` value type + JSON emission; serde_yaml parses OSS-RELEASE.md
+# frontmatter (the `contract` unit — a deliberate hot-file edit, ADR-0001 §2).
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

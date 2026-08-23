@@ -1,13 +1,13 @@
 [workspace]
 members = ["cargo:."]
 
-# Config for 'dist' (cargo-dist). ossctl is a portable, POSIX-friendly CLI
+# Config for 'dist' (cargo-dist). shipshape is a portable, POSIX-friendly CLI
 # (no fork/tmux/signal machinery), so the target set is broad. The tag-triggered
 # `.github/workflows/release.yml` is GENERATED from this [dist] section via
 # `dist generate` — edit config here, then regenerate; never hand-edit the
-# workflow. Only `crates/ossctl-cli` is marked distributable (its
+# workflow. Only `crates/shipshape-cli` is marked distributable (its
 # `[package.metadata.dist] dist = true`), so the produced binary artifact is
-# `ossctl`.
+# `shipshape`.
 [dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax). Pinned to
 # the version this config was generated against so a regenerated workflow and
@@ -18,16 +18,16 @@ ci = "github"
 # Installer scripts generated as release assets: curl-to-shell (Unix) only.
 # No PowerShell installer — Windows is not a supported platform (see targets).
 #
-# Homebrew auto-publish is NOT enabled here because the ossctl release ENGINE
+# Homebrew auto-publish is NOT enabled here because the shipshape release ENGINE
 # owns the tap write itself (a direct tap-write in the post-tag dist phase, since
 # 0.2.3). This is a real division of labour, not a deferral: cargo-dist builds and
 # attaches the binaries, the engine renders and pushes the formula against them.
 # (The tap write token exists and is not a constraint on either side.)
 installers = ["shell"]
-# Cross-platform binary matrix (Rust target-triple syntax): macOS (arm64) and
-# Linux (arm64 + x86_64). The Linux targets use `musl`, not `gnu`, so the
+# Cross-platform binary matrix (Rust target-triple syntax): macOS and Linux,
+# each on arm64 + x86_64. The Linux targets use `musl`, not `gnu`, so the
 # binaries are statically linked and run on any distro regardless of its glibc
-# vintage — ossctl is pure Rust with no C dependencies, so musl is a clean fit
+# vintage — shipshape is pure Rust with no C dependencies, so musl is a clean fit
 # and avoids a `GLIBC_x.y not found` cliff on older LTS systems.
 #
 # NO WINDOWS (maintainer decision, 2026-08-17). Building and shipping a Windows
@@ -36,13 +36,14 @@ installers = ["shell"]
 # repo had opted into it explicitly, and that opt-in is now withdrawn.
 targets = [
     "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
     "aarch64-unknown-linux-musl",
     "x86_64-unknown-linux-musl",
 ]
-# NOTE: no `x86_64-apple-darwin`. The macOS build runs on the self-hosted runner
-# below, which uses Homebrew Rust (no rustup) and so cannot cross-compile
-# the Intel-mac target — same constraint, same choice as orchestratectl. Apple
-# silicon is covered natively; Intel-mac users install via `cargo install ossctl`.
+# The arm64 macOS build uses the repository-local self-hosted runner below. The
+# Intel macOS target remains on cargo-dist's GitHub-hosted runner, avoiding an
+# unsupported cross-build on the Homebrew-Rust self-host while preserving the
+# required prebuilt Intel install path.
 # Where to host releases.
 hosting = "github"
 # Generate GitHub build-provenance attestations for the release artifacts
@@ -58,7 +59,7 @@ github-attestations = true
 # create `v*` tags, on which commits) with a GitHub tag-protection ruleset.
 pr-run-mode = "skip"
 
-# DELIBERATE REPOSITORY-LOCAL INFRA EXCEPTION (not ossctl canon and never
+# DELIBERATE REPOSITORY-LOCAL INFRA EXCEPTION (not shipshape canon and never
 # generated for downstream projects): build macOS arm64 on this repository's
 # self-hosted Apple-silicon runner rather than GitHub-hosted macOS. This runner
 # is configured only for this repository, and the generic `self-hosted` label is

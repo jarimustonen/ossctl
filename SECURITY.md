@@ -12,18 +12,18 @@ Include, as far as you can: the affected version or commit, the component and th
 (for example the subprocess a command invokes, or a prebuilt release binary), reproduction
 steps or a proof-of-concept, and the impact you observed.
 
-`ossctl` is a local command-line tool: it does not run a network service, but it **invokes
+`shipshape` is a local command-line tool: it does not run a network service, but it **invokes
 subprocesses** (`git`, `cargo`, and release adapters) and is intended to **distribute prebuilt
 binaries** via GitHub Releases and a Homebrew tap. Those — subprocess execution today, and the
 release binaries once published — are its primary threat surfaces.
 
-<!-- oss-security:supported-versions-start -->
+<!-- shipshape-security:supported-versions-start -->
 ## Supported Versions
 
 | Version | Supported |
 |---------|-----------|
 | 0.1.x   | ✅        |
-<!-- oss-security:supported-versions-end -->
+<!-- shipshape-security:supported-versions-end -->
 
 ## What to Expect
 

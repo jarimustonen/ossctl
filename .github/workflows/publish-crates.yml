@@ -12,9 +12,9 @@ name: Publish to crates.io
 # verified working trigger. This runs in parallel with release.yml (the crates
 # publish needs only the tagged source, not the built binaries).
 #
-# ossctl is a two-crate workspace: `ossctl` depends on an exact `ossctl-core`
-# version, so the members MUST publish in dependency order — `ossctl-core` first,
-# then `ossctl` after its dependency is visible on the index. Modern `cargo
+# shipshape is a two-crate workspace: `shipshape` depends on an exact `shipshape-core`
+# version, so the members MUST publish in dependency order — `shipshape-core` first,
+# then `shipshape` after its dependency is visible on the index. Modern `cargo
 # publish` waits for the just-published crate to appear on the index before it
 # returns, so a plain sequential publish is safe; the explicit retry loop below is
 # belt-and-suspenders against index propagation lag.
@@ -46,8 +46,8 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          cargo publish -p ossctl-core --dry-run
-          # `ossctl` can't be dry-run-verified until ossctl-core is on the index,
+          cargo publish -p shipshape-core --dry-run
+          # `shipshape` can't be dry-run-verified until shipshape-core is on the index,
           # so a dry-run only covers the leaf crate.
 
       - name: Publish (dep-order)
@@ -58,7 +58,7 @@ jobs:
           set -euo pipefail
 
           # Publish a crate, tolerating "already exists on crates.io index" as
-          # success. The engine (`ossctl release cut`) publishes both crates
+          # success. The engine (`shipshape release cut`) publishes both crates
           # directly, and the version-tag push ALSO triggers this workflow, so a
           # crate version is frequently already on the index by the time CI runs.
           # A plain `cargo publish` exits 101 in that case; under `set -e` that
@@ -81,7 +81,7 @@ jobs:
               return 0
             fi
             # Tolerate ONLY cargo's exact duplicate-version diagnostic for THIS
-            # package, e.g. "error: crate ossctl-core@0.2.4 already exists on
+            # package, e.g. "error: crate shipshape-core@0.2.4 already exists on
             # crates.io index". A here-string (not a pipe) avoids a pipefail
             # SIGPIPE false-negative from grep -q closing the pipe early. Any
             # other failure (network, auth, verification) still propagates.
@@ -92,16 +92,16 @@ jobs:
             return "$rc"
           }
 
-          echo "Publishing ossctl-core…"
-          publish ossctl-core
-          echo "Publishing ossctl (retry until ossctl-core is index-visible)…"
+          echo "Publishing shipshape-core…"
+          publish shipshape-core
+          echo "Publishing shipshape (retry until shipshape-core is index-visible)…"
           for attempt in 1 2 3 4 5 6; do
-            if publish ossctl; then
-              echo "ossctl published."
+            if publish shipshape; then
+              echo "shipshape published."
               exit 0
             fi
-            echo "attempt $attempt failed (ossctl-core may not be index-visible yet); waiting 30s…"
+            echo "attempt $attempt failed (shipshape-core may not be index-visible yet); waiting 30s…"
             sleep 30
           done
-          echo "ossctl failed to publish after retries" >&2
+          echo "shipshape failed to publish after retries" >&2
           exit 1

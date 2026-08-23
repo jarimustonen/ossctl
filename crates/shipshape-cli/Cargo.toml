@@ -1,0 +1,42 @@
+[package]
+# Published to crates.io as `shipshape` so `cargo install shipshape` resolves. The
+# package name differs from its directory (`crates/shipshape-cli`) on purpose —
+# Cargo permits this, and docs/AGENTS.md reference the directory path widely.
+name = "shipshape"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Release & readiness coordinator: the AI-first Rust CLI behind the /shipshape-* skill family."
+keywords.workspace = true
+categories.workspace = true
+# README/LICENSE are symlinks to the repo-root files so a single source of truth
+# still ships inside the published `.crate` tarball (and renders on crates.io).
+readme = "README.md"
+publish = true
+
+[package.metadata.dist]
+dist = true
+
+[[bin]]
+name = "shipshape"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+shipshape-core = { path = "../shipshape-core", version = "=0.10.1" }
+clap = { workspace = true }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+tempfile = { workspace = true }

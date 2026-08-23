@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
 
+### Changed
+- **The product is now Shipshape.** The canonical executable/package is `shipshape`, the
+  core crate is `shipshape-core`, and all ten bundled skills use `/shipshape-*` names.
+  Existing release plans and journals remain readable in the permanent
+  `git-common-dir/ossctl` compatibility namespace without JSON, journal, or seal-version
+  changes; legacy skill names fail with migration guidance. Distribution moves to the
+  `homebrew-shipshape` tap and adds a prebuilt Intel macOS target, retaining macOS/Linux
+  arm64+x86_64 coverage and the deliberate no-Windows policy. ADR-0005 records the
+  frozen old-crate policy and the verified post-merge channel/machine rollout
+  (`rename-ossctl-shipshape`).
+
 ### Fixed
 - Successful release cuts now fast-forward the remote default branch to the verified
   release commit as a final resumable barrier, preventing engine-owned bump commits

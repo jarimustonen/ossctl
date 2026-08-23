@@ -1,4 +1,4 @@
-# Clippy configuration for ossctl.
+# Clippy configuration for Shipshape.
 #
 # Lint *levels* (pedantic = warn + the allow-list) live in the root Cargo.toml
 # `[workspace.lints.clippy]` table so they apply per-crate via
