@@ -1,13 +1,16 @@
 ---
 created: 2026-08-23
-updated: 2026-08-23
+updated: 2026-08-24
 type: bug
-status: open
+status: fixed
 priority: high
 lane: release-engine
 commits:
 - hash: ed3df46
   summary: target registry CLI package in CI and release workflows
+- hash: 0e14c65
+  summary: restore steady-state crate publishing
+closed: 2026-08-24
 ---
 
 # Shipshape crates.io package name is already owned
@@ -25,6 +28,11 @@ Fixed by moving the registry package to shipshape-cli, adding a non-published sh
 ### 2026-08-23T16:31:53Z · @issuectl
 
 Reopen regression resolved: CI lockstep now selects Cargo package shipshape-cli, the tag-triggered crates.io workflow skips the deliberately non-publishable recovery core via Cargo metadata and publishes shipshape-cli, and the workspace-wide lockstep test guards the registry/package boundary. Exact failing command and complete green gate passed; four-model review findings were assessed and confirmed localized fixes applied.
+
+### 2026-08-23T21:06:25Z · @issuectl
+
+Post-cut cleanup complete after verified v0.11.0 recovery: shipshape-core is publishable and first in the crates.io target order, active recovery-only workflow/contract behavior is removed, facts/normalizer/planner regressions cover both crates and the exact pin, and the full green gate passed. Engine run 01M0QQMW8Y6SWRR2G383M0KVJX remains honestly abandoned.
+
 
 
 ## Reopen Notes — 2026-08-23
