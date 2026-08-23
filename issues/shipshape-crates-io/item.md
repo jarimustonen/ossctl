@@ -2,9 +2,13 @@
 created: 2026-08-23
 updated: 2026-08-23
 type: bug
-status: open
+status: fixed
 priority: high
 lane: release-engine
+closed: 2026-08-23
+commits:
+- hash: ed3df46
+  summary: target registry CLI package in CI and release workflows
 ---
 
 # Shipshape crates.io package name is already owned
@@ -18,6 +22,11 @@ The first Shipshape 0.11.0 cut (run 01M0QJKSEJZ0Z3JQGN0Q9ADE0Y, plan 5fece070...
 ### 2026-08-23T16:08:31Z · @issuectl
 
 Fixed by moving the registry package to shipshape-cli, adding a non-published shipshape cargo-dist naming wrapper, pre-bumping a resumable 0.11.0 recovery tree, and guarding the temporary core omission until verified post-cut cleanup. Full green gate and pinned cargo-dist package/build verification pass.
+
+### 2026-08-23T16:31:53Z · @issuectl
+
+Reopen regression resolved: CI lockstep now selects Cargo package shipshape-cli, the tag-triggered crates.io workflow skips the deliberately non-publishable recovery core via Cargo metadata and publishes shipshape-cli, and the workspace-wide lockstep test guards the registry/package boundary. Exact failing command and complete green gate passed; four-model review findings were assessed and confirmed localized fixes applied.
+
 
 ## Reopen Notes — 2026-08-23
 
