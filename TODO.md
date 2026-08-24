@@ -47,7 +47,7 @@ for observed cuts. There is currently no parent epic for that gate; create one o
 maintainer wants a checkable tracking artifact._
 
 _**Triage context only:** `intake-bug-ossctl-a5febb642dd7` is unscheduled and `untriaged`;
-it awaits a human lane-or-close decision and is not executable work. `oss-publicize-skill`
+it awaits a human lane-or-close decision and is not executable work. `shipshape-publicize-skill`
 remains deliberately unscheduled until a second real de-stealth observation supports its
 documented extraction decision. Neither belongs to a prepared execution agenda._
 
@@ -56,7 +56,7 @@ documented extraction decision. Neither belongs to a prepared execution agenda._
 
 ## Scheduling
 
-**Deliberate unlaned collection issue:** `oss-publicize-skill` stays open outside the DAG.
+**Deliberate unlaned collection issue:** `shipshape-publicize-skill` stays open outside the DAG.
 It is not executable backlog yet: append observations from at least one more real de-stealth
 pass to that issue, then make the documented A/B/C extraction decision. Do not assign a lane
 or start implementation before the second data point. Its appearance in open-and-unlaned
