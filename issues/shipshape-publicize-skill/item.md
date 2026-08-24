@@ -104,3 +104,28 @@ dimensions), the judgment in the skill — same split as the rest of the family.
 
 Run the same pass on a second project (any stealth-public family repo),
 append the observations as a comment here, then decide A/B/C and extract.
+
+## Comments
+
+### 2026-08-24T09:58:40Z · @glasspad-orchestrator
+
+**Second data point: glasspad publicize pass, 2026-08-24** (run by the glasspad orchestrator session; ended in the 0.17.1 release, verified on all three channels).
+
+What was run: repo-metadata apply (`gh repo edit` description + 9 topics, PVR enable via `gh api PUT`), GitHub issue forms (via `/shipshape-contributing`), `ARCHITECTURE.md` (via `/shipshape-architecture`), a README overhaul as an autonomous worktree unit (logo, live-space screenshot, security-model section, docs links, deep-dive content moved to `docs/`), then full green gate + a docs-only patch cut.
+
+**Confirmations of the gaps already listed (now 2/2 projects):**
+
+- *Repo metadata empty despite an otherwise-complete repo* — description, topics, and homepage were all null on a repo whose `shipshape audit` said `core_complete`. Applied directly under standing autonomy; supports the "apply on explicit go" step.
+- *PVR disabled while SECURITY.md points at it* — exactly the project-canon finding, independently rediscovered. One `gh api PUT` fixes it. Nuance worth encoding in the binary: `shipshape audit`'s community profile reported `security: absent` even though a root `SECURITY.md` was committed and pushed — the actionable signal was the PVR **setting**, not file presence. An audit dimension "PVR enabled when SECURITY.md references it" would have caught this precisely; file-presence probing did not.
+- *Claims-vs-binary drift is the biggest README rot* — the stealth-era README documented a CLI surface (`serve`, `create`, `render`, `open`, `publish-space`) that no longer exists; the shipped surface is a `publish` default verb + a `loopback` group. Caught only because the README worker re-derived examples and the orchestrator verified them against `--help`. Note for the C-option automation: a canon-conformant CLI exposes `--help --json`, so "README example commands ⊆ real command tree" is mechanizable as an audit dimension, not just skill judgment.
+- *AI-face staleness* — confirmed here too: `AGENTS.md` still documents `glasspad serve` post-rename. (Fixed for the observed instances; a full re-ground remains open on the glasspad side.)
+
+**New observations glasspad adds:**
+
+- *Issue-forms vs issuectl tension in `/shipshape-contributing`.* The skill's tracker-detection rule says "issuectl present → do NOT generate GitHub forms". The publicize goal wants the opposite: GitHub Issues as the **external intake** (and the community-profile checkbox), issuectl as the committer-only tracker of record, with an explicit mirror note in the forms. That is the same owner correction (a) recorded from project-canon — with two data points, "external → GitHub Issues; issuectl = committer-only; forms state the mirror" deserves to be the *default* in an external-audience/publicize mode rather than an owner override each time.
+- *Registry front page is part of the pass.* crates.io renders the README too: images must use absolute `raw.githubusercontent.com` URLs (relative paths break off-GitHub), and the new README does not actually reach crates.io until a release is cut. A publicize pass on a published crate therefore naturally *ends in a patch release* — "the README isn't shipped until you cut" is a sequencing rule the skill should own.
+- *Visual front door needs a fallback ladder.* For a visual tool the screenshot was the single highest-leverage README change, but capture automation is environment-fragile (Apple Events automation dead → headless-browser fallback succeeded). If the skill briefs a worker to capture screenshots, mark the step optional-with-disclosure, never a hard done-criterion.
+- *`/shipshape-architecture` fits the pass.* Contributor-facing depth (a code map) slotted naturally between contributing docs and the README rewrite; worth listing as an optional step in the sequence even though it is never a gate.
+- *Social preview image is the one metadata item with no CLI/API path* — `gh repo edit` covers description/topics but the social preview requires the web UI; the skill can only surface it as a manual TODO for the maintainer.
+
+**On the design question:** this run leans **A** (thin `/shipshape-publicize` member) with the deterministic checks pushed into `shipshape audit` dimensions: (1) PVR-enabled-when-SECURITY.md-references-it, (2) README-example-commands ⊆ `--help --json` command tree, (3) README install/platform claims vs dist target list, (4) repo description/topics non-empty. B would overload a release-focused orchestrator with a one-time transition; C loses exactly the checks above that are tool-verifiable. The glasspad sequence that worked: metadata apply → issue forms → architecture (opt) → README rewrite as a worktree unit with the claims audit in its brief → green gate → patch cut.
