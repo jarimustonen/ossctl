@@ -2,9 +2,14 @@
 created: 2026-09-02
 updated: 2026-09-02
 type: task
-status: open
+status: done
 priority: normal
 lane: dependency-updates
+closed: 2026-09-02
+closed_by: conductor
+commits:
+- hash: 7f09dda
+  summary: converge dependency and workflow updates
 ---
 
 # Converge outstanding dependency updates
@@ -38,3 +43,9 @@ Additional necessary convergence: cargo-dist was upgraded from 0.28.2 to 0.32.0 
 Verification completed: official action metadata/release notes; self-hosted runner/OS check; targeted lock generation; `cargo update --dry-run`; locked metadata; final-tree Rust 1.85 check; actionlint (only unchanged cargo-dist-generated SC2086/SC2129 diagnostics suppressed); cargo-dist 0.32.0 canonical generation and `dist plan`; `/llm-review` (four models, two cross-review rounds) plus `/assess-findings`; and the exact full green gate (`fmt`, Clippy `-D warnings`, tests, build, rustdoc `-D warnings`).
 
 Conductor after merge: verify `main` CI is green, close #1 and #3 with the rejection/reopen rationale above, close #2/#5/#6/#7/#8/#9/#10 as superseded by the merged convergence commit, confirm no listed proposal remains open, then close this issue. Do not merge Dependabot branches after this convergence commit lands.
+
+## Resolution
+
+### 2026-09-02T06:09:03Z · @conductor
+
+Merged main CI 33597466969 passed. Dependabot PRs #2/#5/#6/#7/#8/#9/#10 were superseded by the reviewed convergence commit; #1 was rejected until Rust 1.100.0 exists with pin synchronization and MSRV preserved; #3 was partially included in authored workflows and rejected for generated release.yml until cargo-dist emits checkout v7. All nine PRs are closed.
