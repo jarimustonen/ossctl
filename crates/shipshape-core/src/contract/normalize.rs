@@ -585,7 +585,7 @@ fn check_dist_workspace_homebrew(
     let Ok(text) = String::from_utf8(bytes) else {
         return;
     };
-    let Ok(config) = text.parse::<toml::Value>() else {
+    let Ok(config) = toml::from_str::<toml::Value>(&text) else {
         return;
     };
     let Some(dist) = config.get("dist").and_then(toml::Value::as_table) else {
