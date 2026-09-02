@@ -6,10 +6,10 @@ Pointers to open issues. Descriptions and plans live in the linked
 ## 🔄 Continue here (handoff)
 
 
-_**Handoff written 2026-08-24 after the Shipshape migration stint.** The ossctl →
-Shipshape product migration is complete. Main is clean and pushed at `602431e`; main CI
-`32666524383` is green. The supported command is `shipshape`, the crates are
-`shipshape-core` and `shipshape-cli`, and the runtime skills are `/shipshape-*`._
+_**Handoff updated 2026-09-02 after the Shipshape migration stint.** The ossctl →
+Shipshape product migration is complete. Main is clean and pushed; main CI `32666524383`
+is green. The supported command is `shipshape`, the crates are `shipshape-core` and
+`shipshape-cli`, and the runtime skills are `/shipshape-*`._
 
 _**Live release:** Shipshape v0.11.0 is observed on crates.io for both crates, on GitHub
 Release `v0.11.0` with exactly 11 assets, and in `jarimustonen/homebrew-shipshape`.
@@ -46,21 +46,17 @@ HIGH findings, then a written compatibility/stability contract. Tests are not su
 for observed cuts. There is currently no parent epic for that gate; create one only if the
 maintainer wants a checkable tracking artifact._
 
-_**Triage context only:** `intake-bug-ossctl-a5febb642dd7` is unscheduled and `untriaged`;
-it awaits a human lane-or-close decision and is not executable work. `shipshape-publicize-skill`
-remains deliberately unscheduled until a second real de-stealth observation supports its
-documented extraction decision. Neither belongs to a prepared execution agenda._
+_**Prepared next stint:** execute both accepted live-DAG issues. The release-preflight bug
+must recognize the observed inline `tags: [...]` GitHub Actions trigger without weakening
+the warning for a genuinely absent CI publish path. The publicize issue now has its required
+second real data point from Glasspad; extract the thin `/shipshape-publicize` member and put
+deterministic checks in the binary according to the issue's recorded A/B/C decision evidence.
+Use the live DAG for execution mechanics rather than treating this prose as a schedule._
 
 **Read first (the spec):** `docs/adr/000{1,2,3,4}-*.md` + the AGENTS.md operating policy
 (engine recipe, hot files, issue standard).
 
 ## Scheduling
-
-**Deliberate unlaned collection issue:** `shipshape-publicize-skill` stays open outside the DAG.
-It is not executable backlog yet: append observations from at least one more real de-stealth
-pass to that issue, then make the documented A/B/C extraction decision. Do not assign a lane
-or start implementation before the second data point. Its appearance in open-and-unlaned
-triage is expected until that evidence has been collected.
 
 Canonical scheduling lives in `issuectl` frontmatter (`lane:`, `lane_seq:`, `blocked_by:`,
 `collision:`). Do not maintain a markdown DAG or adjacent backlog in this file.
