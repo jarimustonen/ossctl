@@ -1,12 +1,13 @@
 ---
 created: 2026-08-23
-updated: 2026-08-23
+updated: 2026-09-02
 type: bug
 reporter: jari
-status: untriaged
+status: open
 priority: normal
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:homebase-wrapup-ossctl-cargo-publish-detection-20260823
+lane: release-preflight
 ---
 
 # Release plan misses tag-triggered Cargo publish workflow

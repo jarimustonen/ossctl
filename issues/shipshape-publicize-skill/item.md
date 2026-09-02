@@ -1,11 +1,12 @@
 ---
 created: 2026-08-23
-updated: 2026-08-24
+updated: 2026-09-02
 type: feature
 reporter: jari
 status: open
 priority: normal
 labels: [skills]
+lane: publicize
 ---
 
 # Collect de-stealth experience toward a /shipshape-publicize skill
