@@ -2138,6 +2138,7 @@ mod tests {
         let cli = &ws.members[1];
         assert_eq!(cli.workspace_deps, vec!["shipshape-core"]);
         let expected_pin = format!("={}", core.version.as_deref().expect("core version"));
+        let expected_wrapper_pin = format!("={}", cli.version.as_deref().expect("CLI version"));
         assert_eq!(
             cli.version, core.version,
             "public crates must stay lockstep"
@@ -2157,7 +2158,7 @@ mod tests {
             .expect("non-published wrapper remains a bump pin owner");
         assert_eq!(
             wrapper.pin_reqs.get("shipshape-cli"),
-            Some(&vec![Some("=0.11.0".to_string())])
+            Some(&vec![Some(expected_wrapper_pin)])
         );
     }
 
