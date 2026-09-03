@@ -59,6 +59,11 @@ The repository's `.github/workflows/publish-crates.yml` contains `on: push: tags
 
 Root cause confirmed: the trigger detector was an indentation-aware text scan that accepted only a line exactly equal to `tags:`. It therefore discarded the valid inline sequence `tags: [...]` before the existing structured job/`cargo publish -p ...` detector ran. The fix parses the workflow trigger mapping as YAML (including quoted `on` and YAML-1.1 boolean-key representations) while retaining negative checks for branch-only triggers and tag workflows without a direct publish path.
 
+### 2026-09-03T12:52:28Z · @agent
+
+Post-review clarification: the final implementation does not retain the provisional YAML-1.1 boolean-key fallback mentioned in the earlier root-cause note. A worktree-local check against pinned serde_yaml 0.9 confirmed ordinary unquoted `on` parses as the string `"on"`; matching boolean `true` would only introduce a false positive. Final tests cover quoted and unquoted `on` behavior through the detector.
+
+
 ## Resolution
 
 ### 2026-09-03T12:52:05Z · @agent
