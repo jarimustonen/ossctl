@@ -199,12 +199,16 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
 
 ## Companion-skill installer (`shipshape skill install`)
 
-The bundled `/shipshape-*` skills install into a per-runtime skills home. `skill install`
-**dual-homes** by default — with no `--agent`, each `SKILL.md` is written into both
-`~/.claude/skills/<name>/` (Claude Code) and `~/.pi/agent/skills/<name>/` (pi.dev).
-`--agent` narrows it: `claude` | `pi` | `codex` (flat `~/.codex/prompts/<name>.md`) |
-`all`. Only `SKILL.md` is mirrored; the install is idempotent, §17 version-guarded, and
-the write is atomic. `--dest <PATH>` overrides the root.
+The bundled `/shipshape-*` skills install into all maintained runtimes by default:
+Claude at `.claude/skills/<name>/...`, pi at `.pi/agent/skills/<name>/...`, and a
+self-contained Codex prompt at `.codex/prompts/<name>.md`. Omitted `--agent` and explicit
+`--agent all` are equivalent; `claude` | `pi` | `codex` narrows to one runtime.
+`--target <PATH>` overrides the install base while preserving those native layouts.
+Compatibility `--dest <PATH>` still overrides the resolved skills directory directly and
+is mutually exclusive with `--target`. Installation is non-interactive, atomic per file,
+§17 version-guarded, and no-clobber by default; use `--dry-run` to preflight without
+writes and `--force` to overwrite a refused destination explicitly. Inspect the full
+machine contract with `shipshape skill list --json`.
 
 ## Gitignored directories
 

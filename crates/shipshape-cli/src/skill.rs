@@ -139,12 +139,12 @@ pub const CATALOG: &[BundledSkill] = &[
 ];
 
 /// Which agent runtime(s) `skill install` targets. Each selects a well-known
-/// skills directory under `$HOME` *and* the on-disk file shape that runtime
-/// expects; `--dest` overrides the directory (not the shape).
+/// skills directory under the install base and the on-disk artifact form that
+/// runtime expects. `--target` overrides the install base; legacy `--dest`
+/// overrides the already-resolved skills directory.
 ///
-/// When `--agent` is **omitted**, install **dual-homes** into Claude Code *and*
-/// pi.dev (see [`selected_runtimes`]) — the migration default. An explicit value
-/// narrows to one runtime, or, with `all`, widens to every known runtime.
+/// When `--agent` is omitted, all maintained runtimes are selected. An explicit
+/// value narrows to one runtime, or `all` selects all three explicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
 pub enum Agent {
@@ -170,17 +170,10 @@ impl Agent {
     }
 }
 
-/// The runtimes an `--agent` selection expands to. When **unset** (the common
-/// case), install **dual-home** into Claude Code *and* pi.dev — the migration
-/// default: an agent stack moving from Claude Code to pi.dev needs each skill
-/// discoverable under both `~/.claude/skills` and `~/.pi/agent/skills`. An
-/// explicit `--agent` narrows to a single runtime (or, with `all`, widens to
-/// every known runtime, Codex included).
+/// The runtimes an `--agent` selection expands to. Both an omitted selector and
+/// explicit `all` cover every maintained runtime, as required by canon §15.
 fn selected_runtimes(agent: Option<Agent>) -> &'static [Runtime] {
-    match agent {
-        None => &[Runtime::Claude, Runtime::Pi],
-        Some(a) => a.runtimes(),
-    }
+    agent.unwrap_or(Agent::All).runtimes()
 }
 
 /// A single concrete runtime (never `All`) — carries the per-runtime path shape.
@@ -233,19 +226,22 @@ pub struct InstallArgs {
     /// Skill name (see `skill list`). Omit to install every bundled skill.
     #[arg(value_name = "NAME")]
     pub name: Option<String>,
-    /// Agent runtime to install into. Omit to **dual-home** into Claude Code and
-    /// pi.dev (`~/.claude/skills` + `~/.pi/agent/skills`); pass `claude`, `pi`,
-    /// or `codex` to narrow to one, or `all` for every known runtime.
+    /// Agent runtime to install into. Omit for `all` (Claude Code, pi.dev, and
+    /// Codex); pass `claude`, `pi`, or `codex` to narrow to one runtime.
     #[arg(long, value_enum)]
     pub agent: Option<Agent>,
-    /// Override the destination directory (the runtime's file shape still applies
-    /// under it). When several selected runtimes share a shape *and* a `--dest`
-    /// root — Claude and pi.dev both write `<name>/SKILL.md` — they resolve to the
-    /// same file and collapse to a single write.
-    #[arg(long, value_name = "PATH")]
+    /// Override the install base. Runtime-native layouts are created below it:
+    /// `.claude/skills`, `.pi/agent/skills`, and `.codex/prompts`.
+    #[arg(long, value_name = "PATH", conflicts_with = "dest")]
+    pub target: Option<PathBuf>,
+    /// Compatibility override for the resolved skills directory. Unlike canonical
+    /// `--target`, runtime layout prefixes are not added below this path.
+    #[arg(long, value_name = "PATH", conflicts_with = "target")]
     pub dest: Option<PathBuf>,
-    /// Overwrite an existing skill even when the on-disk copy is newer than the
-    /// running binary (which §17 otherwise refuses).
+    /// Validate and print the complete install plan without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Overwrite an unmanaged, non-regular, malformed, or newer destination.
     #[arg(long)]
     pub force: bool,
 }
@@ -307,17 +303,45 @@ fn render(skill: &BundledSkill) -> String {
 
 // ── skill list ───────────────────────────────────────────────────────────────
 
+const SUPPORTED_AGENTS: &[&str] = &["claude", "pi", "codex"];
+const ACCEPTED_AGENT_VALUES: &[&str] = &["claude", "pi", "codex", "all"];
+
 #[derive(Serialize)]
 struct ListEntry<'a> {
     name: &'a str,
     description: &'a str,
     cli_version: &'a str,
     schema_version: u32,
+    skill_schema_version: u32,
     path_in_repo: &'a str,
+    resources: &'static [&'static str],
+}
+
+#[derive(Serialize)]
+struct InstallLayout {
+    agent: &'static str,
+    path: &'static str,
+    form: &'static str,
+}
+
+#[derive(Serialize)]
+struct InstallCapability {
+    selection_flag: &'static str,
+    default: &'static str,
+    accepted_values: &'static [&'static str],
+    target_flag: &'static str,
+    dry_run_flag: &'static str,
+    force_flag: &'static str,
+    interactive: bool,
+    no_clobber_default: bool,
+    overwrite_requires_force: bool,
+    layouts: [InstallLayout; 3],
 }
 
 #[derive(Serialize)]
 struct ListPayload<'a> {
+    supported_agents: &'static [&'static str],
+    install: InstallCapability,
     skills: Vec<ListEntry<'a>>,
 }
 
@@ -329,17 +353,52 @@ fn list(format: OutputFormat) -> Result<(), CliError> {
             description: s.description,
             cli_version: CLI_VERSION,
             schema_version: SKILL_SCHEMA_VERSION,
+            skill_schema_version: SKILL_SCHEMA_VERSION,
             path_in_repo: s.path_in_repo,
+            resources: &["SKILL.md"],
         })
         .collect();
 
+    let payload = ListPayload {
+        supported_agents: SUPPORTED_AGENTS,
+        install: InstallCapability {
+            selection_flag: "--agent",
+            default: "all",
+            accepted_values: ACCEPTED_AGENT_VALUES,
+            target_flag: "--target",
+            dry_run_flag: "--dry-run",
+            force_flag: "--force",
+            interactive: false,
+            no_clobber_default: true,
+            overwrite_requires_force: true,
+            layouts: [
+                InstallLayout {
+                    agent: "claude",
+                    path: ".claude/skills/<name>/...",
+                    form: "agent-skill-tree",
+                },
+                InstallLayout {
+                    agent: "pi",
+                    path: ".pi/agent/skills/<name>/...",
+                    form: "agent-skill-tree",
+                },
+                InstallLayout {
+                    agent: "codex",
+                    path: ".codex/prompts/<name>.md",
+                    form: "self-contained-prompt",
+                },
+            ],
+        },
+        skills,
+    };
+
     match format {
-        OutputFormat::Json => emit_json(&ListPayload { skills }, &[])?,
+        OutputFormat::Json => emit_json(&payload, &[])?,
         OutputFormat::Text => {
-            if skills.is_empty() {
+            if payload.skills.is_empty() {
                 crate::output::stdoutln!("no skills bundled")?;
             } else {
-                for s in &skills {
+                for s in &payload.skills {
                     crate::output::stdoutln!(
                         "{}  (cli {})  {}",
                         s.name,
@@ -398,11 +457,38 @@ struct InstalledEntry {
     dest_path: String,
     cli_version: String,
     schema_version: u32,
+    action: &'static str,
+}
+
+#[derive(Serialize)]
+struct WouldEntry {
+    action: &'static str,
+    resource: &'static str,
+    input: WouldInput,
+    known_effects: WouldEffects,
+    unknown_until_apply: &'static [&'static str],
+}
+
+#[derive(Serialize)]
+struct WouldInput {
+    name: String,
+    agent: &'static str,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct WouldEffects {
+    status: &'static str,
 }
 
 #[derive(Serialize)]
 struct InstallPayload {
+    dry_run: bool,
+    force: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     installed: Vec<InstalledEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    would: Vec<WouldEntry>,
 }
 
 /// One resolved (skill, runtime, path) install target.
@@ -412,24 +498,138 @@ struct PlanEntry<'a> {
     path: PathBuf,
 }
 
+#[derive(Clone, Copy)]
+enum PlannedAction {
+    Install,
+    Upgrade,
+    Unchanged,
+    Overwrite,
+}
+
+impl PlannedAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Upgrade => "upgrade",
+            Self::Unchanged => "unchanged",
+            Self::Overwrite => "overwrite",
+        }
+    }
+
+    fn mutation(self) -> &'static str {
+        match self {
+            Self::Install => "create",
+            Self::Upgrade | Self::Unchanged | Self::Overwrite => "update",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Preflight {
+    action: PlannedAction,
+    warning: Option<String>,
+}
+
 fn install(args: &InstallArgs, format: OutputFormat) -> Result<(), CliError> {
-    // Which skills: the named one, or the whole catalog.
     let targets: Vec<&BundledSkill> = match &args.name {
         Some(name) => vec![lookup(name)?],
         None => CATALOG.iter().collect(),
     };
+    let plan = build_plan(args, &targets)?;
+    let (preflights, warnings) = preflight_plan(&plan, args.force)?;
+    let mut installed = Vec::new();
+    let mut would = Vec::new();
+    if args.dry_run {
+        for entry in &plan {
+            let action = preflights[&entry.path].action;
+            would.push(WouldEntry {
+                action: action.mutation(),
+                resource: "skill",
+                input: WouldInput {
+                    name: entry.skill.name.to_string(),
+                    agent: entry.runtime.label(),
+                    path: entry.path.display().to_string(),
+                },
+                known_effects: WouldEffects {
+                    status: action.label(),
+                },
+                unknown_until_apply: &[],
+            });
+        }
+    } else {
+        let mut written = std::collections::HashSet::new();
+        for (idx, entry) in plan.iter().enumerate() {
+            let action = preflights[&entry.path].action;
+            if !matches!(action, PlannedAction::Unchanged) && written.insert(entry.path.clone()) {
+                write_atomic(&entry.path, &render(entry.skill), idx)?;
+            }
+            installed.push(InstalledEntry {
+                name: entry.skill.name.to_string(),
+                agent: entry.runtime.label(),
+                dest_path: entry.path.display().to_string(),
+                cli_version: CLI_VERSION.to_string(),
+                schema_version: SKILL_SCHEMA_VERSION,
+                action: action.label(),
+            });
+        }
+    }
 
-    // Resolve $HOME only when needed — a `--dest` override skips it entirely.
-    let home = home_dir();
+    let payload = InstallPayload {
+        dry_run: args.dry_run,
+        force: args.force,
+        installed,
+        would,
+    };
+    match format {
+        OutputFormat::Json => emit_json(&payload, &warnings)?,
+        OutputFormat::Text => {
+            for warning in &warnings {
+                eprintln!("warning: {warning}");
+            }
+            if args.dry_run {
+                for entry in &payload.would {
+                    crate::output::stdoutln!(
+                        "would {} {} ({}) → {}",
+                        entry.known_effects.status,
+                        entry.input.name,
+                        entry.input.agent,
+                        entry.input.path
+                    )?;
+                }
+            } else {
+                for entry in &payload.installed {
+                    crate::output::stdoutln!(
+                        "{} {} ({}) → {}",
+                        entry.action,
+                        entry.name,
+                        entry.agent,
+                        entry.dest_path
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
-    // Build the full plan before touching disk.
+fn build_plan<'a>(
+    args: &InstallArgs,
+    targets: &[&'a BundledSkill],
+) -> Result<Vec<PlanEntry<'a>>, CliError> {
+    // `--target` is a HOME-like base; compatibility `--dest` names the resolved
+    // skills directory itself and therefore skips runtime prefixes.
+    let base = match (&args.target, &args.dest) {
+        (Some(target), None) => Some(target.clone()),
+        (None, Some(_)) => None,
+        (None, None) => Some(home_dir().ok_or_else(home_error)?),
+        (Some(_), Some(_)) => unreachable!("clap rejects --target with --dest"),
+    };
     let mut plan = Vec::new();
     for &runtime in selected_runtimes(args.agent) {
-        let root = match &args.dest {
-            Some(dest) => dest.clone(),
-            None => runtime.default_root(home.as_deref().ok_or_else(home_error)?),
-        };
-        for skill in &targets {
+        let root = args.dest.clone().unwrap_or_else(|| {
+            runtime.default_root(base.as_deref().expect("install base resolved"))
+        });
+        for &skill in targets {
             plan.push(PlanEntry {
                 skill,
                 runtime,
@@ -437,57 +637,25 @@ fn install(args: &InstallArgs, format: OutputFormat) -> Result<(), CliError> {
             });
         }
     }
+    Ok(plan)
+}
 
-    // Preflight: classify every target's drift up front so a §17 refusal fails
-    // the whole command *before* any partial write. Distinct *logical* targets can
-    // resolve to one *physical* file — shape-sharing runtimes (Claude + pi.dev,
-    // both `<name>/SKILL.md`) rooted at the same `--dest` — so check each unique
-    // path once, both to avoid a duplicate warning and because the second "check"
-    // would race the first's write. (Lexical dedup only: `--dest a/../a` and
-    // symlinked roots are not canonicalized, but a missed collision only costs a
-    // redundant write of byte-identical content, which is harmless.)
+fn preflight_plan(
+    plan: &[PlanEntry<'_>],
+    force: bool,
+) -> Result<(std::collections::HashMap<PathBuf, Preflight>, Vec<String>), CliError> {
+    let mut results = std::collections::HashMap::new();
     let mut warnings = Vec::new();
-    let mut checked = std::collections::HashSet::new();
-    for entry in &plan {
-        if checked.insert(entry.path.clone()) {
-            if let Some(w) = check_drift(&entry.path, args.force)? {
-                warnings.push(w);
+    for entry in plan {
+        if !results.contains_key(&entry.path) {
+            let result = check_drift(&entry.path, entry.skill, force)?;
+            if let Some(warning) = &result.warning {
+                warnings.push(warning.clone());
             }
+            results.insert(entry.path.clone(), result);
         }
     }
-
-    // All clear — write each unique file once, but report **every** logical target.
-    // A user who asked for `--agent all` still sees a `pi` row even when its file
-    // coincides with Claude's under a shared `--dest`: the write collapses, the
-    // reporting does not (so automation greping `agent == "pi"` still matches).
-    let mut installed = Vec::new();
-    let mut written = std::collections::HashSet::new();
-    for (idx, entry) in plan.iter().enumerate() {
-        if written.insert(entry.path.clone()) {
-            let content = render(entry.skill);
-            write_atomic(&entry.path, &content, idx)?;
-        }
-        installed.push(InstalledEntry {
-            name: entry.skill.name.to_string(),
-            agent: entry.runtime.label(),
-            dest_path: entry.path.display().to_string(),
-            cli_version: CLI_VERSION.to_string(),
-            schema_version: SKILL_SCHEMA_VERSION,
-        });
-    }
-
-    match format {
-        OutputFormat::Json => emit_json(&InstallPayload { installed }, &warnings)?,
-        OutputFormat::Text => {
-            for w in &warnings {
-                eprintln!("warning: {w}");
-            }
-            for e in &installed {
-                crate::output::stdoutln!("installed {} ({}) → {}", e.name, e.agent, e.dest_path)?;
-            }
-        }
-    }
-    Ok(())
+    Ok((results, warnings))
 }
 
 /// Write `content` to `path` atomically: create the parent, write a sibling
@@ -533,22 +701,22 @@ fn home_dir() -> Option<PathBuf> {
 fn home_error() -> CliError {
     CliError::system(
         "no_home_dir",
-        "cannot resolve the skills directory: $HOME is unset (pass --dest <PATH>)",
+        "cannot resolve the skill install base: $HOME is unset (pass --target <PATH> or --dest <PATH>)",
     )
 }
 
-/// Inspect an existing on-disk skill and apply the §17 drift policy. Returns
-/// `Ok(Some(warning))` when install may proceed but the caller should be warned,
-/// `Ok(None)` when there is nothing to say, and `Err(..)` when §17 refuses the
-/// overwrite (on-disk copy newer than the binary) without `--force`.
-fn check_drift(path: &Path, force: bool) -> Result<Option<String>, CliError> {
-    let existing = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        // Only a genuine "not found" is a clean first install. Every other read
-        // failure (permission denied, path is a directory, invalid UTF-8) must
-        // surface — treating it as "absent" would silently overwrite whatever is
-        // there, defeating the drift guard.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+/// Inspect an existing destination and apply §15's no-clobber rule plus §17's
+/// managed-skill drift policy. A regular file is managed only when its top-level
+/// `name` matches the bundled skill expected at that exact path.
+fn check_drift(path: &Path, skill: &BundledSkill, force: bool) -> Result<Preflight, CliError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Preflight {
+                action: PlannedAction::Install,
+                warning: None,
+            });
+        }
         Err(e) => {
             return Err(CliError::system(
                 "install_failed",
@@ -556,68 +724,127 @@ fn check_drift(path: &Path, force: bool) -> Result<Option<String>, CliError> {
             ));
         }
     };
-    // Present but unparseable frontmatter: treat as a refusal absent --force —
-    // we will not silently clobber a file we cannot reason about.
-    let Some(on_disk) = frontmatter_cli_version(&existing) else {
+
+    if let Some(result) = check_non_regular(path, &metadata, force)? {
+        return Ok(result);
+    }
+
+    let existing = match std::fs::read_to_string(path) {
+        Ok(existing) => existing,
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData && force => {
+            return Ok(Preflight {
+                action: PlannedAction::Overwrite,
+                warning: Some(format!(
+                    "overwriting non-text destination `{}` (--force)",
+                    path.display()
+                )),
+            });
+        }
+        Err(e) => {
+            return Err(CliError::system(
+                "install_failed",
+                format!("could not inspect existing `{}`: {e}", path.display()),
+            ));
+        }
+    };
+    let on_disk_name = frontmatter_field(&existing, "name");
+    let on_disk_version = frontmatter_cli_version(&existing);
+
+    if on_disk_name.as_deref() != Some(skill.name) || on_disk_version.is_none() {
         if force {
-            return Ok(Some(format!(
-                "overwriting `{}`: existing file has no readable cli_version",
-                path.display()
-            )));
+            return Ok(Preflight {
+                action: PlannedAction::Overwrite,
+                warning: Some(format!(
+                    "overwriting unmanaged or malformed destination `{}` (--force)",
+                    path.display()
+                )),
+            });
         }
         return Err(CliError::user(
             "skill_install_conflict",
             format!(
-                "`{}` exists but its cli_version is unreadable; pass --force to overwrite",
-                path.display()
+                "`{}` is not a managed `{}` skill; pass --force to overwrite",
+                path.display(),
+                skill.name
             ),
         ));
-    };
-
-    match compare_versions(&on_disk, CLI_VERSION) {
-        // On-disk older → §17 says proceed with a warning.
-        Some(std::cmp::Ordering::Less) => Ok(Some(format!(
-            "upgrading `{}` from cli_version {on_disk} to {CLI_VERSION}",
-            path.display()
-        ))),
-        // Equal → idempotent re-install, nothing to report.
-        Some(std::cmp::Ordering::Equal) => Ok(None),
-        // On-disk newer → refuse unless forced (agent upgraded ahead of binary).
-        Some(std::cmp::Ordering::Greater) => {
-            if force {
-                Ok(Some(format!(
-                    "downgrading `{}` from cli_version {on_disk} to {CLI_VERSION} (--force)",
-                    path.display()
-                )))
-            } else {
-                Err(CliError::user(
-                    "skill_version_mismatch",
-                    format!(
-                        "`{}` has cli_version {on_disk}, newer than this binary ({CLI_VERSION}); \
-                         pass --force to overwrite",
-                        path.display()
-                    ),
-                ))
-            }
-        }
-        // Unparseable version string on disk — same conservative refusal.
-        None => {
-            if force {
-                Ok(Some(format!(
-                    "overwriting `{}`: existing cli_version `{on_disk}` is unparseable",
-                    path.display()
-                )))
-            } else {
-                Err(CliError::user(
-                    "skill_install_conflict",
-                    format!(
-                        "`{}` has an unparseable cli_version `{on_disk}`; pass --force to overwrite",
-                        path.display()
-                    ),
-                ))
-            }
-        }
     }
+
+    let on_disk = on_disk_version.expect("checked above");
+    match compare_versions(&on_disk, CLI_VERSION) {
+        Some(std::cmp::Ordering::Less) => Ok(Preflight {
+            action: PlannedAction::Upgrade,
+            warning: Some(format!(
+                "upgrading `{}` from cli_version {on_disk} to {CLI_VERSION}",
+                path.display()
+            )),
+        }),
+        Some(std::cmp::Ordering::Equal) => Ok(Preflight {
+            action: PlannedAction::Unchanged,
+            warning: None,
+        }),
+        Some(std::cmp::Ordering::Greater) if force => Ok(Preflight {
+            action: PlannedAction::Overwrite,
+            warning: Some(format!(
+                "downgrading `{}` from cli_version {on_disk} to {CLI_VERSION} (--force)",
+                path.display()
+            )),
+        }),
+        Some(std::cmp::Ordering::Greater) => Err(CliError::user(
+            "skill_version_mismatch",
+            format!(
+                "`{}` has cli_version {on_disk}, newer than this binary ({CLI_VERSION}); pass --force to overwrite",
+                path.display()
+            ),
+        )),
+        None if force => Ok(Preflight {
+            action: PlannedAction::Overwrite,
+            warning: Some(format!(
+                "overwriting `{}`: existing cli_version `{on_disk}` is unparseable (--force)",
+                path.display()
+            )),
+        }),
+        None => Err(CliError::user(
+            "skill_install_conflict",
+            format!(
+                "`{}` has an unparseable cli_version `{on_disk}`; pass --force to overwrite",
+                path.display()
+            ),
+        )),
+    }
+}
+
+/// Never follow a final-component symlink. With `--force` the atomic rename
+/// replaces it; directories cannot be replaced safely by this file installer.
+fn check_non_regular(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    force: bool,
+) -> Result<Option<Preflight>, CliError> {
+    if metadata.file_type().is_file() {
+        return Ok(None);
+    }
+    if metadata.file_type().is_symlink() && force {
+        return Ok(Some(Preflight {
+            action: PlannedAction::Overwrite,
+            warning: Some(format!(
+                "overwriting non-regular destination `{}` (--force)",
+                path.display()
+            )),
+        }));
+    }
+    let guidance = if metadata.file_type().is_symlink() {
+        "; pass --force to replace the symlink"
+    } else {
+        "; expected a regular file"
+    };
+    Err(CliError::user(
+        "skill_install_conflict",
+        format!(
+            "refusing to overwrite non-regular destination `{}`{guidance}",
+            path.display()
+        ),
+    ))
 }
 
 /// Extract the top-level `cli_version:` scalar from a SKILL.md YAML frontmatter

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **The bundled skill installer now conforms to project-canon 0.8.0 §15 for Claude,
+  pi, and Codex.** Omitted `--agent` and explicit `all` install all three native layouts;
+  `skill list --json` declares the complete capability contract; canonical `--target`,
+  side-effect-free `--dry-run`, and explicit force/no-clobber behavior are supported while
+  preserving legacy `--dest` semantics (`quite-learned-fly`).
 - **Prebuilt support now covers exactly macOS arm64 and Linux musl arm64/x86_64.**
   Intel macOS joins Windows as deliberately unsupported; source installation remains.
   Contract defaults, cargo-dist generation, readiness checks, Homebrew rendering and

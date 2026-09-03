@@ -53,10 +53,42 @@ fn skill_list_json_carries_version_fields() {
     for s in skills {
         assert!(s["name"].is_string(), "name present: {s}");
         assert!(s["description"].is_string(), "description present: {s}");
+        assert!(
+            s["description"].as_str().unwrap().chars().count() <= 1024,
+            "Agent Skill description stays within the §15 limit: {s}"
+        );
         assert_eq!(s["cli_version"], ver, "cli_version pinned to binary: {s}");
-        assert_eq!(s["schema_version"], 1, "skill schema_version: {s}");
+        assert_eq!(s["schema_version"], 1, "legacy skill schema field: {s}");
+        assert_eq!(s["skill_schema_version"], 1, "skill schema field: {s}");
+        assert_eq!(s["resources"], serde_json::json!(["SKILL.md"]));
         assert!(s["path_in_repo"].is_string(), "path_in_repo present: {s}");
     }
+
+    assert_eq!(
+        v["data"]["supported_agents"],
+        serde_json::json!(["claude", "pi", "codex"])
+    );
+    let install = &v["data"]["install"];
+    assert_eq!(install["selection_flag"], "--agent");
+    assert_eq!(install["default"], "all");
+    assert_eq!(
+        install["accepted_values"],
+        serde_json::json!(["claude", "pi", "codex", "all"])
+    );
+    assert_eq!(install["target_flag"], "--target");
+    assert_eq!(install["dry_run_flag"], "--dry-run");
+    assert_eq!(install["force_flag"], "--force");
+    assert_eq!(install["interactive"], false);
+    assert_eq!(install["no_clobber_default"], true);
+    assert_eq!(install["overwrite_requires_force"], true);
+    assert_eq!(
+        install["layouts"],
+        serde_json::json!([
+            {"agent":"claude","path":".claude/skills/<name>/...","form":"agent-skill-tree"},
+            {"agent":"pi","path":".pi/agent/skills/<name>/...","form":"agent-skill-tree"},
+            {"agent":"codex","path":".codex/prompts/<name>.md","form":"self-contained-prompt"}
+        ])
+    );
 }
 
 /// `version --json` exposes the same catalog (§17: one call to audit freshness).
@@ -186,6 +218,39 @@ fn skill_print_matches_installed_bytes() {
     assert_eq!(installed, printed, "install == print (§16)");
 }
 
+/// Every Codex artifact is the complete printed skill, not a pointer to a
+/// Claude/pi resource tree.
+#[test]
+fn every_codex_prompt_is_self_contained() {
+    let target = tempfile::tempdir().unwrap();
+    shipshape()
+        .args(["skill", "install", "--agent", "codex", "--target"])
+        .arg(target.path())
+        .assert()
+        .success();
+
+    let list = shipshape()
+        .args(["skill", "list", "--json"])
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    for skill in value["data"]["skills"].as_array().unwrap() {
+        let name = skill["name"].as_str().unwrap();
+        let installed = std::fs::read(
+            target
+                .path()
+                .join(".codex/prompts")
+                .join(format!("{name}.md")),
+        )
+        .unwrap();
+        let printed = shipshape().args(["skill", "print", name]).output().unwrap();
+        assert_eq!(
+            installed, printed.stdout,
+            "Codex prompt is complete: {name}"
+        );
+    }
+}
+
 /// Unknown skill → §10 error envelope carrying the accepted set, exit 1.
 #[test]
 fn skill_print_unknown_is_structured_error() {
@@ -311,8 +376,8 @@ fn skill_install_shipshape_init_matches_print() {
 // ── skill install ────────────────────────────────────────────────────────────
 
 /// A clean single-runtime install writes the canonical file and reports it in the
-/// envelope. (`--agent claude` keeps this focused on one target; the dual-home
-/// default + shared `--dest` collapse is covered separately below.)
+/// envelope. (`--agent claude` keeps this focused on one target; default-all
+/// behavior and shared `--dest` collapse are covered separately below.)
 #[test]
 fn skill_install_writes_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -502,20 +567,18 @@ fn skill_install_codex_shape() {
     );
 }
 
-// ── dual-home (Claude Code + pi.dev) ──────────────────────────────────────────
+// ── default-all runtimes ─────────────────────────────────────────────────────
 
-/// With no `--agent`, install **dual-homes**: the same `SKILL.md` lands under
-/// both `~/.claude/skills/<name>/` (Claude Code) and `~/.pi/agent/skills/<name>/`
-/// (pi.dev), rooted at `$HOME`, and the envelope reports both targets.
+/// With no `--agent`, install all three maintained runtime forms under HOME.
 #[test]
-fn skill_install_default_dual_homes_claude_and_pi() {
+fn skill_install_default_is_all_agents() {
     let home = tempfile::tempdir().unwrap();
     let out = shipshape()
         .args(["skill", "install", "shipshape-release", "--json"])
         .env("HOME", home.path())
         .output()
         .unwrap();
-    assert!(out.status.success(), "dual-home install succeeds");
+    assert!(out.status.success(), "default-all install succeeds");
 
     let claude = home
         .path()
@@ -523,13 +586,21 @@ fn skill_install_default_dual_homes_claude_and_pi() {
     let pi = home
         .path()
         .join(".pi/agent/skills/shipshape-release/SKILL.md");
+    let codex = home.path().join(".codex/prompts/shipshape-release.md");
     assert!(claude.exists(), "Claude Code target written");
     assert!(pi.exists(), "pi.dev target written");
-    // Byte-identical payload in both homes.
+    assert!(codex.exists(), "Codex target written");
+    // All forms are self-contained and byte-identical because this catalog has
+    // no external resource files to flatten into Codex prompts.
     assert_eq!(
         std::fs::read(&claude).unwrap(),
         std::fs::read(&pi).unwrap(),
-        "same rendered SKILL.md in both homes"
+        "same rendered SKILL.md in native homes"
+    );
+    assert_eq!(
+        std::fs::read(&claude).unwrap(),
+        std::fs::read(&codex).unwrap(),
+        "Codex prompt is self-contained"
     );
 
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -538,8 +609,7 @@ fn skill_install_default_dual_homes_claude_and_pi() {
         .iter()
         .map(|e| e["agent"].as_str().unwrap())
         .collect();
-    assert!(agents.contains(&"claude"), "claude target reported: {v}");
-    assert!(agents.contains(&"pi"), "pi target reported: {v}");
+    assert_eq!(agents, vec!["claude", "pi", "codex"]);
 }
 
 /// `--agent claude` writes **only** the Claude Code home — pi.dev is untouched.
@@ -603,10 +673,10 @@ fn skill_install_agent_pi_only() {
     );
 }
 
-/// The dual-home install is idempotent: a second run re-writes byte-identical
-/// content into both homes with no drift warning and exit 0.
+/// The default-all install is idempotent: a second run leaves byte-identical
+/// content in every runtime with no drift warning and exit 0.
 #[test]
-fn skill_install_dual_home_is_idempotent() {
+fn skill_install_default_all_is_idempotent() {
     let home = tempfile::tempdir().unwrap();
     let claude = home
         .path()
@@ -614,6 +684,7 @@ fn skill_install_dual_home_is_idempotent() {
     let pi = home
         .path()
         .join(".pi/agent/skills/shipshape-release/SKILL.md");
+    let codex = home.path().join(".codex/prompts/shipshape-release.md");
     let mut first: Option<Vec<u8>> = None;
     for _ in 0..2 {
         let out = shipshape()
@@ -631,7 +702,9 @@ fn skill_install_dual_home_is_idempotent() {
         // Both homes present and byte-identical to each other and across runs.
         let cbytes = std::fs::read(&claude).unwrap();
         let pbytes = std::fs::read(&pi).unwrap();
-        assert_eq!(cbytes, pbytes, "same bytes in both homes");
+        let codex_bytes = std::fs::read(&codex).unwrap();
+        assert_eq!(cbytes, pbytes, "same bytes in native homes");
+        assert_eq!(cbytes, codex_bytes, "self-contained Codex prompt bytes");
         match &first {
             None => first = Some(cbytes),
             Some(prev) => assert_eq!(prev, &cbytes, "stable across re-install"),
@@ -707,9 +780,119 @@ fn skill_install_dest_collapses_shape_sharing_runtimes() {
     );
 }
 
-/// The final-component overwrite is symlink-safe: installing over a path that is a
-/// (dangling) symlink replaces the *link* with a regular file rather than
-/// following it. The atomic `rename` guarantees this on POSIX.
+/// Canonical `--target` treats its argument as an install base and preserves
+/// every runtime's native directory layout. Explicit `all` matches the default.
+#[test]
+fn skill_install_target_preserves_native_layouts() {
+    let target = tempfile::tempdir().unwrap();
+    shipshape()
+        .args([
+            "skill",
+            "install",
+            "shipshape-release",
+            "--agent",
+            "all",
+            "--target",
+        ])
+        .arg(target.path())
+        .assert()
+        .success();
+
+    for relative in [
+        ".claude/skills/shipshape-release/SKILL.md",
+        ".pi/agent/skills/shipshape-release/SKILL.md",
+        ".codex/prompts/shipshape-release.md",
+    ] {
+        assert!(target.path().join(relative).is_file(), "missing {relative}");
+    }
+}
+
+/// Dry-run performs preflight and emits the §11 planning envelope without even
+/// creating runtime directories.
+#[test]
+fn skill_install_dry_run_plans_all_and_writes_nothing() {
+    let target = tempfile::tempdir().unwrap();
+    let out = shipshape()
+        .args(["skill", "install", "shipshape-release", "--target"])
+        .arg(target.path())
+        .args(["--dry-run", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["data"]["dry_run"], true);
+    assert_eq!(value["data"]["force"], false);
+    let would = value["data"]["would"].as_array().unwrap();
+    assert_eq!(would.len(), 3);
+    assert!(would.iter().all(|entry| entry["action"] == "create"));
+    assert!(!target.path().join(".claude").exists());
+    assert!(!target.path().join(".pi").exists());
+    assert!(!target.path().join(".codex").exists());
+}
+
+/// A parseable foreign skill is still unmanaged: a forged/old `cli_version` alone
+/// must not bypass no-clobber. `--force` is the only overwrite opt-in.
+#[test]
+fn skill_install_refuses_foreign_file_without_force() {
+    let target = tempfile::tempdir().unwrap();
+    let path = target.path().join(".codex/prompts/shipshape-release.md");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "---\nname: foreign\ncli_version: 0.1.0\n---\nkeep me\n",
+    )
+    .unwrap();
+
+    shipshape()
+        .args([
+            "skill",
+            "install",
+            "shipshape-release",
+            "--agent",
+            "codex",
+            "--target",
+        ])
+        .arg(target.path())
+        .assert()
+        .failure()
+        .code(1);
+    assert!(std::fs::read_to_string(&path).unwrap().contains("keep me"));
+
+    shipshape()
+        .args([
+            "skill",
+            "install",
+            "shipshape-release",
+            "--agent",
+            "codex",
+            "--force",
+            "--target",
+        ])
+        .arg(target.path())
+        .assert()
+        .success();
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("name: shipshape-release"));
+}
+
+/// Canonical target and compatibility destination have intentionally different
+/// semantics and cannot be supplied together.
+#[test]
+fn skill_install_rejects_target_with_dest() {
+    let dir = tempfile::tempdir().unwrap();
+    shipshape()
+        .args(["skill", "install", "--target"])
+        .arg(dir.path())
+        .args(["--dest"])
+        .arg(dir.path())
+        .assert()
+        .failure()
+        .code(1);
+}
+
+/// The final-component overwrite is symlink-safe: no-clobber refuses it by
+/// default; explicit force replaces the link rather than following it.
 #[cfg(unix)]
 #[test]
 fn skill_install_replaces_final_component_symlink() {
@@ -721,6 +904,7 @@ fn skill_install_replaces_final_component_symlink() {
     // not resolve it (which would write through to a nonexistent outside path).
     std::os::unix::fs::symlink(dir.path().join("nowhere-outside"), &target).unwrap();
 
+    // No-clobber is the default even for a dangling symlink.
     shipshape()
         .args([
             "skill",
@@ -728,6 +912,25 @@ fn skill_install_replaces_final_component_symlink() {
             "shipshape-release",
             "--agent",
             "claude",
+            "--dest",
+        ])
+        .arg(dir.path())
+        .assert()
+        .failure()
+        .code(1);
+    assert!(std::fs::symlink_metadata(&target)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+
+    shipshape()
+        .args([
+            "skill",
+            "install",
+            "shipshape-release",
+            "--agent",
+            "claude",
+            "--force",
             "--dest",
         ])
         .arg(dir.path())

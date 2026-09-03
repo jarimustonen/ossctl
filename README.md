@@ -120,34 +120,27 @@ shipshape skill print shipshape-init  # stream one rendered SKILL.md to stdout
 shipshape skill install         # install the whole catalog (add a NAME to scope to one)
 ```
 
-`skill install` **dual-homes** each skill by default — the same `SKILL.md` is written
-into **both** agent-runtime homes so it is discoverable whether you drive `shipshape`
-from Claude Code or from pi.dev:
+`skill install` targets **all three maintained agents by default**, exactly like an
+explicit `--agent all`:
 
-- `~/.claude/skills/<name>/SKILL.md` — Claude Code
-- `~/.pi/agent/skills/<name>/SKILL.md` — pi.dev (discovered as `/skill:<name>`)
+- `~/.claude/skills/<name>/SKILL.md` — Claude Code native Agent Skill tree
+- `~/.pi/agent/skills/<name>/SKILL.md` — pi.dev native Agent Skill tree
+- `~/.codex/prompts/<name>.md` — self-contained Codex prompt
 
-Narrow the target with `--agent`:
+Pass `--agent claude|pi|codex` to narrow the install to one runtime. Canonical
+`--target <DIR>` replaces the install base while preserving those native paths, which
+makes a repository root or disposable test directory safe to target. The older `--dest
+<DIR>` remains compatible: it names the already-resolved skills directory directly and
+therefore omits the `.claude` / `.pi` / `.codex` prefix. The two overrides are mutually
+exclusive.
 
-| `--agent` | Writes to |
-| --- | --- |
-| *(omitted)* | Claude Code **and** pi.dev (dual-home — the default) |
-| `claude` | `~/.claude/skills` only |
-| `pi` | `~/.pi/agent/skills` only |
-| `codex` | `~/.codex/prompts/<name>.md` (flat prompt file) |
-| `all` | every known runtime (Claude + pi.dev + Codex) |
-
-Installs are idempotent and version-guarded: a re-install of the same version
-re-writes byte-identical content and emits no drift warning, and an on-disk copy
-newer than the running binary is refused unless you pass `--force` (§17). `--dest
-<PATH>` overrides the root directory (the per-runtime file shape still applies); when
-several selected runtimes share a shape *and* that root — Claude and pi.dev both write
-`<name>/SKILL.md` — they resolve to the same file, so the *write* collapses to one
-file while the report still lists each requested runtime. The `--json` envelope
-reports one `installed[]` row per requested target
-(`{name, agent, dest_path, cli_version, schema_version}`) — the same field shape as
-before; dual-home is additive to that shape, though note the **default now writes two
-targets** (Claude + pi.dev) where it previously wrote one.
+Installs are non-interactive, idempotent, and no-clobber by default. A managed older
+copy upgrades with a warning; an unmanaged, malformed, non-regular, or newer destination
+is refused unless `--force` safely applies. `--dry-run` performs the same complete
+preflight and emits a `would[]` planning envelope without creating directories or files.
+Use `--json` for the schema-versioned result. `skill list --json` advertises the supported
+agents, exact layouts, selector/default, target, dry-run, force, and no-clobber
+capabilities so callers can inspect the contract without mutating disk.
 
 ## License
 
