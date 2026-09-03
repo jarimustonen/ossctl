@@ -38,19 +38,24 @@ Homebrew tap/secret setup guidance from the approved contract.
   cargo install shipshape-cli
   ```
 
-The manifests preserve the portable source-install path. Shipshape is published on
-crates.io as `shipshape-cli` and `shipshape-core`.
+The manifests preserve the portable source-install path. The first crates.io release
+will be published by the verified post-merge rollout in ADR-0005; until it completes,
+retain the frozen `ossctl` 0.10.x installation rather than assuming the new channel is
+live.
 
-Prebuilt cross-platform binaries and a shell installer are produced with
-[cargo-dist](https://opensource.axo.dev/cargo-dist/).
+From the first Shipshape release onward, prebuilt cross-platform binaries and a shell
+installer will be produced with [cargo-dist](https://opensource.axo.dev/cargo-dist/).
 Download the installer or a matching archive from this repository's GitHub Releases for
-macOS arm64 and Linux (statically-linked `musl`, arm64 / x86_64). Intel macOS and Windows receive no prebuilt artifacts; source installation remains available wherever the Rust workspace and its dependencies build.
+macOS arm64 and Linux (statically-linked `musl`, arm64 / x86_64). Intel macOS and Windows
+receive no prebuilt artifacts; source installation remains available wherever the Rust
+workspace and its dependencies build.
 
 ## Status
 
-**Shipshape 0.11.0 is released.** The founding architecture is recorded in
-[`docs/adr/`](docs/adr/). [crates.io](https://crates.io/crates/shipshape-cli) carries
-`shipshape-cli` + `shipshape-core`, with prebuilt artifacts on this repository's GitHub Releases. The
+**Source migration complete; first Shipshape release pending.** The founding
+architecture is recorded in [`docs/adr/`](docs/adr/). After ADR-0005's rollout,
+[crates.io](https://crates.io/crates/shipshape-cli) will carry `shipshape-cli` +
+`shipshape-core`, with prebuilt artifacts on this repository's GitHub Releases. The
 `shipshape-cli` package installs the command `shipshape`; product, executable, release
 asset, and formula names remain Shipshape. See
 [`CHANGELOG.md`](CHANGELOG.md) for the release history.
