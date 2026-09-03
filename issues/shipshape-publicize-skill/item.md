@@ -7,6 +7,9 @@ status: in-progress
 priority: normal
 labels: [skills]
 lane: publicize
+commits:
+- hash: 881b7fab459c7ccb17c4410e444d3fff5ddeea37
+  summary: start implementation
 ---
 
 # Collect de-stealth experience toward a /shipshape-publicize skill
