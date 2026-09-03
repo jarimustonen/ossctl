@@ -3,7 +3,7 @@ created: 2026-08-23
 updated: 2026-09-03
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:homebase-wrapup-ossctl-cargo-publish-detection-20260823
@@ -14,6 +14,10 @@ commits:
   summary: start release trigger preflight fix
 - hash: cf542d8
   summary: parse inline tag publish triggers
+- hash: f2b222b
+  summary: tighten workflow trigger evidence after review
+closed: 2026-09-03
+closed_by: agent
 ---
 
 # Release plan misses tag-triggered Cargo publish workflow
@@ -54,3 +58,9 @@ The repository's `.github/workflows/publish-crates.yml` contains `on: push: tags
 ### 2026-09-03T12:13:53Z · @agent
 
 Root cause confirmed: the trigger detector was an indentation-aware text scan that accepted only a line exactly equal to `tags:`. It therefore discarded the valid inline sequence `tags: [...]` before the existing structured job/`cargo publish -p ...` detector ran. The fix parses the workflow trigger mapping as YAML (including quoted `on` and YAML-1.1 boolean-key representations) while retaining negative checks for branch-only triggers and tag workflows without a direct publish path.
+
+## Resolution
+
+### 2026-09-03T12:52:05Z · @agent
+
+Fixed and verified. Release planning now structurally recognizes the observed inline `push.tags` sequence and direct `cargo publish -p ...` steps with no delegated-publish warning. Empty/malformed filters, branch-only triggers, malformed workflows, invalid reusable triggers, and tag workflows without publish commands remain inconclusive and preserve the warning. `/llm-review` plus `/assess-findings` completed; all five confirmed localized findings were applied. The exact repository green gate passed: fmt, workspace Clippy with warnings denied, workspace tests (637 passed, 9 ignored), workspace build, and rustdoc with warnings denied.
