@@ -86,3 +86,4 @@ own issues. `issuectl list` for the live view.
 - [ ] 🐛 Piialiisan bugiraportti: homebrew/binary target verification fails: missing during cut, unknown … — jari via Telegram ([`intake-bug-ossctl-51f9c1ce4cfd`](issues/intake-bug-ossctl-51f9c1ce4cfd/item.md))
 - [ ] 🐛 Piialiisan bugiraportti: Release plan misses tag-triggered Cargo publish workflow — jari via Telegram ([`intake-bug-ossctl-a5febb642dd7`](issues/intake-bug-ossctl-a5febb642dd7/item.md))
 - [ ] 🐛 Piialiisan bugiraportti: Release dry-run misses required dist executable — jari via Telegram ([`intake-bug-ossctl-c9024d7429d8`](issues/intake-bug-ossctl-c9024d7429d8/item.md))
+- [ ] 🐛 Piialiisan bugiraportti: Release cut checks cargo-dist only after bump — jari via Telegram ([`intake-bug-ossctl-106596a87c61`](issues/intake-bug-ossctl-106596a87c61/item.md))
