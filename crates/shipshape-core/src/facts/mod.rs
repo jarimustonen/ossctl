@@ -424,28 +424,10 @@ fn command_segment_runs_cargo_publish(segment: &str) -> bool {
 }
 
 fn workflow_accepts_calls(text: &str) -> bool {
-    let mut on_indent = None;
-    for line in text.lines() {
-        let uncommented = line.split('#').next().unwrap_or("");
-        if uncommented.trim().is_empty() {
-            continue;
-        }
-        let indent = uncommented.len() - uncommented.trim_start().len();
-        let key = uncommented.trim();
-        if key == "on:" {
-            on_indent = Some(indent);
-            continue;
-        }
-        if let Some(on) = on_indent {
-            if indent <= on {
-                return false;
-            }
-            if key == "workflow_call:" {
-                return true;
-            }
-        }
-    }
-    false
+    let Some(document) = serde_yaml::from_str::<serde_yaml::Value>(text).ok() else {
+        return false;
+    };
+    workflow_has_trigger(&document, "workflow_call")
 }
 
 fn local_workflow_calls(text: &str) -> Vec<String> {
@@ -475,41 +457,50 @@ fn yaml_mapping(value: &serde_yaml::Value) -> Option<&serde_yaml::Mapping> {
     value.as_mapping()
 }
 
-fn workflow_pushes_tags(text: &str) -> bool {
-    let mut on_indent = None;
-    let mut push_indent = None;
-    for line in text.lines() {
-        let uncommented = line.split('#').next().unwrap_or("");
-        if uncommented.trim().is_empty() {
-            continue;
-        }
-        let indent = uncommented.len() - uncommented.trim_start().len();
-        let key = uncommented.trim();
-        if key == "on:" {
-            on_indent = Some(indent);
-            push_indent = None;
-            continue;
-        }
-        if let Some(on) = on_indent {
-            if indent <= on {
-                on_indent = None;
-                push_indent = None;
-                continue;
-            }
-            if key == "push:" {
-                push_indent = Some(indent);
-                continue;
-            }
-        }
-        if let Some(push) = push_indent {
-            if indent <= push {
-                push_indent = None;
-            } else if key == "tags:" {
-                return true;
-            }
-        }
+fn yaml_mapping_get<'a>(
+    mapping: &'a serde_yaml::Mapping,
+    key: &str,
+) -> Option<&'a serde_yaml::Value> {
+    mapping.iter().find_map(|(candidate, value)| {
+        let matches_string = candidate.as_str() == Some(key);
+        // Some YAML 1.1 parsers resolve the unquoted GitHub Actions key `on` as
+        // boolean true. Accept that representation without treating any other
+        // boolean key as a workflow trigger.
+        let matches_yaml_11_on = key == "on" && candidate.as_bool() == Some(true);
+        (matches_string || matches_yaml_11_on).then_some(value)
+    })
+}
+
+fn workflow_on(text: &str) -> Option<serde_yaml::Value> {
+    let document = serde_yaml::from_str::<serde_yaml::Value>(text).ok()?;
+    yaml_mapping(&document)
+        .and_then(|root| yaml_mapping_get(root, "on"))
+        .cloned()
+}
+
+fn workflow_has_trigger(document: &serde_yaml::Value, trigger: &str) -> bool {
+    let Some(on) = yaml_mapping(document).and_then(|root| yaml_mapping_get(root, "on")) else {
+        return false;
+    };
+    match on {
+        serde_yaml::Value::String(single) => single == trigger,
+        serde_yaml::Value::Sequence(triggers) => triggers
+            .iter()
+            .any(|candidate| candidate.as_str() == Some(trigger)),
+        serde_yaml::Value::Mapping(triggers) => yaml_mapping_get(triggers, trigger).is_some(),
+        _ => false,
     }
-    false
+}
+
+fn workflow_pushes_tags(text: &str) -> bool {
+    let Some(on) = workflow_on(text) else {
+        return false;
+    };
+    let Some(push) = yaml_mapping(&on).and_then(|triggers| yaml_mapping_get(triggers, "push"))
+    else {
+        return false;
+    };
+    yaml_mapping(push).is_some_and(|push| yaml_mapping_get(push, "tags").is_some())
 }
 
 /// Read every Cargo manifest's `publish` disposition under `repo_root` — the
@@ -1968,6 +1959,15 @@ mod tests {
         Path::new("/repo")
     }
 
+    fn delegated_cargo_target(package: &str) -> crate::contract::schema::Target {
+        crate::contract::schema::Target {
+            ecosystem: Ecosystem::Rust,
+            package: Some(package.to_string()),
+            registry: crate::contract::schema::Registry::CratesIo,
+            adapter: crate::contract::schema::Adapter::CargoPublishCi,
+        }
+    }
+
     // ── Empty / unborn repo ────────────────────────────────────────────────
 
     #[test]
@@ -3073,6 +3073,83 @@ mod tests {
         assert_eq!(
             surface.tag_triggered_cargo_publish_workflows,
             vec!["publish.yaml"]
+        );
+    }
+
+    #[test]
+    fn observed_inline_tag_trigger_and_direct_package_publishes_are_detected() {
+        let fs = FakeFs::default().file(
+            "/repo/.github/workflows/publish-crates.yml",
+            "on:\n  push:\n    tags: ['v[0-9]+.[0-9]+.[0-9]+*']\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo publish -p octl-core\n      - run: cargo publish -p orchestratectl\n",
+        );
+        let surface = gather(repo(), &fs, &FakeGit::default()).distribution_surface;
+        assert_eq!(surface.tag_triggered_workflows, vec!["publish-crates.yml"]);
+        assert_eq!(
+            surface.tag_triggered_cargo_publish_workflows,
+            vec!["publish-crates.yml"]
+        );
+        assert!(
+            crate::release::distribution::delegated_publish_workflow_warnings(
+                &[
+                    delegated_cargo_target("octl-core"),
+                    delegated_cargo_target("orchestratectl"),
+                ],
+                &surface,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn inline_tags_without_a_direct_publish_path_remain_inconclusive() {
+        let fs = FakeFs::default().file(
+            "/repo/.github/workflows/release.yml",
+            "on:\n  push:\n    tags: ['v*']\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo build --release\n",
+        );
+        let surface = gather(repo(), &fs, &FakeGit::default()).distribution_surface;
+        assert_eq!(surface.tag_triggered_workflows, vec!["release.yml"]);
+        assert!(surface.tag_triggered_cargo_publish_workflows.is_empty());
+        let warnings = crate::release::distribution::delegated_publish_workflow_warnings(
+            &[delegated_cargo_target("demo")],
+            &surface,
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("no directly inspectable Cargo publish path"));
+    }
+
+    #[test]
+    fn direct_publish_without_a_tag_filter_remains_inconclusive() {
+        let fs = FakeFs::default().file(
+            "/repo/.github/workflows/publish.yml",
+            "on:\n  push:\n    branches: [main]\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo publish -p demo\n",
+        );
+        let surface = gather(repo(), &fs, &FakeGit::default()).distribution_surface;
+        assert!(surface.tag_triggered_workflows.is_empty());
+        assert!(surface.tag_triggered_cargo_publish_workflows.is_empty());
+        let warnings = crate::release::distribution::delegated_publish_workflow_warnings(
+            &[delegated_cargo_target("demo")],
+            &surface,
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("no tag-triggered workflows were detected"));
+    }
+
+    #[test]
+    fn inline_push_mapping_is_detected_without_matching_unrelated_tags() {
+        let fs = FakeFs::default()
+            .file(
+                "/repo/.github/workflows/publish.yml",
+                "\"on\": { push: { tags: ['v*'] } }\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo publish -p demo\n",
+            )
+            .file(
+                "/repo/.github/workflows/ci.yml",
+                "on:\n  pull_request:\n    tags: ['not-a-push-filter']\njobs: {}\n",
+            );
+        let surface = gather(repo(), &fs, &FakeGit::default()).distribution_surface;
+        assert_eq!(surface.tag_triggered_workflows, vec!["publish.yml"]);
+        assert_eq!(
+            surface.tag_triggered_cargo_publish_workflows,
+            vec!["publish.yml"]
         );
     }
 
