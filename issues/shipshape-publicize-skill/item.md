@@ -3,7 +3,7 @@ created: 2026-08-23
 updated: 2026-09-03
 type: feature
 reporter: jari
-status: in-progress
+status: done
 priority: normal
 labels: [skills]
 lane: publicize
@@ -16,6 +16,8 @@ commits:
   summary: harden publicize checks after multi-model review
 - hash: 1c1420e
   summary: keep release status evidence-grounded
+closed: 2026-09-03
+closed_by: pi
 ---
 
 # Collect de-stealth experience toward a /shipshape-publicize skill
@@ -139,3 +141,31 @@ What was run: repo-metadata apply (`gh repo edit` description + 9 topics, PVR en
 - *Social preview image is the one metadata item with no CLI/API path* — `gh repo edit` covers description/topics but the social preview requires the web UI; the skill can only surface it as a manual TODO for the maintainer.
 
 **On the design question:** this run leans **A** (thin `/shipshape-publicize` member) with the deterministic checks pushed into `shipshape audit` dimensions: (1) PVR-enabled-when-SECURITY.md-references-it, (2) README-example-commands ⊆ `--help --json` command tree, (3) README install/platform claims vs dist target list, (4) repo description/topics non-empty. B would overload a release-focused orchestrator with a one-time transition; C loses exactly the checks above that are tool-verifiable. The glasspad sequence that worked: metadata apply → issue forms → architecture (opt) → README rewrite as a worktree unit with the claims audit in its brief → green gate → patch cut.
+
+## Acceptance Criteria
+
+- [x] Direction A is implemented as a thin bundled `/shipshape-publicize` skill.
+- [x] Evidence-backed deterministic checks live in `shipshape audit`; judgment and writes remain in the skill.
+- [x] Catalog, installer coverage, public documentation, and changelog are updated.
+- [x] Four-model `/llm-review` and `/assess-findings` are complete and all accepted findings are resolved.
+
+## Tests Run
+
+- [x] `cargo fmt --all --check`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo test --workspace`
+- [x] `cargo build --workspace`
+- [x] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`
+
+## Implementation Notes
+
+Direction A preserves existing member ownership while adding advisory public-front-door gaps.
+Command claims become definitive only when canonical binary commit provenance matches a clean
+checkout; unavailable or malformed observations remain `unknown` rather than false `absent`.
+Review artifacts are retained under the gitignored `history/` directory.
+
+## Resolution
+
+### 2026-09-03T13:03:16Z · @pi
+
+Implemented direction A as a bundled thin /shipshape-publicize member, added only deterministic advisory audit signals backed by the project-canon and Glasspad passes, hardened evidence semantics after four-model review and /assess-findings, and verified the full Rust green gate (fmt, clippy, tests, build, rustdoc).
