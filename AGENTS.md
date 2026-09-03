@@ -1,7 +1,7 @@
 # shipshape
 
 Release & readiness coordinator: the deterministic engine that takes any repo to
-OSS release quality — the AI-first Rust CLI behind the `/shipshape-*` Claude Code skill
+OSS release quality — the AI-first Rust CLI behind the `/shipshape-*` Agent Skills
 family. `shipshape` owns the normalizer/validator for the project release contract
 (`OSS-RELEASE.md`), repo-fact detection, the readiness audit, and the resumable
 per-ecosystem release-cut state machine; the prose `/shipshape-*` skills are thin callers

@@ -33,6 +33,8 @@ use crate::protocol::audit::{
 };
 use crate::protocol::facts::Facts;
 
+mod publicize;
+
 /// Score the repo at `repo_root` against its `contract` and detected `facts`.
 ///
 /// Pure over its inputs and read-only over the repo: filesystem probes go
@@ -107,6 +109,11 @@ pub fn audit(
     // The normalizer does NOT hard-fail on a missing producer (advisory-producer
     // decision from the shipshape-init unit); the audit reports them as gaps.
     producer_gaps(&mut gaps, repo_root, contract, facts, fs, maturity);
+
+    // ── Public-facing consistency checks (read-only) ──
+    // These are the deterministic subset learned from two real publicize passes.
+    // Audience reframing and prose quality remain in /shipshape-publicize.
+    publicize::publicize_gaps(&mut gaps, repo_root, contract, facts, fs, cmd);
 
     // ── GitHub community standards (read-only; failure ⇒ unknown) ──
     let community_profile = community_profile(repo_root, cmd);

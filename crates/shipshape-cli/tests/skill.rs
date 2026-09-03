@@ -44,11 +44,12 @@ fn skill_list_json_carries_version_fields() {
             "shipshape-security-policy",
             "shipshape-changelog",
             "shipshape-readiness",
+            "shipshape-publicize",
             "shipshape-readme",
             "shipshape-contributing",
             "shipshape-dist",
         ],
-        "the catalog contains exactly the ten canonical Shipshape skills"
+        "the catalog contains exactly the eleven canonical Shipshape skills"
     );
     for s in skills {
         assert!(s["name"].is_string(), "name present: {s}");
@@ -302,6 +303,54 @@ fn skill_print_shipshape_init_is_wired_to_the_binary() {
             "shipshape-init must not reference the retired `{retired}`"
         );
     }
+}
+
+#[test]
+fn publicize_installs_in_all_runtime_layouts_and_keeps_member_ownership() {
+    let target = tempfile::tempdir().unwrap();
+    shipshape()
+        .args([
+            "skill",
+            "install",
+            "shipshape-publicize",
+            "--agent",
+            "all",
+            "--target",
+        ])
+        .arg(target.path())
+        .assert()
+        .success();
+
+    let paths = [
+        ".claude/skills/shipshape-publicize/SKILL.md",
+        ".pi/agent/skills/shipshape-publicize/SKILL.md",
+        ".codex/prompts/shipshape-publicize.md",
+    ];
+    let mut expected = None;
+    for relative in paths {
+        let bytes = std::fs::read(target.path().join(relative)).unwrap();
+        if let Some(expected) = &expected {
+            assert_eq!(expected, &bytes, "runtime artifact stays self-contained");
+        } else {
+            expected = Some(bytes);
+        }
+    }
+    let text = String::from_utf8(expected.unwrap()).unwrap();
+    for required in [
+        "shipshape audit --json",
+        "/shipshape-readme",
+        "/shipshape-contributing",
+        "/shipshape-security-policy",
+        "/shipshape-architecture",
+        "committer-only",
+        "manual TODO",
+    ] {
+        assert!(
+            text.contains(required),
+            "publicize sequence includes {required}"
+        );
+    }
+    assert!(text.contains("Existing family members remain sole writers"));
 }
 
 /// `shipshape-dist` is a registered family member and installs the exact rendered

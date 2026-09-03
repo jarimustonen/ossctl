@@ -147,6 +147,13 @@ impl FakeCmd {
                 profile_json,
                 "",
             )
+            .on(
+                "gh",
+                &["api", "repos/acme/tool"],
+                0,
+                r#"{"description":"A useful tool","topics":["cli"]}"#,
+                "",
+            )
     }
 }
 
@@ -1027,6 +1034,208 @@ fn community_profile_reads_security_policy_alias() {
         &FakeCmd::github(profile),
     );
     assert_eq!(report.community_profile.security, Presence::Present);
+}
+
+// ── Publicize checks derived from two observed passes ──────────────────────
+
+#[test]
+fn empty_github_metadata_is_reported_and_api_failure_is_unknown() {
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n");
+    let empty = FakeCmd::github(PROFILE_README_LICENSE).on(
+        "gh",
+        &["api", "repos/acme/tool"],
+        0,
+        r#"{"description":"  ","topics":[]}"#,
+        "",
+    );
+    let report = audit(
+        repo(),
+        &contract_at(Maturity::Spike),
+        &facts_with(Maturity::Spike, true, None),
+        &fs,
+        &empty,
+    );
+    assert_eq!(gap(&report, "github-description").status, Presence::Absent);
+    assert_eq!(gap(&report, "github-topics").status, Presence::Absent);
+
+    let failed = FakeCmd::new().on(
+        "git",
+        &["remote", "get-url", "origin"],
+        0,
+        "git@github.com:acme/tool.git\n",
+        "",
+    );
+    let report = audit(
+        repo(),
+        &contract_at(Maturity::Spike),
+        &facts_with(Maturity::Spike, true, None),
+        &fs,
+        &failed,
+    );
+    assert_eq!(gap(&report, "github-description").status, Presence::Unknown);
+    assert_eq!(gap(&report, "github-topics").status, Presence::Unknown);
+}
+
+#[test]
+fn security_policy_that_promises_pvr_requires_enabled_setting() {
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n")
+        .file(
+            "/repo/SECURITY.md",
+            "Use GitHub Private Vulnerability Reporting.\n",
+        );
+    let disabled = FakeCmd::github(PROFILE_README_LICENSE).on(
+        "gh",
+        &["api", "repos/acme/tool/private-vulnerability-reporting"],
+        0,
+        r#"{"enabled":false}"#,
+        "",
+    );
+    let report = audit(
+        repo(),
+        &contract_at(Maturity::Spike),
+        &facts_with(Maturity::Spike, true, None),
+        &fs,
+        &disabled,
+    );
+    assert_eq!(
+        gap(&report, "github-private-vulnerability-reporting").status,
+        Presence::Absent
+    );
+
+    let enabled = FakeCmd::github(PROFILE_README_LICENSE).on(
+        "gh",
+        &["api", "repos/acme/tool/private-vulnerability-reporting"],
+        0,
+        r#"{"enabled":true}"#,
+        "",
+    );
+    let report = audit(
+        repo(),
+        &contract_at(Maturity::Spike),
+        &facts_with(Maturity::Spike, true, None),
+        &fs,
+        &enabled,
+    );
+    assert!(!ids(&report).contains(&"github-private-vulnerability-reporting"));
+}
+
+#[test]
+fn readme_platform_claim_is_checked_against_distribution_targets() {
+    let mut contract = contract_at(Maturity::Mvp);
+    contract.distributions = vec![dist_with(&[
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-musl",
+    ])];
+    let fs = FakeFs::default()
+        .file(
+            "/repo/README.md",
+            "Prebuilt binaries support Intel macOS and Linux arm64.\nIntel macOS is unsupported for prebuilt installs.\n",
+        )
+        .file("/repo/LICENSE", "MIT\n");
+    let report = audit(
+        repo(),
+        &contract,
+        &facts_with(Maturity::Mvp, true, None),
+        &fs,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    assert_eq!(
+        gap(&report, "readme-platform:x86_64-apple-darwin").status,
+        Presence::Absent
+    );
+    assert!(!ids(&report).contains(&"readme-platform:aarch64-unknown-linux-musl"));
+}
+
+#[test]
+fn stale_readme_subcommand_is_checked_against_structured_help() {
+    let fs = FakeFs::default()
+        .file(
+            "/repo/Cargo.toml",
+            "[package]\nname = \"tool-package\"\nversion = \"0.1.0\"\n[[bin]]\nname = \"tool\"\npath = \"src/main.rs\"\n",
+        )
+        .file("/repo/README.md", "```sh\ntool serve ./site\n```\n")
+        .file("/repo/LICENSE", "MIT\n");
+    let cmd = FakeCmd::github(PROFILE_README_LICENSE).on(
+        "tool",
+        &["--help", "--json"],
+        0,
+        r#"{"data":{"command":{"subcommands":[{"name":"publish"}],"args":[],"flags":[{"long":"json"}]}}}"#,
+        "",
+    );
+    let report = audit(
+        repo(),
+        &contract_at(Maturity::Spike),
+        &facts_with(Maturity::Spike, true, None),
+        &fs,
+        &cmd,
+    );
+    assert_eq!(gap(&report, "readme-command:1").status, Presence::Absent);
+}
+
+#[test]
+fn readme_command_check_handles_workspace_binaries_positionals_and_flags() {
+    let fs = FakeFs::default()
+        .file(
+            "/repo/Cargo.toml",
+            "[workspace]\nmembers = [\"crates/tool\"]\n",
+        )
+        .file(
+            "/repo/crates/tool/Cargo.toml",
+            "[package]\nname = \"tool-package\"\nversion = \"0.1.0\"\n[[bin]]\nname = \"tool\"\npath = \"src/main.rs\"\n",
+        )
+        .file(
+            "/repo/README.md",
+            "```sh\ntool publish ./site --json\ntool publish ./site --retired\n```\n",
+        )
+        .file("/repo/LICENSE", "MIT\n");
+    let top = r#"{"data":{"command":{"subcommands":[{"name":"publish"}],"args":[],"flags":[{"long":"json"}]}}}"#;
+    let publish = r#"{"data":{"command":{"subcommands":[],"args":[{"id":"path"}],"flags":[{"long":"json"}]}}}"#;
+    let cmd = FakeCmd::github(PROFILE_README_LICENSE)
+        .on("tool", &["--help", "--json"], 0, top, "")
+        .on("tool", &["publish", "--help", "--json"], 0, publish, "");
+    let report = audit(
+        repo(),
+        &contract_at(Maturity::Spike),
+        &facts_with(Maturity::Spike, true, None),
+        &fs,
+        &cmd,
+    );
+    assert!(!ids(&report).contains(&"readme-command:1"));
+    assert_eq!(gap(&report, "readme-command:2").status, Presence::Absent);
+}
+
+#[test]
+fn public_link_to_tracked_symlink_and_vendor_category_are_reported() {
+    let fs = FakeFs::default()
+        .file(
+            "/repo/README.md",
+            "The Claude Code skills use [the canon](CANON.md).\n",
+        )
+        .file("/repo/LICENSE", "MIT\n");
+    let cmd = FakeCmd::github(PROFILE_README_LICENSE).on(
+        "git",
+        &["ls-files", "-s"],
+        0,
+        "120000 abcdef 0\tCANON.md\n100644 abcdef 0\tREADME.md\n",
+        "",
+    );
+    let report = audit(
+        repo(),
+        &contract_at(Maturity::Spike),
+        &facts_with(Maturity::Spike, true, None),
+        &fs,
+        &cmd,
+    );
+    assert!(ids(&report)
+        .iter()
+        .any(|id| id.starts_with("symlink-link:")));
+    assert!(ids(&report)
+        .iter()
+        .any(|id| id.starts_with("product-neutrality:")));
 }
 
 // ── Wire-format contract (serialized enum strings) ─────────────────────────

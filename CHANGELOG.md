@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- oss-changelog:unreleased-start -->
 ## [Unreleased]
 
+### Added
+- **A bundled `/shipshape-publicize` workflow now turns a technically ready but
+  insider-facing repository into an externally usable project.** It sequences existing
+  file-owning members, enforces an explicit autonomy boundary for GitHub settings, separates
+  external GitHub intake from committer-only issuectl, and carries registry README changes
+  through the required release. `shipshape audit` adds deterministic checks for repository
+  metadata, PVR state, README command/platform claims, symlink links, and neutral Agent Skills
+  terminology (`shipshape-publicize-skill`).
+
 ### Changed
 - **Release bumps now rewrite exact intra-workspace pins owned by every workspace
   member, including non-published distribution wrappers.** The complete workspace-wide

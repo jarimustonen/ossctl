@@ -110,6 +110,15 @@ pub const CATALOG: &[BundledSkill] = &[
         path_in_repo: "crates/shipshape-cli/skills/shipshape-readiness/SKILL.template.md",
     },
     BundledSkill {
+        name: "shipshape-publicize",
+        description:
+            "Turn a public-but-insider-facing repository into an externally usable project: \
+             orchestrate existing members, verify its public front door, apply authorized GitHub \
+             metadata/PVR settings, and sequence registry README publication.",
+        template: include_str!("../skills/shipshape-publicize/SKILL.template.md"),
+        path_in_repo: "crates/shipshape-cli/skills/shipshape-publicize/SKILL.template.md",
+    },
+    BundledSkill {
         name: "shipshape-readme",
         description:
             "Generator of a project's README.md front door + LICENSE: read the contract \

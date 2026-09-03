@@ -5,7 +5,8 @@
 //! canon** (recommended artifacts scaled to the facts' maturity), the
 //! **producer-existence** obligations the contract declares (a `fragment`
 //! changelog needs its dir, a `coverage`/`scorecard` badge needs its CI
-//! producer, a registry target needs an SPDX license), and the **GitHub
+//! producer, a registry target needs an SPDX license), the deterministic
+//! public-front-door checks learned from real publicize passes, and the **GitHub
 //! community standards** (`gh api …/community/profile`). It is **read-only** —
 //! nothing here nor in [`crate::audit`] ever writes the repo (ADR-0001 §3).
 //!
@@ -200,8 +201,9 @@ pub struct CommunityProfile {
 }
 
 /// The readiness gap-report — a read-only score of the repo against the gated
-/// core, the tier-scaled canon, the contract's producer obligations, and the
-/// GitHub community standards.
+/// core, the tier-scaled canon, the contract's producer obligations,
+/// deterministic public-front-door consistency checks, and the GitHub community
+/// standards.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AuditReport {
     /// The canonicalized repository root that was scored.

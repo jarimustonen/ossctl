@@ -3,15 +3,16 @@
 **Release & readiness coordinator** — an AI-first Rust CLI that takes any repository to
 open-source release quality and cuts releases from it, safely and reproducibly.
 
-`shipshape` is the deterministic engine behind a family of `/shipshape-*` Claude Code skills. It
+`shipshape` is the deterministic engine behind a family of `/shipshape-*` Agent Skills. It
 owns the parts that must be exact and identical for every caller:
 
 - **`shipshape contract show | validate`** — the single reader/validator of a project's
   `OSS-RELEASE.md` release contract (normalizes, materializes defaults, enforces floors).
 - **`shipshape facts`** — deterministic repo-fact detection (ecosystems, packages, Cargo
   publish policy, CI, tags, maturity).
-- **`shipshape audit`** — readiness scoring against the gated core (README + LICENSE + CI)
-  and the tier-scaled canon.
+- **`shipshape audit`** — readiness scoring against the gated core (README + LICENSE + CI),
+  the tier-scaled canon, and deterministic public-front-door checks used by
+  `/shipshape-publicize`.
 - **`shipshape release plan | cut | resume | verify | show | list | abandon`** — a
   resumable, journaled, per-ecosystem release-cut state machine with a sealed
   content-addressed approval plan.
@@ -21,7 +22,7 @@ owns the parts that must be exact and identical for every caller:
   and the version/schema surface.
 
 The prose `/shipshape-*` skills (README/LICENSE authoring, CI, changelog, contributing,
-security policy, architecture docs, distribution-channel generation, and the orchestrator)
+security policy, architecture docs, distribution-channel generation, publicizing, and the release orchestrator)
 ship bundled with the binary and are thin callers of it. The binary is the source of truth.
 `/shipshape-dist` wraps `shipshape dist generate` to produce cargo-dist release infrastructure and
 Homebrew tap/secret setup guidance from the approved contract.
@@ -37,22 +38,19 @@ Homebrew tap/secret setup guidance from the approved contract.
   cargo install shipshape-cli
   ```
 
-The manifests preserve the portable source-install path. The first crates.io release
-will be published by the verified post-merge rollout in ADR-0005; until it completes,
-retain the frozen `ossctl` 0.10.x installation rather than assuming the new channel is
-live.
+The manifests preserve the portable source-install path. Shipshape is published on
+crates.io as `shipshape-cli` and `shipshape-core`.
 
-From the first Shipshape release onward, prebuilt cross-platform binaries and a shell
-installer will be produced with [cargo-dist](https://opensource.axo.dev/cargo-dist/).
+Prebuilt cross-platform binaries and a shell installer are produced with
+[cargo-dist](https://opensource.axo.dev/cargo-dist/).
 Download the installer or a matching archive from this repository's GitHub Releases for
 macOS arm64 and Linux (statically-linked `musl`, arm64 / x86_64). Intel macOS and Windows receive no prebuilt artifacts; source installation remains available wherever the Rust workspace and its dependencies build.
 
 ## Status
 
-**Source migration complete; first Shipshape release pending.** The founding
-architecture is recorded in [`docs/adr/`](docs/adr/). After ADR-0005's rollout,
-[crates.io](https://crates.io/crates/shipshape-cli) will carry `shipshape-cli` +
-`shipshape-core`, with prebuilt artifacts on this repository's GitHub Releases. The
+**Shipshape 0.11.0 is released.** The founding architecture is recorded in
+[`docs/adr/`](docs/adr/). [crates.io](https://crates.io/crates/shipshape-cli) carries
+`shipshape-cli` + `shipshape-core`, with prebuilt artifacts on this repository's GitHub Releases. The
 `shipshape-cli` package installs the command `shipshape`; product, executable, release
 asset, and formula names remain Shipshape. See
 [`CHANGELOG.md`](CHANGELOG.md) for the release history.
@@ -98,7 +96,7 @@ shipshape-cli`; Cargo installs its declared `shipshape` binary. After verifying 
 Shipshape release and `shipshape version --json`,
 replace the declared fleet unit rather than leaving two persistent binaries.
 
-The bundled skill catalog contains only the ten canonical `shipshape-*` names. A known
+The bundled skill catalog contains only the eleven canonical `shipshape-*` names. A known
 `oss-*` name gets an actionable `skill_renamed` refusal. Install and verify the complete
 new catalog before explicitly removing old runtime files; Shipshape never deletes files
 outside the requested installation destination.
