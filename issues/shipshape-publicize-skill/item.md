@@ -1,9 +1,9 @@
 ---
 created: 2026-08-23
-updated: 2026-09-02
+updated: 2026-09-03
 type: feature
 reporter: jari
-status: open
+status: in-progress
 priority: normal
 labels: [skills]
 lane: publicize
