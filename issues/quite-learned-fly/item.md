@@ -2,13 +2,17 @@
 created: 2026-09-03
 updated: 2026-09-03
 type: improvement
-status: untriaged
+status: done
 priority: normal
 provenance: other
 provenance_detail: orchestratectl autonomous implementation run
 source_ref: orchestratectl:01m1khdx02qsn4fcr0z2sxpm0w/task
 originating_run: 01m1khdx02qsn4fcr0z2sxpm0w
 originating_run_kind: spinoff
+closed: 2026-09-03
+commits:
+- hash: 30fccc5
+  summary: canonical-skill-installer
 ---
 
 # Conform skill installer to canon section 15
