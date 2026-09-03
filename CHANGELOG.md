@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verification, bundled skills, and active project policy no longer promise or accept an
   Intel archive. ADR-0005 records the superseding decision and the safe manual recovery
   for the partially released v0.11.0 (`drop-intel-macos`).
+
+### Fixed
+- Release preflight now recognizes valid inline GitHub Actions `push.tags` sequences
+  with direct Cargo publish commands, while retaining warnings for absent, malformed,
+  branch-only, or non-inspectable publish paths
+  (`intake-bug-ossctl-a5febb642dd7`).
 <!-- oss-changelog:unreleased-end -->
 
 ## [0.11.0] - 2026-08-23
