@@ -31,4 +31,4 @@ required-features = ["dist-bin"]
 workspace = true
 
 [dependencies]
-shipshape-cli = { path = "../shipshape-cli", version = "=0.11.0" }
+shipshape-cli = { path = "../shipshape-cli", version = "=0.12.0" }

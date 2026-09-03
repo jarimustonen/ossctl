@@ -32,7 +32,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-shipshape-core = { path = "../shipshape-core", version = "=0.11.0" }
+shipshape-core = { path = "../shipshape-core", version = "=0.12.0" }
 clap = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }

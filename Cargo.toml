@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/shipshape-core", "crates/shipshape-cli", "crates/shipshape-dist"]
 
 [workspace.package]
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"

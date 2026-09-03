@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+### Changed
+
+### Fixed
+<!-- oss-changelog:unreleased-end -->
+
+## [0.12.0] - 2026-09-03
+
+### Added
+
 - **A bundled `/shipshape-publicize` workflow now turns a technically ready but
   insider-facing repository into an externally usable project.** It sequences existing
   file-owning members, enforces an explicit autonomy boundary for GitHub settings, separates
@@ -17,7 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata, PVR state, README command/platform claims, symlink links, and neutral Agent Skills
   terminology (`shipshape-publicize-skill`).
 
+- Collect de-stealth experience toward a /shipshape-publicize skill (`shipshape-publicize-skill`).
+
 ### Changed
+
 - **Release bumps now rewrite exact intra-workspace pins owned by every workspace
   member, including non-published distribution wrappers.** The complete workspace-wide
   edit set is sealed before execution, preventing Cargo.lock refresh from failing on a
@@ -36,12 +49,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Intel archive. ADR-0005 records the superseding decision and the safe manual recovery
   for the partially released v0.11.0 (`drop-intel-macos`).
 
+- Conform skill installer to canon section 15 (`quite-learned-fly`).
+- Converge outstanding dependency updates (`dependency-update-convergence`).
+- Drop Intel macOS release target (`drop-intel-macos`).
+
 ### Fixed
+
 - Release preflight now recognizes valid inline GitHub Actions `push.tags` sequences
   with direct Cargo publish commands, while retaining warnings for absent, malformed,
   branch-only, or non-inspectable publish paths
   (`intake-bug-ossctl-a5febb642dd7`).
-<!-- oss-changelog:unreleased-end -->
+
+- Bump planner misses pins in non-published workspace members (`faintly-decisive-straw`).
+- Release plan misses tag-triggered Cargo publish workflow (`intake-bug-ossctl-a5febb642dd7`).
+- Shipshape crates.io package name is already owned (`shipshape-crates-io`).
 
 ## [0.11.0] - 2026-08-23
 
