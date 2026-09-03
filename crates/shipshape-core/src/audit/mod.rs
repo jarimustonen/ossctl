@@ -113,7 +113,7 @@ pub fn audit(
     // ── Public-facing consistency checks (read-only) ──
     // These are the deterministic subset learned from two real publicize passes.
     // Audience reframing and prose quality remain in /shipshape-publicize.
-    publicize::publicize_gaps(&mut gaps, repo_root, contract, facts, fs, cmd);
+    publicize::publicize_gaps(&mut gaps, repo_root, contract, fs, cmd);
 
     // ── GitHub community standards (read-only; failure ⇒ unknown) ──
     let community_profile = community_profile(repo_root, cmd);

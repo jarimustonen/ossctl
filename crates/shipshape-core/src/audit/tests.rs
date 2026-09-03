@@ -1124,6 +1124,25 @@ fn security_policy_that_promises_pvr_requires_enabled_setting() {
 }
 
 #[test]
+fn email_only_security_policy_does_not_trigger_pvr_check() {
+    let fs = FakeFs::default()
+        .file("/repo/README.md", "# tool\n")
+        .file("/repo/LICENSE", "MIT\n")
+        .file(
+            "/repo/SECURITY.md",
+            "## Report a vulnerability\n\nEmail security@example.com. Do not open a public issue.\n",
+        );
+    let report = audit(
+        repo(),
+        &contract_at(Maturity::Spike),
+        &facts_with(Maturity::Spike, true, None),
+        &fs,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    assert!(!ids(&report).contains(&"github-private-vulnerability-reporting"));
+}
+
+#[test]
 fn readme_platform_claim_is_checked_against_distribution_targets() {
     let mut contract = contract_at(Maturity::Mvp);
     contract.distributions = vec![dist_with(&[
@@ -1133,7 +1152,7 @@ fn readme_platform_claim_is_checked_against_distribution_targets() {
     let fs = FakeFs::default()
         .file(
             "/repo/README.md",
-            "Prebuilt binaries support Intel macOS and Linux arm64.\nIntel macOS is unsupported for prebuilt installs.\n",
+            "Prebuilt binaries support macOS x86_64 and Linux arm64.\nmacOS x86_64 is unsupported for prebuilt installs.\n",
         )
         .file("/repo/LICENSE", "MIT\n");
     let report = audit(
@@ -1151,6 +1170,42 @@ fn readme_platform_claim_is_checked_against_distribution_targets() {
 }
 
 #[test]
+fn platform_source_install_is_not_a_prebuilt_claim_and_empty_targets_are_checked() {
+    let source_only = FakeFs::default()
+        .file(
+            "/repo/README.md",
+            "macOS x86_64 users can install from source with Cargo.\n",
+        )
+        .file("/repo/LICENSE", "MIT\n");
+    let report = audit(
+        repo(),
+        &contract_at(Maturity::Spike),
+        &facts_with(Maturity::Spike, true, None),
+        &source_only,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    assert!(!ids(&report).contains(&"readme-platform:x86_64-apple-darwin"));
+
+    let false_prebuilt = FakeFs::default()
+        .file(
+            "/repo/README.md",
+            "Prebuilt binaries are available for macOS x86_64.\n",
+        )
+        .file("/repo/LICENSE", "MIT\n");
+    let report = audit(
+        repo(),
+        &contract_at(Maturity::Spike),
+        &facts_with(Maturity::Spike, true, None),
+        &false_prebuilt,
+        &FakeCmd::github(PROFILE_README_LICENSE),
+    );
+    assert_eq!(
+        gap(&report, "readme-platform:x86_64-apple-darwin").status,
+        Presence::Absent
+    );
+}
+
+#[test]
 fn stale_readme_subcommand_is_checked_against_structured_help() {
     let fs = FakeFs::default()
         .file(
@@ -1159,13 +1214,29 @@ fn stale_readme_subcommand_is_checked_against_structured_help() {
         )
         .file("/repo/README.md", "```sh\ntool serve ./site\n```\n")
         .file("/repo/LICENSE", "MIT\n");
-    let cmd = FakeCmd::github(PROFILE_README_LICENSE).on(
-        "tool",
-        &["--help", "--json"],
-        0,
-        r#"{"data":{"command":{"subcommands":[{"name":"publish"}],"args":[],"flags":[{"long":"json"}]}}}"#,
-        "",
-    );
+    let cmd = FakeCmd::github(PROFILE_README_LICENSE)
+        .on("git", &["rev-parse", "HEAD"], 0, "abc123\n", "")
+        .on(
+            "git",
+            &["status", "--porcelain", "--untracked-files=no"],
+            0,
+            "",
+            "",
+        )
+        .on(
+            "tool",
+            &["version", "--json"],
+            0,
+            r#"{"data":{"commit":"abc123"}}"#,
+            "",
+        )
+        .on(
+            "tool",
+            &["--help", "--json"],
+            0,
+            r#"{"data":{"command":{"subcommands":[{"name":"publish"}],"args":[],"flags":[{"long":"json","takes_value":false}]}}}"#,
+            "",
+        );
     let report = audit(
         repo(),
         &contract_at(Maturity::Spike),
@@ -1192,9 +1263,24 @@ fn readme_command_check_handles_workspace_binaries_positionals_and_flags() {
             "```sh\ntool publish ./site --json\ntool publish ./site --retired\n```\n",
         )
         .file("/repo/LICENSE", "MIT\n");
-    let top = r#"{"data":{"command":{"subcommands":[{"name":"publish"}],"args":[],"flags":[{"long":"json"}]}}}"#;
-    let publish = r#"{"data":{"command":{"subcommands":[],"args":[{"id":"path"}],"flags":[{"long":"json"}]}}}"#;
+    let top = r#"{"data":{"command":{"subcommands":[{"name":"publish"}],"args":[],"flags":[{"long":"json","takes_value":false}]}}}"#;
+    let publish = r#"{"data":{"command":{"subcommands":[],"args":[{"id":"path"}],"flags":[{"long":"json","takes_value":false}]}}}"#;
     let cmd = FakeCmd::github(PROFILE_README_LICENSE)
+        .on("git", &["rev-parse", "HEAD"], 0, "abc123\n", "")
+        .on(
+            "git",
+            &["status", "--porcelain", "--untracked-files=no"],
+            0,
+            "",
+            "",
+        )
+        .on(
+            "tool",
+            &["version", "--json"],
+            0,
+            r#"{"data":{"commit":"abc123"}}"#,
+            "",
+        )
         .on("tool", &["--help", "--json"], 0, top, "")
         .on("tool", &["publish", "--help", "--json"], 0, publish, "");
     let report = audit(
@@ -1206,6 +1292,124 @@ fn readme_command_check_handles_workspace_binaries_positionals_and_flags() {
     );
     assert!(!ids(&report).contains(&"readme-command:1"));
     assert_eq!(gap(&report, "readme-command:2").status, Presence::Absent);
+}
+
+#[test]
+fn command_help_without_tree_parity_and_nested_failures_are_unknown() {
+    let fs = FakeFs::default()
+        .file(
+            "/repo/Cargo.toml",
+            "[package]\nname = \"tool\"\nversion = \"0.1.0\"\n",
+        )
+        .file("/repo/src/main.rs", "fn main() {}\n")
+        .file("/repo/README.md", "```sh\ntool publish ./site\n```\n")
+        .file("/repo/LICENSE", "MIT\n");
+    let stale = FakeCmd::github(PROFILE_README_LICENSE)
+        .on("git", &["rev-parse", "HEAD"], 0, "new\n", "")
+        .on(
+            "git",
+            &["status", "--porcelain", "--untracked-files=no"],
+            0,
+            "",
+            "",
+        )
+        .on(
+            "tool",
+            &["version", "--json"],
+            0,
+            r#"{"data":{"commit":"old"}}"#,
+            "",
+        );
+    let report = audit(
+        repo(),
+        &contract_at(Maturity::Spike),
+        &facts_with(Maturity::Spike, true, None),
+        &fs,
+        &stale,
+    );
+    assert_eq!(
+        gap(&report, "readme-command-help:tool").status,
+        Presence::Unknown
+    );
+    assert!(!ids(&report).contains(&"readme-command:1"));
+
+    let top = r#"{"data":{"command":{"subcommands":[{"name":"publish"}],"args":[],"flags":[]}}}"#;
+    let nested_failure = FakeCmd::github(PROFILE_README_LICENSE)
+        .on("git", &["rev-parse", "HEAD"], 0, "same\n", "")
+        .on(
+            "git",
+            &["status", "--porcelain", "--untracked-files=no"],
+            0,
+            "",
+            "",
+        )
+        .on(
+            "tool",
+            &["version", "--json"],
+            0,
+            r#"{"data":{"commit":"same"}}"#,
+            "",
+        )
+        .on("tool", &["--help", "--json"], 0, top, "");
+    let report = audit(
+        repo(),
+        &contract_at(Maturity::Spike),
+        &facts_with(Maturity::Spike, true, None),
+        &fs,
+        &nested_failure,
+    );
+    assert_eq!(
+        gap(&report, "readme-command-help:tool:publish").status,
+        Presence::Unknown
+    );
+    assert!(!ids(&report).contains(&"readme-command:1"));
+}
+
+#[test]
+fn cargo_src_bin_targets_and_only_shell_fences_are_considered() {
+    let fs = FakeFs::default()
+        .file(
+            "/repo/Cargo.toml",
+            "[package]\nname = \"package\"\nversion = \"0.1.0\"\n",
+        )
+        .file("/repo/src/bin/tool.rs", "fn main() {}\n")
+        .file(
+            "/repo/README.md",
+            "```json\ntool retired\n```\n```sh\ntool retired > out.txt\n```\n",
+        )
+        .file("/repo/LICENSE", "MIT\n");
+    let cmd = FakeCmd::github(PROFILE_README_LICENSE)
+        .on("git", &["rev-parse", "HEAD"], 0, "same\n", "")
+        .on(
+            "git",
+            &["status", "--porcelain", "--untracked-files=no"],
+            0,
+            "",
+            "",
+        )
+        .on(
+            "tool",
+            &["version", "--json"],
+            0,
+            r#"{"data":{"commit":"same"}}"#,
+            "",
+        )
+        .on(
+            "tool",
+            &["--help", "--json"],
+            0,
+            r#"{"data":{"command":{"subcommands":[{"name":"publish"}],"args":[],"flags":[]}}}"#,
+            "",
+        );
+    let report = audit(
+        repo(),
+        &contract_at(Maturity::Spike),
+        &facts_with(Maturity::Spike, true, None),
+        &fs,
+        &cmd,
+    );
+    assert_eq!(gap(&report, "readme-command:1").status, Presence::Absent);
+    assert!(!ids(&report).contains(&"readme-command:2"));
 }
 
 #[test]

@@ -4,10 +4,9 @@
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
-use crate::contract::schema::{Contract, Ecosystem};
+use crate::contract::schema::Contract;
 use crate::ports::{CommandRunner, Fs};
 use crate::protocol::audit::{Category, Gap, Presence, Severity};
-use crate::protocol::facts::Facts;
 
 use super::{github_slug, HEALTH_DIRS, README_NAMES, SECURITY_NAMES};
 
@@ -18,7 +17,6 @@ pub(super) fn publicize_gaps(
     gaps: &mut Vec<Gap>,
     repo_root: &Path,
     contract: &Contract,
-    facts: &Facts,
     fs: &dyn Fs,
     cmd: &dyn CommandRunner,
 ) {
@@ -32,7 +30,7 @@ pub(super) fn publicize_gaps(
 
     if let Some((_, text)) = &readme {
         readme_platform_gaps(gaps, contract, text);
-        readme_command_gaps(gaps, repo_root, facts, fs, cmd, text);
+        readme_command_gaps(gaps, repo_root, fs, cmd, text);
     }
     symlink_link_gaps(gaps, repo_root, cmd, &markdown);
     neutrality_gaps(gaps, &markdown);
@@ -100,8 +98,9 @@ fn pvr_gap(
     };
     let lower = security.to_lowercase();
     let references_pvr = [
-        "private vulnerability reporting",
-        "report a vulnerability",
+        "github private vulnerability reporting",
+        "private vulnerability reporting on github",
+        "/security/advisories/new",
         "privately-reporting-a-security-vulnerability",
     ]
     .iter()
@@ -139,30 +138,43 @@ fn readme_platform_gaps(gaps: &mut Vec<Gap>, contract: &Contract, readme: &str) 
         .iter()
         .flat_map(|distribution| distribution.platforms.iter().map(String::as_str))
         .collect();
-    if declared.is_empty() {
-        return;
-    }
-    let claims = [
+    let claims: [(&str, &[&str]); 4] = [
         (
             "aarch64-apple-darwin",
-            ["aarch64-apple-darwin", "macos arm64"],
+            &["aarch64-apple-darwin", "macos arm64", "macos aarch64"],
         ),
         (
             "x86_64-apple-darwin",
-            ["x86_64-apple-darwin", "intel macos"],
+            &[
+                "x86_64-apple-darwin",
+                "intel macos",
+                "macos x86_64",
+                "macos x86-64",
+            ],
         ),
         (
             "aarch64-unknown-linux-musl",
-            ["aarch64-unknown-linux-musl", "linux arm64"],
+            &["aarch64-unknown-linux-musl", "linux arm64"],
         ),
         (
             "x86_64-unknown-linux-musl",
-            ["x86_64-unknown-linux-musl", "linux x86_64"],
+            &["x86_64-unknown-linux-musl", "linux x86_64"],
         ),
     ];
     let mut seen = HashSet::new();
-    for line in readme.lines() {
-        let lower = line.to_lowercase();
+    for clause in readme.lines().flat_map(|line| line.split([';', '.'])) {
+        let lower = clause.to_lowercase();
+        let prebuilt_context = [
+            "prebuilt",
+            "binary",
+            "binaries",
+            "archive",
+            "download",
+            "installer",
+            "release artifact",
+        ]
+        .iter()
+        .any(|token| lower.contains(token));
         let negative = [
             "unsupported",
             "not supported",
@@ -171,7 +183,7 @@ fn readme_platform_gaps(gaps: &mut Vec<Gap>, contract: &Contract, readme: &str) 
         ]
         .iter()
         .any(|token| lower.contains(token));
-        if negative {
+        if !prebuilt_context || negative {
             continue;
         }
         for (triple, aliases) in &claims {
@@ -192,25 +204,38 @@ fn readme_platform_gaps(gaps: &mut Vec<Gap>, contract: &Contract, readme: &str) 
 fn readme_command_gaps(
     gaps: &mut Vec<Gap>,
     repo_root: &Path,
-    facts: &Facts,
     fs: &dyn Fs,
     cmd: &dyn CommandRunner,
     readme: &str,
 ) {
-    let binaries = project_binaries(repo_root, facts, fs);
+    let binaries = project_binaries(repo_root, fs);
     if binaries.is_empty() {
         return;
     }
     let commands = fenced_commands(readme, &binaries);
     let mut unavailable = HashSet::new();
+    let mut proven = HashSet::new();
     for (index, tokens) in commands.iter().enumerate() {
         let binary = &tokens[0];
+        if !proven.contains(binary) {
+            if let Err(detail) = binary_matches_tree(cmd, repo_root, binary) {
+                if unavailable.insert(binary.clone()) {
+                    gaps.push(publicize_gap(
+                        &format!("readme-command-help:{binary}"),
+                        Presence::Unknown,
+                        detail,
+                    ));
+                }
+                continue;
+            }
+            proven.insert(binary.clone());
+        }
         let Some(top) = structured_help(cmd, repo_root, binary, &[]) else {
             if unavailable.insert(binary.clone()) {
                 gaps.push(publicize_gap(
                     &format!("readme-command-help:{binary}"),
                     Presence::Unknown,
-                    format!("README examples use `{binary}`, but `{binary} --help --json` could not be inspected"),
+                    format!("README examples use `{binary}`, but `{binary} --help --json` could not be inspected as canonical structured help"),
                 ));
             }
             continue;
@@ -218,11 +243,22 @@ fn readme_command_gaps(
         let mut help = top;
         let mut path: Vec<String> = Vec::new();
         let mut invalid = None;
-        for token in tokens
-            .iter()
-            .skip(1)
-            .take_while(|token| !token.starts_with('-'))
-        {
+        let mut observation_failed = false;
+        let mut tokens_iter = tokens.iter().skip(1).peekable();
+        while let Some(token) = tokens_iter.next() {
+            if token == "--" {
+                break;
+            }
+            if let Some(flag) = token.strip_prefix("--") {
+                if !flag.contains('=') && help_flag_takes_value(&help, flag) == Some(true) {
+                    tokens_iter.next();
+                }
+                continue;
+            }
+            if token.starts_with('-') {
+                observation_failed = true;
+                break;
+            }
             let subs = help_subcommands(&help);
             if subs.is_empty() {
                 break;
@@ -237,10 +273,23 @@ fn readme_command_gaps(
             path.push(token.clone());
             let refs: Vec<&str> = path.iter().map(String::as_str).collect();
             let Some(next) = structured_help(cmd, repo_root, binary, &refs) else {
-                invalid = Some(token.clone());
+                observation_failed = true;
                 break;
             };
             help = next;
+        }
+        if observation_failed {
+            let suffix = if path.is_empty() {
+                String::new()
+            } else {
+                format!(":{}", path.join(":"))
+            };
+            gaps.push(publicize_gap(
+                &format!("readme-command-help:{binary}{suffix}"),
+                Presence::Unknown,
+                format!("README example uses `{}`, but its canonical structured-help path could not be fully inspected", tokens.join(" ")),
+            ));
+            continue;
         }
         if invalid.is_none() {
             invalid = tokens
@@ -260,6 +309,44 @@ fn readme_command_gaps(
     }
 }
 
+fn binary_matches_tree(
+    cmd: &dyn CommandRunner,
+    repo_root: &Path,
+    binary: &str,
+) -> Result<(), String> {
+    let head = cmd
+        .run("git", &["rev-parse", "HEAD"], repo_root)
+        .ok()
+        .filter(|out| out.status == Some(0))
+        .map(|out| out.stdout.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let clean = cmd
+        .run(
+            "git",
+            &["status", "--porcelain", "--untracked-files=no"],
+            repo_root,
+        )
+        .is_ok_and(|out| out.status == Some(0) && out.stdout.trim().is_empty());
+    let commit = cmd
+        .run(binary, &["version", "--json"], repo_root)
+        .ok()
+        .filter(|out| out.status == Some(0))
+        .and_then(|out| serde_json::from_str::<serde_json::Value>(&out.stdout).ok())
+        .and_then(|value| {
+            value
+                .get("data")
+                .and_then(|data| data.get("commit"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+    if clean && head.as_deref() == commit.as_deref() {
+        return Ok(());
+    }
+    Err(format!(
+        "README examples use `{binary}`, but its canonical `version --json` commit could not be matched to a clean audited-tree HEAD; rebuild from the clean checkout before drawing command-tree conclusions"
+    ))
+}
+
 fn structured_help(
     cmd: &dyn CommandRunner,
     repo_root: &Path,
@@ -269,9 +356,14 @@ fn structured_help(
     let mut args = path.to_vec();
     args.extend(["--help", "--json"]);
     let out = cmd.run(binary, &args, repo_root).ok()?;
-    (out.status == Some(0))
+    let value = (out.status == Some(0))
         .then(|| serde_json::from_str::<serde_json::Value>(&out.stdout).ok())
-        .flatten()
+        .flatten()?;
+    let command = help_command(&value)?.as_object()?;
+    ["subcommands", "args", "flags"]
+        .iter()
+        .all(|field| command.get(*field).is_some_and(serde_json::Value::is_array))
+        .then_some(value)
 }
 
 fn help_command(value: &serde_json::Value) -> Option<&serde_json::Value> {
@@ -308,7 +400,17 @@ fn help_has_flag(value: &serde_json::Value, wanted: &str) -> bool {
         })
 }
 
-fn project_binaries(repo_root: &Path, facts: &Facts, fs: &dyn Fs) -> HashSet<String> {
+fn help_flag_takes_value(value: &serde_json::Value, wanted: &str) -> Option<bool> {
+    help_command(value)?
+        .get("flags")?
+        .as_array()?
+        .iter()
+        .find(|flag| flag.get("long").and_then(serde_json::Value::as_str) == Some(wanted))?
+        .get("takes_value")?
+        .as_bool()
+}
+
+fn project_binaries(repo_root: &Path, fs: &dyn Fs) -> HashSet<String> {
     let mut names = HashSet::new();
     if let Some(text) = read_text(fs, &repo_root.join("Cargo.toml"), 1 << 20) {
         if let Ok(value) = toml::from_str::<toml::Value>(&text) {
@@ -330,15 +432,6 @@ fn project_binaries(repo_root: &Path, facts: &Facts, fs: &dyn Fs) -> HashSet<Str
                             collect_manifest_binaries(&member_root, &value, fs, &mut names);
                         }
                     }
-                }
-            }
-        }
-    }
-    for package in &facts.packages {
-        if package.ecosystem == Ecosystem::Go {
-            if let Some(name) = &package.package {
-                if let Some(last) = name.rsplit('/').next() {
-                    names.insert(last.to_string());
                 }
             }
         }
@@ -368,23 +461,45 @@ fn collect_manifest_binaries(
             names.insert(name.to_string());
         }
     }
+    let bin_dir = manifest_root.join("src/bin");
+    if let Ok(entries) = fs.read_dir(&bin_dir) {
+        for entry in entries {
+            let path = bin_dir.join(&entry);
+            if fs.is_file(&path) && path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                    names.insert(stem.to_string());
+                }
+            } else if fs.is_dir(&path) && fs.is_file(&path.join("main.rs")) {
+                names.insert(entry);
+            }
+        }
+    }
 }
 
 fn fenced_commands(readme: &str, binaries: &HashSet<String>) -> Vec<Vec<String>> {
-    let mut inside = false;
+    let mut fence: Option<bool> = None;
     let mut commands = Vec::new();
     for line in readme.lines() {
-        if line.trim_start().starts_with("```") {
-            inside = !inside;
+        let trimmed = line.trim_start();
+        if let Some(info) = trimmed.strip_prefix("```") {
+            if fence.is_some() {
+                fence = None;
+            } else {
+                let language = info.split_ascii_whitespace().next().unwrap_or("");
+                fence = Some(matches!(language, "" | "sh" | "bash" | "shell" | "console"));
+            }
             continue;
         }
-        if !inside {
+        if fence != Some(true) {
             continue;
         }
         let line = line.trim().strip_prefix("$ ").unwrap_or(line.trim());
+        if line.ends_with('\\') {
+            continue;
+        }
         let tokens: Vec<String> = line
             .split_ascii_whitespace()
-            .take_while(|token| !matches!(*token, "|" | "&&" | "||"))
+            .take_while(|token| !is_shell_boundary(token))
             .map(|token| {
                 token
                     .trim_matches(|c: char| matches!(c, '`' | '\'' | '"'))
@@ -399,6 +514,14 @@ fn fenced_commands(readme: &str, binaries: &HashSet<String>) -> Vec<Vec<String>>
         }
     }
     commands
+}
+
+fn is_shell_boundary(token: &str) -> bool {
+    matches!(token, "|" | "&&" | "||" | ";" | ">" | ">>" | "<" | "<<")
+        || token.starts_with('>')
+        || token
+            .split_once('>')
+            .is_some_and(|(fd, _)| fd.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn symlink_link_gaps(
@@ -437,7 +560,7 @@ fn symlink_link_gaps(
                 gaps.push(publicize_gap(
                     &format!("symlink-link:{}:{}", source.display(), target.display()),
                     Presence::Absent,
-                    format!("public document `{}` links to tracked symlink `{}`; GitHub renders the symlink target path rather than the target content", source.display(), target.display()),
+                    format!("public document `{}` links to tracked symlink `{}`; verify whether the link should show target content or intentionally document the symlink relationship", source.display(), target.display()),
                 ));
             }
         }
@@ -452,7 +575,7 @@ fn neutrality_gaps(gaps: &mut Vec<Gap>, markdown: &[(PathBuf, String)]) {
             gaps.push(publicize_gap(
                 &format!("product-neutrality:{}", path.display()),
                 Presence::Absent,
-                format!("public document `{}` uses one agent product as the category name for skills; use the neutral Agent Skills terminology", path.display()),
+                format!("public document `{}` contains product-specific skills terminology; verify whether it is category usage or runtime-specific compatibility wording", path.display()),
             ));
         }
     }
