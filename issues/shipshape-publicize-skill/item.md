@@ -10,6 +10,8 @@ lane: publicize
 commits:
 - hash: 881b7fab459c7ccb17c4410e444d3fff5ddeea37
   summary: start implementation
+- hash: afc262c5b5c4902dd7057fc35cf261eb50af743d
+  summary: add publicize skill and deterministic audit checks
 ---
 
 # Collect de-stealth experience toward a /shipshape-publicize skill
