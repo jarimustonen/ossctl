@@ -2,13 +2,17 @@
 created: 2026-09-03
 updated: 2026-09-03
 type: bug
-status: in-progress
+status: fixed
 priority: high
 provenance: other
 provenance_detail: Observed release-cut failure assigned through orchestratectl
 source_ref: orchestratectl:01m1kkravtfm7pe67bsxc9m9pj/task:bump-pin-discovery
 originating_run: 01m1kkravtfm7pe67bsxc9m9pj
 originating_run_kind: spinoff
+closed: 2026-09-03
+commits:
+- hash: db52c80
+  summary: discover exact pins across all workspace members
 ---
 
 # Bump planner misses pins in non-published workspace members
@@ -34,3 +38,9 @@ The planner must discover and seal rewrites for every safe exact intra-workspace
 - A regression fixture with a non-published wrapper exactly pinning a published CLI proves staged `Cargo.lock` refresh succeeds.
 - Seal-version implications are evaluated under the documented evolution rule.
 - The full repository green gate passes.
+
+## Resolution
+
+### 2026-09-03T12:45:23Z · @issuectl
+
+Workspace-wide pin ownership now includes non-published members while publishability remains confined to target expansion. The real Cargo regression fixture proves the staged lockfile refresh succeeds, SEAL_VERSION is 11, and the exact green gate passed.
