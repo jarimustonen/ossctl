@@ -264,9 +264,11 @@ pub fn gather_report(repo_root: &Path, fs: &dyn Fs, git: &dyn GitRepo) -> FactsR
 }
 
 /// Detect cargo-dist configuration and tag-triggered GitHub workflows through the
-/// injected filesystem port. The trigger scanner intentionally recognizes only the
-/// ordinary nested `on: push: tags:` shape: missing an exotic YAML spelling is safe,
-/// while treating an unrelated `tags:` key as release infrastructure is not.
+/// injected filesystem port. Trigger detection structurally recognizes an explicit,
+/// non-empty `on: push: tags:` string sequence in block or flow form. Bare `push`,
+/// `tags-ignore`, and unrelated `tags` keys remain deliberately inconclusive: this
+/// evidence also identifies release infrastructure, so broad push triggers are not
+/// strong enough to count.
 ///
 /// Cargo publication evidence follows repository-local reusable workflow calls, so a
 /// conventional tag workflow delegating to `on: workflow_call` is not misreported as
@@ -285,7 +287,7 @@ pub fn detect_distribution_surface(repo_root: &Path, fs: &dyn Fs) -> Distributio
     }
 
     let workflows = repo_root.join(".github/workflows");
-    let mut workflow_texts = fs
+    let mut workflow_documents = fs
         .read_dir(&workflows)
         .unwrap_or_default()
         .into_iter()
@@ -295,20 +297,26 @@ pub fn detect_distribution_surface(repo_root: &Path, fs: &dyn Fs) -> Distributio
             })
         })
         .filter_map(|name| {
-            read_text(fs, &workflows.join(&name), MANIFEST_LIMIT).map(|text| (name, text))
+            let text = read_text(fs, &workflows.join(&name), MANIFEST_LIMIT)?;
+            let document = serde_yaml::from_str::<serde_yaml::Value>(&text).ok()?;
+            Some((name, document))
         })
         .collect::<Vec<_>>();
-    workflow_texts.sort_by(|a, b| a.0.cmp(&b.0));
+    workflow_documents.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let tag_triggered_workflows = workflow_texts
+    let tag_triggered = workflow_documents
         .iter()
-        .filter(|(_, text)| workflow_pushes_tags(text))
+        .filter(|(_, document)| workflow_pushes_tags(document))
+        .collect::<Vec<_>>();
+    let tag_triggered_workflows = tag_triggered
+        .iter()
         .map(|(name, _)| name.clone())
         .collect::<Vec<_>>();
-    let tag_triggered_cargo_publish_workflows = workflow_texts
+    let tag_triggered_cargo_publish_workflows = tag_triggered
         .iter()
-        .filter(|(_, text)| workflow_pushes_tags(text))
-        .filter(|(name, _)| workflow_reaches_cargo_publish(name, &workflow_texts, &mut Vec::new()))
+        .filter(|(name, _)| {
+            workflow_reaches_cargo_publish(name, &workflow_documents, &mut Vec::new())
+        })
         .map(|(name, _)| name.clone())
         .collect::<Vec<_>>();
 
@@ -322,21 +330,21 @@ pub fn detect_distribution_surface(repo_root: &Path, fs: &dyn Fs) -> Distributio
 
 fn workflow_reaches_cargo_publish(
     name: &str,
-    workflows: &[(String, String)],
+    workflows: &[(String, serde_yaml::Value)],
     visiting: &mut Vec<String>,
 ) -> bool {
     if visiting.iter().any(|seen| seen == name) {
         return false;
     }
-    let Some((_, text)) = workflows.iter().find(|(candidate, _)| candidate == name) else {
+    let Some((_, document)) = workflows.iter().find(|(candidate, _)| candidate == name) else {
         return false;
     };
-    if workflow_runs_cargo_publish(text) {
+    if workflow_runs_cargo_publish(document) {
         return true;
     }
 
     visiting.push(name.to_string());
-    let reaches_publish = local_workflow_calls(text).iter().any(|called| {
+    let reaches_publish = local_workflow_calls(document).iter().any(|called| {
         workflows
             .iter()
             .find(|(candidate, _)| candidate == called)
@@ -349,8 +357,8 @@ fn workflow_reaches_cargo_publish(
     reaches_publish
 }
 
-fn workflow_runs_cargo_publish(text: &str) -> bool {
-    workflow_jobs(text).is_some_and(|jobs| {
+fn workflow_runs_cargo_publish(document: &serde_yaml::Value) -> bool {
+    workflow_jobs(document).is_some_and(|jobs| {
         jobs.values().any(|job| {
             yaml_mapping(job)
                 .and_then(|job| job.get("steps"))
@@ -423,18 +431,15 @@ fn command_segment_runs_cargo_publish(segment: &str) -> bool {
     true
 }
 
-fn workflow_accepts_calls(text: &str) -> bool {
-    let Some(document) = serde_yaml::from_str::<serde_yaml::Value>(text).ok() else {
-        return false;
-    };
-    workflow_has_trigger(&document, "workflow_call")
+fn workflow_accepts_calls(document: &serde_yaml::Value) -> bool {
+    workflow_has_trigger(document, "workflow_call")
 }
 
-fn local_workflow_calls(text: &str) -> Vec<String> {
-    let Some(jobs) = workflow_jobs(text) else {
+fn local_workflow_calls(document: &serde_yaml::Value) -> Vec<String> {
+    let Some(jobs) = workflow_jobs(document) else {
         return Vec::new();
     };
-    jobs.into_values()
+    jobs.values()
         .filter_map(|job| {
             job.as_mapping()
                 .and_then(|job| job.get("uses"))
@@ -445,12 +450,10 @@ fn local_workflow_calls(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn workflow_jobs(text: &str) -> Option<serde_yaml::Mapping> {
-    let document = serde_yaml::from_str::<serde_yaml::Value>(text).ok()?;
-    yaml_mapping(&document)
-        .and_then(|root| root.get("jobs"))
+fn workflow_jobs(document: &serde_yaml::Value) -> Option<&serde_yaml::Mapping> {
+    yaml_mapping(document)
+        .and_then(|root| yaml_mapping_get(root, "jobs"))
         .and_then(serde_yaml::Value::as_mapping)
-        .cloned()
 }
 
 fn yaml_mapping(value: &serde_yaml::Value) -> Option<&serde_yaml::Mapping> {
@@ -461,21 +464,13 @@ fn yaml_mapping_get<'a>(
     mapping: &'a serde_yaml::Mapping,
     key: &str,
 ) -> Option<&'a serde_yaml::Value> {
-    mapping.iter().find_map(|(candidate, value)| {
-        let matches_string = candidate.as_str() == Some(key);
-        // Some YAML 1.1 parsers resolve the unquoted GitHub Actions key `on` as
-        // boolean true. Accept that representation without treating any other
-        // boolean key as a workflow trigger.
-        let matches_yaml_11_on = key == "on" && candidate.as_bool() == Some(true);
-        (matches_string || matches_yaml_11_on).then_some(value)
-    })
+    mapping
+        .iter()
+        .find_map(|(candidate, value)| (candidate.as_str() == Some(key)).then_some(value))
 }
 
-fn workflow_on(text: &str) -> Option<serde_yaml::Value> {
-    let document = serde_yaml::from_str::<serde_yaml::Value>(text).ok()?;
-    yaml_mapping(&document)
-        .and_then(|root| yaml_mapping_get(root, "on"))
-        .cloned()
+fn workflow_on(document: &serde_yaml::Value) -> Option<&serde_yaml::Value> {
+    yaml_mapping(document).and_then(|root| yaml_mapping_get(root, "on"))
 }
 
 fn workflow_has_trigger(document: &serde_yaml::Value, trigger: &str) -> bool {
@@ -487,20 +482,35 @@ fn workflow_has_trigger(document: &serde_yaml::Value, trigger: &str) -> bool {
         serde_yaml::Value::Sequence(triggers) => triggers
             .iter()
             .any(|candidate| candidate.as_str() == Some(trigger)),
-        serde_yaml::Value::Mapping(triggers) => yaml_mapping_get(triggers, trigger).is_some(),
+        serde_yaml::Value::Mapping(triggers) => {
+            yaml_mapping_get(triggers, trigger).is_some_and(|value| {
+                trigger != "workflow_call" || value.is_null() || value.is_mapping()
+            })
+        }
         _ => false,
     }
 }
 
-fn workflow_pushes_tags(text: &str) -> bool {
-    let Some(on) = workflow_on(text) else {
+fn workflow_pushes_tags(document: &serde_yaml::Value) -> bool {
+    let Some(on) = workflow_on(document) else {
         return false;
     };
-    let Some(push) = yaml_mapping(&on).and_then(|triggers| yaml_mapping_get(triggers, "push"))
+    let Some(push) = yaml_mapping(on).and_then(|triggers| yaml_mapping_get(triggers, "push"))
     else {
         return false;
     };
-    yaml_mapping(push).is_some_and(|push| yaml_mapping_get(push, "tags").is_some())
+    let Some(patterns) = yaml_mapping(push)
+        .and_then(|push| yaml_mapping_get(push, "tags"))
+        .and_then(serde_yaml::Value::as_sequence)
+    else {
+        return false;
+    };
+    !patterns.is_empty()
+        && patterns.iter().all(|pattern| {
+            pattern
+                .as_str()
+                .is_some_and(|pattern| !pattern.trim().is_empty())
+        })
 }
 
 /// Read every Cargo manifest's `publish` disposition under `repo_root` — the
@@ -3144,6 +3154,10 @@ mod tests {
             .file(
                 "/repo/.github/workflows/ci.yml",
                 "on:\n  pull_request:\n    tags: ['not-a-push-filter']\njobs: {}\n",
+            )
+            .file(
+                "/repo/.github/workflows/not-on.yml",
+                "true: { push: { tags: ['v*'] } }\njobs:\n  publish:\n    steps:\n      - run: cargo publish -p demo\n",
             );
         let surface = gather(repo(), &fs, &FakeGit::default()).distribution_surface;
         assert_eq!(surface.tag_triggered_workflows, vec!["publish.yml"]);
@@ -3151,6 +3165,40 @@ mod tests {
             surface.tag_triggered_cargo_publish_workflows,
             vec!["publish.yml"]
         );
+    }
+
+    #[test]
+    fn explicit_tag_filter_requires_a_non_empty_string_sequence() {
+        for invalid in [
+            "on:\n  push:\n    tags: []\n",
+            "on:\n  push:\n    tags:\n",
+            "on:\n  push:\n    tags: false\n",
+            "on:\n  push:\n    tags: {}\n",
+            "on:\n  push:\n    tags: ['']\n",
+            "on: push\n",
+            "on:\n  push:\n    tags-ignore: ['nightly-*']\n",
+        ] {
+            let document = serde_yaml::from_str(invalid).expect("valid YAML fixture");
+            assert!(!workflow_pushes_tags(&document), "{invalid:?}");
+        }
+        for valid in [
+            "on:\n  push:\n    tags: ['v*']\n",
+            "on:\n  push:\n    tags:\n      - 'v*'\n",
+        ] {
+            let document = serde_yaml::from_str(valid).expect("valid YAML fixture");
+            assert!(workflow_pushes_tags(&document), "{valid:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_workflow_is_not_release_evidence() {
+        let fs = FakeFs::default().file(
+            "/repo/.github/workflows/publish.yml",
+            "on: [push\njobs: {publish: {steps: [{run: cargo publish}]}}\n",
+        );
+        let surface = gather(repo(), &fs, &FakeGit::default()).distribution_surface;
+        assert!(surface.tag_triggered_workflows.is_empty());
+        assert!(surface.tag_triggered_cargo_publish_workflows.is_empty());
     }
 
     #[test]
@@ -3198,6 +3246,45 @@ mod tests {
             surface.tag_triggered_cargo_publish_workflows,
             vec!["release.yml"]
         );
+    }
+
+    #[test]
+    fn reusable_workflow_shorthand_triggers_are_detected() {
+        for trigger in ["on: workflow_call\n", "on: [workflow_call]\n"] {
+            let fs = FakeFs::default()
+                .file(
+                    "/repo/.github/workflows/release.yml",
+                    "on:\n  push:\n    tags: ['v*']\njobs:\n  crates:\n    uses: ./.github/workflows/publish.yml\n",
+                )
+                .file(
+                    "/repo/.github/workflows/publish.yml",
+                    &format!(
+                        "{trigger}jobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo publish --locked\n"
+                    ),
+                );
+            let surface = gather(repo(), &fs, &FakeGit::default()).distribution_surface;
+            assert_eq!(
+                surface.tag_triggered_cargo_publish_workflows,
+                vec!["release.yml"],
+                "{trigger:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_reusable_workflow_trigger_is_not_publish_evidence() {
+        let fs = FakeFs::default()
+            .file(
+                "/repo/.github/workflows/release.yml",
+                "on:\n  push:\n    tags: ['v*']\njobs:\n  crates:\n    uses: ./.github/workflows/publish.yml\n",
+            )
+            .file(
+                "/repo/.github/workflows/publish.yml",
+                "on:\n  workflow_call: false\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo publish --locked\n",
+            );
+        let surface = gather(repo(), &fs, &FakeGit::default()).distribution_surface;
+        assert_eq!(surface.tag_triggered_workflows, vec!["release.yml"]);
+        assert!(surface.tag_triggered_cargo_publish_workflows.is_empty());
     }
 
     #[test]
