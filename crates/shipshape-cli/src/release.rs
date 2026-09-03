@@ -3147,6 +3147,7 @@ mod tests {
                 dep_reqs: std::collections::BTreeMap::new(),
                 pin_reqs: std::collections::BTreeMap::new(),
             }],
+            pin_owners: Vec::new(),
             workspace_pin_reqs: std::collections::BTreeMap::new(),
             pin_parse_error: None,
         });

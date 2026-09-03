@@ -281,3 +281,27 @@ release version *through* the targets, so every publish-none contract was refuse
 changes is empty. The tag phase still refuses a contradictory already-journalled
 disposition in all three directions, including a tag-only plan over a tag that already
 carries a created or delegated Release.
+
+## Amendment (2026-08-24) — workspace-wide exact-pin bump discovery
+
+The sealed bump edit set includes exact pins owned by every named Cargo workspace
+member, not only members that are themselves publishable. Publishability still controls
+the crates.io target graph and dependency order; it does not remove a member manifest
+from Cargo's workspace resolution. A non-published cargo-dist naming wrapper can
+therefore pin a published CLI crate at `=<workspace version>`, and that requirement must
+move in lockstep before `cargo update --workspace` refreshes the staged lockfile.
+
+Facts keep these concerns separate: the existing publishable-member graph continues to
+feed target expansion, while an off-wire pin-owner set retains local dependency
+declarations from all named members. Planning emits a rewrite only for dependencies that
+resolve to a publishable workspace member and only under the existing safe exact-pin
+rule: every explicit declaration for that owner/dependency pair must equal the old
+lockstep version. Package aliases remain resolved by the shared TOML parser. Execution
+continues to locate the owner by package identity and applies the sealed edit without any
+wrapper-name special case.
+
+This widens the complete engine-owned bump edit set for an unchanged source tree. An old
+binary could approve a plan that omits a required wrapper edit, so the execution
+semantics of bump approvals changed even though the serialized `BumpPlan` shape did not.
+`SEAL_VERSION` therefore advances from 10 to 11. Stored older plans remain loadable for
+resume; a fresh cut must be re-planned in the disjoint v11 plan-id space.

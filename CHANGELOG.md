@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Release bumps now rewrite exact intra-workspace pins owned by every workspace
+  member, including non-published distribution wrappers.** The complete workspace-wide
+  edit set is sealed before execution, preventing Cargo.lock refresh from failing on a
+  stale wrapper dependency. Release-plan `SEAL_VERSION` advances from 10 to 11; older
+  plans remain readable for resume but fresh cuts require re-planning
+  (`faintly-decisive-straw`).
 - **The bundled skill installer now conforms to project-canon 0.8.0 §15 for Claude,
   pi, and Codex.** Omitted `--agent` and explicit `all` install all three native layouts;
   `skill list --json` declares the complete capability contract; canonical `--target`,

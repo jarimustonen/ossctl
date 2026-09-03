@@ -40,7 +40,7 @@ use crate::ports::{Fs, GitRepo};
 pub use crate::protocol::facts::{CargoPublishFlag, CargoPublishPolicy};
 use crate::protocol::facts::{
     DistributionSurface, Facts, FactsReport, MaturitySignals, Package, RustWorkspace,
-    WorkspaceMember,
+    WorkspaceMember, WorkspacePinOwner,
 };
 
 /// Root-level manifests, in the canonical probe order. The ecosystem order here
@@ -815,13 +815,13 @@ fn push_member_dir(
 /// `None` unless the repo root is a members-bearing Cargo *virtual workspace* (the
 /// shape that expresses a lib+bin split): reads each member manifest for its
 /// `[package].name`, version (honoring `version.workspace = true` inheritance),
-/// `publish` allow-list, and intra-workspace dependency edges, then keeps only the
-/// crates.io-publishable members (matching the cargo adapter's cut-time `cargo
-/// metadata` filter — a `publish = false` member, or one restricted to a
-/// non-crates.io registry, is dropped) with their edges restricted to other
-/// publishable members. Members are returned in workspace declaration order; the
-/// planner applies the topological publish ordering. `None` when no publishable
-/// named member resolves (nothing for the planner to expand).
+/// `publish` allow-list, and intra-workspace dependency edges. The publish graph keeps
+/// only crates.io-publishable members (matching the cargo adapter's cut-time `cargo
+/// metadata` filter), while pin ownership keeps every named member so a `publish =
+/// false` wrapper cannot retain a stale exact requirement after the shared version
+/// changes. Publishable members are returned in workspace declaration order; the
+/// planner applies the topological publish ordering. `None` when no publishable named
+/// member resolves (nothing for the planner to expand or bump as a release target).
 ///
 /// **Edges gate publish ORDER, and a missed edge fails a cut CLOSED — it is not a
 /// free "hint".** The coordinator walks the plan's target order; the cargo adapter
@@ -837,8 +837,9 @@ fn push_member_dir(
 /// parser-backed separately, so a declaration shape this ordering scanner misses can
 /// no longer leave an exact internal pin stale during an engine-owned bump.
 ///
-/// One parsed workspace member before the publishability filter — the intermediate
-/// [`detect_rust_workspace`] reduces to the published [`WorkspaceMember`] set.
+/// One parsed workspace member before the publishability filter. Publication controls
+/// the [`WorkspaceMember`] target graph, while every named member remains available as
+/// a [`WorkspacePinOwner`] for workspace-wide bump discovery.
 struct RawMember {
     package: String,
     version: Option<String>,
@@ -848,6 +849,75 @@ struct RawMember {
     /// All local dependency declarations, including dev and target-specific tables.
     /// Duplicates are preserved for plan-time pin-equivalence validation.
     pins: Vec<(String, Option<String>)>,
+}
+
+fn workspace_pin_owners(
+    raw: &[RawMember],
+    publishable_names: &std::collections::BTreeSet<&str>,
+) -> Vec<WorkspacePinOwner> {
+    raw.iter()
+        .map(|member| {
+            let mut pin_reqs: std::collections::BTreeMap<String, Vec<Option<String>>> =
+                std::collections::BTreeMap::new();
+            for (name, requirement) in &member.pins {
+                if name.as_str() != member.package && publishable_names.contains(name.as_str()) {
+                    pin_reqs
+                        .entry(name.clone())
+                        .or_default()
+                        .push(requirement.clone());
+                }
+            }
+            WorkspacePinOwner {
+                package: member.package.clone(),
+                pin_reqs,
+            }
+        })
+        .collect()
+}
+
+fn publishable_workspace_members(
+    raw: &[RawMember],
+    publishable_names: &std::collections::BTreeSet<&str>,
+) -> Vec<WorkspaceMember> {
+    raw.iter()
+        .filter(|member| member.publishable)
+        .map(|member| {
+            let mut dep_reqs: std::collections::BTreeMap<String, String> =
+                std::collections::BTreeMap::new();
+            for (name, requirement) in &member.deps {
+                if name.as_str() == member.package || !publishable_names.contains(name.as_str()) {
+                    continue;
+                }
+                if let Some(requirement) = requirement {
+                    dep_reqs
+                        .entry(name.clone())
+                        .or_insert_with(|| requirement.clone());
+                }
+            }
+            let mut workspace_deps: Vec<String> = member
+                .deps
+                .iter()
+                .map(|(name, _requirement)| name.clone())
+                .filter(|dependency| {
+                    dependency.as_str() != member.package
+                        && publishable_names.contains(dependency.as_str())
+                })
+                .collect();
+            workspace_deps.sort();
+            workspace_deps.dedup();
+            let pin_reqs = workspace_pin_owners(std::slice::from_ref(member), publishable_names)
+                .pop()
+                .expect("one raw member produces one pin owner")
+                .pin_reqs;
+            WorkspaceMember {
+                package: member.package.clone(),
+                version: member.version.clone(),
+                workspace_deps,
+                dep_reqs,
+                pin_reqs,
+            }
+        })
+        .collect()
 }
 
 fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace> {
@@ -875,7 +945,6 @@ fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace>
         }
         Err(error) => pin_parse_error = Some(format!("Cargo.toml: {error}")),
     }
-
     // First pass: parse every named member (name, version, publishability, edges).
     let mut raw: Vec<RawMember> = Vec::new();
     for rel in &dirs {
@@ -912,54 +981,16 @@ fn detect_rust_workspace(repo_root: &Path, fs: &dyn Fs) -> Option<RustWorkspace>
         .filter(|m| m.publishable)
         .map(|m| m.package.as_str())
         .collect();
-    let members: Vec<WorkspaceMember> = raw
-        .iter()
-        .filter(|m| m.publishable)
-        .map(|m| {
-            // Restrict to edges to OTHER publishable members; carry each edge's literal
-            // requirement string (when the manifest declared one) so the pin-rewrite
-            // derivation can key precisely on the `=<ver>` lockstep convention.
-            let mut dep_reqs: std::collections::BTreeMap<String, String> =
-                std::collections::BTreeMap::new();
-            for (name, req) in &m.deps {
-                if name.as_str() == m.package || !publishable_names.contains(name.as_str()) {
-                    continue;
-                }
-                if let Some(req) = req {
-                    // First declaration wins (a crate appearing in both `[dependencies]`
-                    // and `[build-dependencies]` shares one requirement in practice).
-                    dep_reqs.entry(name.clone()).or_insert_with(|| req.clone());
-                }
-            }
-            let mut workspace_deps: Vec<String> = m
-                .deps
-                .iter()
-                .map(|(name, _req)| name.clone())
-                .filter(|d| d.as_str() != m.package && publishable_names.contains(d.as_str()))
-                .collect();
-            workspace_deps.sort();
-            workspace_deps.dedup();
-            let mut pin_reqs: std::collections::BTreeMap<String, Vec<Option<String>>> =
-                std::collections::BTreeMap::new();
-            for (name, req) in &m.pins {
-                if name.as_str() != m.package && publishable_names.contains(name.as_str()) {
-                    pin_reqs.entry(name.clone()).or_default().push(req.clone());
-                }
-            }
-            WorkspaceMember {
-                package: m.package.clone(),
-                version: m.version.clone(),
-                workspace_deps,
-                dep_reqs,
-                pin_reqs,
-            }
-        })
-        .collect();
+    let pin_owners = workspace_pin_owners(&raw, &publishable_names);
+    // Restrict target-order edges to other publishable members; pin owners remain
+    // workspace-wide through the separate collection above.
+    let members = publishable_workspace_members(&raw, &publishable_names);
     if members.is_empty() {
         return None;
     }
     Some(RustWorkspace {
         members,
+        pin_owners,
         workspace_pin_reqs,
         pin_parse_error,
     })
@@ -2068,11 +2099,10 @@ mod tests {
     }
 
     /// Read the repository's real manifests as a regression fixture. Both public
-    /// crates must remain visible to facts, with the CLI's exact core edge intact;
-    /// otherwise a one-time recovery `publish = false` could silently leak into the
-    /// next release plan.
+    /// crates must remain visible to the publish graph, while the non-published
+    /// cargo-dist wrapper remains visible to exact-pin discovery.
     #[test]
-    fn shipshape_workspace_facts_include_both_publishable_crates_and_exact_pin() {
+    fn shipshape_workspace_facts_include_public_graph_and_wrapper_pin() {
         let fs = FakeFs::default()
             .file("/repo/Cargo.toml", include_str!("../../../../Cargo.toml"))
             .file(
@@ -2109,6 +2139,15 @@ mod tests {
         assert_eq!(
             cli.pin_reqs.get("shipshape-core"),
             Some(&vec![Some(expected_pin)])
+        );
+        let wrapper = ws
+            .pin_owners
+            .iter()
+            .find(|owner| owner.package == "shipshape")
+            .expect("non-published wrapper remains a bump pin owner");
+        assert_eq!(
+            wrapper.pin_reqs.get("shipshape-cli"),
+            Some(&vec![Some("=0.11.0".to_string())])
         );
     }
 

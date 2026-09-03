@@ -727,9 +727,10 @@ fn changelog_is_finalizable(contract: &Contract) -> bool {
 /// Derive the intra-workspace `=`-version pin rewrites the bump applies in lockstep
 /// with the workspace version.
 ///
-/// For each publishable workspace member, exact internal pins may live either in its
-/// own dependency tables or once in root `[workspace.dependencies]` and be inherited
-/// with `workspace = true`. Both locations are sealed and rewritten from
+/// For each workspace member (including non-published wrappers), exact pins to a
+/// publishable workspace member may live either in its own dependency tables or once
+/// in root `[workspace.dependencies]` and be inherited with `workspace = true`. Both
+/// locations are sealed and rewritten from
 /// `=<from_version>` to `=<to_version>`. Entries are emitted deterministically; the
 /// set is empty for a single-crate workspace or a repo with no detected workspace graph.
 ///
@@ -805,8 +806,8 @@ fn derive_pin_rewrites(
         .collect();
     let from_pin = format!("={from_version}");
     let mut rewrites: Vec<PinRewrite> = Vec::new();
-    for member in &workspace.members {
-        for (dep, requirements) in &member.pin_reqs {
+    for owner in &workspace.pin_owners {
+        for (dep, requirements) in &owner.pin_reqs {
             // Only edges to another publishable member carry an intra-workspace pin.
             if !is_member.contains(dep.as_str()) {
                 continue;
@@ -815,12 +816,20 @@ fn derive_pin_rewrites(
             // and target-specific tables. Rewrite one sealed dependency set only when
             // every declaration is provably the same exact lockstep pin. This is the
             // same equivalence rule the cut-time rewriter enforces.
-            let owner = format!("crate `{}`", member.package);
-            if exact_pin_count(&owner, dep, requirements, &from_pin, from_version)?.is_none() {
+            let owner_description = format!("crate `{}`", owner.package);
+            if exact_pin_count(
+                &owner_description,
+                dep,
+                requirements,
+                &from_pin,
+                from_version,
+            )?
+            .is_none()
+            {
                 continue;
             }
             rewrites.push(PinRewrite {
-                in_package: member.package.clone(),
+                in_package: owner.package.clone(),
                 workspace_root: false,
                 dependency: dep.clone(),
                 from: from_pin.clone(),
@@ -1245,10 +1254,10 @@ const SEAL_DOMAIN: &str = "ossctl.release-plan";
 /// wire-envelope versions. Bump this (never silently) whenever the shape changes or an
 /// unchanged sealed field gains a different effect, so approvals made under distinct
 /// interpretations always occupy disjoint plan-id spaces.
-// v10 seals the final advance-branch barrier. Older plan documents remain readable
-// for resume; a fresh plan binds the guarantee that a verified release commit is
-// fast-forwarded onto the remote default branch before the run completes.
-const SEAL_VERSION: u32 = 10;
+// v11 seals workspace-wide exact-pin discovery, including declarations owned by
+// non-published members. Older plan documents remain readable for resume; fresh plans
+// cannot collide with approvals whose bump edit set omitted those manifests.
+const SEAL_VERSION: u32 = 11;
 
 /// The canonical hashed pre-image (see the module docs for the exact contents).
 /// A dedicated struct rather than an ad-hoc byte concatenation so the field set

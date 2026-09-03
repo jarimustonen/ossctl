@@ -25,6 +25,8 @@ struct FakeRunner {
     fail_substr: Option<String>,
     hook_fail: bool,
     issuectl_json: Option<String>,
+    /// Execute Cargo for integration fixtures that must prove lockfile resolution.
+    real_cargo: bool,
     /// A callback run when `sh -c <hook>` fires, so a test can model a hook that edits
     /// files in the checkout (e.g. regenerating a snapshot, or maliciously re-versioning).
     hook_effect: Option<HookEffect>,
@@ -41,6 +43,7 @@ impl FakeRunner {
             fail_substr: None,
             hook_fail: false,
             issuectl_json: None,
+            real_cargo: false,
             hook_effect: None,
         }
     }
@@ -58,6 +61,17 @@ impl CommandRunner for FakeRunner {
                     stderr: "boom".into(),
                 });
             }
+        }
+        if program == "cargo" && self.real_cargo {
+            let output = std::process::Command::new(program)
+                .args(args)
+                .current_dir(cwd)
+                .output()?;
+            return Ok(CommandOutput {
+                status: output.status.code(),
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
         }
         if program == "sh" {
             if let Some(effect) = &self.hook_effect {
@@ -144,6 +158,61 @@ fn temp_workspace() -> TempDir {
         "# auto\n[[package]]\nname = \"acme-core\"\nversion = \"0.4.0\"\n",
     )
     .unwrap();
+    dir
+}
+
+/// A real Cargo workspace matching Shipshape's public core+CLI plus its non-published
+/// cargo-dist wrapper. The wrapper's exact CLI pin is the production regression shape.
+fn temp_workspace_with_wrapper() -> TempDir {
+    let dir = tempfile::Builder::new()
+        .prefix("shipshape-wrapper-bump-test-")
+        .tempdir()
+        .unwrap();
+    let root = dir.path();
+    for member in ["core", "cli", "dist"] {
+        std::fs::create_dir_all(root.join("crates").join(member).join("src")).unwrap();
+    }
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/core\", \"crates/cli\", \"crates/dist\"]\n\n[workspace.package]\nversion = \"0.4.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("crates/core/Cargo.toml"),
+        "[package]\nname = \"acme-core\"\nversion.workspace = true\nedition.workspace = true\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("crates/core/src/lib.rs"), "pub fn run() {}\n").unwrap();
+    std::fs::write(
+        root.join("crates/cli/Cargo.toml"),
+        "[package]\nname = \"acme-cli\"\nversion.workspace = true\nedition.workspace = true\n\n[dependencies]\nacme-core = { path = \"../core\", version = \"=0.4.0\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("crates/cli/src/lib.rs"),
+        "pub fn run() { acme_core::run(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("crates/dist/Cargo.toml"),
+        "[package]\nname = \"acme\"\nversion.workspace = true\nedition.workspace = true\npublish = false\n\n[dependencies]\nacme-cli = { path = \"../cli\", version = \"=0.4.0\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("crates/dist/src/main.rs"),
+        "fn main() { acme_cli::run(); }\n",
+    )
+    .unwrap();
+    let output = std::process::Command::new("cargo")
+        .args(["generate-lockfile", "--offline"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "fixture lockfile generation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     dir
 }
 
@@ -241,6 +310,52 @@ fn applies_version_pin_changelog_and_commits() {
         !calls.iter().any(|c| c.starts_with("git push")),
         "the executor must not push the branch: {calls:?}"
     );
+}
+
+#[test]
+fn non_published_wrapper_pin_allows_real_lockfile_refresh() {
+    let dir = temp_workspace_with_wrapper();
+    let mut runner = FakeRunner::new("wrapper123");
+    runner.real_cargo = true;
+    let (clock, reg) = (FakeClock, NoRegistry);
+    let ctx = ctx(&runner, &clock, &reg, dir.path());
+    let plan = BumpPlan {
+        level: BumpLevel::Minor,
+        from_version: "0.4.0".into(),
+        to_version: "0.5.0".into(),
+        pin_rewrites: vec![
+            PinRewrite {
+                in_package: "acme-cli".into(),
+                workspace_root: false,
+                dependency: "acme-core".into(),
+                from: "=0.4.0".into(),
+                to: "=0.5.0".into(),
+            },
+            PinRewrite {
+                in_package: "acme".into(),
+                workspace_root: false,
+                dependency: "acme-cli".into(),
+                from: "=0.4.0".into(),
+                to: "=0.5.0".into(),
+            },
+        ],
+        changelog_finalize: false,
+        changelog: None,
+        bump_hook: None,
+    };
+
+    apply_bump(&ctx, &plan, "2026-08-24").expect("staged Cargo.lock refresh succeeds");
+
+    let wrapper = std::fs::read_to_string(dir.path().join("crates/dist/Cargo.toml")).unwrap();
+    assert!(wrapper.contains("version = \"=0.5.0\""), "{wrapper}");
+    let lock = std::fs::read_to_string(dir.path().join("Cargo.lock")).unwrap();
+    for package in ["acme-core", "acme-cli", "acme"] {
+        let entry = format!("name = \"{package}\"\nversion = \"0.5.0\"");
+        assert!(
+            lock.contains(&entry),
+            "updated lock entry for {package}: {lock}"
+        );
+    }
 }
 
 #[test]

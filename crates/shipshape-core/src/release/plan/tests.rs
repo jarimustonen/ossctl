@@ -12,6 +12,7 @@ use crate::contract::schema::{
 };
 use crate::protocol::facts::{
     DistributionSurface, Facts, MaturitySignals, Package, RustWorkspace, WorkspaceMember,
+    WorkspacePinOwner,
 };
 use crate::protocol::journal::Phase;
 use crate::protocol::plan::PlanPhase;
@@ -248,7 +249,7 @@ fn plan_id_golden_vector() {
     let plan = build(&rust_contract(), &rust_facts(), HEAD, "1.2.0");
     assert_eq!(
         plan.plan_id,
-        "2a30d12745d079a0c0f8170195f8aeff556e012ac4824793cb44245efa99c221"
+        "5d8c62995d97463cc72d81373e08d8201e4bfa6c5ca1f9673aeaf00ad6ca60ba"
     );
 }
 
@@ -276,7 +277,7 @@ fn plan_id_golden_vector_with_distribution() {
     let plan = build(&contract, &rust_facts(), HEAD, "1.2.0");
     assert_eq!(
         plan.plan_id,
-        "fb77d1dd0ba107b82d86f99736aa04960377b3d9f44b525fb9a3e70c570273f7"
+        "a845e00411f4f63126749dcc283f57b6564d1a26374cf24de8581c0008db6e24"
     );
     // The tap threads into the plan from the sole distribution.
     assert_eq!(plan.homebrew_tap.as_deref(), Some("acme/homebrew-acme"));
@@ -797,12 +798,26 @@ fn member(name: &str, version: &str, deps: &[&str]) -> WorkspaceMember {
     }
 }
 
+fn pin_owner(name: &str, version: &str, deps: &[&str]) -> WorkspacePinOwner {
+    WorkspacePinOwner {
+        package: name.to_string(),
+        pin_reqs: deps
+            .iter()
+            .map(|dep| ((*dep).to_string(), vec![Some(format!("={version}"))]))
+            .collect(),
+    }
+}
+
 /// Facts carrying a lib+bin Rust workspace graph (`lib` ← `bin` depends on it),
 /// both crates.io-publishable — the orchestratectl shape.
 fn lib_bin_workspace_facts(lib: &str, bin: &str) -> Facts {
     let mut f = rust_facts();
     f.rust_workspace = Some(RustWorkspace {
         members: vec![member(lib, "0.1.6", &[]), member(bin, "0.1.6", &[lib])],
+        pin_owners: vec![
+            pin_owner(lib, "0.1.6", &[]),
+            pin_owner(bin, "0.1.6", &[lib]),
+        ],
         workspace_pin_reqs: std::collections::BTreeMap::new(),
         pin_parse_error: None,
     });
@@ -1023,6 +1038,7 @@ fn shipshape_steady_state_plan_publishes_core_then_cli_and_keeps_product_names_d
             member("shipshape-core", "0.11.0", &[]),
             member("shipshape-cli", "0.11.0", &["shipshape-core"]),
         ],
+        pin_owners: Vec::new(),
         workspace_pin_reqs: std::collections::BTreeMap::new(),
         pin_parse_error: None,
     });
@@ -1158,6 +1174,7 @@ fn derivation_publishes_the_closure_not_every_member() {
             member("orchestratectl", "0.1.6", &["octl-core"]),
             member("experimental", "0.1.6", &[]), // publishable but unrelated + undeclared
         ],
+        pin_owners: Vec::new(),
         workspace_pin_reqs: std::collections::BTreeMap::new(),
         pin_parse_error: None,
     });
@@ -1192,6 +1209,7 @@ fn derivation_pulls_a_transitive_dependency_closure() {
             member("core", "1.0.0", &[]),
             member("unrelated", "1.0.0", &[]),
         ],
+        pin_owners: Vec::new(),
         workspace_pin_reqs: std::collections::BTreeMap::new(),
         pin_parse_error: None,
     });
@@ -1223,6 +1241,7 @@ fn an_ambiguous_null_rust_target_is_never_expanded_to_publish_everything() {
     ];
     f.rust_workspace = Some(RustWorkspace {
         members: vec![member("a", "1.0.0", &[]), member("b", "1.0.0", &["a"])],
+        pin_owners: Vec::new(),
         workspace_pin_reqs: std::collections::BTreeMap::new(),
         pin_parse_error: None,
     });
@@ -1409,6 +1428,37 @@ fn the_bump_derives_the_intra_workspace_pin_rewrite() {
 }
 
 #[test]
+fn non_published_wrapper_pin_is_owned_by_the_sealed_edit_set() {
+    let mut c = rust_contract();
+    c.targets = vec![target(
+        Ecosystem::Rust,
+        "shipshape-cli",
+        Registry::CratesIo,
+        Adapter::CargoPublish,
+    )];
+    let mut f = lib_bin_workspace_facts("shipshape-core", "shipshape-cli");
+    f.rust_workspace
+        .as_mut()
+        .unwrap()
+        .pin_owners
+        .push(pin_owner("shipshape", "0.1.6", &["shipshape-cli"]));
+
+    let plan = build_with_bump(&c, &f, HEAD, "0.1.6", BumpLevel::Minor).unwrap();
+    let rewrites = &plan.bump.as_ref().unwrap().pin_rewrites;
+    let wrapper = rewrites
+        .iter()
+        .find(|rewrite| rewrite.in_package == "shipshape")
+        .expect("the non-published wrapper's exact pin is sealed");
+    assert_eq!(wrapper.dependency, "shipshape-cli");
+    assert_eq!(wrapper.from, "=0.1.6");
+    assert_eq!(wrapper.to, "=0.2.0");
+    assert!(plan
+        .targets
+        .iter()
+        .all(|target| target.package.as_deref() != Some("shipshape")));
+}
+
+#[test]
 fn inherited_workspace_exact_pin_is_owned_by_the_sealed_edit_set() {
     let mut c = rust_contract();
     c.targets = vec![target(
@@ -1419,7 +1469,7 @@ fn inherited_workspace_exact_pin_is_owned_by_the_sealed_edit_set() {
     )];
     let mut f = lib_bin_workspace_facts("octl-core", "orchestratectl");
     let workspace = f.rust_workspace.as_mut().unwrap();
-    workspace.members[1]
+    workspace.pin_owners[1]
         .pin_reqs
         .insert("octl-core".into(), vec![None]);
     workspace
@@ -1454,7 +1504,7 @@ fn stale_exact_workspace_pin_is_refused_at_plan_time() {
     )];
     let mut f = lib_bin_workspace_facts("octl-core", "orchestratectl");
     let workspace = f.rust_workspace.as_mut().unwrap();
-    workspace.members[1]
+    workspace.pin_owners[1]
         .pin_reqs
         .insert("octl-core".into(), vec![None]);
     workspace
@@ -1490,7 +1540,7 @@ fn equivalent_duplicate_pins_plan_once_and_rewrite_every_declaration() {
         Adapter::CargoPublish,
     )];
     let mut f = lib_bin_workspace_facts("octl-core", "orchestratectl");
-    let cli = &mut f.rust_workspace.as_mut().unwrap().members[1];
+    let cli = &mut f.rust_workspace.as_mut().unwrap().pin_owners[1];
     cli.pin_reqs.insert(
         "octl-core".into(),
         vec![Some("=0.1.6".into()), Some("=0.1.6".into())],
@@ -1517,7 +1567,7 @@ fn non_equivalent_duplicate_pins_are_refused_while_planning() {
         Adapter::CargoPublish,
     )];
     let mut f = lib_bin_workspace_facts("octl-core", "orchestratectl");
-    f.rust_workspace.as_mut().unwrap().members[1]
+    f.rust_workspace.as_mut().unwrap().pin_owners[1]
         .pin_reqs
         .insert(
             "octl-core".into(),
@@ -1545,7 +1595,7 @@ fn path_only_duplicate_is_neutral_during_planning() {
         Adapter::CargoPublish,
     )];
     let mut f = lib_bin_workspace_facts("octl-core", "orchestratectl");
-    f.rust_workspace.as_mut().unwrap().members[1]
+    f.rust_workspace.as_mut().unwrap().pin_owners[1]
         .pin_reqs
         .insert("octl-core".into(), vec![Some("=0.1.6".into()), None]);
 
@@ -1840,6 +1890,7 @@ fn a_transitive_delegated_dependency_is_still_a_conflict() {
             member("mid", "0.1.6", &["core"]),
             member("bin", "0.1.6", &["mid"]),
         ],
+        pin_owners: Vec::new(),
         workspace_pin_reqs: std::collections::BTreeMap::new(),
         pin_parse_error: None,
     });

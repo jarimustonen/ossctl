@@ -185,12 +185,31 @@ pub struct Facts {
 pub struct RustWorkspace {
     /// The publishable workspace members, in declaration order.
     pub members: Vec<WorkspaceMember>,
+    /// Dependency-pin owners across **all** named workspace members, including
+    /// non-published wrappers. A wrapper still participates in Cargo resolution when
+    /// the shared workspace version changes, so its exact pins must be sealed even
+    /// though it never becomes a publish target.
+    pub pin_owners: Vec<WorkspacePinOwner>,
     /// Exact/local declarations owned by the root `[workspace.dependencies]` table,
     /// keyed by resolved package name. Off-wire like the workspace graph itself.
     pub workspace_pin_reqs: std::collections::BTreeMap<String, Vec<Option<String>>>,
     /// Parser error encountered while gathering the sealed pin model. Planning must
     /// refuse rather than equate this with an empty declaration set.
     pub pin_parse_error: Option<String>,
+}
+
+/// One named Cargo workspace member that can own exact pins to publishable members.
+///
+/// This is deliberately distinct from [`WorkspaceMember`]: publication controls the
+/// release target graph, but it must not hide a non-published member's manifest from
+/// the workspace-wide bump edit set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspacePinOwner {
+    /// The crate/package name used to locate its manifest during bump execution.
+    pub package: String,
+    /// Every local requirement targeting a publishable workspace member, preserving
+    /// duplicates for exact-pin equivalence validation.
+    pub pin_reqs: std::collections::BTreeMap<String, Vec<Option<String>>>,
 }
 
 /// One crates.io-publishable Cargo workspace member and its intra-workspace
