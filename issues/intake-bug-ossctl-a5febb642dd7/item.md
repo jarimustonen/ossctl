@@ -9,6 +9,9 @@ provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:homebase-wrapup-ossctl-cargo-publish-detection-20260823
 lane: release-preflight
 assignee: agent
+commits:
+- hash: b4b1f6265720570a51d37e5b0ba3509e888dfd5f
+  summary: start release trigger preflight fix
 ---
 
 # Release plan misses tag-triggered Cargo publish workflow
