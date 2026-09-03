@@ -12,6 +12,8 @@ commits:
   summary: start implementation
 - hash: afc262c5b5c4902dd7057fc35cf261eb50af743d
   summary: add publicize skill and deterministic audit checks
+- hash: f5733c9
+  summary: harden publicize checks after multi-model review
 ---
 
 # Collect de-stealth experience toward a /shipshape-publicize skill
