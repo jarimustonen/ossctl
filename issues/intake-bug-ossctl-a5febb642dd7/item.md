@@ -12,6 +12,8 @@ assignee: agent
 commits:
 - hash: b4b1f6265720570a51d37e5b0ba3509e888dfd5f
   summary: start release trigger preflight fix
+- hash: cf542d8
+  summary: parse inline tag publish triggers
 ---
 
 # Release plan misses tag-triggered Cargo publish workflow
@@ -46,3 +48,9 @@ The repository's `.github/workflows/publish-crates.yml` contains `on: push: tags
 - Release journal: `01M0QA6BTN55D9K1YB7QGS83DW`
 - Release commit: `f0c52ab232706fb480a51bfd45f2171c6b7aa056`
 - Publish workflow run: `32640599433` (success)
+
+## Comments
+
+### 2026-09-03T12:13:53Z · @agent
+
+Root cause confirmed: the trigger detector was an indentation-aware text scan that accepted only a line exactly equal to `tags:`. It therefore discarded the valid inline sequence `tags: [...]` before the existing structured job/`cargo publish -p ...` detector ran. The fix parses the workflow trigger mapping as YAML (including quoted `on` and YAML-1.1 boolean-key representations) while retaining negative checks for branch-only triggers and tag workflows without a direct publish path.
