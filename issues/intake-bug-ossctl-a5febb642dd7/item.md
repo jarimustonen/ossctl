@@ -16,6 +16,8 @@ commits:
   summary: parse inline tag publish triggers
 - hash: f2b222b
   summary: tighten workflow trigger evidence after review
+- hash: bf3052c
+  summary: record release preflight trigger fix in changelog
 closed: 2026-09-03
 closed_by: agent
 ---
