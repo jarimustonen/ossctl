@@ -12,7 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Maintained Shipshape surfaces now use the Taskfleet identity consistently across source,
+  documentation, fixtures, workflows, and release metadata (`taskfleet-zero-legacy-repository`).
+
 ### Fixed
+
+- Delegated release reconciliation now follows validated repository-local Cargo publish helpers
+  from the immutable release tag and recognizes current cargo-dist Homebrew output for Linux GNU
+  platforms, preventing false unknown or conflicting results (`observe-cargo-publish-helpers`,
+  `verify-homebrew-gnu-platforms`).
 <!-- oss-changelog:unreleased-end -->
 
 ## [0.12.0] - 2026-09-03
