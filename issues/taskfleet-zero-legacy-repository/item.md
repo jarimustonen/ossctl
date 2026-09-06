@@ -2,9 +2,13 @@
 created: 2026-09-06
 updated: 2026-09-06
 type: bug
-status: open
+status: fixed
 priority: high
 related: ['@taskfleet-shipshape-reference-convergence']
+closed: 2026-09-06
+commits:
+- hash: 3cecae1d69e01a47306a14a4981806b116f8735f
+  summary: complete Taskfleet identity convergence
 ---
 
 # Converge Shipshape identity and Taskfleet release reconciliation
@@ -32,3 +36,9 @@ Do not publish a release, mutate installed tools, retag, create a replacement Ta
 - [x] Current cargo-dist Homebrew output reconciles without a false conflict.
 - [x] Supported Shipshape verification reports four matches for Taskfleet journal `01M1VNPPABMDKB49EZG6KFEVMJ`, or records a precise external blocker without hand-rolled registry truth.
 - [x] Full repository gate passes.
+
+## Resolution
+
+### 2026-09-06T16:11:53Z · @issuectl
+
+Removed every tracked path/content occurrence of the retired product family and environment prefix, with neutral package-graph fixtures and canonical Taskfleet observer regressions. The exact full gate passed. A release build from 3cecae1d69e01a47306a14a4981806b116f8735f ran Shipshape-owned read-only verification for journal 01M1VNPPABMDKB49EZG6KFEVMJ and reported four matches, zero conflicts, zero missing, and zero unknown; the existing journal remained in progress and was not mutated.
