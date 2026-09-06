@@ -2,11 +2,15 @@
 created: 2026-09-06
 updated: 2026-09-06
 type: bug
-status: open
+status: fixed
 priority: high
 lane: release
 lane_seq: 2
 collision: [crates/shipshape-core/src/release/adapters/homebrew.rs, crates/shipshape-core/src/release/reconcile.rs]
+closed: 2026-09-06
+commits:
+- hash: a7b2ae1
+  summary: reconcile Homebrew GNU platforms
 ---
 
 # Verify cargo-dist Homebrew GNU platform stanzas
@@ -27,3 +31,9 @@ Taskfleet v0.6.1's sealed plan and cargo-dist manifest declare `aarch64-unknown-
 - Add cargo-dist-shaped regression tests for mixed macOS ARM + Linux GNU plans, including exact expected formula stanzas and no false conflict.
 - Improve delegated Homebrew non-match detail so a platform-stanza mismatch is not mislabeled as a Release-manifest tag/version mismatch if feasible without breaking the JSON schema.
 - Run the full Shipshape green gate. Do not publish or globally install Shipshape.
+
+## Resolution
+
+### 2026-09-06T08:41:39Z · @issuectl
+
+Linux GNU and musl targets now map to the same Homebrew OS/CPU conditions while duplicate libc variants fail closed. The full green gate passed, and repository-local Shipshape verification observed all five Taskfleet v0.6.1 targets as Matches.
