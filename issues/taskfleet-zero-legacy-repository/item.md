@@ -27,8 +27,8 @@ Do not publish a release, mutate installed tools, retag, create a replacement Ta
 
 ## Acceptance Criteria
 
-- [ ] Case-insensitive tracked path/content scans find zero retired product, command, environment-prefix, package, protocol, or repository identities.
-- [ ] Repository-local publish-helper workflow discovery is secure and covered by regression tests.
-- [ ] Current cargo-dist Homebrew output reconciles without a false conflict.
-- [ ] Supported Shipshape verification reports four matches for Taskfleet journal `01M1VNPPABMDKB49EZG6KFEVMJ`, or records a precise external blocker without hand-rolled registry truth.
-- [ ] Full repository gate passes.
+- [x] Case-insensitive tracked path/content scans find zero retired product, command, environment-prefix, package, protocol, or repository identities.
+- [x] Repository-local publish-helper workflow discovery is secure and covered by regression tests.
+- [x] Current cargo-dist Homebrew output reconciles without a false conflict.
+- [x] Supported Shipshape verification reports four matches for Taskfleet journal `01M1VNPPABMDKB49EZG6KFEVMJ`, or records a precise external blocker without hand-rolled registry truth.
+- [x] Full repository gate passes.

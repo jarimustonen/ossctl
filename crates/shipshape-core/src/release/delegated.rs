@@ -204,8 +204,8 @@ fn publish_helper_paths(command: &str) -> Result<Vec<String>, String> {
     Ok(helpers)
 }
 
-fn command_runs_cargo_publish(command: &str, allow_taskfleet_cargo_variable: bool) -> bool {
-    let taskfleet_cargo_variable = allow_taskfleet_cargo_variable
+fn command_runs_cargo_publish(command: &str, allow_declared_cargo_variable: bool) -> bool {
+    let declared_cargo_variable = allow_declared_cargo_variable
         && command
             .lines()
             .any(|line| line.trim() == "readonly cargo_bin=\"${CARGO_BIN:-cargo}\"");
@@ -213,7 +213,7 @@ fn command_runs_cargo_publish(command: &str, allow_taskfleet_cargo_variable: boo
         let tokens = segment.split_ascii_whitespace().collect::<Vec<_>>();
         let Some(index) = tokens.iter().position(|token| {
             let token = trim_shell_quotes(token);
-            token == "cargo" || (taskfleet_cargo_variable && token == "$cargo_bin")
+            token == "cargo" || (declared_cargo_variable && token == "$cargo_bin")
         }) else {
             return false;
         };

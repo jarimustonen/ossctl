@@ -2087,11 +2087,11 @@ mod tests {
         // exact `dep = { path, version = "=X" }` form `/shipshape-init` emits.
         let root = "[workspace]\nmembers = [\"crates/core\", \"crates/cli\"]\n\n\
                     [workspace.package]\nversion = \"0.1.6\"\n";
-        let core = "[package]\nname = \"octl-core\"\nversion.workspace = true\n\
+        let core = "[package]\nname = \"acme-core\"\nversion.workspace = true\n\
                     publish = true\n";
-        let cli = "[package]\nname = \"orchestratectl\"\nversion.workspace = true\n\
+        let cli = "[package]\nname = \"acme-cli\"\nversion.workspace = true\n\
                    publish = true\n\n[dependencies]\n\
-                   octl-core = { path = \"../core\", version = \"=0.1.6\" }\n\
+                   acme-core = { path = \"../core\", version = \"=0.1.6\" }\n\
                    serde = \"1\"\n";
         let fs = FakeFs::default()
             .file("/repo/Cargo.toml", root)
@@ -2100,11 +2100,11 @@ mod tests {
         let ws = detect_rust_workspace(repo(), &fs).expect("a members-bearing workspace");
         // Both members, in declaration order (planner applies the topo order).
         let names: Vec<_> = ws.members.iter().map(|m| m.package.as_str()).collect();
-        assert_eq!(names, vec!["octl-core", "orchestratectl"]);
+        assert_eq!(names, vec!["acme-core", "acme-cli"]);
         // The lib has no intra-workspace deps; the bin depends on the lib only
         // (`serde` is an external crate, not a member, so it is not an edge).
         assert!(ws.members[0].workspace_deps.is_empty());
-        assert_eq!(ws.members[1].workspace_deps, vec!["octl-core".to_string()]);
+        assert_eq!(ws.members[1].workspace_deps, vec!["acme-core".to_string()]);
         assert_eq!(ws.members[0].version.as_deref(), Some("0.1.6"));
     }
 
@@ -2490,22 +2490,22 @@ mod tests {
         // facet 3: an inline `= "=X"` pin's requirement is carried in dep_reqs so the
         // planner can rewrite only the exact lockstep edge.
         let root = "[workspace]\nmembers = [\"core\", \"cli\"]\n";
-        let core = "[package]\nname = \"octl-core\"\nversion = \"0.4.0\"\n";
+        let core = "[package]\nname = \"acme-core\"\nversion = \"0.4.0\"\n";
         let cli = "[package]\nname = \"cli\"\nversion = \"0.4.0\"\n\n[dependencies]\n\
-                   octl-core = { path = \"../core\", version = \"=0.4.0\" }\n";
+                   acme-core = { path = \"../core\", version = \"=0.4.0\" }\n";
         let fs = FakeFs::default()
             .file("/repo/Cargo.toml", root)
             .file("/repo/core/Cargo.toml", core)
             .file("/repo/cli/Cargo.toml", cli);
         let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
         let cli = ws.members.iter().find(|m| m.package == "cli").unwrap();
-        assert_eq!(cli.workspace_deps, vec!["octl-core".to_string()]);
+        assert_eq!(cli.workspace_deps, vec!["acme-core".to_string()]);
         assert_eq!(
-            cli.dep_reqs.get("octl-core").map(String::as_str),
+            cli.dep_reqs.get("acme-core").map(String::as_str),
             Some("=0.4.0")
         );
         assert_eq!(
-            cli.pin_reqs.get("octl-core"),
+            cli.pin_reqs.get("acme-core"),
             Some(&vec![Some("=0.4.0".to_string())])
         );
     }
@@ -2581,17 +2581,17 @@ mod tests {
         // planner emits no pin rewrite for it (fail closed — the publish would surface
         // a real error if a pin were needed).
         let root = "[workspace]\nmembers = [\"core\", \"cli\"]\n";
-        let core = "[package]\nname = \"octl-core\"\nversion = \"0.4.0\"\n";
+        let core = "[package]\nname = \"acme-core\"\nversion = \"0.4.0\"\n";
         let cli = "[package]\nname = \"cli\"\nversion = \"0.4.0\"\n\n[dependencies]\n\
-                   octl-core = { path = \"../core\" }\n";
+                   acme-core = { path = \"../core\" }\n";
         let fs = FakeFs::default()
             .file("/repo/Cargo.toml", root)
             .file("/repo/core/Cargo.toml", core)
             .file("/repo/cli/Cargo.toml", cli);
         let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
         let cli = ws.members.iter().find(|m| m.package == "cli").unwrap();
-        assert_eq!(cli.workspace_deps, vec!["octl-core".to_string()]);
-        assert!(!cli.dep_reqs.contains_key("octl-core"));
+        assert_eq!(cli.workspace_deps, vec!["acme-core".to_string()]);
+        assert!(!cli.dep_reqs.contains_key("acme-core"));
     }
 
     #[test]
@@ -2599,17 +2599,17 @@ mod tests {
         // A `[target.'cfg(...)'.dependencies]` normal dep gates publish order too —
         // crates.io validates it at `cargo publish`.
         let root = "[workspace]\nmembers = [\"core\", \"cli\"]\n";
-        let core = "[package]\nname = \"octl-core\"\nversion = \"1.0.0\"\n";
+        let core = "[package]\nname = \"acme-core\"\nversion = \"1.0.0\"\n";
         let cli = "[package]\nname = \"cli\"\nversion = \"1.0.0\"\n\n\
                    [target.'cfg(unix)'.dependencies]\n\
-                   octl-core = { path = \"../core\", version = \"=1.0.0\" }\n";
+                   acme-core = { path = \"../core\", version = \"=1.0.0\" }\n";
         let fs = FakeFs::default()
             .file("/repo/Cargo.toml", root)
             .file("/repo/core/Cargo.toml", core)
             .file("/repo/cli/Cargo.toml", cli);
         let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
         let cli = ws.members.iter().find(|m| m.package == "cli").unwrap();
-        assert_eq!(cli.workspace_deps, vec!["octl-core".to_string()]);
+        assert_eq!(cli.workspace_deps, vec!["acme-core".to_string()]);
     }
 
     #[test]
@@ -2655,20 +2655,20 @@ mod tests {
     #[test]
     fn rust_workspace_graph_dep_rename_ignores_package_substring_in_a_path() {
         // A path value that literally contains "package" must NOT be misread as a
-        // `package = ` rename key: the edge stays on the bare key `octl-core`.
+        // `package = ` rename key: the edge stays on the bare key `acme-core`.
         let root = "[workspace]\nmembers = [\"core\", \"cli\"]\n";
-        let core = "[package]\nname = \"octl-core\"\nversion = \"1.0.0\"\n";
+        let core = "[package]\nname = \"acme-core\"\nversion = \"1.0.0\"\n";
         let cli = "[package]\nname = \"cli\"\nversion = \"1.0.0\"\n\n[dependencies]\n\
-                   octl-core = { path = \"../my-package-core\", version = \"1\" }\n";
+                   acme-core = { path = \"../my-package-core\", version = \"1\" }\n";
         let fs = FakeFs::default()
             .file("/repo/Cargo.toml", root)
             .file("/repo/core/Cargo.toml", core)
             .file("/repo/cli/Cargo.toml", cli);
-        // `octl-core` is not a member name here (the lib is named `octl-core`, the dep
-        // key is `octl-core`) — assert the key resolves, not a spurious path substring.
+        // `acme-core` is not a member name here (the lib is named `acme-core`, the dep
+        // key is `acme-core`) — assert the key resolves, not a spurious path substring.
         let ws = detect_rust_workspace(repo(), &fs).expect("workspace");
         let cli = ws.members.iter().find(|m| m.package == "cli").unwrap();
-        assert_eq!(cli.workspace_deps, vec!["octl-core".to_string()]);
+        assert_eq!(cli.workspace_deps, vec!["acme-core".to_string()]);
     }
 
     #[test]
@@ -3091,7 +3091,7 @@ mod tests {
     fn observed_inline_tag_trigger_and_direct_package_publishes_are_detected() {
         let fs = FakeFs::default().file(
             "/repo/.github/workflows/publish-crates.yml",
-            "on:\n  push:\n    tags: ['v[0-9]+.[0-9]+.[0-9]+*']\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo publish -p octl-core\n      - run: cargo publish -p orchestratectl\n",
+            "on:\n  push:\n    tags: ['v[0-9]+.[0-9]+.[0-9]+*']\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo publish -p acme-core\n      - run: cargo publish -p acme-cli\n",
         );
         let surface = gather(repo(), &fs, &FakeGit::default()).distribution_surface;
         assert_eq!(surface.tag_triggered_workflows, vec!["publish-crates.yml"]);
@@ -3102,8 +3102,8 @@ mod tests {
         assert!(
             crate::release::distribution::delegated_publish_workflow_warnings(
                 &[
-                    delegated_cargo_target("octl-core"),
-                    delegated_cargo_target("orchestratectl"),
+                    delegated_cargo_target("acme-core"),
+                    delegated_cargo_target("acme-cli"),
                 ],
                 &surface,
             )

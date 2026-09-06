@@ -10,7 +10,7 @@
 //! `{{SKILL_SCHEMA_VERSION}}` tokens that are substituted for the **running**
 //! binary's versions at `print`/`install` time — so a printed or installed
 //! skill can never claim a `cli_version` other than the binary that produced
-//! it. This mirrors how `orchestratectl`/`issuectl` ship their skill families.
+//! it. This mirrors how `taskfleet`/`issuectl` ship their skill families.
 
 use std::path::{Path, PathBuf};
 

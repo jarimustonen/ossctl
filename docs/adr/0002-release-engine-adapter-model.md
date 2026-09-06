@@ -19,7 +19,7 @@ Two facts force real structure here, both surfaced sharply by the release-engine
 1. **The approval seam.** AI-first CLIs cannot prompt (§3). The binary must therefore stop at the human-confirm boundary and be re-invoked to execute. Naively ("binary plans, exits; caller re-invokes `cut`") this is **unsafe**: repo state can drift between plan and execute (a new commit, a `Cargo.lock` bump), or the caller can re-invoke with different flags — and the human approved a *different* release than the one that runs.
 2. **The 4 phases are asymmetric in reversibility** and each adapter produces **receipts** (published versions, digests, remote URLs) that must be captured as *facts*, not re-derived. Resume behavior differs categorically by which phase's point-of-no-return was crossed.
 
-`octl-core` already proves the durable pattern we build on: an event-sourced journal with append-then-apply atomicity and an idempotent reducer (ADR-0003).
+`taskfleet-core` already proves the durable pattern we build on: an event-sourced journal with append-then-apply atomicity and an idempotent reducer (ADR-0003).
 
 ---
 

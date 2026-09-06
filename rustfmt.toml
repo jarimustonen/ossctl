@@ -3,7 +3,7 @@
 # Only *stable* options live here so `cargo fmt --check` is meaningful on the
 # stable toolchain CI uses. Import grouping and wrap_comments are nightly-only
 # as of rustfmt 1.9 — omitted rather than emitting a per-run "requires nightly"
-# note. Revisit once they stabilise. (Mirrors orchestratectl.)
+# note. Revisit once they stabilise. (Mirrors taskfleet.)
 
 edition = "2021"
 max_width = 100

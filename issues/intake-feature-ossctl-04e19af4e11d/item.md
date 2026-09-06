@@ -30,7 +30,7 @@ way to drive just the formula step; you must write and push `Formula/<name>.rb` 
 `ossctl dist generate` deliberately EXCLUDES `homebrew` from the cargo-dist `[dist] installers`
 (warning: "the 'homebrew' installer is published by ossctl's Homebrew tap adapter (post-tag, once
 the release tarball sha256 exists)"), i.e. it assumes a PREBUILT-BINARY formula pushed by an ossctl
-tap adapter. But the actual sibling taps (homebrew-ossctl, homebrew-issuectl, homebrew-orchestratectl)
+tap adapter. But the actual sibling taps (homebrew-ossctl, homebrew-issuectl, homebrew-taskfleet)
 ship a SOURCE-BUILD formula: `depends_on "rust" => :build` + `cargo install` from the GitHub source
 tarball. So the generated model and the real convention disagree, and neither the tap adapter nor a
 source-build formula generator is actually reachable standalone today.

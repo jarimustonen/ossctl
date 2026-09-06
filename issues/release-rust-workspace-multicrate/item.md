@@ -25,25 +25,25 @@ closed: 2026-08-14
 
 ## Description
 
-GOAL: make `ossctl release plan/cut` able to cut orchestratectl's releases so we can RETIRE hand-cutting (0.1.1-0.1.6 were all hand-cut; `ossctl release list` shows only an abandoned v0.1.0 run — the engine has never successfully cut a release for this repo).
+GOAL: make `ossctl release plan/cut` able to cut taskfleet's releases so we can RETIRE hand-cutting (0.1.1-0.1.6 were all hand-cut; `ossctl release list` shows only an abandoned v0.1.0 run — the engine has never successfully cut a release for this repo).
 
-## Observed gap (ossctl 0.2.2, repo /path/to/orchestratectl)
-`ossctl release plan --version 0.1.6 --json` for a two-crate workspace (crates/octl-core lib + crates/octl-cli bin `orchestratectl`, where the CLI depends on `octl-core = "=<version>"`) produced an INCOMPLETE plan:
-- targets: **only** `{ecosystem: rust, package: orchestratectl, registry: crates.io}` — `octl-core` is NOT a target, so a cut would `cargo publish orchestratectl` while `octl-core@<new-version>` does not yet exist on crates.io → publish fails on the `=<version>` pin.
-- **no version-bump phase**: head_sha was the pre-bump commit (Cargo.toml still at the old version); phases were [dry-run-all, build-all, publish-all, tag, dist]. Nothing bumps the workspace `version`, the octl-cli `octl-core = "=X"` pin, or Cargo.lock.
-- `homebrew_tap: null` even though OSS-RELEASE.md's distribution + the per-tool tap `example-org/orchestratectl` exist.
+## Observed gap (ossctl 0.2.2, repo /path/to/taskfleet)
+`ossctl release plan --version 0.1.6 --json` for a two-crate workspace (crates/taskfleet-core lib + crates/taskfleet-cli bin `taskfleet`, where the CLI depends on `taskfleet-core = "=<version>"`) produced an INCOMPLETE plan:
+- targets: **only** `{ecosystem: rust, package: taskfleet, registry: crates.io}` — `taskfleet-core` is NOT a target, so a cut would `cargo publish taskfleet` while `taskfleet-core@<new-version>` does not yet exist on crates.io → publish fails on the `=<version>` pin.
+- **no version-bump phase**: head_sha was the pre-bump commit (Cargo.toml still at the old version); phases were [dry-run-all, build-all, publish-all, tag, dist]. Nothing bumps the workspace `version`, the taskfleet-cli `taskfleet-core = "=X"` pin, or Cargo.lock.
+- `homebrew_tap: null` even though OSS-RELEASE.md's distribution + the per-tool tap `example-org/taskfleet` exist.
 
 ## What the engine should do for a Rust workspace release
-1. **Derive dependency-ordered member publish** from the workspace graph: publish path-dependency crates before their dependents (octl-core → orchestratectl), waiting for each to be available on the registry (as `cargo publish` already does within a crate). Both members are `publish = true`.
-2. **Own the version bump** as a plan phase: set the workspace `[workspace.package] version`, rewrite intra-workspace `=<version>` pins (octl-cli's `octl-core = "=X"`), refresh Cargo.lock, and finalize CHANGELOG (`[Unreleased]` → dated) — content-addressed like the rest of the plan.
-3. **Regenerate version-embedding test snapshots** as part of the bump (orchestratectl has insta `envelope_snapshots__version_{text,json,jsonl}` that embed the version + per-skill cli_version; a bump restales them and reds CI). Either regenerate + strip insta's volatile `assertion_line:` header, or provide a documented hook the repo runs.
+1. **Derive dependency-ordered member publish** from the workspace graph: publish path-dependency crates before their dependents (taskfleet-core → taskfleet), waiting for each to be available on the registry (as `cargo publish` already does within a crate). Both members are `publish = true`.
+2. **Own the version bump** as a plan phase: set the workspace `[workspace.package] version`, rewrite intra-workspace `=<version>` pins (taskfleet-cli's `taskfleet-core = "=X"`), refresh Cargo.lock, and finalize CHANGELOG (`[Unreleased]` → dated) — content-addressed like the rest of the plan.
+3. **Regenerate version-embedding test snapshots** as part of the bump (taskfleet has insta `envelope_snapshots__version_{text,json,jsonl}` that embed the version + per-skill cli_version; a bump restales them and reds CI). Either regenerate + strip insta's volatile `assertion_line:` header, or provide a documented hook the repo runs.
 4. **Carry homebrew_tap** from the contract's distribution block into the plan (tag → cargo-dist Release CI builds binaries + updates the tap).
 
 ## Evidence
-`ossctl release list --json` → only abandoned v0.1.0. `ossctl release plan --version 0.1.6 --json` → the single-target/no-bump plan above. Hand-cut reference (what the engine must reproduce): the `release: vX.Y.Z` commits on orchestratectl main + TODO.md 'RELEASE STATE'.
+`ossctl release list --json` → only abandoned v0.1.0. `ossctl release plan --version 0.1.6 --json` → the single-target/no-bump plan above. Hand-cut reference (what the engine must reproduce): the `release: vX.Y.Z` commits on taskfleet main + TODO.md 'RELEASE STATE'.
 
 ## Done
-`ossctl release cut` produces a correct, coherent orchestratectl release end-to-end (both crates published in order at the bumped version, snapshots green, tag pushed, tap updated) — verified on a real cut — so the repo's AGENTS.md 'the /oss-release skill orchestrates the whole thing' becomes true and hand-cutting is retired.
+`ossctl release cut` produces a correct, coherent taskfleet release end-to-end (both crates published in order at the bumped version, snapshots green, tag pushed, tap updated) — verified on a real cut — so the repo's AGENTS.md 'the /oss-release skill orchestrates the whole thing' becomes true and hand-cutting is retired.
 
 ---
 
@@ -61,10 +61,10 @@ GOAL: make `ossctl release plan/cut` able to cut orchestratectl's releases so we
   publishable member** (an unrelated, deliberately-undeclared crate is never swept in
   — an llm-review safety fix). ossctl's own plan is unchanged (strict superset). Proven
   end-to-end: `release plan --json` on a two-crate fixture declaring only the bin
-  yields `[octl-core, orchestratectl]` (crates.io) and excludes an `experimental` crate.
+  yields `[taskfleet-core, taskfleet]` (crates.io) and excludes an `experimental` crate.
 - **Facet 4 — homebrew_tap carry. DONE (was already carried; now tested).** The plan
   threads the per-tool tap from the contract's distribution block; verified non-null for
-  the orchestratectl fixture (`example-org/orchestratectl`).
+  the taskfleet fixture (`example-org/taskfleet`).
 
 **NOT landed — need a maintainer design decision (left open deliberately):**
 
@@ -85,7 +85,7 @@ GOAL: make `ossctl release plan/cut` able to cut orchestratectl's releases so we
   `bump_hook` the repo runs. Recommend the contract-declared hook (keeps the engine out
   of arbitrary test-harness specifics); defer until facet 2's shape is fixed.
 
-**Ultimate acceptance (a real orchestratectl cut) is the maintainer's step** — it needs
+**Ultimate acceptance (a real taskfleet cut) is the maintainer's step** — it needs
 crates.io creds + an irreversible publish and was explicitly out of this spinoff's scope.
 
 ### llm-review follow-ups (parser hardening; each fails a cut CLOSED today, never mis-publishes)
@@ -162,7 +162,7 @@ of this spinoff's scope). Remaining work, all gated behind that live validation:
    policy, permitted file changes, and a post-hook validation pass (re-read manifests + lock +
    changelog, reject unexpected modifications). Document the trust model.
 
-Acceptance (a real orchestratectl cut through the engine) remains the maintainer's step.
+Acceptance (a real taskfleet cut through the engine) remains the maintainer's step.
 
 ## Progress — cut-time EXECUTOR landed (2026-08-13, `wt/01kzx…-release-bump-executor`)
 
@@ -201,10 +201,10 @@ the `bump_execution_unimplemented` fail-closed guard is **removed**.
 coordinator/unit level against fakes + a real temp checkout (`release::coordinator::a_bump_plan_applies_…`,
 `…_does_not_double_bump`, `release::bump_exec::*`), but a **real crates.io cut through the engine** (irreversible
 publish) was explicitly out of scope and NOT run. Remaining validation, all gated behind that live cut:
-- a real `ossctl release cut --bump` on orchestratectl (the original driver) — proves the whole flow end to end;
+- a real `ossctl release cut --bump` on taskfleet (the original driver) — proves the whole flow end to end;
 - the **best-effort branch push** (`HEAD:refs/heads/<branch>`) is untested against a real remote — verify it
   advances `main` as intended (or refine to a safer branch-advance);
-- the `bump_hook` against orchestratectl's real insta snapshot-regen command;
+- the `bump_hook` against taskfleet's real insta snapshot-regen command;
 - the `bump_hook` timeout gap (add a first-class per-command timeout to `CommandRunner`).
 
 ## Closed done (2026-08-14, maintainer decision) — code complete; live acceptance decoupled
@@ -214,7 +214,7 @@ in **ossctl 0.5.0** (2026-08-13, all four channels live): facet 1 (dep-ordered m
 closure), facet 4 (`homebrew_tap` carry), facets 2+3 (`--bump` plan + cut-time executor). The
 maintainer closes this **done** on code-complete: the original "verified on a real cut" acceptance is
 a live, credential-gated validation, not remaining engineering, so it is **decoupled** from this
-issue. The next step is a real `ossctl release cut --bump` on **orchestratectl** (the original
+issue. The next step is a real `ossctl release cut --bump` on **taskfleet** (the original
 driver); if that live cut surfaces problems, they are triaged as **new issues** (or this one is
 reopened), not tracked as open work here. The deferred parser-hardening follow-ups below already
 each fail a cut CLOSED for the shapes they don't handle, so none blocks the live cut.

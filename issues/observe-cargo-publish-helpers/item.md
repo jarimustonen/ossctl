@@ -23,7 +23,7 @@ Shipshape cannot reconcile a successful `cargo-publish-ci` target when a tag-tri
 
 Taskfleet v0.6.1 published all three crates successfully in GitHub Actions run `34020495272`, but Shipshape journal `01M1TTRXNXK6FPQJK3F92B9AXA` remains in progress. Both Shipshape 0.10.1 and 0.12.0 return: `no tracked GitHub Actions workflow containing cargo publish could be resolved for the cargo-publish-ci target`. GitHub Release and Homebrew reconcile as `Matches`.
 
-The tagged workflow invokes `./scripts/publish-crates.sh publish taskfleet-core|taskfleet|orchestratectl`; that tracked helper contains and controls the real `cargo publish` operations and receipt generation.
+The tagged workflow invokes `./scripts/publish-crates.sh publish <package>` once per declared crate; that tracked helper contains and controls the real `cargo publish` operations and receipt generation.
 
 ## Required outcome
 

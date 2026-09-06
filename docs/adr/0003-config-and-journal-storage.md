@@ -15,7 +15,7 @@ Two distinct kinds of "config/state" must not be conflated:
 - **`OSS-RELEASE.md`** — the **project's** release contract: frontmatter = machine config, body = human rationale. Read by all 10 members only through the normalizer (`ossctl contract show`, ADR-0001). Its canonical-JSON shape is a schema-versioned inter-skill contract. Floors (design §3.1): no `release.model: auto` on a spike; a registry target requires a valid SPDX license; `slsa-l3` only at production; every health-badge needs its producer; `schema_version` bound; `changelog.fragment_dir` must stay inside the repo.
 - **`ossctl`'s own tool config** (§8) — API URLs, profiles, credentials. At founding `ossctl` has **none** (it is repo-scoped and shells out to `cargo`/`npm`/`gh`, which carry their own auth).
 
-The release cut (ADR-0002) is a partially-irreversible, resumable state machine whose progress must survive a network drop, an OTP timeout, or a one-of-N registry failure — and must be recoverable **without re-publishing what already landed**. `octl-core` proves the pattern: `manifest.json` + append-only events + an `applied_seq` watermark + an idempotent reducer, with append-then-apply atomicity (fsync event → apply to projection/manifest → advance watermark; a crash between fsync and apply replays as a clean no-op-or-apply).
+The release cut (ADR-0002) is a partially-irreversible, resumable state machine whose progress must survive a network drop, an OTP timeout, or a one-of-N registry failure — and must be recoverable **without re-publishing what already landed**. `taskfleet-core` proves the pattern: `manifest.json` + append-only events + an `applied_seq` watermark + an idempotent reducer, with append-then-apply atomicity (fsync event → apply to projection/manifest → advance watermark; a crash between fsync and apply replays as a clean no-op-or-apply).
 
 The panel raised one correctness landmine repeatedly: a **literal `.git/` path is not a portable repo-state abstraction** (linked worktrees make `.git` a *file*; submodules, bare repos, and `GIT_DIR` overrides all break naive concatenation), and git-local state is **easy to lose** exactly when recovery is needed.
 
@@ -27,14 +27,14 @@ The panel raised one correctness landmine repeatedly: a **literal `.git/` path i
 
 `OSS-RELEASE.md` remains the human-reviewed, project-carried contract at the repo root (frontmatter = config, body = rationale), authored by `/oss-init` and read via `ossctl contract show`. It is **not** migrated into `ossctl`'s §8 tool config — the two are separate concerns (project contract vs tool settings). `ossctl` exposes **no** `config` noun at founding (ADR-0001 reserves it for any future §8 settings, keeping `contract` for the project artifact). The normalizer materializes every default, expands `targets`, splits `versioning` into base + `versioning_pattern`, and enforces every floor **before** any external state changes; a config that crosses a floor never lands (design §3.3).
 
-### 2. Journal format: event-sourced JSONL, mirroring `octl-core`
+### 2. Journal format: event-sourced JSONL, mirroring `taskfleet-core`
 
 Per release run, `ossctl-core` writes:
 
 - **`journal.jsonl`** — append-only, one self-contained JSON **event per line** (§2 JSONL), each carrying its own **`schema_version`**, a monotonic **`seq`**, a timestamp, and the event payload. Event classes (ADR-0002): `run_created`, `phase_entered`/`phase_completed { phase, outcome }`, `target_dry_run`, `target_built`, `target_published { PublishReceipt }`, `target_cancelled`, `tag_created_local`, `tag_pushed_remote`, `github_release_created`, `run_abandoned { reason }`.
 - **`manifest.json`** — the materialized run state (run_id, contract snapshot hash / `plan_id`, target set, current phase, `applied_seq`, terminal status). The manifest is **disposable and reconstructable from `journal.jsonl`** — the journal is the single source of truth; if the manifest cannot be rebuilt from events, there are two sources of truth (forbidden).
 
-**Atomicity (non-negotiable, from octl-core):** append-then-apply — fsync the journal event, THEN apply to the manifest, THEN advance `applied_seq`. The reducer is **deterministic and idempotent**: replaying the event stream against existing state is a clean no-op-or-apply, so a crash between append and apply is recovered by replay. Manifest writes use temp-file → flush → atomic rename → directory fsync. `target_published` receipts are written **per target before the next target is attempted** — never batch-written.
+**Atomicity (non-negotiable, from taskfleet-core):** append-then-apply — fsync the journal event, THEN apply to the manifest, THEN advance `applied_seq`. The reducer is **deterministic and idempotent**: replaying the event stream against existing state is a clean no-op-or-apply, so a crash between append and apply is recovered by replay. Manifest writes use temp-file → flush → atomic rename → directory fsync. `target_published` receipts are written **per target before the next target is attempted** — never batch-written.
 
 **Per-event schema versioning + forward tolerance:** each event carries its own `schema_version` (the journal is durable across `ossctl` upgrades — a run started under v0.3 must be resumable under v0.4). The reducer tolerates additive fields and **refuses an unknown *required* event schema with an actionable error rather than mutating state**.
 
@@ -75,7 +75,7 @@ Resume continues **from the first incomplete step**; "already-done and matching"
 
 - Release progress survives interruption and is recoverable **without double-publishing**: the per-target receipts + the reconciliation table make "did this land?" an answerable, deterministic question against the registries.
 - State is **co-located with the repo it mutates** and correct under worktrees/submodules/bare repos (git-common-dir), while the lock prevents concurrent cuts from corrupting a run.
-- Reusing the `octl-core` append-then-apply/idempotent-reducer pattern means the atomicity and replay semantics are borrowed from a proven implementation, not re-derived.
+- Reusing the `taskfleet-core` append-then-apply/idempotent-reducer pattern means the atomicity and replay semantics are borrowed from a proven implementation, not re-derived.
 - `OSS-RELEASE.md` stays a human-reviewable artifact beside the code, and the tool-config namespace is left clean for a real §8 need.
 
 **Costs / risks accepted**
@@ -141,7 +141,7 @@ is never evidence. What a publish-none cut does is ADR-0002's tag-only amendment
 
 **Rejected alternatives**
 
-- **Home-dir / XDG state (`~/.ossctl/...`), as `orchestratectl` uses.** Rejected: `octl` keeps state in the home dir because *its* runs span multiple worktrees and repos; an `ossctl` release is intrinsically tied to **one** repo, so git-common-dir-local state co-locates the journal with the repo it mutates and avoids a home-dir hash-keyed lookup. (`--journal-dir` remains for the CI case.)
+- **Home-dir / XDG state (`~/.ossctl/...`), as `taskfleet` uses.** Rejected: `taskfleet` keeps state in the home dir because *its* runs span multiple worktrees and repos; an `ossctl` release is intrinsically tied to **one** repo, so git-common-dir-local state co-locates the journal with the repo it mutates and avoids a home-dir hash-keyed lookup. (`--journal-dir` remains for the CI case.)
 - **Literal `.git/ossctl/...` path.** Rejected: `.git` is a *file* in linked worktrees and is relocated by submodules / bare repos / `GIT_DIR`; the path must come from `git rev-parse --git-common-dir`.
 - **A plain-text or single-JSON-document log.** Rejected: it cannot be appended atomically per event, cannot be `tail`/`jq`-streamed (§2), and cannot express the phase/receipt event model the resume contract needs.
 - **A simpler "last completed step" checkpoint file (no event sourcing).** Rejected as insufficient for a partially-irreversible multi-target workflow: it cannot capture per-target publish receipts as facts, cannot distinguish reversible-attempt from point-of-no-return events, and cannot be replayed idempotently after a crash mid-write.

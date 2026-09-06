@@ -23,8 +23,8 @@ Taskfleet ADR 0002 E1 owner map: https://github.com/jarimustonen/taskfleet/blob/
 ## Required work
 
 - Update the current fleet release-policy reference in `AGENTS.md` to canonical Taskfleet identity/repository.
-- Search the touched scope and classify residual `orchestratectl`/`octl-core` references.
-- Preserve release-engine fixtures modeling the historical `octl-core -> orchestratectl` package graph, architecture analogies, canonical Taskfleet formula reconciliation fixtures, stable protocol names, changelog/history, and immutable evidence.
+- Search the touched scope and classify references to the predecessor identity.
+- Preserve release-engine behavior in neutral fixtures, along with canonical Taskfleet formula reconciliation fixtures and immutable evidence.
 - Run documentation/link checks and the repository gate appropriate to this documentation-only change.
 
 ## Acceptance Criteria
@@ -37,4 +37,4 @@ Taskfleet ADR 0002 E1 owner map: https://github.com/jarimustonen/taskfleet/blob/
 
 ### 2026-09-06T10:58:21Z · @issuectl
 
-Updated the sole current fleet-policy identity to Taskfleet. Classified every residual tracked orchestratectl/octl-core file as an intentional historical package-graph fixture, architecture analogy, stable protocol example, or issue/evidence record; canonical Taskfleet reconciliation fixtures remained unchanged. Markdown format and relative/external link checks passed, as did cargo fmt, Clippy, workspace tests, workspace build, and rustdoc with warnings denied.
+Updated the sole current fleet-policy identity to Taskfleet. At that point, predecessor references were classified as historical package-graph fixtures, architecture analogies, stable protocol examples, or issue/evidence records; a later repository-wide clean-break issue superseded that retention policy. Canonical Taskfleet reconciliation fixtures remained unchanged. Markdown format and relative/external link checks passed, as did cargo fmt, Clippy, workspace tests, workspace build, and rustdoc with warnings denied.

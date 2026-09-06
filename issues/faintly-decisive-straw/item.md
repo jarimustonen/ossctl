@@ -1,12 +1,12 @@
 ---
 created: 2026-09-03
-updated: 2026-09-03
+updated: 2026-09-06
 type: bug
 status: fixed
 priority: high
 provenance: other
-provenance_detail: Observed release-cut failure assigned through orchestratectl
-source_ref: orchestratectl:01m1kkravtfm7pe67bsxc9m9pj/task:bump-pin-discovery
+provenance_detail: Observed release-cut failure assigned through the predecessor runner
+source_ref: legacy-run:01m1kkravtfm7pe67bsxc9m9pj/task:bump-pin-discovery
 originating_run: 01m1kkravtfm7pe67bsxc9m9pj
 originating_run_kind: spinoff
 closed: 2026-09-03

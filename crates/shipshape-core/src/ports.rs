@@ -183,7 +183,7 @@ pub trait GitRepo {
 /// filesystem, while pinning down the atomicity discipline its production impl
 /// **must** honor.
 ///
-/// The append-then-apply contract (ADR-0003 §2, borrowed from `octl-core`) maps
+/// The append-then-apply contract (ADR-0003 §2, borrowed from `taskfleet-core`) maps
 /// onto these operations:
 ///
 /// 1. [`Self::append_line`] fsyncs the event so it is durable **before** the

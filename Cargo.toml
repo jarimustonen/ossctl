@@ -45,7 +45,7 @@ lto = "thin"
 # `shipshape-core` additionally layers `missing_docs` via a crate-root
 # `#![warn(missing_docs)]` — Cargo rejects mixing `lints.workspace = true` with a
 # per-crate `[lints.rust]` table, so the attribute is the clean path (mirrors
-# octl-core).
+# taskfleet-core).
 [workspace.lints.clippy]
 # Pedantic is a strong default for a CLI that will grow many subcommands. Kept at
 # "warn"; CI promotes warnings to errors via `-D warnings`. Aggressive lints that

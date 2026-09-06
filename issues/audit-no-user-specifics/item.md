@@ -47,7 +47,7 @@ and `0.2.0`:
 gh_account: "example-org".to_string(),
 repo_root:  "/path/to/sources".to_string(),
 const DEFAULT_FAMILY_TOOLS: [&str; 7] = [
-    "issuectl", "orchestratectl", "private-tool-a", "private-tool-b", "ossctl", "a-private-service", "glasspad",
+    "issuectl", "taskfleet", "private-tool-a", "private-tool-b", "ossctl", "a-private-service", "glasspad",
 ];
 ```
 

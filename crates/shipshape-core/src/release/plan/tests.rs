@@ -780,7 +780,7 @@ fn an_all_distribution_ecosystem_repo_has_no_derivable_version() {
 
 /// A `WorkspaceMember` in one line (deps are intra-workspace crate names). Each dep is
 /// given a lockstep `=<version>` requirement, the convention the pin-rewrite derivation
-/// keys on — matching what `detect_rust_workspace` records for the `octl-core = { path,
+/// keys on — matching what `detect_rust_workspace` records for the `acme-core = { path,
 /// version = "=X" }` shape this feature targets.
 fn member(name: &str, version: &str, deps: &[&str]) -> WorkspaceMember {
     WorkspaceMember {
@@ -809,7 +809,7 @@ fn pin_owner(name: &str, version: &str, deps: &[&str]) -> WorkspacePinOwner {
 }
 
 /// Facts carrying a lib+bin Rust workspace graph (`lib` ← `bin` depends on it),
-/// both crates.io-publishable — the orchestratectl shape.
+/// both crates.io-publishable — the acme-cli shape.
 fn lib_bin_workspace_facts(lib: &str, bin: &str) -> Facts {
     let mut f = rust_facts();
     f.rust_workspace = Some(RustWorkspace {
@@ -834,20 +834,20 @@ fn two_crate_workspace_declaring_only_the_bin_derives_both_members_lib_first() {
     // THE headline gap: a contract that declares ONLY the bin crate as a target must
     // now plan BOTH crates as ordered publish units (lib before bin), where before it
     // planned only the bin — which would `cargo publish <bin>` while the `=`-pinned
-    // lib is not yet on crates.io (the orchestratectl failure).
+    // lib is not yet on crates.io (the acme-cli failure).
     let mut c = rust_contract();
     c.targets = vec![target(
         Ecosystem::Rust,
-        "orchestratectl",
+        "acme-cli",
         Registry::CratesIo,
         Adapter::CargoPublish,
     )];
-    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let f = lib_bin_workspace_facts("acme-core", "acme-cli");
 
     let plan = build(&c, &f, HEAD, "0.1.6");
     assert_eq!(
         target_packages(&plan),
-        vec![Some("octl-core"), Some("orchestratectl")],
+        vec![Some("acme-core"), Some("acme-cli")],
         "the lib is derived as its own target and ordered before the bin"
     );
     // Both are crates.io / cargo-publish Rust targets.
@@ -921,7 +921,7 @@ fn a_publish_none_contract_plans_no_targets_even_with_a_publishable_workspace() 
     // is a valid state, not an unplannable one).
     let mut c = rust_contract();
     c.targets = vec![];
-    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let f = lib_bin_workspace_facts("acme-core", "acme-cli");
 
     let plan = build(&c, &f, HEAD, "0.1.6");
     assert!(
@@ -941,12 +941,12 @@ fn a_contract_declaring_only_the_bin_yields_the_same_target_set_as_declaring_bot
     // dependency-ordered publish set is identical. (The `plan_id` still differs — the
     // seal hashes the full contract text, which differs by one declared target — but
     // what a cut EXECUTES, the target set, is the same.)
-    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let f = lib_bin_workspace_facts("acme-core", "acme-cli");
 
     let mut only_bin = rust_contract();
     only_bin.targets = vec![target(
         Ecosystem::Rust,
-        "orchestratectl",
+        "acme-cli",
         Registry::CratesIo,
         Adapter::CargoPublish,
     )];
@@ -955,13 +955,13 @@ fn a_contract_declaring_only_the_bin_yields_the_same_target_set_as_declaring_bot
     both.targets = vec![
         target(
             Ecosystem::Rust,
-            "octl-core",
+            "acme-core",
             Registry::CratesIo,
             Adapter::CargoPublish,
         ),
         target(
             Ecosystem::Rust,
-            "orchestratectl",
+            "acme-cli",
             Registry::CratesIo,
             Adapter::CargoPublish,
         ),
@@ -1069,22 +1069,22 @@ fn derivation_reorders_a_bin_first_declaration_into_dependency_order() {
     c.targets = vec![
         target(
             Ecosystem::Rust,
-            "orchestratectl",
+            "acme-cli",
             Registry::CratesIo,
             Adapter::CargoPublish,
         ),
         target(
             Ecosystem::Rust,
-            "octl-core",
+            "acme-core",
             Registry::CratesIo,
             Adapter::CargoPublish,
         ),
     ];
-    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let f = lib_bin_workspace_facts("acme-core", "acme-cli");
     let plan = build(&c, &f, HEAD, "0.1.6");
     assert_eq!(
         target_packages(&plan),
-        vec![Some("octl-core"), Some("orchestratectl")]
+        vec![Some("acme-core"), Some("acme-cli")]
     );
 }
 
@@ -1097,24 +1097,24 @@ fn derived_members_are_spliced_before_dist_and_homebrew_targets() {
     c.targets = vec![
         target(
             Ecosystem::Rust,
-            "orchestratectl",
+            "acme-cli",
             Registry::CratesIo,
             Adapter::CargoPublish,
         ),
         target(
             Ecosystem::Rust,
-            "orchestratectl",
+            "acme-cli",
             Registry::GhReleases,
             Adapter::CargoDist,
         ),
         target(
             Ecosystem::Rust,
-            "orchestratectl",
+            "acme-cli",
             Registry::Homebrew,
             Adapter::HomebrewTap,
         ),
     ];
-    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let f = lib_bin_workspace_facts("acme-core", "acme-cli");
     let plan = build(&c, &f, HEAD, "0.1.6");
     let shape: Vec<(&str, Registry)> = plan
         .targets
@@ -1124,10 +1124,10 @@ fn derived_members_are_spliced_before_dist_and_homebrew_targets() {
     assert_eq!(
         shape,
         vec![
-            ("octl-core", Registry::CratesIo),
-            ("orchestratectl", Registry::CratesIo),
-            ("orchestratectl", Registry::GhReleases),
-            ("orchestratectl", Registry::Homebrew),
+            ("acme-core", Registry::CratesIo),
+            ("acme-cli", Registry::CratesIo),
+            ("acme-cli", Registry::GhReleases),
+            ("acme-cli", Registry::Homebrew),
         ]
     );
 }
@@ -1145,7 +1145,7 @@ fn derivation_is_a_superset_keeping_a_declared_package_absent_from_the_graph() {
         Registry::CratesIo,
         Adapter::CargoPublish,
     )];
-    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let f = lib_bin_workspace_facts("acme-core", "acme-cli");
     let plan = build(&c, &f, HEAD, "0.1.6");
     assert_eq!(
         target_packages(&plan),
@@ -1163,15 +1163,15 @@ fn derivation_publishes_the_closure_not_every_member() {
     let mut c = rust_contract();
     c.targets = vec![target(
         Ecosystem::Rust,
-        "orchestratectl",
+        "acme-cli",
         Registry::CratesIo,
         Adapter::CargoPublish,
     )];
     let mut f = rust_facts();
     f.rust_workspace = Some(RustWorkspace {
         members: vec![
-            member("octl-core", "0.1.6", &[]),
-            member("orchestratectl", "0.1.6", &["octl-core"]),
+            member("acme-core", "0.1.6", &[]),
+            member("acme-cli", "0.1.6", &["acme-core"]),
             member("experimental", "0.1.6", &[]), // publishable but unrelated + undeclared
         ],
         pin_owners: Vec::new(),
@@ -1181,7 +1181,7 @@ fn derivation_publishes_the_closure_not_every_member() {
     let plan = build(&c, &f, HEAD, "0.1.6");
     assert_eq!(
         target_packages(&plan),
-        vec![Some("octl-core"), Some("orchestratectl")],
+        vec![Some("acme-core"), Some("acme-cli")],
         "only the declared crate and its dependency closure are published"
     );
     assert!(
@@ -1270,13 +1270,13 @@ fn homebrew_tap_carries_into_a_multi_crate_plan() {
     c.targets = vec![
         target(
             Ecosystem::Rust,
-            "orchestratectl",
+            "acme-cli",
             Registry::CratesIo,
             Adapter::CargoPublish,
         ),
         target(
             Ecosystem::Rust,
-            "orchestratectl",
+            "acme-cli",
             Registry::Homebrew,
             Adapter::HomebrewTap,
         ),
@@ -1286,16 +1286,13 @@ fn homebrew_tap_carries_into_a_multi_crate_plan() {
         adapter: DistributionAdapter::CargoDist,
         gh_releases: true,
         installers: vec![Installer::Homebrew],
-        homebrew_tap: Some("jarimustonen/orchestratectl".to_string()),
+        homebrew_tap: Some("acme/homebrew-acme-cli".to_string()),
         platforms: vec!["aarch64-apple-darwin".to_string()],
         extra_fields: serde_json::Map::new(),
     }];
-    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let f = lib_bin_workspace_facts("acme-core", "acme-cli");
     let plan = build(&c, &f, HEAD, "0.1.6");
-    assert_eq!(
-        plan.homebrew_tap.as_deref(),
-        Some("jarimustonen/orchestratectl")
-    );
+    assert_eq!(plan.homebrew_tap.as_deref(), Some("acme/homebrew-acme-cli"));
     // And the derivation still produced both crates.io members.
     assert_eq!(
         plan.targets
@@ -1307,24 +1304,24 @@ fn homebrew_tap_carries_into_a_multi_crate_plan() {
 }
 
 #[test]
-fn orchestratectl_plan_id_differs_once_the_lib_target_is_derived() {
+fn acme_cli_plan_id_differs_once_the_lib_target_is_derived() {
     // The resolved target set grew (bin-only → lib+bin), so the sealed plan_id
     // changes — a stale single-target plan re-derives to a different id and `verify`
     // reports drift, exactly as intended (the plan genuinely changed).
     let mut c = rust_contract();
     c.targets = vec![target(
         Ecosystem::Rust,
-        "orchestratectl",
+        "acme-cli",
         Registry::CratesIo,
         Adapter::CargoPublish,
     )];
     let mut f_no_graph = rust_facts();
     f_no_graph.rust_workspace = None;
-    let f_graph = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let f_graph = lib_bin_workspace_facts("acme-core", "acme-cli");
 
     let before = build(&c, &f_no_graph, HEAD, "0.1.6");
     let after = build(&c, &f_graph, HEAD, "0.1.6");
-    assert_eq!(target_packages(&before), vec![Some("orchestratectl")]);
+    assert_eq!(target_packages(&before), vec![Some("acme-cli")]);
     assert_ne!(before.plan_id, after.plan_id);
 }
 
@@ -1365,11 +1362,11 @@ fn bump_plan(level: BumpLevel) -> ReleasePlan {
     let mut c = rust_contract();
     c.targets = vec![target(
         Ecosystem::Rust,
-        "orchestratectl",
+        "acme-cli",
         Registry::CratesIo,
         Adapter::CargoPublish,
     )];
-    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let f = lib_bin_workspace_facts("acme-core", "acme-cli");
     build_with_bump(&c, &f, HEAD, "0.1.6", level).expect("0.1.6 is strict semver")
 }
 
@@ -1412,7 +1409,7 @@ fn a_bump_plan_prepends_the_bump_phase_and_carries_the_computed_version() {
 
 #[test]
 fn the_bump_derives_the_intra_workspace_pin_rewrite() {
-    // THE lockstep pin: the bin's `octl-core = "=0.1.6"` must become `= "=0.2.0"`.
+    // THE lockstep pin: the bin's `acme-core = "=0.1.6"` must become `= "=0.2.0"`.
     let plan = bump_plan(BumpLevel::Minor);
     let bump = plan.bump.unwrap();
     assert_eq!(
@@ -1421,8 +1418,8 @@ fn the_bump_derives_the_intra_workspace_pin_rewrite() {
         "one lib←bin edge ⇒ one pin rewrite"
     );
     let r = &bump.pin_rewrites[0];
-    assert_eq!(r.in_package, "orchestratectl");
-    assert_eq!(r.dependency, "octl-core");
+    assert_eq!(r.in_package, "acme-cli");
+    assert_eq!(r.dependency, "acme-core");
     assert_eq!(r.from, "=0.1.6");
     assert_eq!(r.to, "=0.2.0");
 }
@@ -1463,18 +1460,18 @@ fn inherited_workspace_exact_pin_is_owned_by_the_sealed_edit_set() {
     let mut c = rust_contract();
     c.targets = vec![target(
         Ecosystem::Rust,
-        "orchestratectl",
+        "acme-cli",
         Registry::CratesIo,
         Adapter::CargoPublish,
     )];
-    let mut f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let mut f = lib_bin_workspace_facts("acme-core", "acme-cli");
     let workspace = f.rust_workspace.as_mut().unwrap();
     workspace.pin_owners[1]
         .pin_reqs
-        .insert("octl-core".into(), vec![None]);
+        .insert("acme-core".into(), vec![None]);
     workspace
         .workspace_pin_reqs
-        .insert("octl-core".into(), vec![Some("=0.1.6".into())]);
+        .insert("acme-core".into(), vec![Some("=0.1.6".into())]);
 
     let plan = build_with_bump(&c, &f, HEAD, "0.1.6", BumpLevel::Minor).unwrap();
     let rewrites = &plan.bump.as_ref().unwrap().pin_rewrites;
@@ -1488,7 +1485,7 @@ fn inherited_workspace_exact_pin_is_owned_by_the_sealed_edit_set() {
         .find(|rewrite| rewrite.workspace_root)
         .unwrap();
     assert_eq!(root.in_package, "workspace");
-    assert_eq!(root.dependency, "octl-core");
+    assert_eq!(root.dependency, "acme-core");
     assert_eq!(root.from, "=0.1.6");
     assert_eq!(root.to, "=0.2.0");
 }
@@ -1498,22 +1495,22 @@ fn stale_exact_workspace_pin_is_refused_at_plan_time() {
     let mut c = rust_contract();
     c.targets = vec![target(
         Ecosystem::Rust,
-        "orchestratectl",
+        "acme-cli",
         Registry::CratesIo,
         Adapter::CargoPublish,
     )];
-    let mut f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let mut f = lib_bin_workspace_facts("acme-core", "acme-cli");
     let workspace = f.rust_workspace.as_mut().unwrap();
     workspace.pin_owners[1]
         .pin_reqs
-        .insert("octl-core".into(), vec![None]);
+        .insert("acme-core".into(), vec![None]);
     workspace
         .workspace_pin_reqs
-        .insert("octl-core".into(), vec![Some("=0.1.5".into())]);
+        .insert("acme-core".into(), vec![Some("=0.1.5".into())]);
 
     let err = build_with_bump(&c, &f, HEAD, "0.1.6", BumpLevel::Minor).unwrap_err();
     assert!(
-        err.reason.contains("exact internal pin `octl-core`"),
+        err.reason.contains("exact internal pin `acme-core`"),
         "{}",
         err.reason
     );
@@ -1522,7 +1519,7 @@ fn stale_exact_workspace_pin_is_refused_at_plan_time() {
 #[test]
 fn pin_parser_failure_refuses_plan_instead_of_meaning_no_pins() {
     let c = rust_contract();
-    let mut f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let mut f = lib_bin_workspace_facts("acme-core", "acme-cli");
     f.rust_workspace.as_mut().unwrap().pin_parse_error =
         Some("crates/cli/Cargo.toml: invalid inline table".into());
 
@@ -1535,14 +1532,14 @@ fn equivalent_duplicate_pins_plan_once_and_rewrite_every_declaration() {
     let mut c = rust_contract();
     c.targets = vec![target(
         Ecosystem::Rust,
-        "orchestratectl",
+        "acme-cli",
         Registry::CratesIo,
         Adapter::CargoPublish,
     )];
-    let mut f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let mut f = lib_bin_workspace_facts("acme-core", "acme-cli");
     let cli = &mut f.rust_workspace.as_mut().unwrap().pin_owners[1];
     cli.pin_reqs.insert(
-        "octl-core".into(),
+        "acme-core".into(),
         vec![Some("=0.1.6".into()), Some("=0.1.6".into())],
     );
 
@@ -1550,7 +1547,7 @@ fn equivalent_duplicate_pins_plan_once_and_rewrite_every_declaration() {
     let rewrites = &plan.bump.as_ref().unwrap().pin_rewrites;
     assert_eq!(rewrites.len(), 1, "one sealed equivalent declaration set");
 
-    let manifest = "[dependencies]\noctl-core = { path = \"../core\", version = \"=0.1.6\" }\n[dev-dependencies]\noctl-core = { path = \"../core\", version = \"=0.1.6\" }\n";
+    let manifest = "[dependencies]\nacme-core = { path = \"../core\", version = \"=0.1.6\" }\n[dev-dependencies]\nacme-core = { path = \"../core\", version = \"=0.1.6\" }\n";
     let r = &rewrites[0];
     let bumped =
         crate::release::bump::rewrite_pin(manifest, &r.dependency, &r.from, &r.to).unwrap();
@@ -1562,15 +1559,15 @@ fn non_equivalent_duplicate_pins_are_refused_while_planning() {
     let mut c = rust_contract();
     c.targets = vec![target(
         Ecosystem::Rust,
-        "orchestratectl",
+        "acme-cli",
         Registry::CratesIo,
         Adapter::CargoPublish,
     )];
-    let mut f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let mut f = lib_bin_workspace_facts("acme-core", "acme-cli");
     f.rust_workspace.as_mut().unwrap().pin_owners[1]
         .pin_reqs
         .insert(
-            "octl-core".into(),
+            "acme-core".into(),
             vec![Some("=0.1.6".into()), Some("^0.1".into())],
         );
 
@@ -1590,14 +1587,14 @@ fn path_only_duplicate_is_neutral_during_planning() {
     let mut c = rust_contract();
     c.targets = vec![target(
         Ecosystem::Rust,
-        "orchestratectl",
+        "acme-cli",
         Registry::CratesIo,
         Adapter::CargoPublish,
     )];
-    let mut f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let mut f = lib_bin_workspace_facts("acme-core", "acme-cli");
     f.rust_workspace.as_mut().unwrap().pin_owners[1]
         .pin_reqs
-        .insert("octl-core".into(), vec![Some("=0.1.6".into()), None]);
+        .insert("acme-core".into(), vec![Some("=0.1.6".into()), None]);
 
     let plan = build_with_bump(&c, &f, HEAD, "0.1.6", BumpLevel::Minor).unwrap();
     assert_eq!(plan.bump.unwrap().pin_rewrites.len(), 1);
@@ -1610,11 +1607,11 @@ fn build_with_bump_computes_the_version_from_the_level_not_a_literal() {
     let mut c = rust_contract();
     c.targets = vec![target(
         Ecosystem::Rust,
-        "orchestratectl",
+        "acme-cli",
         Registry::CratesIo,
         Adapter::CargoPublish,
     )];
-    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let f = lib_bin_workspace_facts("acme-core", "acme-cli");
     let plan = build_with_bump(&c, &f, HEAD, "0.1.6", BumpLevel::Major).unwrap();
     assert_eq!(plan.version, "1.0.0");
     assert_eq!(plan.bump.unwrap().to_version, "1.0.0");
@@ -1656,11 +1653,11 @@ fn the_bump_finalizes_a_curated_changelog_but_not_an_automated_one() {
     c.changelog.mode = ChangelogMode::Automated;
     c.targets = vec![target(
         Ecosystem::Rust,
-        "orchestratectl",
+        "acme-cli",
         Registry::CratesIo,
         Adapter::CargoPublish,
     )];
-    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let f = lib_bin_workspace_facts("acme-core", "acme-cli");
     let auto = build_with_bump(&c, &f, HEAD, "0.1.6", BumpLevel::Patch).unwrap();
     let auto_bump = auto.bump.unwrap();
     assert!(!auto_bump.changelog_finalize);
@@ -1698,11 +1695,11 @@ fn a_declared_bump_hook_rides_on_the_bump_plan() {
     c.release.bump_hook = Some("cargo insta test --accept".to_string());
     c.targets = vec![target(
         Ecosystem::Rust,
-        "orchestratectl",
+        "acme-cli",
         Registry::CratesIo,
         Adapter::CargoPublish,
     )];
-    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let f = lib_bin_workspace_facts("acme-core", "acme-cli");
     let plan = build_with_bump(&c, &f, HEAD, "0.1.6", BumpLevel::Minor).unwrap();
     assert_eq!(
         plan.bump.unwrap().bump_hook.as_deref(),
@@ -1726,11 +1723,11 @@ fn a_bump_plan_has_a_different_id_than_the_no_bump_plan() {
         let mut c = rust_contract();
         c.targets = vec![target(
             Ecosystem::Rust,
-            "orchestratectl",
+            "acme-cli",
             Registry::CratesIo,
             Adapter::CargoPublish,
         )];
-        let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+        let f = lib_bin_workspace_facts("acme-core", "acme-cli");
         build(&c, &f, HEAD, "0.1.6")
     };
     let bumped = bump_plan(BumpLevel::Patch);
@@ -1763,11 +1760,11 @@ fn a_declared_bump_hook_changes_the_bump_plan_id() {
         c.release.bump_hook = Some("cargo insta test --accept".to_string());
         c.targets = vec![target(
             Ecosystem::Rust,
-            "orchestratectl",
+            "acme-cli",
             Registry::CratesIo,
             Adapter::CargoPublish,
         )];
-        let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+        let f = lib_bin_workspace_facts("acme-core", "acme-cli");
         build_with_bump(&c, &f, HEAD, "0.1.6", BumpLevel::Minor).unwrap()
     };
     assert_ne!(without.plan_id, with.plan_id);
@@ -1785,30 +1782,30 @@ fn an_engine_target_depending_on_a_ci_delegated_crate_is_a_conflict() {
     c.targets = vec![
         target(
             Ecosystem::Rust,
-            "octl-core",
+            "acme-core",
             Registry::CratesIo,
             Adapter::CargoPublishCi,
         ),
         target(
             Ecosystem::Rust,
-            "orchestratectl",
+            "acme-cli",
             Registry::CratesIo,
             Adapter::CargoPublish,
         ),
     ];
-    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let f = lib_bin_workspace_facts("acme-core", "acme-cli");
 
     let plan = build(&c, &f, HEAD, "0.1.6");
     let conflicts = delegated_dependency_conflicts(&plan, &f);
     assert_eq!(
         conflicts,
         vec![DelegatedDependencyConflict {
-            engine_package: "orchestratectl".to_string(),
-            delegated_package: "octl-core".to_string(),
+            engine_package: "acme-cli".to_string(),
+            delegated_package: "acme-core".to_string(),
         }]
     );
     let message = &delegated_dependency_messages(&conflicts)[0];
-    assert!(message.contains("orchestratectl") && message.contains("octl-core"));
+    assert!(message.contains("acme-cli") && message.contains("acme-core"));
 }
 
 #[test]
@@ -1820,18 +1817,18 @@ fn the_reverse_dependency_direction_is_not_a_conflict() {
     c.targets = vec![
         target(
             Ecosystem::Rust,
-            "octl-core",
+            "acme-core",
             Registry::CratesIo,
             Adapter::CargoPublish,
         ),
         target(
             Ecosystem::Rust,
-            "orchestratectl",
+            "acme-cli",
             Registry::CratesIo,
             Adapter::CargoPublishCi,
         ),
     ];
-    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let f = lib_bin_workspace_facts("acme-core", "acme-cli");
 
     let plan = build(&c, &f, HEAD, "0.1.6");
     assert!(delegated_dependency_conflicts(&plan, &f).is_empty());
@@ -1845,18 +1842,18 @@ fn an_all_delegated_workspace_has_no_conflict() {
     c.targets = vec![
         target(
             Ecosystem::Rust,
-            "octl-core",
+            "acme-core",
             Registry::CratesIo,
             Adapter::CargoPublishCi,
         ),
         target(
             Ecosystem::Rust,
-            "orchestratectl",
+            "acme-cli",
             Registry::CratesIo,
             Adapter::CargoPublishCi,
         ),
     ];
-    let f = lib_bin_workspace_facts("octl-core", "orchestratectl");
+    let f = lib_bin_workspace_facts("acme-core", "acme-cli");
 
     let plan = build(&c, &f, HEAD, "0.1.6");
     assert!(delegated_dependency_conflicts(&plan, &f).is_empty());

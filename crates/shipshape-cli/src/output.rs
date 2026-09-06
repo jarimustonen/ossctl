@@ -8,7 +8,7 @@
 //!
 //! The body lives under a dedicated `data` key so the envelope can grow
 //! reserved fields (`warnings`, `dry_run`, `trace_id`, …) over time without
-//! colliding with payload field names (mirrors octl-core's envelope).
+//! colliding with payload field names (mirrors taskfleet-core's envelope).
 //!
 //! Format is selected only by the explicit global `--json` flag, never by
 //! `isatty()` (`AGENTS-AI-FIRST-CLI.md` §9). Streaming `--output=jsonl` (§12) is

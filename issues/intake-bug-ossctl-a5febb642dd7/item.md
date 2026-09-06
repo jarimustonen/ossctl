@@ -30,7 +30,7 @@ Release plan misses tag-triggered Cargo publish workflow
 
 ## Observed
 
-From a clean orchestratectl main checkout with `.github/workflows/publish-crates.yml` present, this command:
+From a clean taskfleet main checkout with `.github/workflows/publish-crates.yml` present, this command:
 
 ```sh
 scripts/ossctl-release.sh plan patch
@@ -39,10 +39,10 @@ scripts/ossctl-release.sh plan patch
 sealed a valid four-target plan but emitted:
 
 ```text
-cargo-publish-ci delegates crates.io publication for octl-core, orchestratectl to CI, but no tag-triggered Cargo publish workflow was detected under .github/workflows; no directly inspectable Cargo publish path was found in the detected tag-triggered workflows (release.yml).
+cargo-publish-ci delegates crates.io publication for taskfleet-core, taskfleet to CI, but no tag-triggered Cargo publish workflow was detected under .github/workflows; no directly inspectable Cargo publish path was found in the detected tag-triggered workflows (release.yml).
 ```
 
-The repository's `.github/workflows/publish-crates.yml` contains `on: push: tags: ['v[0-9]+.[0-9]+.[0-9]+*']` and directly runs `cargo publish -p octl-core` followed by `cargo publish -p orchestratectl`. The resulting v0.5.1 tag later triggered that workflow successfully, and ossctl verification reported both crates.io targets as `matches`.
+The repository's `.github/workflows/publish-crates.yml` contains `on: push: tags: ['v[0-9]+.[0-9]+.[0-9]+*']` and directly runs `cargo publish -p taskfleet-core` followed by `cargo publish -p taskfleet`. The resulting v0.5.1 tag later triggered that workflow successfully, and ossctl verification reported both crates.io targets as `matches`.
 
 ## Expected
 

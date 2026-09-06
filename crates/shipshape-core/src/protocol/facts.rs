@@ -228,7 +228,7 @@ pub struct WorkspaceMember {
     pub workspace_deps: Vec<String>,
     /// The **literal version requirement string** this member's manifest declares
     /// for each intra-workspace dependency that carries one, keyed by dependency
-    /// crate name (e.g. `{"octl-core": "=0.4.0"}` for `octl-core = { path = "…",
+    /// crate name (e.g. `{"acme-core": "=0.4.0"}` for `acme-core = { path = "…",
     /// version = "=0.4.0" }`). Only local declarations whose resolved package is
     /// another publishable member appear, and only when the manifest declares an
     /// explicit `version` on the dependency —

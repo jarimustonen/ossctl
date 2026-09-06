@@ -14,7 +14,7 @@
 //!   append-then-apply atomicity discipline and holding the single-active-cut
 //!   lock for its lifetime.
 //!
-//! # Append-then-apply (ADR-0003 §2, from `octl-core`)
+//! # Append-then-apply (ADR-0003 §2, from `taskfleet-core`)
 //!
 //! Every mutation is: **(1)** fsync the event to `journal.jsonl` (durable),
 //! **(2)** apply it to the in-memory [`RunState`], **(3)** atomically rewrite the

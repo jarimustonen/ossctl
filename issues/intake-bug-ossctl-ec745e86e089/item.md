@@ -39,7 +39,7 @@ intake flow as the other repos.
 
 Fixed across the whole active fleet, not just ossctl (2026-08-20).
 
-SCOPE. The report named ossctl, but the same schema lag affected seven of eight active repos. Only project-canon and intakectl already carried the intake statuses. Fixed in: ossctl, issuectl, orchestratectl, glasspad, homebase (five parallel workers), then deutschpad and aggountant (found when deutschpad's migration failed 13 items on the same schema-violation this issue reports).
+SCOPE. The report named ossctl, but the same schema lag affected seven of eight active repos. Only project-canon and intakectl already carried the intake statuses. Fixed in: ossctl, issuectl, taskfleet, glasspad, homebase (five parallel workers), then deutschpad and aggountant (found when deutschpad's migration failed 13 items on the same schema-violation this issue reports).
 
 WHAT SHIPPED. 1) issues/.schema.yaml status enum extended with untriaged / deferred / needs-info, mirroring project-canon's reference schema. 2) issuectl intake migrate --apply run everywhere, converting label-encoded intake state to first-class fields: via:* labels became the provenance field, needs-triage + open became status untriaged, label-deferred became status deferred; stale deferred labels on already-closed items were dropped without reopening. 3) issuectl doctor --fix applied.
 

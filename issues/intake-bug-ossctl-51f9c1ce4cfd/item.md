@@ -16,7 +16,7 @@ commits:
 - hash: 00c56a1
   summary: apply confirmed review fixes and route-specific failure coverage
 closed: 2026-08-23
-closed_by: orchestratectl:01m0ncp7hmvv0wx1p6ftj0erpy
+closed_by: legacy-run:01m0ncp7hmvv0wx1p6ftj0erpy
 ---
 
 # homebrew/binary target verification fails: missing during cut, unknown …
@@ -113,6 +113,6 @@ Two independent dispatch/parsing defects explain the contradictory outcomes:
 
 ## Resolution
 
-### 2026-08-22T21:49:31Z · @orchestratectl:01m0ncp7hmvv0wx1p6ftj0erpy
+### 2026-08-22T21:49:31Z · @legacy-run:01m0ncp7hmvv0wx1p6ftj0erpy
 
 Fixed both diagnosed observer paths. The byte-exact project-canon v0.6.1 cargo-dist 0.28.2 formula now verifies Matches for all sealed Homebrew platforms; 404 remains Missing while 5xx and transport failures remain Unknown; standalone mixed GitHub Release + Homebrew reconciliation observes each target at its own destination. The exact full Rust gate passed, followed by multi-model review and assessed localized fixes.

@@ -20,4 +20,4 @@ The most program-shaped member and likely its own multi-issue epic. Implement pe
 
 ### 2026-07-26T16:16:27Z · @claude-code
 
-release-engine campaign complete on integration branch orchestrate/release-engine-2026-07-26 (HEAD 1abf4a2, 261 tests green, 0 deaths). All 7 features landed via /orchestrate: f-journal, f-adapter, f-plan, f-coordinator, f-verify-cmd, f-resume, f-streaming. NOT merged to main yet — awaits user review+merge, then close. Watch-out: adapter publish() bodies may be skeletons (audit before a real cut). Report: ~/.orchestratectl/runs/01kyfc8jf1x9rbf91kjfwdfssn/report.md
+release-engine campaign complete on integration branch orchestrate/release-engine-2026-07-26 (HEAD 1abf4a2, 261 tests green, 0 deaths). All 7 features landed via /orchestrate: f-journal, f-adapter, f-plan, f-coordinator, f-verify-cmd, f-resume, f-streaming. NOT merged to main yet — awaits user review+merge, then close. Watch-out: adapter publish() bodies may be skeletons (audit before a real cut). Report: ~/.taskfleet/runs/01kyfc8jf1x9rbf91kjfwdfssn/report.md

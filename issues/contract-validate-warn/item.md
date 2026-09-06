@@ -22,10 +22,10 @@ mode is SILENT: a downstream repo whose Homebrew tap is declared only in `dist-w
 (cargo-dist config) and NOT mirrored into a contract `distribution:` block gets `homebrew_tap: null`
 in the plan — so a `release cut` would quietly **drop the Homebrew leg** with no error and no warning.
 
-**How it surfaced (stint #20, 2026-08-14).** Preparing orchestratectl for its `--bump` cut, the
+**How it surfaced (stint #20, 2026-08-14).** Preparing taskfleet for its `--bump` cut, the
 first `ossctl release plan --bump minor` carried a null tap even though `dist-workspace.toml` had a
 valid `publish-jobs = ["homebrew"]` + tap. The fix there was to add a `distribution:` block to
-orchestratectl's `OSS-RELEASE.md` — but nothing told us the tap was missing; it was caught only by
+taskfleet's `OSS-RELEASE.md` — but nothing told us the tap was missing; it was caught only by
 eyeballing the plan output. A less careful downstream cut would have shipped crates.io + GH-release
 and silently skipped Homebrew.
 
