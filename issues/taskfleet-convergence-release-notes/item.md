@@ -2,9 +2,13 @@
 created: 2026-09-06
 updated: 2026-09-06
 type: task
-status: open
+status: done
 priority: high
 related: ['@taskfleet-zero-legacy-repository']
+closed: 2026-09-06
+commits:
+- hash: db795b3fb93b5d34e3981eef5683b2036dc1e6e9
+  summary: record Taskfleet convergence release notes
 ---
 
 # Prepare Shipshape Taskfleet convergence release notes
@@ -19,7 +23,13 @@ Using the repository's marker-anchored changelog ownership rules, add concise `[
 
 ## Acceptance Criteria
 
-- [ ] `[Unreleased]` accurately describes both shipped changes without naming the retired identity.
-- [ ] Changelog markers remain valid and the release engine can plan a patch release.
-- [ ] Canonical identity scan remains at zero retired references.
-- [ ] Required focused gate passes.
+- [x] `[Unreleased]` accurately describes both shipped changes without naming the retired identity.
+- [x] Changelog markers remain valid and the release engine can plan a patch release.
+- [x] Canonical identity scan remains at zero retired references.
+- [x] Required focused gate passes.
+
+## Resolution
+
+### 2026-09-06T16:21:14Z · @issuectl
+
+Added marker-anchored curated entries for Taskfleet identity convergence and delegated publish/Homebrew reconciliation. Contract validation, marker checks, focused changelog tests, formatting, zero-reference scan, release build, and patch-plan formation for 0.12.1 all passed; no cut was started.
