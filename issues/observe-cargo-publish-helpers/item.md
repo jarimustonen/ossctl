@@ -2,11 +2,15 @@
 created: 2026-09-06
 updated: 2026-09-06
 type: bug
-status: open
+status: fixed
 priority: high
 lane: release
 lane_seq: 1
 collision: [crates/shipshape-core/src/release/delegated.rs]
+closed: 2026-09-06
+commits:
+- hash: dc1bdf8
+  summary: observe cargo publish through tracked helpers
 ---
 
 # Observe cargo publish workflows through tracked helpers
@@ -30,3 +34,9 @@ The tagged workflow invokes `./scripts/publish-crates.sh publish taskfleet-core|
 - Add regression tests using the Taskfleet-shaped helper topology and adversarial ambiguous/missing helper cases.
 - Keep `Unknown` red when ownership cannot be proven.
 - Land through the full Shipshape green gate. Do not publish a Shipshape release as part of this worker.
+
+## Resolution
+
+### 2026-09-06T08:24:01Z · @issuectl
+
+Implemented immutable-tag workflow and tracked-helper discovery with fail-closed path validation and ambiguity handling. The exact repository green gate passed: fmt, workspace Clippy with -D warnings, workspace tests, workspace build, and rustdoc with -D warnings. A repository-local release build from dc1bdf8 ran read-only verification against Taskfleet journal 01M1TTRXNXK6FPQJK3F92B9AXA: all three cargo-publish-ci targets resolved .github/workflows/publish-crates.yml, exact GitHub Actions run 34020495272, and reconciled Matches. The report also retained an unrelated pre-existing Homebrew Conflicts outcome; no external journal was resumed or mutated.
