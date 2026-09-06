@@ -139,7 +139,7 @@ Open an `issuectl` issue before building a feature — do not pre-design beyond 
 - **Homebrew tap ownership — shipshape is the exception, not the pattern.** shipshape owns its
   OWN tap via `homebrew-tap` (its `dist-workspace.toml` has NO `publish-jobs`), and it is
   the only live exercise of that adapter. Every other fleet repo
-  (issuectl / glasspad / orchestratectl / project-canon) carries
+  (issuectl / glasspad / taskfleet / project-canon) carries
   `publish-jobs = ["homebrew"]`, so cargo-dist's `publish-homebrew-formula` job writes
   their formula on every tag: their contracts **must declare the homebrew target with
   `adapter: cargo-dist`**. Declaring `homebrew-tap` there creates a double writer (this
