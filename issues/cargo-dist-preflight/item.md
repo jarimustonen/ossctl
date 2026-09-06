@@ -1,15 +1,17 @@
 ---
 created: 2026-09-03
-updated: 2026-09-03
+updated: 2026-09-06
 type: bug
 reporter: jari
-status: untriaged
+status: open
 priority: normal
 provenance: agent:issuectl-wrapup
 source_ref: agent:issuectl-wrapup/reporter:jari/id:issuectl-wrapup-2026-09-03-dist-preflight
+lane: release-preflight
+collision: [crates/shipshape-core/src/release/coordinator.rs]
 ---
 
-# Release cut checks cargo-dist only after bump
+# Preflight pinned cargo-dist before release mutation
 
 ## Description
 

@@ -1,15 +1,17 @@
 ---
 created: 2026-09-03
-updated: 2026-09-03
+updated: 2026-09-06
 type: bug
 reporter: jari
-status: untriaged
+status: duplicate
 priority: normal
 provenance: agent:homebase-wrapup
 source_ref: agent:homebase-wrapup/reporter:jari/id:project-canon-070-missing-dist-preflight
+closed: 2026-09-06
+duplicate_of: cargo-dist-preflight
 ---
 
-# Release dry-run misses required dist executable
+# Release dry-run does not detect missing cargo-dist
 
 ## Description
 
@@ -22,3 +24,9 @@ Release dry-run misses required dist executable
 Expected: preflight or `dry_run` should resolve and execute-check every required external program before creating/progressing a release run, and fail with an actionable diagnostic naming the required cargo-dist version or installation remedy.
 
 Observed impact: the sealed run was left in progress and required installing cargo-dist 0.28.2 into a disposable prefix and calling `shipshape release resume`. No target had published, and the same journaled run eventually completed safely. This is a deterministic dependency-preflight gap, not a release corruption.
+
+## Comments
+
+### 2026-09-06T17:05:35Z · @intake
+
+Duplicate of cargo-dist-preflight
