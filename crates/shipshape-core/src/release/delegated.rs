@@ -35,49 +35,263 @@ pub fn observe_github_run(
 }
 
 fn cargo_publish_workflow(ctx: &EffectCtx<'_>, version: &str) -> Result<String, String> {
+    let tag = format!("v{version}");
     let output = ctx
         .runner
         .run(
             "git",
             &[
-                "grep",
-                "-l",
-                "-e",
-                "cargo publish",
-                &format!("v{version}"),
+                "ls-tree",
+                "-r",
+                "--name-only",
+                &tag,
                 "--",
-                ".github/workflows/*.yml",
-                ".github/workflows/*.yaml",
+                ".github/workflows",
             ],
             ctx.repo_root,
         )
-        .map_err(|error| format!("could not inspect tag-triggered workflows: {error}"))?;
-    if output.status != Some(0) && output.status != Some(1) {
+        .map_err(|error| format!("could not inspect workflows in tag `{tag}`: {error}"))?;
+    if output.status != Some(0) {
         return Err(format!(
-            "could not inspect tag-triggered workflows: {}",
+            "could not inspect workflows in tag `{tag}`: {}",
             output.stderr.trim()
         ));
     }
-    let mut candidates: Vec<String> = output
-        .stdout
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect();
+
+    let mut candidates = Vec::new();
+    let mut rejected = Vec::new();
+    for path in output.stdout.lines().map(str::trim).filter(|path| {
+        path.starts_with(".github/workflows/")
+            && std::path::Path::new(path)
+                .extension()
+                .is_some_and(|extension| {
+                    extension.eq_ignore_ascii_case("yml") || extension.eq_ignore_ascii_case("yaml")
+                })
+    }) {
+        let document = tagged_text(ctx, &tag, path)
+            .map_err(|detail| format!("could not inspect tagged workflow `{path}`: {detail}"))?;
+        let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&document) else {
+            continue;
+        };
+        if !workflow_pushes_tags(&yaml) {
+            continue;
+        }
+        match workflow_publish_evidence(ctx, &tag, &yaml) {
+            Ok(true) => candidates.push(path.to_string()),
+            Ok(false) => {}
+            Err(detail) => rejected.push(format!("`{path}`: {detail}")),
+        }
+    }
     candidates.sort();
     candidates.dedup();
     match candidates.as_slice() {
-        [only] => Ok(only.clone()),
-        [] => Err(
-            "no tracked GitHub Actions workflow containing `cargo publish` could be resolved for the cargo-publish-ci target"
-                .to_string(),
-        ),
+        [only] if rejected.is_empty() => Ok(only.clone()),
+        [] => {
+            let mut detail = "no tracked tag-triggered GitHub Actions workflow with direct `cargo publish` or a verifiable repository-local publish helper could be resolved for the cargo-publish-ci target".to_string();
+            if !rejected.is_empty() {
+                let _ = write!(detail, "; rejected evidence: {}", rejected.join("; "));
+            }
+            Err(detail)
+        }
+        [only] => Err(format!(
+            "workflow `{only}` contains publish evidence, but other tag-triggered workflow evidence could not be verified; refusing ambiguous ownership: {}",
+            rejected.join("; ")
+        )),
         many => Err(format!(
-            "more than one GitHub Actions workflow contains `cargo publish`; cannot identify the delegated owner: {}",
+            "more than one tag-triggered GitHub Actions workflow owns cargo publication; cannot identify the delegated owner: {}",
             many.join(", ")
         )),
     }
+}
+
+fn tagged_text(ctx: &EffectCtx<'_>, tag: &str, path: &str) -> Result<String, String> {
+    let object = format!("{tag}:{path}");
+    let output = ctx
+        .runner
+        .run("git", &["show", &object], ctx.repo_root)
+        .map_err(|error| format!("could not read `{path}` from `{tag}`: {error}"))?;
+    if output.status == Some(0) {
+        Ok(output.stdout)
+    } else {
+        Err(format!(
+            "could not read tracked file `{path}` from `{tag}`: {}",
+            output.stderr.trim()
+        ))
+    }
+}
+
+fn workflow_publish_evidence(
+    ctx: &EffectCtx<'_>,
+    tag: &str,
+    document: &serde_yaml::Value,
+) -> Result<bool, String> {
+    let Some(jobs) = yaml_mapping(document).and_then(|root| yaml_get(root, "jobs")) else {
+        return Ok(false);
+    };
+    let Some(jobs) = jobs.as_mapping() else {
+        return Ok(false);
+    };
+    let mut direct_publish = false;
+    let mut helpers = Vec::new();
+    for job in jobs.values() {
+        let Some(steps) = job
+            .as_mapping()
+            .and_then(|job| yaml_get(job, "steps"))
+            .and_then(serde_yaml::Value::as_sequence)
+        else {
+            continue;
+        };
+        for run in steps.iter().filter_map(|step| {
+            step.as_mapping()
+                .and_then(|step| yaml_get(step, "run"))
+                .and_then(serde_yaml::Value::as_str)
+        }) {
+            direct_publish |= command_runs_cargo_publish(run, false);
+            helpers.extend(publish_helper_paths(run)?);
+        }
+    }
+    helpers.sort();
+    helpers.dedup();
+    for helper in &helpers {
+        let text = tagged_text(ctx, tag, helper)?;
+        if !command_runs_cargo_publish(&text, true) {
+            return Err(format!(
+                "tracked helper `{helper}` does not directly contain a recognizable crates.io cargo publish command (recursive or multi-hop helper delegation is not followed)"
+            ));
+        }
+    }
+    Ok(direct_publish || !helpers.is_empty())
+}
+
+fn publish_helper_paths(command: &str) -> Result<Vec<String>, String> {
+    let mut helpers = Vec::new();
+    for segment in command_segments(command) {
+        let tokens = segment.split_ascii_whitespace().collect::<Vec<_>>();
+        let Some(publish_index) = tokens.iter().position(|token| *token == "publish") else {
+            continue;
+        };
+        let Some(executable) = tokens.first().map(|token| trim_shell_quotes(token)) else {
+            continue;
+        };
+        if executable == "cargo" || executable.ends_with("cargo_bin") {
+            continue;
+        }
+        if publish_index == 0 {
+            continue;
+        }
+        if !executable.starts_with("./") {
+            if executable.contains('/') || executable.contains('$') {
+                return Err(format!(
+                    "publish helper path `{executable}` is dynamic, absolute, or not repository-relative"
+                ));
+            }
+            continue;
+        }
+        let path = &executable[2..];
+        if path.is_empty()
+            || path
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+            || path.contains('$')
+            || path.contains(['*', '?', '[', ']'])
+        {
+            return Err(format!(
+                "publish helper path `{executable}` is dynamic or escapes the repository"
+            ));
+        }
+        helpers.push(path.to_string());
+    }
+    Ok(helpers)
+}
+
+fn command_runs_cargo_publish(command: &str, allow_taskfleet_cargo_variable: bool) -> bool {
+    let taskfleet_cargo_variable = allow_taskfleet_cargo_variable
+        && command
+            .lines()
+            .any(|line| line.trim() == "readonly cargo_bin=\"${CARGO_BIN:-cargo}\"");
+    command_segments(command).into_iter().any(|segment| {
+        let tokens = segment.split_ascii_whitespace().collect::<Vec<_>>();
+        let Some(index) = tokens.iter().position(|token| {
+            let token = trim_shell_quotes(token);
+            token == "cargo" || (taskfleet_cargo_variable && token == "$cargo_bin")
+        }) else {
+            return false;
+        };
+        let prefix = tokens[..index]
+            .strip_prefix(&["if"])
+            .unwrap_or(&tokens[..index]);
+        if prefix
+            .iter()
+            .any(|token| !token.contains('=') || token.starts_with('-'))
+            || tokens.get(index + 1) != Some(&"publish")
+        {
+            return false;
+        }
+        let options = &tokens[index + 2..];
+        if options.iter().any(|option| {
+            matches!(*option, "--dry-run" | "--help" | "-h" | "--index")
+                || option.starts_with("--index=")
+                || option
+                    .strip_prefix("--registry=")
+                    .is_some_and(|registry| registry != "crates-io")
+        }) {
+            return false;
+        }
+        options.iter().enumerate().all(|(option_index, option)| {
+            *option != "--registry" || options.get(option_index + 1).copied() == Some("crates-io")
+        })
+    })
+}
+
+fn command_segments(command: &str) -> Vec<&str> {
+    command
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or(""))
+        .flat_map(|line| line.split(';'))
+        .flat_map(|part| part.split("&&"))
+        .flat_map(|part| part.split("||"))
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn trim_shell_quotes(token: &str) -> &str {
+    token
+        .strip_prefix('"')
+        .and_then(|token| token.strip_suffix('"'))
+        .or_else(|| {
+            token
+                .strip_prefix('\'')
+                .and_then(|token| token.strip_suffix('\''))
+        })
+        .unwrap_or(token)
+}
+
+fn yaml_mapping(value: &serde_yaml::Value) -> Option<&serde_yaml::Mapping> {
+    value.as_mapping()
+}
+
+fn yaml_get<'a>(mapping: &'a serde_yaml::Mapping, key: &str) -> Option<&'a serde_yaml::Value> {
+    mapping
+        .iter()
+        .find_map(|(candidate, value)| (candidate.as_str() == Some(key)).then_some(value))
+}
+
+fn workflow_pushes_tags(document: &serde_yaml::Value) -> bool {
+    yaml_mapping(document)
+        .and_then(|root| yaml_get(root, "on"))
+        .and_then(serde_yaml::Value::as_mapping)
+        .and_then(|on| yaml_get(on, "push"))
+        .and_then(serde_yaml::Value::as_mapping)
+        .and_then(|push| yaml_get(push, "tags"))
+        .and_then(serde_yaml::Value::as_sequence)
+        .is_some_and(|tags| {
+            !tags.is_empty()
+                && tags.iter().all(|tag| {
+                    tag.as_str()
+                        .is_some_and(|pattern| !pattern.trim().is_empty())
+                })
+        })
 }
 
 #[derive(Deserialize)]
@@ -376,6 +590,7 @@ mod tests {
     struct RunnerFake {
         run_list: String,
         run_view: Option<String>,
+        tagged_files: Vec<(&'static str, &'static str)>,
         calls: RefCell<Vec<String>>,
     }
     impl CommandRunner for RunnerFake {
@@ -383,21 +598,46 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(format!("{program} {}", args.join(" ")));
-            let stdout = if program == "git" && args.starts_with(&["rev-list"]) {
-                "abc123\n".to_string()
-            } else if program == "git" && args.starts_with(&["grep"]) {
-                ".github/workflows/publish-crates.yml\n".to_string()
+            let (status, stdout, stderr) = if program == "git" && args.starts_with(&["rev-list"]) {
+                (Some(0), "abc123\n".to_string(), String::new())
+            } else if program == "git" && args.starts_with(&["ls-tree"]) {
+                let files = self
+                    .tagged_files
+                    .iter()
+                    .map(|(path, _)| *path)
+                    .filter(|path| path.starts_with(".github/workflows/"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (Some(0), format!("{files}\n"), String::new())
+            } else if program == "git" && args.starts_with(&["show"]) {
+                let path = args[1].split_once(':').map_or("", |(_, path)| path);
+                match self
+                    .tagged_files
+                    .iter()
+                    .find(|(candidate, _)| *candidate == path)
+                {
+                    Some((_, text)) => (Some(0), (*text).to_string(), String::new()),
+                    None => (
+                        Some(128),
+                        String::new(),
+                        "path does not exist in tag".to_string(),
+                    ),
+                }
             } else if program == "gh" && args.starts_with(&["run", "list"]) {
-                self.run_list.clone()
+                (Some(0), self.run_list.clone(), String::new())
             } else if program == "gh" && args.starts_with(&["run", "view"]) {
-                self.run_view.clone().unwrap_or_default()
+                (
+                    Some(0),
+                    self.run_view.clone().unwrap_or_default(),
+                    String::new(),
+                )
             } else {
-                String::new()
+                (Some(0), String::new(), String::new())
             };
             Ok(CommandOutput {
-                status: Some(0),
+                status,
                 stdout,
-                stderr: String::new(),
+                stderr,
             })
         }
     }
@@ -421,6 +661,7 @@ mod tests {
         let runner = RunnerFake {
             run_list: r#"[{"databaseId":77,"status":"in_progress","conclusion":"","headBranch":"v1.0.0","headSha":"abc123","url":"https://example/run/77"}]"#.to_string(),
             run_view: None,
+            tagged_files: Vec::new(),
             calls: RefCell::new(Vec::new()),
         };
         let (clock, registry) = (ClockFake, RegistryFake);
@@ -444,6 +685,7 @@ mod tests {
         let runner = RunnerFake {
             run_list: r#"[{"databaseId":88,"status":"completed","conclusion":"cancelled","headBranch":"v1.0.0","headSha":"abc123","url":"https://example/run/88"}]"#.to_string(),
             run_view: Some(r#"{"status":"completed","conclusion":"cancelled","url":"https://example/run/88","jobs":[{"name":"build (aarch64-unknown-linux-musl)","status":"completed","conclusion":"cancelled"},{"name":"host","status":"completed","conclusion":"skipped"}]}"#.to_string()),
+            tagged_files: Vec::new(),
             calls: RefCell::new(Vec::new()),
         };
         let (clock, registry) = (ClockFake, RegistryFake);
@@ -467,6 +709,7 @@ mod tests {
         let runner = RunnerFake {
             run_list: r#"[{"databaseId":99,"status":"completed","conclusion":"success","headBranch":"v1.0.0","headSha":"abc123","url":"https://example/run/99"}]"#.to_string(),
             run_view: None,
+            tagged_files: Vec::new(),
             calls: RefCell::new(Vec::new()),
         };
         let (clock, registry) = (ClockFake, RegistryFake);
@@ -478,6 +721,150 @@ mod tests {
         .unwrap();
         assert_eq!(run.status, DelegatedRunStatus::Success);
         assert_eq!(run.run_id, Some(99));
+    }
+
+    const TAG_WORKFLOW_PREFIX: &str = r"
+on:
+  push:
+    tags: ['v*']
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: ";
+
+    fn workflow(run: &str) -> String {
+        format!("{TAG_WORKFLOW_PREFIX}{run}\n")
+    }
+
+    fn cargo_publish_runner(
+        files: Vec<(&'static str, &'static str)>,
+    ) -> (RunnerFake, ClockFake, RegistryFake) {
+        (
+            RunnerFake {
+                run_list: String::new(),
+                run_view: None,
+                tagged_files: files,
+                calls: RefCell::new(Vec::new()),
+            },
+            ClockFake,
+            RegistryFake,
+        )
+    }
+
+    #[test]
+    fn taskfleet_shaped_tracked_helper_resolves_the_unique_workflow() {
+        let workflow = Box::leak(
+            workflow("./scripts/publish-crates.sh publish taskfleet-core").into_boxed_str(),
+        );
+        let helper = r#"#!/usr/bin/env bash
+readonly cargo_bin="${CARGO_BIN:-cargo}"
+if CARGO_REGISTRY_TOKEN="$token" "$cargo_bin" publish --locked --no-verify --package "$package"; then
+  exit 0
+fi
+"#;
+        let (runner, clock, registry) = cargo_publish_runner(vec![
+            (".github/workflows/publish-crates.yml", workflow),
+            ("scripts/publish-crates.sh", helper),
+        ]);
+
+        assert_eq!(
+            cargo_publish_workflow(&ctx(&runner, &clock, &registry), "0.6.1").unwrap(),
+            ".github/workflows/publish-crates.yml"
+        );
+        let calls = runner.calls.borrow();
+        assert!(calls
+            .iter()
+            .any(|call| call == "git show v0.6.1:scripts/publish-crates.sh"));
+        assert!(!calls.iter().any(|call| call.contains("git grep")));
+    }
+
+    #[test]
+    fn direct_cargo_publish_still_resolves() {
+        let workflow = Box::leak(workflow("cargo publish --locked").into_boxed_str());
+        let (runner, clock, registry) =
+            cargo_publish_runner(vec![(".github/workflows/publish-crates.yml", workflow)]);
+        assert!(cargo_publish_workflow(&ctx(&runner, &clock, &registry), "1.0.0").is_ok());
+    }
+
+    #[test]
+    fn absent_or_untracked_helper_fails_closed_with_the_tagged_path() {
+        let workflow = Box::leak(workflow("./scripts/missing.sh publish crate-a").into_boxed_str());
+        let (runner, clock, registry) =
+            cargo_publish_runner(vec![(".github/workflows/publish-crates.yml", workflow)]);
+        let error = cargo_publish_workflow(&ctx(&runner, &clock, &registry), "1.0.0").unwrap_err();
+        assert!(error.contains("scripts/missing.sh"));
+        assert!(error.contains("v1.0.0"));
+    }
+
+    #[test]
+    fn escaping_absolute_and_dynamic_helper_paths_fail_closed() {
+        for run in [
+            "./../outside.sh publish crate-a",
+            "/tmp/publish.sh publish crate-a",
+            "${PUBLISH_HELPER} publish crate-a",
+        ] {
+            let workflow = Box::leak(workflow(run).into_boxed_str());
+            let (runner, clock, registry) =
+                cargo_publish_runner(vec![(".github/workflows/publish-crates.yml", workflow)]);
+            let error =
+                cargo_publish_workflow(&ctx(&runner, &clock, &registry), "1.0.0").unwrap_err();
+            assert!(
+                error.contains("dynamic") || error.contains("escapes"),
+                "unexpected error for {run}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn helper_that_only_mentions_cargo_publish_fails_closed() {
+        let workflow = Box::leak(workflow("./scripts/noop.sh publish crate-a").into_boxed_str());
+        let (runner, clock, registry) = cargo_publish_runner(vec![
+            (".github/workflows/publish-crates.yml", workflow),
+            ("scripts/noop.sh", "echo cargo publish --locked\n"),
+        ]);
+        let error = cargo_publish_workflow(&ctx(&runner, &clock, &registry), "1.0.0").unwrap_err();
+        assert!(error.contains("does not directly contain"));
+    }
+
+    #[test]
+    fn recursive_helper_indirection_fails_closed() {
+        let workflow = Box::leak(workflow("./scripts/outer.sh publish crate-a").into_boxed_str());
+        let (runner, clock, registry) = cargo_publish_runner(vec![
+            (".github/workflows/publish-crates.yml", workflow),
+            ("scripts/outer.sh", "./scripts/inner.sh publish \"$@\"\n"),
+            ("scripts/inner.sh", "cargo publish --locked\n"),
+        ]);
+        let error = cargo_publish_workflow(&ctx(&runner, &clock, &registry), "1.0.0").unwrap_err();
+        assert!(error.contains("recursive or multi-hop"));
+    }
+
+    #[test]
+    fn multiple_candidate_workflows_fail_closed() {
+        let first = Box::leak(workflow("cargo publish -p crate-a").into_boxed_str());
+        let second = Box::leak(workflow("cargo publish -p crate-b").into_boxed_str());
+        let (runner, clock, registry) = cargo_publish_runner(vec![
+            (".github/workflows/a.yml", first),
+            (".github/workflows/b.yml", second),
+        ]);
+        let error = cargo_publish_workflow(&ctx(&runner, &clock, &registry), "1.0.0").unwrap_err();
+        assert!(error.contains("more than one"));
+        assert!(error.contains("a.yml"));
+        assert!(error.contains("b.yml"));
+    }
+
+    #[test]
+    fn non_tag_triggered_workflow_is_not_an_owner() {
+        let workflow = r"on: workflow_dispatch
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo publish
+";
+        let (runner, clock, registry) =
+            cargo_publish_runner(vec![(".github/workflows/publish-crates.yml", workflow)]);
+        assert!(cargo_publish_workflow(&ctx(&runner, &clock, &registry), "1.0.0").is_err());
     }
 
     #[test]

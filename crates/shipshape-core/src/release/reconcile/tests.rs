@@ -30,8 +30,10 @@ impl CommandRunner for RecordingCmd {
             .push(format!("{program} {}", args.join(" ")));
         let stdout = if program == "git" && args.starts_with(&["rev-list"]) {
             "abc123\n".to_string()
-        } else if program == "git" && args.starts_with(&["grep"]) {
+        } else if program == "git" && args.starts_with(&["ls-tree"]) {
             ".github/workflows/publish-crates.yml\n".to_string()
+        } else if program == "git" && args.starts_with(&["show"]) {
+            "on:\n  push:\n    tags: ['v*']\njobs:\n  publish:\n    steps:\n      - run: cargo publish\n".to_string()
         } else if program == "gh" && args.starts_with(&["run", "list"]) {
             let branch = args
                 .iter()
