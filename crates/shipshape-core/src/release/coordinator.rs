@@ -644,20 +644,32 @@ fn advance_branch_phase(
 /// # Errors
 /// [`CutError::Plan`] when a target has no resolved package, two *identical*
 /// targets (same ecosystem, package, registry, and adapter) collide on one
-/// journal id, or a Homebrew target has no servable platform.
+/// journal id, or a Homebrew target has no unambiguous servable platform set.
 pub fn validate_plan(plan: &ReleasePlan) -> Result<(), CutError> {
     resolve_target_plans(plan)?;
     if plan
         .targets
         .iter()
-        .any(|target| matches!(target.adapter, Adapter::HomebrewTap | Adapter::HomebrewCore))
-        && !plan.homebrew_platforms.iter().any(|triple| {
-            crate::release::adapters::homebrew::homebrew_platform_condition(triple).is_some()
-        })
+        .any(|target| target.registry == Registry::Homebrew)
     {
-        return Err(CutError::Plan(
-            "Homebrew formula has no Homebrew-servable cargo-dist platforms; supported platforms are macOS and Linux musl; refusing to write a formula with no installable archive".into(),
-        ));
+        let conditions: Vec<_> = plan
+            .homebrew_platforms
+            .iter()
+            .filter_map(|triple| {
+                crate::release::adapters::homebrew::homebrew_platform_condition(triple)
+            })
+            .collect();
+        if conditions.is_empty() {
+            return Err(CutError::Plan(
+                "Homebrew formula has no Homebrew-servable cargo-dist platforms; supported platforms are macOS and Linux GNU or musl; refusing to write a formula with no installable archive".into(),
+            ));
+        }
+        let unique: std::collections::BTreeSet<_> = conditions.iter().copied().collect();
+        if unique.len() != conditions.len() {
+            return Err(CutError::Plan(
+                "Homebrew formula platform set is ambiguous: GNU and musl variants for the same OS/CPU map to one formula condition; declare exactly one archive per Homebrew OS/CPU condition".into(),
+            ));
+        }
     }
     Ok(())
 }

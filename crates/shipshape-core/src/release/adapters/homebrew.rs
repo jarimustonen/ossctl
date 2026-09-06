@@ -880,19 +880,27 @@ pub(crate) fn verify_tap_formula(
         if expected_conditions.is_empty() {
             return VerifyOutcome::Missing;
         }
+        // GNU and musl are different release assets but the same Homebrew
+        // OS/CPU selection. A plan naming both would make one formula condition
+        // ambiguous, so reject it rather than silently collapsing two archives.
+        let unique_conditions: std::collections::BTreeSet<_> =
+            expected_conditions.iter().copied().collect();
+        if unique_conditions.len() != expected_conditions.len() {
+            return VerifyOutcome::Conflicts;
+        }
         for condition in all_conditions {
-            let should_exist = expected_conditions.contains(&condition);
-            let does_exist = formula_has_platform_stanza(&formula, condition);
-            if should_exist && !does_exist {
+            let should_exist = unique_conditions.contains(condition);
+            let stanza_count = formula_platform_stanza_count(&formula, condition);
+            if should_exist && stanza_count == 0 {
                 return VerifyOutcome::Missing;
             }
-            if !should_exist && does_exist {
+            if (!should_exist && stanza_count > 0) || stanza_count > 1 {
                 return VerifyOutcome::Conflicts;
             }
         }
     } else if !all_conditions
         .iter()
-        .any(|condition| formula_has_platform_stanza(&formula, condition))
+        .any(|condition| formula_platform_stanza_count(&formula, condition) > 0)
     {
         return VerifyOutcome::Missing;
     }
@@ -904,14 +912,21 @@ pub(crate) fn verify_tap_formula(
 /// 0.28.x nests a CPU block inside an OS block and later repeats combined guards
 /// in `install` without download fields. Block-scoped matching prevents those
 /// later guards from shadowing a complete nested download stanza.
-fn formula_has_platform_stanza(formula: &str, condition: &str) -> bool {
-    fn block_for_condition<'a>(lines: &'a [&str], condition: &str) -> Option<&'a [&'a str]> {
-        let start = lines.iter().position(|line| line.trim() == condition)?;
-        let indent = lines[start].len() - lines[start].trim_start().len();
-        let end = lines[start + 1..].iter().position(|line| {
-            line.trim() == "end" && line.len() - line.trim_start().len() == indent
-        })?;
-        Some(&lines[start + 1..start + 1 + end])
+fn formula_platform_stanza_count(formula: &str, condition: &str) -> usize {
+    fn blocks_for_condition<'a>(lines: &'a [&str], condition: &str) -> Vec<&'a [&'a str]> {
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.trim() == condition)
+            .filter_map(|(start, line)| {
+                let indent = line.len() - line.trim_start().len();
+                let end = lines[start + 1..].iter().position(|candidate| {
+                    candidate.trim() == "end"
+                        && candidate.len() - candidate.trim_start().len() == indent
+                })?;
+                Some(&lines[start + 1..start + 1 + end])
+            })
+            .collect()
     }
 
     fn has_url_and_sha(lines: &[&str]) -> bool {
@@ -928,21 +943,23 @@ fn formula_has_platform_stanza(formula: &str, condition: &str) -> bool {
         "if OS.mac? && Hardware::CPU.intel?" => ("if OS.mac?", "if Hardware::CPU.intel?"),
         "if OS.linux? && Hardware::CPU.arm?" => ("if OS.linux?", "if Hardware::CPU.arm?"),
         "if OS.linux? && Hardware::CPU.intel?" => ("if OS.linux?", "if Hardware::CPU.intel?"),
-        _ => return false,
+        _ => return 0,
     };
     let lines: Vec<&str> = formula.lines().collect();
 
-    // Prefer cargo-dist's nested download shape. Its later install method uses
-    // combined guards with the same platform identity but deliberately has no URL.
-    if let Some(os_block) = block_for_condition(&lines, os) {
-        if let Some(cpu_block) = block_for_condition(os_block, cpu) {
-            if has_url_and_sha(cpu_block) {
-                return true;
-            }
-        }
-    }
-
-    block_for_condition(&lines, condition).is_some_and(has_url_and_sha)
+    // cargo-dist nests CPU downloads inside an OS block and later repeats the
+    // combined guard in `install` without download fields. Count only complete
+    // URL+SHA blocks, so the install guards neither shadow nor duplicate them.
+    let nested = blocks_for_condition(&lines, os)
+        .into_iter()
+        .flat_map(|os_block| blocks_for_condition(os_block, cpu))
+        .filter(|cpu_block| has_url_and_sha(cpu_block))
+        .count();
+    let combined = blocks_for_condition(&lines, condition)
+        .into_iter()
+        .filter(|block| has_url_and_sha(block))
+        .count();
+    nested + combined
 }
 
 /// Render a prebuilt-archive Homebrew formula. The archives are fetched and
@@ -989,8 +1006,12 @@ pub(crate) fn homebrew_platform_condition(triple: &str) -> Option<&'static str> 
     match triple {
         "aarch64-apple-darwin" => Some("if OS.mac? && Hardware::CPU.arm?"),
         "x86_64-apple-darwin" => Some("if OS.mac? && Hardware::CPU.intel?"),
-        "aarch64-unknown-linux-musl" => Some("if OS.linux? && Hardware::CPU.arm?"),
-        "x86_64-unknown-linux-musl" => Some("if OS.linux? && Hardware::CPU.intel?"),
+        "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl" => {
+            Some("if OS.linux? && Hardware::CPU.arm?")
+        }
+        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => {
+            Some("if OS.linux? && Hardware::CPU.intel?")
+        }
         _ => None,
     }
 }
@@ -1013,7 +1034,12 @@ fn verified_assets<'a>(ctx: &'a EffectCtx<'a>) -> Result<&'a [HomebrewAsset], Ad
                 .collect()
         })
         .unwrap_or_default();
+    let unique_conditions: std::collections::BTreeSet<_> = expected
+        .iter()
+        .filter_map(|triple| homebrew_platform_condition(triple))
+        .collect();
     if expected.is_empty()
+        || unique_conditions.len() != expected.len()
         || assets.len() != expected.len()
         || expected
             .iter()
@@ -1217,7 +1243,7 @@ fn formula_class(name: &str) -> String {
 
 #[cfg(test)]
 mod platform_stanza_tests {
-    use super::{formula_carries_marker, formula_has_platform_stanza};
+    use super::{formula_carries_marker, formula_platform_stanza_count};
 
     #[test]
     fn current_and_legacy_ownership_markers_are_both_trusted() {
@@ -1243,7 +1269,7 @@ mod platform_stanza_tests {
             "if OS.linux? && Hardware::CPU.intel?",
         ] {
             assert!(
-                formula_has_platform_stanza(CARGO_DIST_0_28_2_FORMULA, condition),
+                formula_platform_stanza_count(CARGO_DIST_0_28_2_FORMULA, condition) == 1,
                 "cargo-dist 0.28.2 formula should contain {condition}"
             );
         }
@@ -1260,9 +1286,28 @@ mod platform_stanza_tests {
   end
 end
 "#;
-        assert!(!formula_has_platform_stanza(
-            formula,
-            "if OS.linux? && Hardware::CPU.arm?"
-        ));
+        assert_eq!(
+            formula_platform_stanza_count(formula, "if OS.linux? && Hardware::CPU.arm?"),
+            0
+        );
+    }
+
+    #[test]
+    fn duplicate_complete_download_conditions_are_counted_as_ambiguous() {
+        let formula = r#"class Tool < Formula
+  if OS.linux? && Hardware::CPU.arm?
+    url "https://example/gnu.tar.xz"
+    sha256 "aaa"
+  end
+  if OS.linux? && Hardware::CPU.arm?
+    url "https://example/musl.tar.xz"
+    sha256 "bbb"
+  end
+end
+"#;
+        assert_eq!(
+            formula_platform_stanza_count(formula, "if OS.linux? && Hardware::CPU.arm?"),
+            2
+        );
     }
 }

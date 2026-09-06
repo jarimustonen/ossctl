@@ -14,7 +14,7 @@ use crate::ports::{Clock, CommandOutput, CommandRunner, RegistryQuery};
 use crate::protocol::journal::{PublishReceipt, RunState, RunStatus};
 use crate::protocol::plan::{PlanTarget, ReleasePlan};
 use crate::protocol::release::VerifyOutcome;
-use crate::release::adapters::EffectCtx;
+use crate::release::adapters::{homebrew::verify_tap_formula, EffectCtx};
 
 // ── Fakes ────────────────────────────────────────────────────────────────────
 
@@ -97,9 +97,19 @@ struct FormulaRegistry {
 }
 impl FormulaRegistry {
     fn cargo_dist_fixture() -> Self {
+        Self::with_body(include_bytes!(
+            "../fixtures/project-canon-cargo-dist-0.28.2.rb"
+        ))
+    }
+
+    fn taskfleet_fixture() -> Self {
+        Self::with_body(include_bytes!("../fixtures/taskfleet-cargo-dist-0.28.rb"))
+    }
+
+    fn with_body(body: &[u8]) -> Self {
         Self {
             status: Some(200),
-            body: include_bytes!("../fixtures/project-canon-cargo-dist-0.28.2.rb").to_vec(),
+            body: body.to_vec(),
             urls: RefCell::new(Vec::new()),
         }
     }
@@ -484,6 +494,194 @@ fn delegated_cargo_dist_reconciles_github_and_homebrew_at_their_own_destinations
     assert_eq!(reg.urls.borrow().len(), 1, "Homebrew must be observed once");
     assert!(reg.urls.borrow()[0]
         .contains("jarimustonen/homebrew-project-canon/HEAD/Formula/project-canon.rb"));
+}
+
+#[test]
+fn taskfleet_gnu_cargo_dist_formula_matches_the_sealed_platform_set() {
+    let target = PlanTarget {
+        ecosystem: Ecosystem::Binary,
+        package: Some("taskfleet".to_string()),
+        registry: Registry::Homebrew,
+        adapter: Adapter::CargoDist,
+    };
+    let plan = ReleasePlan {
+        plan_id: "plan-taskfleet".to_string(),
+        contract_schema_version: 2,
+        head_sha: "abc123".to_string(),
+        version: "0.6.1".to_string(),
+        targets: vec![target],
+        phases: Vec::new(),
+        bump: None,
+        homebrew_tap: Some("jarimustonen/homebrew-taskfleet".to_string()),
+        license: Some("MIT".to_string()),
+        description: None,
+        homebrew_platforms: vec![
+            "aarch64-apple-darwin".to_string(),
+            "aarch64-unknown-linux-gnu".to_string(),
+            "x86_64-unknown-linux-gnu".to_string(),
+        ],
+    };
+    let mut state = state_with(&[]);
+    state.targets = vec!["binary".to_string()];
+    state.delegated.insert("binary".to_string());
+    state
+        .delegated_adapters
+        .insert("binary".to_string(), "cargo-dist".to_string());
+    let (cmd, clock, reg) = (
+        RecordingCmd::default(),
+        FixedClock,
+        FormulaRegistry::taskfleet_fixture(),
+    );
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: Path::new("/repo"),
+        artifacts: &crate::release::adapters::EMPTY_ARTIFACTS,
+    };
+
+    let report = reconcile_with_plan(&state, Some(&plan), &ctx);
+
+    assert_eq!(only(&report).outcome, VerifyOutcome::Matches, "{report:?}");
+    assert_eq!(only(&report).detail, None);
+}
+
+#[test]
+fn homebrew_platform_sets_remain_exact_complete_and_unambiguous() {
+    let cmd = RecordingCmd::default();
+    let clock = FixedClock;
+    let taskfleet = include_str!("../fixtures/taskfleet-cargo-dist-0.28.rb");
+    let gnu = [
+        "aarch64-apple-darwin".to_string(),
+        "aarch64-unknown-linux-gnu".to_string(),
+        "x86_64-unknown-linux-gnu".to_string(),
+    ];
+    let check = |body: &str, platforms: &[String]| {
+        let reg = FormulaRegistry::with_body(body.as_bytes());
+        let ctx = EffectCtx {
+            runner: &cmd,
+            clock: &clock,
+            registry: &reg,
+            repo_root: Path::new("/repo"),
+            artifacts: &crate::release::adapters::EMPTY_ARTIFACTS,
+        };
+        verify_tap_formula(
+            &ctx,
+            "jarimustonen/homebrew-taskfleet",
+            "taskfleet",
+            "0.6.1",
+            false,
+            Some(platforms),
+        )
+    };
+
+    assert_eq!(check(taskfleet, &gnu), VerifyOutcome::Matches);
+    assert_eq!(
+        check(
+            include_str!("../fixtures/project-canon-cargo-dist-0.28.2.rb"),
+            &[
+                "aarch64-apple-darwin".to_string(),
+                "aarch64-unknown-linux-musl".to_string(),
+                "x86_64-unknown-linux-musl".to_string(),
+            ],
+        ),
+        VerifyOutcome::Matches,
+        "Linux musl remains Homebrew-servable"
+    );
+
+    let incomplete = taskfleet.replacen(
+        "      sha256 \"3aedcaec35b2ddc789bcee8d1f934e0641dba508edb6e08e09e8d7e63b5359a3\"\n",
+        "",
+        1,
+    );
+    assert_eq!(check(&incomplete, &gnu), VerifyOutcome::Missing);
+    assert_eq!(
+        check(taskfleet, &["aarch64-apple-darwin".to_string()]),
+        VerifyOutcome::Conflicts,
+        "truly extra Linux stanzas stay red"
+    );
+    assert_eq!(
+        check(
+            taskfleet,
+            &[
+                "aarch64-apple-darwin".to_string(),
+                "x86_64-apple-darwin".to_string(),
+                "aarch64-unknown-linux-gnu".to_string(),
+                "x86_64-unknown-linux-gnu".to_string(),
+            ],
+        ),
+        VerifyOutcome::Missing,
+        "missing expected stanzas stay red"
+    );
+    assert_eq!(
+        check(
+            taskfleet,
+            &[
+                "aarch64-apple-darwin".to_string(),
+                "aarch64-unknown-linux-gnu".to_string(),
+                "aarch64-unknown-linux-musl".to_string(),
+                "x86_64-unknown-linux-gnu".to_string(),
+            ],
+        ),
+        VerifyOutcome::Conflicts,
+        "GNU plus musl for one condition is ambiguous"
+    );
+    assert_eq!(
+        check(taskfleet, &["x86_64-pc-windows-msvc".to_string()]),
+        VerifyOutcome::Missing,
+        "an unsupported-only set is refused"
+    );
+}
+
+#[test]
+fn delegated_homebrew_conflict_detail_names_the_formula_not_release_manifest() {
+    let target = PlanTarget {
+        ecosystem: Ecosystem::Binary,
+        package: Some("taskfleet".to_string()),
+        registry: Registry::Homebrew,
+        adapter: Adapter::CargoDist,
+    };
+    let plan = ReleasePlan {
+        plan_id: "plan-taskfleet".to_string(),
+        contract_schema_version: 2,
+        head_sha: "abc123".to_string(),
+        version: "0.6.1".to_string(),
+        targets: vec![target],
+        phases: Vec::new(),
+        bump: None,
+        homebrew_tap: Some("jarimustonen/homebrew-taskfleet".to_string()),
+        license: None,
+        description: None,
+        homebrew_platforms: vec!["aarch64-apple-darwin".to_string()],
+    };
+    let mut state = state_with(&[]);
+    state.targets = vec!["binary".to_string()];
+    state.delegated.insert("binary".to_string());
+    state
+        .delegated_adapters
+        .insert("binary".to_string(), "cargo-dist".to_string());
+    let (cmd, clock, reg) = (
+        RecordingCmd::default(),
+        FixedClock,
+        FormulaRegistry::taskfleet_fixture(),
+    );
+    let ctx = EffectCtx {
+        runner: &cmd,
+        clock: &clock,
+        registry: &reg,
+        repo_root: Path::new("/repo"),
+        artifacts: &crate::release::adapters::EMPTY_ARTIFACTS,
+    };
+
+    let report = reconcile_with_plan(&state, Some(&plan), &ctx);
+
+    assert_eq!(only(&report).outcome, VerifyOutcome::Conflicts);
+    let detail = only(&report).detail.as_deref().unwrap();
+    assert!(
+        detail.contains("Homebrew formula platform stanzas"),
+        "{detail}"
+    );
+    assert!(!detail.contains("Release manifest"), "{detail}");
 }
 
 #[test]

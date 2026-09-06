@@ -794,7 +794,7 @@ fn homebrew_rejects_a_distribution_with_no_servable_platforms() {
     plan.targets.push(plan_target(
         Ecosystem::Rust,
         Registry::Homebrew,
-        Adapter::HomebrewTap,
+        Adapter::CargoDist,
     ));
     plan.homebrew_platforms = vec!["x86_64-pc-windows-msvc".into()];
 
@@ -802,6 +802,28 @@ fn homebrew_rejects_a_distribution_with_no_servable_platforms() {
 
     assert!(
         matches!(err, CutError::Plan(ref message) if message.contains("no Homebrew-servable cargo-dist platforms")),
+        "{err}"
+    );
+}
+
+#[test]
+fn homebrew_rejects_gnu_and_musl_assets_for_the_same_condition() {
+    let mut plan = two_target_plan();
+    plan.targets.push(plan_target(
+        Ecosystem::Rust,
+        Registry::Homebrew,
+        Adapter::CargoDist,
+    ));
+    plan.homebrew_platforms = vec![
+        "aarch64-apple-darwin".into(),
+        "aarch64-unknown-linux-gnu".into(),
+        "aarch64-unknown-linux-musl".into(),
+    ];
+
+    let err = validate_plan(&plan).unwrap_err();
+
+    assert!(
+        matches!(err, CutError::Plan(ref message) if message.contains("GNU and musl variants")),
         "{err}"
     );
 }

@@ -290,7 +290,15 @@ fn classify_delegated(
         .as_ref()
         .filter(|run| run.status != DelegatedRunStatus::Success)
         .and_then(|run| run.detail.clone())
-        .or_else(|| detail_for(outcome, ecosystem, adapter));
+        .or_else(|| {
+            if adapter == Some(Adapter::CargoDist)
+                && planned.is_some_and(|target| target.registry == Registry::Homebrew)
+            {
+                delegated_homebrew_detail(outcome)
+            } else {
+                detail_for(outcome, ecosystem, adapter)
+            }
+        });
     (
         ecosystem.as_str().to_string(),
         package,
@@ -299,6 +307,25 @@ fn classify_delegated(
         detail,
         delegated_run,
     )
+}
+
+/// The operator-facing reason for a delegated Homebrew observation. Keep formula
+/// mismatches distinct from cargo-dist's GitHub Release manifest conflicts.
+fn delegated_homebrew_detail(outcome: VerifyOutcome) -> Option<String> {
+    match outcome {
+        VerifyOutcome::Matches => None,
+        VerifyOutcome::Missing => Some(
+            "the Homebrew formula is absent or lacks the expected version or a complete platform URL/SHA stanza"
+                .to_string(),
+        ),
+        VerifyOutcome::Conflicts => Some(
+            "the Homebrew formula platform stanzas conflict with the sealed exact platform set"
+                .to_string(),
+        ),
+        VerifyOutcome::Unknown => Some(
+            "the Homebrew formula could not be observed (network or response failure)".to_string(),
+        ),
+    }
 }
 
 /// The operator-facing reason for a non-`matches` outcome (`None` for `matches`).
