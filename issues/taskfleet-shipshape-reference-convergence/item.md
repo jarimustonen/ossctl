@@ -2,8 +2,12 @@
 created: 2026-09-06
 updated: 2026-09-06
 type: task
-status: open
+status: done
 priority: normal
+closed: 2026-09-06
+commits:
+- hash: 2d149066cd84290c7a96e9b9212e637a82af9ec1
+  summary: name Taskfleet in fleet release policy
 ---
 
 # Converge Shipshape Taskfleet reference
@@ -25,6 +29,12 @@ Taskfleet ADR 0002 E1 owner map: https://github.com/jarimustonen/taskfleet/blob/
 
 ## Acceptance Criteria
 
-- [ ] Current fleet policy names canonical Taskfleet.
-- [ ] No fixture/history/protocol identity is accidentally renamed.
-- [ ] Required repository checks pass and the issue records the exact commit.
+- [x] Current fleet policy names canonical Taskfleet.
+- [x] No fixture/history/protocol identity is accidentally renamed.
+- [x] Required repository checks pass and the issue records the exact commit.
+
+## Resolution
+
+### 2026-09-06T10:58:21Z · @issuectl
+
+Updated the sole current fleet-policy identity to Taskfleet. Classified every residual tracked orchestratectl/octl-core file as an intentional historical package-graph fixture, architecture analogy, stable protocol example, or issue/evidence record; canonical Taskfleet reconciliation fixtures remained unchanged. Markdown format and relative/external link checks passed, as did cargo fmt, Clippy, workspace tests, workspace build, and rustdoc with warnings denied.
