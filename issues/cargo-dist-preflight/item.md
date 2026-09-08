@@ -3,7 +3,7 @@ created: 2026-09-03
 updated: 2026-09-08
 type: bug
 reporter: jari
-status: in-progress
+status: fixed
 priority: normal
 provenance: agent:issuectl-wrapup
 source_ref: agent:issuectl-wrapup/reporter:jari/id:issuectl-wrapup-2026-09-03-dist-preflight
@@ -12,6 +12,9 @@ collision: [crates/shipshape-core/src/release/coordinator.rs]
 commits:
 - hash: 43f11289cc6957c424f3419f966b5d2ddd4b5eb3
   summary: preflight release executables before mutation
+- hash: faf8e74
+  summary: harden release dependency preflight
+closed: 2026-09-08
 ---
 
 # Preflight pinned cargo-dist before release mutation
@@ -50,3 +53,9 @@ Before creating the release run or applying its bump phase, Shipshape should val
 2. provision and verify the pinned cargo-dist release in a disposable run-local location.
 
 The preflight should prevent a known missing local build dependency from being discovered only after release mutation has begun. Resume semantics must remain available for genuinely transient failures after a run starts.
+
+## Resolution
+
+### 2026-09-08T11:00:22Z · @issuectl
+
+Implemented sealed-plan executable preflight before journal creation and bump mutation, exact cargo-dist pin/version validation, phase-aware resume revalidation after remote reconciliation, structured dependency diagnostics, and controlled regression coverage. Full Rust gate and multi-model review passed.
