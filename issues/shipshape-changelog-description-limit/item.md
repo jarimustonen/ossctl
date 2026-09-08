@@ -3,11 +3,14 @@ created: 2026-09-08
 updated: 2026-09-08
 type: bug
 reporter: jari
-status: open
+status: in-progress
 priority: normal
 provenance: chat
 source_ref: chat:2026-09-08/cleanshot-media_FMVjctLtFI
 lane: unlaned
+commits:
+- hash: 23a91be
+  summary: enforce bundled skill description limit
 ---
 
 # Bundled shipshape-changelog description exceeds Pi limit
