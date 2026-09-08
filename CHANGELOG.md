@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 ### Fixed
+
+- Release cuts now validate required external executables and the exact cargo-dist version
+  pinned by `dist-workspace.toml` before creating a release journal or applying the version
+  bump. Resume re-checks only dependencies needed by the remaining phases, so missing or
+  mismatched tooling fails early without mutation (`cargo-dist-preflight`).
+- Bundled Agent Skills now stay within Pi's 1024 UTF-16-code-unit description limit, with
+  a catalog-wide regression check preventing future installation conflicts
+  (`shipshape-changelog-description-limit`).
 <!-- oss-changelog:unreleased-end -->
 
 ## [0.12.1] - 2026-09-06
