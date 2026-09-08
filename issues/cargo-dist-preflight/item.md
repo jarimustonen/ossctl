@@ -9,6 +9,9 @@ provenance: agent:issuectl-wrapup
 source_ref: agent:issuectl-wrapup/reporter:jari/id:issuectl-wrapup-2026-09-03-dist-preflight
 lane: release-preflight
 collision: [crates/shipshape-core/src/release/coordinator.rs]
+commits:
+- hash: 43f11289cc6957c424f3419f966b5d2ddd4b5eb3
+  summary: preflight release executables before mutation
 ---
 
 # Preflight pinned cargo-dist before release mutation
