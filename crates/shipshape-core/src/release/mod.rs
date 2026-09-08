@@ -18,6 +18,7 @@ pub mod distribution;
 pub mod journal;
 pub mod plan;
 pub mod plan_store;
+pub mod preflight;
 pub mod reconcile;
 pub mod resume;
 pub mod target_id;

@@ -79,7 +79,12 @@ impl TempRepo {
             "---\nschema_version: 1\nstatus: approved\nmaturity: mvp\necosystems: [rust]\ntargets:\n  - {ecosystem: rust, package: e2e-fixture, registry: gh-releases, adapter: cargo-dist}\ndistribution:\n  adapter: cargo-dist\n  gh_releases: true\n  platforms: [aarch64-apple-darwin]\nversioning: semver\nchangelog:\n  mode: curated\nrelease:\n  model: gated\nlicense: MIT\n---\n# e2e-fixture\n",
         )
         .expect("write cargo-dist contract");
-        self.git(&["add", "OSS-RELEASE.md"]);
+        fs::write(
+            self.path().join("dist-workspace.toml"),
+            "[workspace]\nmembers = [\"cargo:.\"]\n\n[dist]\ncargo-dist-version = \"0.32.0\"\n",
+        )
+        .expect("write cargo-dist configuration");
+        self.git(&["add", "OSS-RELEASE.md", "dist-workspace.toml"]);
         self.git(&["commit", "-m", "configure cargo-dist fixture"]);
     }
 
@@ -160,6 +165,7 @@ impl Shims {
             shims.write_script(command);
             shims.set(command, 0, "");
         }
+        shims.set("dist", 0, "cargo-dist 0.32.0\n");
         shims
     }
 
@@ -177,6 +183,23 @@ impl Shims {
             stdout,
         )
         .expect("write shim stdout");
+    }
+
+    pub fn fail_after_version_probe(&self, command: &str, message: &str) {
+        let script = format!(
+            r#"#!/bin/sh
+printf '%s' '{command}' >> "$SHIM_DIR/log"
+for arg in "$@"; do printf ' <%s>' "$arg" >> "$SHIM_DIR/log"; done
+printf '\n' >> "$SHIM_DIR/log"
+if [ "$1" = "--version" ]; then
+  printf '%s 1.0.0\n' '{command}'
+  exit 0
+fi
+printf '%s\n' '{message}' >&2
+exit 1
+"#
+        );
+        self.set_script(command, &script);
     }
 
     pub fn set_script(&self, command: &str, script: &str) {

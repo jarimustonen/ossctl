@@ -77,7 +77,7 @@ fn dry_run_failure_is_journaled_and_never_tags() {
     let repo = TempRepo::new("approved");
     let shims = Shims::new();
     let plan = plan_id(&repo, &shims);
-    shims.set("cargo", 1, "simulated cargo failure\n");
+    shims.fail_after_version_probe("cargo", "simulated cargo failure");
 
     let cut = repo.run(&shims, &["--json", "release", "cut", "--plan", &plan]);
 
@@ -178,6 +178,101 @@ fn a_publish_none_repo_plans_and_cuts_a_tag_only_release() {
 }
 
 #[test]
+fn cargo_dist_version_mismatch_refuses_before_journal_or_repository_mutation() {
+    let repo = TempRepo::new("approved");
+    repo.use_cargo_dist_target();
+    let shims = Shims::new();
+    let plan = plan_id(&repo, &shims);
+    let manifest_before = fs::read_to_string(repo.path().join("Cargo.toml")).unwrap();
+    let contract_before = fs::read_to_string(repo.path().join("OSS-RELEASE.md")).unwrap();
+    shims.set("dist", 0, "cargo-dist 0.31.0\n");
+
+    let cut = repo.run(&shims, &["--json", "release", "cut", "--plan", &plan]);
+
+    assert_eq!(cut.status.code(), Some(2));
+    assert_eq!(error_code(&cut), "release_dependency_missing");
+    let stderr = String::from_utf8_lossy(&cut.stderr);
+    assert!(stderr.contains("cargo-dist 0.32.0"), "{stderr}");
+    assert!(
+        stderr.contains("cargo install cargo-dist --version 0.32.0 --locked"),
+        "{stderr}"
+    );
+    let release_run_count = fs::read_dir(repo.journal_dir())
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .count();
+    assert_eq!(
+        release_run_count, 0,
+        "dependency refusal created a release journal"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("Cargo.toml")).unwrap(),
+        manifest_before
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("OSS-RELEASE.md")).unwrap(),
+        contract_before
+    );
+    assert!(!Command::new("git")
+        .args(["rev-parse", "--verify", "refs/tags/v0.1.0"])
+        .current_dir(repo.path())
+        .output()
+        .expect("query git tag")
+        .status
+        .success());
+    assert!(
+        shims
+            .log()
+            .lines()
+            .all(|line| line.contains(" <--version>")),
+        "preflight ran a mutating tool command: {}",
+        shims.log()
+    );
+}
+
+#[test]
+fn resume_rechecks_cargo_dist_before_retrying_an_incomplete_build() {
+    let repo = TempRepo::new("approved");
+    repo.use_cargo_dist_target();
+    let shims = Shims::new();
+    let plan = plan_id(&repo, &shims);
+    shims.set_script(
+        "dist",
+        r#"#!/bin/sh
+printf 'dist' >> "$SHIM_DIR/log"
+for arg in "$@"; do printf ' <%s>' "$arg" >> "$SHIM_DIR/log"; done
+printf '\n' >> "$SHIM_DIR/log"
+if [ "$1" = "--version" ]; then
+  printf 'cargo-dist 0.32.0\n'
+  exit 0
+fi
+printf 'simulated dist build failure\n' >&2
+exit 1
+"#,
+    );
+    let cut = repo.run(&shims, &["--json", "release", "cut", "--plan", &plan]);
+    assert_eq!(error_code(&cut), "release_failed");
+    let run_id = only_run_id(&repo);
+    let journal_path = repo.journal_dir().join(&run_id).join("journal.jsonl");
+    let journal_before = fs::read_to_string(&journal_path).unwrap();
+    assert!(journal_before.contains("\"phase\":\"build\""));
+    shims.set_script("dist", "#!/bin/sh\nprintf 'cargo-dist 0.31.0\\n'\nexit 0\n");
+
+    let resume = repo.run(&shims, &["--json", "release", "resume", &run_id]);
+
+    assert_eq!(resume.status.code(), Some(2));
+    assert_eq!(error_code(&resume), "release_dependency_missing");
+    assert!(String::from_utf8_lossy(&resume.stderr).contains("cargo-dist 0.32.0"));
+    assert_eq!(
+        fs::read_to_string(journal_path).unwrap(),
+        journal_before,
+        "dependency refusal appended release events before the build retry"
+    );
+}
+
+#[test]
 fn delegated_release_with_zero_assets_fails_verify_and_is_posthoc_observable() {
     let repo = TempRepo::new("approved");
     repo.use_cargo_dist_target();
@@ -235,7 +330,7 @@ fn abandon_marks_a_failed_run_terminally() {
     let repo = TempRepo::new("approved");
     let shims = Shims::new();
     let plan = plan_id(&repo, &shims);
-    shims.set("cargo", 1, "simulated cargo failure\n");
+    shims.fail_after_version_probe("cargo", "simulated cargo failure");
     let cut = repo.run(&shims, &["--json", "release", "cut", "--plan", &plan]);
     assert!(!cut.status.success());
     shims.assert_called("cargo");

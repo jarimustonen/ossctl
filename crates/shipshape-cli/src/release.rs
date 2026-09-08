@@ -13,7 +13,7 @@ use clap::Args;
 
 use shipshape_core::contract::schema::{Contract, Status};
 use shipshape_core::contract::{self, LoadError, Normalized};
-use shipshape_core::ports::{GitRepo, JournalStore};
+use shipshape_core::ports::{CommandRunner, GitRepo, JournalStore};
 use shipshape_core::protocol::journal::{
     EventKind, JournalEvent, RunState, RunStatus, JOURNAL_SCHEMA_VERSION,
 };
@@ -25,6 +25,7 @@ use shipshape_core::release::distribution::{
     delegated_publish_workflow_warnings, find_undeclared_distribution, UndeclaredDistribution,
 };
 use shipshape_core::release::journal::{self, Journal, JournalPaths};
+use shipshape_core::release::preflight;
 
 use crate::cli::ReleaseAction;
 use crate::error::CliError;
@@ -1587,6 +1588,12 @@ pub fn resume(args: &ResumeArgs, format: OutputFormat) -> Result<(), CliError> {
         None => derive_resume_plan(&root, &git, journal.state(), &args.run_id)?,
     };
 
+    // Re-check host dependencies against the sealed plan before reconciliation can
+    // append an adoption or the coordinator can enter a phase. Completed barriers do
+    // not retain dependencies they no longer need (notably, a run past build does not
+    // require cargo-dist merely to verify CI output).
+    preflight_resume_dependencies(&plan, journal.state(), &runner, &root)?;
+
     let verification_artifacts = verification_artifacts(&plan);
     let ctx = EffectCtx {
         runner: &runner,
@@ -1984,13 +1991,21 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
         .with_invalid_value(args.plan.clone()));
     }
 
+    // Validate the complete host toolchain while the cut is still mutation-free:
+    // the lock is held, but no journal exists and an engine-owned bump has not
+    // touched its clean checkout. The plan is authenticated and cannot be discarded
+    // between this observer pass and RunCreated.
+    let runner = RealCommandRunner;
+    let dist_workspace = sealed_dist_workspace(&current, None, &runner, &root)?;
+    preflight::check(&current, None, &runner, &root, dist_workspace.as_deref())
+        .map_err(release_dependency_error)?;
+
     for warning in provenance_warnings {
         eprintln!("warning: {warning}");
     }
 
     let clock = RealClock;
     let idgen = RealIdGen;
-    let runner = RealCommandRunner;
     let registry = RealRegistryQuery;
     let tagger = RealTagger::new(&root);
 
@@ -2027,6 +2042,66 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
         }
         Err(e) => Err(cut_error_to_cli(&run_id, e)),
     }
+}
+
+fn preflight_resume_dependencies(
+    plan: &ReleasePlan,
+    state: &RunState,
+    runner: &dyn CommandRunner,
+    root: &Path,
+) -> Result<(), CliError> {
+    let dist_workspace = sealed_dist_workspace(plan, Some(state), runner, root)?;
+    preflight::check(plan, Some(state), runner, root, dist_workspace.as_deref())
+        .map_err(release_dependency_error)
+}
+
+/// Read cargo-dist's version pin from the authenticated commit when an incomplete
+/// build phase needs `dist`. A fresh cut's `HEAD` already equals the sealed commit,
+/// but using `git show` for both cut and resume also prevents a moved live worktree
+/// from changing the dependency contract of a durable stored plan.
+fn sealed_dist_workspace(
+    plan: &ReleasePlan,
+    state: Option<&RunState>,
+    runner: &dyn CommandRunner,
+    root: &Path,
+) -> Result<Option<String>, CliError> {
+    if !preflight::cargo_dist_required(plan, state) {
+        return Ok(None);
+    }
+    let commit = state
+        .and_then(|state| state.bump.as_ref().map(|bump| bump.commit.as_str()))
+        .unwrap_or(&plan.head_sha);
+    let object = format!("{commit}:{}", preflight::DIST_WORKSPACE_FILENAME);
+    let output = runner.run("git", &["show", &object], root).map_err(|error| {
+        CliError::system(
+            "release_dependency_missing",
+            format!(
+                "cannot read `{}` from sealed commit {commit} while validating cargo-dist: {error}. Restore/fetch the sealed commit, then retry; shipshape does not install cargo-dist automatically",
+                preflight::DIST_WORKSPACE_FILENAME
+            ),
+        )
+    })?;
+    if output.status != Some(0) {
+        let detail = if output.stderr.trim().is_empty() {
+            output.stdout.trim()
+        } else {
+            output.stderr.trim()
+        };
+        return Err(CliError::system(
+            "release_dependency_missing",
+            format!(
+                "the sealed commit {commit} does not provide a readable `{}` with an exact cargo-dist pin ({detail}). Fix the configuration, re-plan, and retry; shipshape does not install cargo-dist automatically",
+                preflight::DIST_WORKSPACE_FILENAME
+            ),
+        ));
+    }
+    Ok(Some(output.stdout))
+}
+
+/// Map the dependency preflight to a stable system-error envelope. A missing host
+/// executable is not fixed by changing the release argv (AI-first CLI canon §2).
+fn release_dependency_error(error: preflight::DependencyError) -> CliError {
+    CliError::system("release_dependency_missing", error.to_string())
 }
 
 /// Create the run journal for a cut: a `--bump` run persists the sealed `head_sha` + bump
