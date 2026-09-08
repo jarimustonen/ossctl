@@ -6,38 +6,36 @@ Pointers to open issues. Descriptions and plans live in the linked
 ## 🔄 Continue here (handoff)
 
 
-_**Handoff updated 2026-09-06 after the publicize and release-preflight stint.** Main is
-clean and pushed; current main CI `34047534365` is green. The supported command remains
-`shipshape`, the published crates are `shipshape-core` and `shipshape-cli`, and durable
-`ossctl` compatibility identifiers remain intentionally unchanged._
+_**Handoff updated 2026-09-08 after the release-dependency preflight stint.** Main is
+clean and pushed at the v0.12.2 bump commit `d1d48d6`; main CI `34219932215` is green.
+The supported command remains `shipshape`, the published crates are `shipshape-core` and
+`shipshape-cli`, and durable `ossctl` compatibility identifiers remain intentionally
+unchanged._
 
-_**Live release:** Shipshape v0.12.1 is installed locally at commit `510276c`; `shipshape
-doctor --json` is green. GitHub Release `v0.12.1` is published with exactly 11 assets and
-main CI for its release commit is green. The maintained prebuilt set remains macOS arm64
-and Linux musl arm64/x86_64; Intel macOS and Windows remain unsupported._
+_**Live release:** Shipshape v0.12.2 is installed locally at commit `d1d48d6`;
+`shipshape doctor --json` is green. GitHub Release `v0.12.2` is published with exactly 11
+assets. The engine observed both crates.io packages, the Release assets and Homebrew at
+their destinations before advancing remote main. The maintained prebuilt set remains
+macOS arm64 and Linux musl arm64/x86_64; Intel macOS and Windows remain unsupported._
 
-_**What landed:** the family now includes the thin `/shipshape-publicize` workflow and
-binary-backed checks derived from the project-canon and Glasspad publicize passes. The
-bundled installer supports Claude, pi and Codex as first-class targets under the current
-canon contract. Release preflight recognizes observed inline GitHub Actions `push.tags`
-sequences with direct Cargo publishes while preserving warnings for absent, malformed,
-branch-only and non-inspectable publish paths. The completed issues are closed._
+_**What landed:** fresh release cuts now validate every executable required by the sealed
+plan and require the exact cargo-dist version pinned by `dist-workspace.toml` before any
+journal or bump mutation. Resume reconciles remote state first and re-checks only tools
+needed by effective remaining work. Missing or mismatched cargo-dist produces an
+actionable required-version diagnostic and is never auto-installed
+(`cargo-dist-preflight`). The bundled skill catalog now enforces Pi's 1024 UTF-16-unit
+description limit; `shipshape-changelog` renders at 853 units
+(`shipshape-changelog-description-limit`). Both issues are fixed._
 
-_**Release evidence and recovery:** the v0.12.0 engine run
-`01M1KPK88J1S7WW65MABF7EW5H` first stopped safely in build because the pinned cargo-dist
-executable was absent, before any publish or tag. It resumed with a verified disposable
-cargo-dist 0.32.0, then observed both crates, the 11-asset Release, Homebrew, and remote-main
-advancement. The disposable install and its temporary profile hook were removed. A
-version-coupled post-bump test was repaired and CI returned green. The run is completed,
-not a recovery candidate. Shipshape v0.12.1 was subsequently released and converged._
+_**Release and convergence evidence:** engine run `01M20BC2AS09TY82KF8Y7755JB` completed
+bump, dry-run-all, build-all, publish-all, tag, dist, verify and advance-branch for v0.12.2.
+The cut used a checksum-verified disposable cargo-dist 0.32.0, which was removed afterward.
+The fleet updater applied on Haapa; Shipshape v0.12.2 and the 853-unit installed skill were
+also verified directly on Gertrud and Hauis. Brunhild was unreachable and remains
+unverified until a later automatic fleet cycle._
 
-_**Prepared next stint:** implement `cargo-dist-preflight`. The product decision is to
-validate every required executable and the `dist-workspace.toml`-pinned cargo-dist version
-at `release cut` startup, after loading and validating the sealed plan but before creating
-the release journal or applying the bump. Fail without mutation and provide an actionable
-required-version diagnostic; do not auto-install cargo-dist. Re-check the dependency on
-resume before entering a phase that needs it. `cargo-dist-dry-run-gap` is closed as the
-directed duplicate. Use the live issuectl DAG for all execution mechanics._
+_**Prepared next stint:** no accepted work is scheduled and no worker owns resumable work.
+Start from the live issuectl DAG rather than manufacturing work from this narrative._
 
 _**Longer direction:** the next substantive milestone remains the 1.0 evidence gate: real
 cuts for still-unproven fleet release shapes, a soak without new HIGH findings, then a
