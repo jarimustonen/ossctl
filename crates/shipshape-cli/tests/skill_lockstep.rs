@@ -7,8 +7,9 @@
 //!
 //!   1. its frontmatter `name` matches its directory,
 //!   2. it carries the `{{CLI_VERSION}}` token (so `print`/`install` can pin it)
-//!      and no `{{…}}` token survives rendering, and
-//!   3. every `shipshape …` command in a fenced code block resolves to a real
+//!      and no `{{…}}` token survives rendering,
+//!   3. its rendered frontmatter description fits maintained runtimes, and
+//!   4. every `shipshape …` command in a fenced code block resolves to a real
 //!      subcommand path, and every `--flag` it references appears in that
 //!      subcommand's `--help`.
 //!
@@ -99,6 +100,43 @@ fn frontmatter_is_well_formed_and_pins_version() {
                 "{name}: rendered skill still contains {token}"
             );
         }
+    }
+}
+
+/// Pi rejects skill descriptions longer than 1024 characters. Exercise the
+/// rendered `skill print` output so token substitution and the exact payload
+/// written by `skill install` are covered for every bundled skill.
+#[test]
+fn rendered_frontmatter_descriptions_fit_pi_limit() {
+    const PI_DESCRIPTION_LIMIT: usize = 1024;
+
+    for (name, _) in bundled_templates() {
+        let out = shipshape()
+            .args(["skill", "print", &name])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{name}: rendered skill could not be printed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rendered = String::from_utf8(out.stdout).unwrap();
+        let frontmatter = rendered
+            .strip_prefix("---\n")
+            .and_then(|body| body.split_once("\n---\n").map(|(yaml, _)| yaml))
+            .unwrap_or_else(|| panic!("{name}: rendered skill has malformed frontmatter"));
+        let parsed: serde_yaml::Value = serde_yaml::from_str(frontmatter).unwrap_or_else(|error| {
+            panic!("{name}: rendered frontmatter is invalid YAML: {error}")
+        });
+        let description = parsed
+            .get("description")
+            .and_then(serde_yaml::Value::as_str)
+            .unwrap_or_else(|| panic!("{name}: rendered frontmatter has no string `description`"));
+        let actual = description.chars().count();
+        assert!(
+            actual <= PI_DESCRIPTION_LIMIT,
+            "{name}: rendered frontmatter description is {actual} characters; Pi permits at most {PI_DESCRIPTION_LIMIT}"
+        );
     }
 }
 

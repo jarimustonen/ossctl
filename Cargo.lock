@@ -619,6 +619,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "serde_yaml",
  "shipshape-core",
  "tempfile",
  "ureq",

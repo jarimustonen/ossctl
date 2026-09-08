@@ -1,19 +1,17 @@
 ---
 name: shipshape-changelog
 description: >-
-  Establish and maintain a repository's CHANGELOG.md — the SOLE writer of that
-  file. Reads `changelog.mode` (curated / automated / fragment) from the OSS
-  contract, then performs STRUCTURAL, marker-anchored operations: create a
-  Keep-a-Changelog skeleton with a marker-bounded `[Unreleased]` section and the
-  fragment directory, add entries to `[Unreleased]`, and — when `/shipshape-release-cut`
-  invokes `--finalize --version <v> --date <d>` — cut a dated release header and
-  compile release notes (calling `issuectl changelog` for the trailer-driven
-  fragment source). A thin caller of the `shipshape` binary (the binary is the source
-  of truth): it reads the contract via `shipshape contract show`, never re-derives the
-  mode from prose. Does NOT bump versions, tag, build, or publish (`/shipshape-release-cut`);
-  does NOT generate README/LICENSE (`/shipshape-readme`) or CI (`/shipshape-ci`); does NOT
-  write the contract (`/shipshape-init`). Use for "set up a CHANGELOG", "add a changelog
-  entry", "finalize the changelog for release vX".
+  Establish and maintain a repository's CHANGELOG.md as its SOLE writer. Reads
+  `changelog.mode` (curated / automated / fragment) from the OSS contract and
+  performs STRUCTURAL, marker-anchored operations: create a Keep-a-Changelog
+  skeleton and fragment directory, add `[Unreleased]` entries, and finalize a
+  dated release with compiled notes when invoked by `/shipshape-release-cut`
+  (using `issuectl changelog` for trailer-driven fragments). A thin caller of
+  `shipshape`, the source of truth: reads via `shipshape contract show` and never
+  re-derives the mode. Does NOT bump, tag, build, or publish
+  (`/shipshape-release-cut`); generate README/LICENSE (`/shipshape-readme`) or CI
+  (`/shipshape-ci`); or write the contract (`/shipshape-init`). Use for "set up a
+  CHANGELOG", "add a changelog entry", or "finalize the changelog for release vX".
 allowed-tools: Bash, Glob, Grep, Read, Write, Edit
 cli_version: "{{CLI_VERSION}}"
 schema_version: {{SKILL_SCHEMA_VERSION}}
