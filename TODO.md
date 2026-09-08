@@ -70,12 +70,3 @@ are the source of truth.
 [`ossctl-phase4-build`](issues/ossctl-phase4-build/item.md) — the founding extraction epic —
 was closed as delivered on 2026-08-21. There is no parent epic now; open work stands on its
 own issues. `issuectl list` for the live view.
-
-## Piialiisan bugiraportit
-
-- [x] 🐛 Piialiisan bugiraportti: Release bump plan accepts duplicate exact pins then cut fails — FIXED and released in 0.10.0 (SEAL_VERSION 6->7) — jari via Telegram ([`intake-bug-ossctl-d38ddf598fd5`](issues/intake-bug-ossctl-d38ddf598fd5/item.md))
-- [x] 🐛 Piialiisan bugiraportti: Cargo-dist verifier reports existing GitHub Releases missing — closed as a duplicate; evidence folded into `verify-gh-release-missing` — jari via Telegram ([`intake-bug-ossctl-09cd3c1d03d0`](issues/intake-bug-ossctl-09cd3c1d03d0/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: homebrew/binary target verification fails: missing during cut, unknown … — jari via Telegram ([`intake-bug-ossctl-51f9c1ce4cfd`](issues/intake-bug-ossctl-51f9c1ce4cfd/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: Release plan misses tag-triggered Cargo publish workflow — jari via Telegram ([`intake-bug-ossctl-a5febb642dd7`](issues/intake-bug-ossctl-a5febb642dd7/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: Release dry-run misses required dist executable — jari via Telegram ([`intake-bug-ossctl-c9024d7429d8`](issues/intake-bug-ossctl-c9024d7429d8/item.md))
-- [ ] 🐛 Piialiisan bugiraportti: Release cut checks cargo-dist only after bump — jari via Telegram ([`intake-bug-ossctl-106596a87c61`](issues/intake-bug-ossctl-106596a87c61/item.md))

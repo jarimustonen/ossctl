@@ -7,13 +7,12 @@ family. `shipshape` owns the normalizer/validator for the project release contra
 per-ecosystem release-cut state machine; the prose `/shipshape-*` skills are thin callers
 of this binary (the binary is the source of truth, §17).
 
-**Status: source migration complete; external Shipshape rollout follows merge.** The
-published ossctl 0.10.x line remains the rollback path until the conductor completes
-ADR-0005's verified channel and machine-convergence sequence. The maintained channels
+**Status: Shipshape migration and external rollout complete.** The maintained channels
 are crates.io (`shipshape-cli` + `shipshape-core`; the former installs binary
-`shipshape`), GitHub Releases (cargo-dist: macOS and
-Linux, arm64+x86_64, `.sh` installer), and the Homebrew tap. **No Windows** (maintainer
-decision 2026-08-17; deliberate, documented in `DEFAULT_CROSS_PLATFORM_TARGETS`).
+`shipshape`), GitHub Releases (cargo-dist: macOS arm64 and Linux musl arm64+x86_64,
+`.sh` installer), and the Homebrew tap. The frozen ossctl 0.10.x line remains historical,
+not an active rollout fallback. **No Windows or Intel macOS prebuilt binaries** (maintainer
+decision 2026-08-23; deliberate, documented in `DEFAULT_CROSS_PLATFORM_TARGETS`).
 Version history: `CHANGELOG.md` + git tags.
 
 ## CLI Design Principles
@@ -235,3 +234,8 @@ Issue tracking is managed by `issuectl`. Use the `/issue` skill (installed by
 All planning documents (plans, analyses, validations, designs, breakdowns, todos) belong
 under their parent issue directory — not as standalone files. If work needs a planning
 document, it also needs an issue.
+
+Do not maintain reporter-specific, provenance-specific, or hand-curated issue lists in
+`TODO.md`, `AGENTS.md`, or other project documents. Reporter and provenance are issuectl
+metadata; query them there. `TODO.md` carries only the current handoff narrative and stable
+pointers, while issue state and scheduling remain exclusively in issuectl.
