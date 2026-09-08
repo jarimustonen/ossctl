@@ -103,12 +103,12 @@ fn frontmatter_is_well_formed_and_pins_version() {
     }
 }
 
-/// Pi rejects skill descriptions longer than 1024 characters. Exercise the
-/// rendered `skill print` output so token substitution and the exact payload
-/// written by `skill install` are covered for every bundled skill.
+/// Pi warns when skill descriptions exceed 1024 UTF-16 code units. Exercise
+/// `skill print`, which uses the same rendering seam as `skill install`, for
+/// every bundled skill so installed descriptions remain diagnostic-free.
 #[test]
 fn rendered_frontmatter_descriptions_fit_pi_limit() {
-    const PI_DESCRIPTION_LIMIT: usize = 1024;
+    const PI_DESCRIPTION_UTF16_LIMIT: usize = 1024;
 
     for (name, _) in bundled_templates() {
         let out = shipshape()
@@ -121,21 +121,25 @@ fn rendered_frontmatter_descriptions_fit_pi_limit() {
             String::from_utf8_lossy(&out.stderr)
         );
         let rendered = String::from_utf8(out.stdout).unwrap();
-        let frontmatter = rendered
-            .strip_prefix("---\n")
-            .and_then(|body| body.split_once("\n---\n").map(|(yaml, _)| yaml))
+        let frontmatter = extract_frontmatter(&rendered)
             .unwrap_or_else(|| panic!("{name}: rendered skill has malformed frontmatter"));
-        let parsed: serde_yaml::Value = serde_yaml::from_str(frontmatter).unwrap_or_else(|error| {
-            panic!("{name}: rendered frontmatter is invalid YAML: {error}")
-        });
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&frontmatter).unwrap_or_else(|error| {
+                panic!("{name}: rendered frontmatter is invalid YAML: {error}")
+            });
         let description = parsed
             .get("description")
             .and_then(serde_yaml::Value::as_str)
             .unwrap_or_else(|| panic!("{name}: rendered frontmatter has no string `description`"));
-        let actual = description.chars().count();
         assert!(
-            actual <= PI_DESCRIPTION_LIMIT,
-            "{name}: rendered frontmatter description is {actual} characters; Pi permits at most {PI_DESCRIPTION_LIMIT}"
+            !description.trim().is_empty(),
+            "{name}: rendered frontmatter description is empty; Pi will not load the skill"
+        );
+        // Pi checks JavaScript `description.length`, which counts UTF-16 code units.
+        let actual = description.encode_utf16().count();
+        assert!(
+            actual <= PI_DESCRIPTION_UTF16_LIMIT,
+            "{name}: rendered frontmatter description is {actual} UTF-16 code units; Pi permits at most {PI_DESCRIPTION_UTF16_LIMIT}"
         );
     }
 }
@@ -415,15 +419,23 @@ fn help_lists_flag(help: &str, flag: &str) -> bool {
         .any(|t| t.trim_end_matches(',') == want)
 }
 
+/// Extract the leading YAML frontmatter, tolerating the BOM and CRLF accepted
+/// by the bundled-skill reader while still requiring both delimiter lines.
+fn extract_frontmatter(text: &str) -> Option<String> {
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+    let normalized = text.replace("\r\n", "\n");
+    let body = normalized.strip_prefix("---\n")?;
+    let (frontmatter, _) = body.split_once("\n---\n")?;
+    Some(frontmatter.to_string())
+}
+
 /// Read a top-level scalar `key:` value out of the leading YAML frontmatter
 /// block, unquoted. Mirrors the binary's own hardened reader (BOM tolerant,
 /// top-level keys only, trailing `# comment` stripped) so the gate and the
 /// binary agree on what a frontmatter value is.
 fn frontmatter_field(text: &str, key: &str) -> Option<String> {
-    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
-    let body = text.strip_prefix("---")?;
-    let end = body.find("\n---")?;
-    for line in body[..end].lines() {
+    let frontmatter = extract_frontmatter(text)?;
+    for line in frontmatter.lines() {
         if line.starts_with(char::is_whitespace) {
             continue;
         }
@@ -437,4 +449,12 @@ fn frontmatter_field(text: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[test]
+fn frontmatter_extraction_tolerates_bom_and_crlf() {
+    let text = "\u{FEFF}---\r\nname: example\r\n---\r\nbody\r\n";
+    assert_eq!(extract_frontmatter(text).as_deref(), Some("name: example"));
+    assert_eq!(frontmatter_field(text, "name").as_deref(), Some("example"));
+    assert_eq!(extract_frontmatter("---\r\nname: example\r\n"), None);
 }

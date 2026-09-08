@@ -9,8 +9,9 @@ description: >-
   (using `issuectl changelog` for trailer-driven fragments). A thin caller of
   `shipshape`, the source of truth: reads via `shipshape contract show` and never
   re-derives the mode. Does NOT bump, tag, build, or publish
-  (`/shipshape-release-cut`); generate README/LICENSE (`/shipshape-readme`) or CI
-  (`/shipshape-ci`); or write the contract (`/shipshape-init`). Use for "set up a
+  (`/shipshape-release-cut`); does NOT generate README/LICENSE
+  (`/shipshape-readme`) or CI (`/shipshape-ci`); and does NOT write the contract
+  (`/shipshape-init`). Use for "set up a
   CHANGELOG", "add a changelog entry", or "finalize the changelog for release vX".
 allowed-tools: Bash, Glob, Grep, Read, Write, Edit
 cli_version: "{{CLI_VERSION}}"
