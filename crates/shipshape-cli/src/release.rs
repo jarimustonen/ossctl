@@ -1588,12 +1588,6 @@ pub fn resume(args: &ResumeArgs, format: OutputFormat) -> Result<(), CliError> {
         None => derive_resume_plan(&root, &git, journal.state(), &args.run_id)?,
     };
 
-    // Re-check host dependencies against the sealed plan before reconciliation can
-    // append an adoption or the coordinator can enter a phase. Completed barriers do
-    // not retain dependencies they no longer need (notably, a run past build does not
-    // require cargo-dist merely to verify CI output).
-    preflight_resume_dependencies(&plan, journal.state(), &runner, &root)?;
-
     let verification_artifacts = verification_artifacts(&plan);
     let ctx = EffectCtx {
         runner: &runner,
@@ -1614,6 +1608,9 @@ pub fn resume(args: &ResumeArgs, format: OutputFormat) -> Result<(), CliError> {
     if reconcile.is_blocked() {
         return Err(resume_conflict_error(&args.run_id, &reconcile));
     }
+
+    // Project remote adoptions before the mutation-free dependency preflight.
+    preflight_reconciled_resume(&plan, journal.state(), &reconcile, &runner, &root)?;
 
     let mut sink = StreamSink::new(std::io::stdout(), matches!(format, OutputFormat::Json));
     // Lead the stream with the run's identity (parity with `cut`), so a `--json`
@@ -2044,15 +2041,28 @@ pub fn cut(args: &CutArgs, format: OutputFormat) -> Result<(), CliError> {
     }
 }
 
-fn preflight_resume_dependencies(
+fn preflight_reconciled_resume(
     plan: &ReleasePlan,
     state: &RunState,
+    reconcile: &shipshape_core::release::resume::ResumeReconcile,
     runner: &dyn CommandRunner,
     root: &Path,
 ) -> Result<(), CliError> {
-    let dist_workspace = sealed_dist_workspace(plan, Some(state), runner, root)?;
-    preflight::check(plan, Some(state), runner, root, dist_workspace.as_deref())
-        .map_err(release_dependency_error)
+    let mut projected = state.clone();
+    for (target, receipt) in reconcile.adoptions() {
+        projected
+            .published
+            .insert(target.to_string(), receipt.clone());
+    }
+    let dist_workspace = sealed_dist_workspace(plan, Some(&projected), runner, root)?;
+    preflight::check(
+        plan,
+        Some(&projected),
+        runner,
+        root,
+        dist_workspace.as_deref(),
+    )
+    .map_err(release_dependency_error)
 }
 
 /// Read cargo-dist's version pin from the authenticated commit when an incomplete
@@ -2080,6 +2090,11 @@ fn sealed_dist_workspace(
                 preflight::DIST_WORKSPACE_FILENAME
             ),
         )
+        .with_expected(serde_json::json!({
+            "executable": "git",
+            "required_version": null,
+            "found": error.to_string(),
+        }))
     })?;
     if output.status != Some(0) {
         let detail = if output.stderr.trim().is_empty() {
@@ -2087,21 +2102,35 @@ fn sealed_dist_workspace(
         } else {
             output.stderr.trim()
         };
-        return Err(CliError::system(
-            "release_dependency_missing",
+        return Err(CliError::user(
+            "invalid_release_dependency_config",
             format!(
                 "the sealed commit {commit} does not provide a readable `{}` with an exact cargo-dist pin ({detail}). Fix the configuration, re-plan, and retry; shipshape does not install cargo-dist automatically",
                 preflight::DIST_WORKSPACE_FILENAME
             ),
-        ));
+        )
+        .with_invalid_value(object));
     }
     Ok(Some(output.stdout))
 }
 
-/// Map the dependency preflight to a stable system-error envelope. A missing host
-/// executable is not fixed by changing the release argv (AI-first CLI canon §2).
+/// Preserve the core preflight's machine-readable dependency details and route
+/// host faults separately from caller-fixable sealed repository configuration.
 fn release_dependency_error(error: preflight::DependencyError) -> CliError {
-    CliError::system("release_dependency_missing", error.to_string())
+    let details = serde_json::json!({
+        "executable": error.executable,
+        "required_version": error.required_version,
+        "found": error.found,
+    });
+    match error.kind {
+        preflight::DependencyErrorKind::Host => {
+            CliError::system("release_dependency_missing", error.message).with_expected(details)
+        }
+        preflight::DependencyErrorKind::Configuration => {
+            CliError::user("invalid_release_dependency_config", error.message)
+                .with_expected(details)
+        }
+    }
 }
 
 /// Create the run journal for a cut: a `--bump` run persists the sealed `head_sha` + bump

@@ -166,6 +166,16 @@ impl Shims {
             shims.set(command, 0, "");
         }
         shims.set("dist", 0, "cargo-dist 0.32.0\n");
+        shims.set(
+            "sha256sum",
+            0,
+            &format!("{}  OSS-RELEASE.md\n", "a".repeat(64)),
+        );
+        shims.set(
+            "shasum",
+            0,
+            &format!("{}  OSS-RELEASE.md\n", "a".repeat(64)),
+        );
         shims
     }
 

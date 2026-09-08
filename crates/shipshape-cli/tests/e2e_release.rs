@@ -233,6 +233,71 @@ fn cargo_dist_version_mismatch_refuses_before_journal_or_repository_mutation() {
 }
 
 #[test]
+fn missing_cargo_dist_refuses_a_bump_cut_before_any_mutation() {
+    let repo = TempRepo::new("approved");
+    repo.use_cargo_dist_target();
+    let shims = Shims::new();
+    let head = || {
+        String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo.path())
+                .output()
+                .expect("query HEAD")
+                .stdout,
+        )
+        .expect("HEAD is UTF-8")
+    };
+    let head_before = head();
+    let manifest_before = fs::read_to_string(repo.path().join("Cargo.toml")).unwrap();
+    let planned = repo.run(&shims, &["--json", "release", "plan", "--bump", "patch"]);
+    assert!(planned.status.success(), "plan failed: {planned:?}");
+    let plan = json(&planned)["data"]["plan_id"]
+        .as_str()
+        .expect("plan id")
+        .to_string();
+    shims.set("dist", 127, "");
+
+    let cut = repo.run(
+        &shims,
+        &[
+            "--json", "release", "cut", "--plan", &plan, "--bump", "patch",
+        ],
+    );
+
+    assert_eq!(cut.status.code(), Some(2));
+    assert_eq!(error_code(&cut), "release_dependency_missing");
+    assert_eq!(head(), head_before);
+    assert_eq!(
+        fs::read_to_string(repo.path().join("Cargo.toml")).unwrap(),
+        manifest_before
+    );
+    assert!(
+        fs::read_dir(repo.journal_dir())
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .all(|entry| !entry.file_type().is_ok_and(|kind| kind.is_dir())),
+        "dependency refusal created a release journal"
+    );
+    assert!(!Command::new("git")
+        .args(["rev-parse", "--verify", "refs/tags/v0.1.1"])
+        .current_dir(repo.path())
+        .output()
+        .expect("query git tag")
+        .status
+        .success());
+    assert!(
+        shims
+            .log()
+            .lines()
+            .all(|line| line.contains(" <--version>")),
+        "preflight ran a mutating tool command: {}",
+        shims.log()
+    );
+}
+
+#[test]
 fn resume_rechecks_cargo_dist_before_retrying_an_incomplete_build() {
     let repo = TempRepo::new("approved");
     repo.use_cargo_dist_target();

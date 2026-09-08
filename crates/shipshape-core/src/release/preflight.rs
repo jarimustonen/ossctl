@@ -17,9 +17,20 @@ use crate::release::journal_target_ids;
 /// The cargo-dist configuration file whose pin governs the local `dist` binary.
 pub const DIST_WORKSPACE_FILENAME: &str = "dist-workspace.toml";
 
+/// The class of release dependency failure, used by CLI callers to route remediation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyErrorKind {
+    /// A required host executable is missing, broken, or the wrong version.
+    Host,
+    /// The sealed repository configuration does not declare a valid dependency.
+    Configuration,
+}
+
 /// A release dependency could not be validated before execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencyError {
+    /// Whether the host or the sealed repository configuration needs repair.
+    pub kind: DependencyErrorKind,
     /// Executable (or executable group) that failed validation.
     pub executable: String,
     /// Exact required version, when the release configuration pins one.
@@ -61,7 +72,7 @@ pub fn check(
         probe(executable, runner, repo_root)?;
     }
     if requirements.sha256 {
-        probe_one_of(&["sha256sum", "shasum"], runner, repo_root)?;
+        probe_sha256(runner, repo_root)?;
     }
     if requirements.executables.contains("dist") {
         let required = pinned_cargo_dist_version(dist_workspace)?;
@@ -126,6 +137,11 @@ fn required_executables(plan: &ReleasePlan, state: Option<&RunState>) -> Require
                     || (target.adapter == Adapter::CargoPublish && publish_remains)
                 {
                     required.executables.insert("cargo");
+                }
+                if target.adapter == Adapter::CargoPublish && publish_remains {
+                    // An already-published crate is skipped only after packaging and
+                    // SHA-256-authenticating the intended artifact.
+                    required.sha256 = true;
                 }
                 if target.adapter == Adapter::CargoPublishCi && verify_remains {
                     required.executables.insert("gh");
@@ -277,34 +293,53 @@ fn probe(
 
 fn missing(executable: &str, detail: &str) -> DependencyError {
     DependencyError {
+        kind: DependencyErrorKind::Host,
         executable: executable.to_string(),
         required_version: None,
-        found: None,
+        found: Some(detail.to_string()),
         message: format!(
             "required release executable `{executable}` is unavailable ({detail}). Install it or place it on PATH, then retry the same `shipshape release cut`/`resume` command; shipshape does not install release tools automatically"
         ),
     }
 }
 
-fn probe_one_of(
-    alternatives: &[&str],
-    runner: &dyn CommandRunner,
-    repo_root: &Path,
-) -> Result<(), DependencyError> {
+fn probe_sha256(runner: &dyn CommandRunner, repo_root: &Path) -> Result<(), DependencyError> {
+    // Every approved release root has this contract, regardless of ecosystem.
+    const INPUT: &str = "OSS-RELEASE.md";
+    let candidates = [
+        ("sha256sum", vec!["--", INPUT]),
+        ("shasum", vec!["-a", "256", "--", INPUT]),
+    ];
     let mut failures = Vec::new();
-    for executable in alternatives {
-        match probe(executable, runner, repo_root) {
-            Ok(_) => return Ok(()),
-            Err(error) => failures.push(error.message),
+    for (executable, args) in candidates {
+        match runner.run(executable, &args, repo_root) {
+            Ok(output)
+                if output.status == Some(0)
+                    && output.stdout.split_whitespace().any(|token| {
+                        token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    }) =>
+            {
+                return Ok(());
+            }
+            Ok(output) => failures.push(format!(
+                "`{executable}` hash probe exited {:?}: {}",
+                output.status,
+                if output.stderr.trim().is_empty() {
+                    output.stdout.trim()
+                } else {
+                    output.stderr.trim()
+                }
+            )),
+            Err(error) => failures.push(format!("cannot run `{executable}`: {error}")),
         }
     }
     Err(DependencyError {
-        executable: alternatives.join(" or "),
+        kind: DependencyErrorKind::Host,
+        executable: "sha256sum or shasum".to_string(),
         required_version: None,
-        found: None,
+        found: Some(failures.join("; ")),
         message: format!(
-            "a SHA-256 executable is required for the remaining release phases, but neither {} is available. Install one and place it on PATH, then retry the same `shipshape release cut`/`resume` command; shipshape does not install release tools automatically ({})",
-            alternatives.join(" nor "),
+            "a SHA-256 executable is required for the remaining release phases, but neither sha256sum nor shasum can hash files. Install one and place it on PATH, then retry the same `shipshape release cut`/`resume` command; shipshape does not install release tools automatically ({})",
             failures.join("; ")
         ),
     })
@@ -313,6 +348,7 @@ fn probe_one_of(
 fn pinned_cargo_dist_version(contents: Option<&str>) -> Result<String, DependencyError> {
     let absent = || {
         DependencyError {
+        kind: DependencyErrorKind::Configuration,
         executable: "dist".to_string(),
         required_version: None,
         found: None,
@@ -338,19 +374,7 @@ fn pinned_cargo_dist_version(contents: Option<&str>) -> Result<String, Dependenc
 }
 
 fn is_exact_version(value: &str) -> bool {
-    let core = value
-        .split_once(['-', '+'])
-        .map_or(value, |(core, _suffix)| core);
-    let components = core.split('.').collect::<Vec<_>>();
-    components.len() == 3
-        && components.iter().all(|component| {
-            !component.is_empty()
-                && component.bytes().all(|byte| byte.is_ascii_digit())
-                && (component == &"0" || !component.starts_with('0'))
-        })
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+    semver::Version::parse(value).is_ok()
 }
 
 fn check_dist_version(
@@ -365,10 +389,11 @@ fn check_dist_version(
         );
         error
     })?;
-    if output_contains_version(&observed, required) {
+    if reported_dist_version(&observed) == Some(required) {
         return Ok(());
     }
     Err(DependencyError {
+        kind: DependencyErrorKind::Host,
         executable: "dist".to_string(),
         required_version: Some(required.to_string()),
         found: Some(observed.clone()),
@@ -378,10 +403,13 @@ fn check_dist_version(
     })
 }
 
-fn output_contains_version(output: &str, required: &str) -> bool {
-    output.split_whitespace().any(|token| {
-        token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && !matches!(ch, '.' | '-' | '+'))
-            == required
+fn reported_dist_version(output: &str) -> Option<&str> {
+    output.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        match (fields.next()?, fields.next()?) {
+            ("cargo-dist" | "dist", version) => Some(version),
+            _ => None,
+        }
     })
 }
 
@@ -413,13 +441,19 @@ mod tests {
     }
 
     impl CommandRunner for FakeRunner {
-        fn run(&self, program: &str, _args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
-            self.calls.borrow_mut().push(program.to_string());
+        fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> io::Result<CommandOutput> {
+            self.calls
+                .borrow_mut()
+                .push(format!("{program} {}", args.join(" ")).trim().to_string());
             self.versions.get(program).map_or_else(
                 || {
                     Ok(CommandOutput {
                         status: Some(0),
-                        stdout: format!("{program} 1.0.0"),
+                        stdout: if matches!(program, "sha256sum" | "shasum") {
+                            format!("{}  Cargo.toml", "a".repeat(64))
+                        } else {
+                            format!("{program} 1.0.0")
+                        },
                         stderr: String::new(),
                     })
                 },
@@ -452,12 +486,123 @@ mod tests {
         }
     }
 
+    fn cargo_publish_plan() -> ReleasePlan {
+        let mut plan = cargo_dist_plan();
+        plan.targets[0].registry = Registry::CratesIo;
+        plan.targets[0].adapter = Adapter::CargoPublish;
+        plan
+    }
+
     fn output(version: &str) -> CommandOutput {
         CommandOutput {
             status: Some(0),
             stdout: format!("cargo-dist {version}\n"),
             stderr: String::new(),
         }
+    }
+
+    #[test]
+    fn cargo_publish_requires_hashing_until_its_publish_is_recorded() {
+        let plan = cargo_publish_plan();
+        let runner = FakeRunner::with_dist(Ok(output("0.32.0")));
+        check(&plan, None, &runner, Path::new("/repo"), None).unwrap();
+        assert!(runner
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call == "sha256sum -- OSS-RELEASE.md"));
+
+        let runner = FakeRunner::with_dist(Ok(output("0.32.0")));
+        let mut state = state_with_completed(&[Phase::DryRun, Phase::Build]);
+        let target = journal_target_ids(&plan.targets).remove(0);
+        state.published.insert(
+            target,
+            crate::protocol::journal::PublishReceipt {
+                ecosystem: "cargo".into(),
+                package: Some("tool".into()),
+                version: "1.2.3".into(),
+                registry_url: None,
+                digest: None,
+            },
+        );
+        check(&plan, Some(&state), &runner, Path::new("/repo"), None).unwrap();
+        assert!(!runner
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call.starts_with("sha256sum ") || call.starts_with("shasum ")));
+    }
+
+    #[test]
+    fn sha_probe_falls_back_to_shasum_using_real_hash_invocations() {
+        let mut versions = std::collections::HashMap::new();
+        versions.insert(
+            "sha256sum".into(),
+            Ok(CommandOutput {
+                status: Some(1),
+                stdout: String::new(),
+                stderr: "unsupported --version".into(),
+            }),
+        );
+        versions.insert(
+            "shasum".into(),
+            Ok(CommandOutput {
+                status: Some(0),
+                stdout: format!("{}  OSS-RELEASE.md", "b".repeat(64)),
+                stderr: String::new(),
+            }),
+        );
+        let runner = FakeRunner {
+            versions,
+            calls: RefCell::new(Vec::new()),
+        };
+
+        check(
+            &cargo_publish_plan(),
+            None,
+            &runner,
+            Path::new("/repo"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            runner
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| call.starts_with("sha256sum ") || call.starts_with("shasum "))
+                .cloned()
+                .collect::<Vec<_>>(),
+            [
+                "sha256sum -- OSS-RELEASE.md",
+                "shasum -a 256 -- OSS-RELEASE.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_sha_tools_are_refused_for_cargo_publish() {
+        let mut versions = std::collections::HashMap::new();
+        for executable in ["sha256sum", "shasum"] {
+            versions.insert(
+                executable.into(),
+                Err(io::Error::new(io::ErrorKind::NotFound, "not found")),
+            );
+        }
+        let runner = FakeRunner {
+            versions,
+            calls: RefCell::new(Vec::new()),
+        };
+        let error = check(
+            &cargo_publish_plan(),
+            None,
+            &runner,
+            Path::new("/repo"),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.executable, "sha256sum or shasum");
+        assert_eq!(error.kind, DependencyErrorKind::Host);
     }
 
     #[test]
@@ -509,6 +654,35 @@ mod tests {
     }
 
     #[test]
+    fn cargo_dist_version_must_be_the_reported_field() {
+        let runner = FakeRunner::with_dist(Ok(CommandOutput {
+            status: Some(0),
+            stdout: "cargo-dist 0.31.0\nwarning: expected 0.32.0\n".into(),
+            stderr: String::new(),
+        }));
+        let error = check(
+            &cargo_dist_plan(),
+            None,
+            &runner,
+            Path::new("/repo"),
+            Some("[dist]\ncargo-dist-version = \"0.32.0\"\n"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.found.as_deref(),
+            Some("cargo-dist 0.31.0\nwarning: expected 0.32.0")
+        );
+    }
+
+    #[test]
+    fn malformed_semver_is_not_an_exact_pin() {
+        for malformed in ["1.2.3-", "1.2.3+", "1.2.3-alpha..1", "1.2.3-01"] {
+            assert!(!is_exact_version(malformed), "accepted {malformed}");
+        }
+        assert!(is_exact_version("1.2.3-rc.1+build.4"));
+    }
+
+    #[test]
     fn resume_rechecks_dist_while_build_remains() {
         let runner = FakeRunner::with_dist(Ok(output("0.32.0")));
         let state = state_with_completed(&[Phase::DryRun]);
@@ -520,7 +694,11 @@ mod tests {
             Some("[dist]\ncargo-dist-version = \"0.32.0\"\n"),
         )
         .unwrap();
-        assert!(runner.calls.borrow().iter().any(|call| call == "dist"));
+        assert!(runner
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call == "dist --version"));
     }
 
     #[test]
@@ -533,7 +711,11 @@ mod tests {
             .built
             .insert(journal_target_ids(&plan.targets).remove(0));
         check(&plan, Some(&state), &runner, Path::new("/repo"), None).unwrap();
-        assert!(!runner.calls.borrow().iter().any(|call| call == "dist"));
+        assert!(!runner
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call == "dist --version"));
     }
 
     #[test]
@@ -549,7 +731,11 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(!runner.calls.borrow().iter().any(|call| call == "dist"));
+        assert!(!runner
+            .calls
+            .borrow()
+            .iter()
+            .any(|call| call == "dist --version"));
     }
 
     fn state_with_completed(phases: &[Phase]) -> RunState {
