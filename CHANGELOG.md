@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Shipshape and generated downstream release infrastructure now pin cargo-dist 0.33.0
+  (`markedly-obeisant-name`).
+
 ### Fixed
 <!-- oss-changelog:unreleased-end -->
 

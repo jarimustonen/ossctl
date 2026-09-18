@@ -192,9 +192,9 @@ fn cargo_dist_version_mismatch_refuses_before_journal_or_repository_mutation() {
     assert_eq!(cut.status.code(), Some(2));
     assert_eq!(error_code(&cut), "release_dependency_missing");
     let stderr = String::from_utf8_lossy(&cut.stderr);
-    assert!(stderr.contains("cargo-dist 0.32.0"), "{stderr}");
+    assert!(stderr.contains("cargo-dist 0.33.0"), "{stderr}");
     assert!(
-        stderr.contains("cargo install cargo-dist --version 0.32.0 --locked"),
+        stderr.contains("cargo install cargo-dist --version 0.33.0 --locked"),
         "{stderr}"
     );
     let release_run_count = fs::read_dir(repo.journal_dir())
@@ -310,7 +310,7 @@ printf 'dist' >> "$SHIM_DIR/log"
 for arg in "$@"; do printf ' <%s>' "$arg" >> "$SHIM_DIR/log"; done
 printf '\n' >> "$SHIM_DIR/log"
 if [ "$1" = "--version" ]; then
-  printf 'cargo-dist 0.32.0\n'
+  printf 'cargo-dist 0.33.0\n'
   exit 0
 fi
 printf 'simulated dist build failure\n' >&2
@@ -329,7 +329,7 @@ exit 1
 
     assert_eq!(resume.status.code(), Some(2));
     assert_eq!(error_code(&resume), "release_dependency_missing");
-    assert!(String::from_utf8_lossy(&resume.stderr).contains("cargo-dist 0.32.0"));
+    assert!(String::from_utf8_lossy(&resume.stderr).contains("cargo-dist 0.33.0"));
     assert_eq!(
         fs::read_to_string(journal_path).unwrap(),
         journal_before,

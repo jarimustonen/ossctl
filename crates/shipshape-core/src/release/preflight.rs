@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn cargo_publish_requires_hashing_until_its_publish_is_recorded() {
         let plan = cargo_publish_plan();
-        let runner = FakeRunner::with_dist(Ok(output("0.32.0")));
+        let runner = FakeRunner::with_dist(Ok(output("0.33.0")));
         check(&plan, None, &runner, Path::new("/repo"), None).unwrap();
         assert!(runner
             .calls
@@ -512,7 +512,7 @@ mod tests {
             .iter()
             .any(|call| call == "sha256sum -- OSS-RELEASE.md"));
 
-        let runner = FakeRunner::with_dist(Ok(output("0.32.0")));
+        let runner = FakeRunner::with_dist(Ok(output("0.33.0")));
         let mut state = state_with_completed(&[Phase::DryRun, Phase::Build]);
         let target = journal_target_ids(&plan.targets).remove(0);
         state.published.insert(
@@ -614,14 +614,14 @@ mod tests {
             None,
             &runner,
             Path::new("/repo"),
-            Some("[dist]\ncargo-dist-version = \"0.32.0\"\n"),
+            Some("[dist]\ncargo-dist-version = \"0.33.0\"\n"),
         )
         .unwrap_err();
         assert_eq!(error.executable, "dist");
-        assert_eq!(error.required_version.as_deref(), Some("0.32.0"));
+        assert_eq!(error.required_version.as_deref(), Some("0.33.0"));
         assert!(error
             .message
-            .contains("cargo install cargo-dist --version 0.32.0 --locked"));
+            .contains("cargo install cargo-dist --version 0.33.0 --locked"));
         assert!(error.message.contains("does not install"));
     }
 
@@ -633,22 +633,22 @@ mod tests {
             None,
             &runner,
             Path::new("/repo"),
-            Some("[dist]\ncargo-dist-version = \"0.32.0\"\n"),
+            Some("[dist]\ncargo-dist-version = \"0.33.0\"\n"),
         )
         .unwrap_err();
-        assert_eq!(error.required_version.as_deref(), Some("0.32.0"));
+        assert_eq!(error.required_version.as_deref(), Some("0.33.0"));
         assert_eq!(error.found.as_deref(), Some("cargo-dist 0.31.0"));
     }
 
     #[test]
     fn matching_cargo_dist_version_passes() {
-        let runner = FakeRunner::with_dist(Ok(output("0.32.0")));
+        let runner = FakeRunner::with_dist(Ok(output("0.33.0")));
         check(
             &cargo_dist_plan(),
             None,
             &runner,
             Path::new("/repo"),
-            Some("[dist]\ncargo-dist-version = \"0.32.0\"\n"),
+            Some("[dist]\ncargo-dist-version = \"0.33.0\"\n"),
         )
         .unwrap();
     }
@@ -657,7 +657,7 @@ mod tests {
     fn cargo_dist_version_must_be_the_reported_field() {
         let runner = FakeRunner::with_dist(Ok(CommandOutput {
             status: Some(0),
-            stdout: "cargo-dist 0.31.0\nwarning: expected 0.32.0\n".into(),
+            stdout: "cargo-dist 0.31.0\nwarning: expected 0.33.0\n".into(),
             stderr: String::new(),
         }));
         let error = check(
@@ -665,12 +665,12 @@ mod tests {
             None,
             &runner,
             Path::new("/repo"),
-            Some("[dist]\ncargo-dist-version = \"0.32.0\"\n"),
+            Some("[dist]\ncargo-dist-version = \"0.33.0\"\n"),
         )
         .unwrap_err();
         assert_eq!(
             error.found.as_deref(),
-            Some("cargo-dist 0.31.0\nwarning: expected 0.32.0")
+            Some("cargo-dist 0.31.0\nwarning: expected 0.33.0")
         );
     }
 
@@ -684,14 +684,14 @@ mod tests {
 
     #[test]
     fn resume_rechecks_dist_while_build_remains() {
-        let runner = FakeRunner::with_dist(Ok(output("0.32.0")));
+        let runner = FakeRunner::with_dist(Ok(output("0.33.0")));
         let state = state_with_completed(&[Phase::DryRun]);
         check(
             &cargo_dist_plan(),
             Some(&state),
             &runner,
             Path::new("/repo"),
-            Some("[dist]\ncargo-dist-version = \"0.32.0\"\n"),
+            Some("[dist]\ncargo-dist-version = \"0.33.0\"\n"),
         )
         .unwrap();
         assert!(runner

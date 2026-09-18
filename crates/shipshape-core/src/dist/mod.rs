@@ -48,7 +48,7 @@ use crate::contract::schema::{Distribution, Installer};
 /// The cargo-dist version pinned into every generated `dist-workspace.toml`, so a
 /// regenerated workflow and a locally-installed `dist` stay in lockstep. Kept in
 /// step with shipshape's own reference `dist-workspace.toml` at the repo root.
-pub const PINNED_CARGO_DIST_VERSION: &str = "0.28.2";
+pub const PINNED_CARGO_DIST_VERSION: &str = "0.33.0";
 
 /// The result of rendering a `dist-workspace.toml` from a [`Distribution`].
 ///

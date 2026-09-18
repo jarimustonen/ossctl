@@ -2555,7 +2555,7 @@ fn dist_generate_writes_config_and_reports_json() {
         serde_json::Value::Null,
         "--no-workflow → null"
     );
-    assert_eq!(data["cargo_dist_version"], "0.28.2");
+    assert_eq!(data["cargo_dist_version"], "0.33.0");
     assert_eq!(
         data["installers"],
         serde_json::json!(["shell", "powershell"])

@@ -81,7 +81,7 @@ impl TempRepo {
         .expect("write cargo-dist contract");
         fs::write(
             self.path().join("dist-workspace.toml"),
-            "[workspace]\nmembers = [\"cargo:.\"]\n\n[dist]\ncargo-dist-version = \"0.32.0\"\n",
+            "[workspace]\nmembers = [\"cargo:.\"]\n\n[dist]\ncargo-dist-version = \"0.33.0\"\n",
         )
         .expect("write cargo-dist configuration");
         self.git(&["add", "OSS-RELEASE.md", "dist-workspace.toml"]);
@@ -165,7 +165,7 @@ impl Shims {
             shims.write_script(command);
             shims.set(command, 0, "");
         }
-        shims.set("dist", 0, "cargo-dist 0.32.0\n");
+        shims.set("dist", 0, "cargo-dist 0.33.0\n");
         shims.set(
             "sha256sum",
             0,
