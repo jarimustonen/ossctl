@@ -76,7 +76,7 @@ a single package when you describe the build. Things the JSON does not say for i
   gaps that never block a release. It probes the repository root, `.github/`, and
   `docs/` by filename and does not judge content. Issue forms and the pull-request
   template are not audit gaps at all; GitHub's community profile reports them, and the
-  audit's publicize pass reads that profile as corroboration.
+  audit reads that profile as corroboration.
 - `conventional_commits` says whether the release engine may derive the version bump
   from commit types. It is not a statement about the repository's commit style:
   shipshape's own contract keeps it `false` although its log is conventional. When it
@@ -87,11 +87,12 @@ a single package when you describe the build. Things the JSON does not say for i
   `source` (`issuectl-trailers`, `conventional-commits`, `manual`) is what the engine
   consults at cut time. For a contributor this comes out as: in `fragment` mode they add
   one `.md` file per change under `fragment_dir` (always present, repo-relative), with a
-  `### Added`, `### Changed`, or `### Fixed` heading so the engine files it; in `curated`
-  mode with `manual` source the maintainer writes the entry and nothing is asked of
-  them; with `issuectl-trailers` the `Refs-Issue: @<slug>` commit trailer is how a
-  change reaches the notes; with `conventional-commits` the commit type is the entry;
-  in `automated` mode a pipeline owns the file and contributors leave it alone.
+  Keep a Changelog heading (`### Added`, `### Changed`, `### Fixed`, also `Deprecated`,
+  `Removed`, `Security`) so the engine files it; in `curated` mode with `manual` source
+  the maintainer writes the entry and nothing is asked of them; with `issuectl-trailers`
+  a `Refs-Issue: @<slug>` or `Fixes-Issue: @<slug>` commit trailer is how a change
+  reaches the notes; with `conventional-commits` the commit type is the entry; in
+  `automated` mode a pipeline owns the file and contributors leave it alone.
   `/shipshape-changelog` owns the file itself; CONTRIBUTING only tells people what to do.
 - `contribution_provenance` is `dco`, `cla`, or `none`. The contract carries no CLA
   URL and no legal text, so `cla` gets a section with a marked link placeholder rather
