@@ -3,8 +3,10 @@ created: 2026-09-27
 updated: 2026-09-27
 type: bug
 reporter: agent
-status: testing
+status: fixed
 priority: high
+closed: 2026-09-27
+closed_by: agent
 ---
 
 # Shipshape self-hosted macOS release installs cargo-dist persistently
@@ -26,3 +28,9 @@ Shipshape itself (GitHub repository `jarimustonen/ossctl`) has `[dist.github-cus
 ### 2026-09-27T07:22:14Z · @agent
 
 Local pinned Rust gate, hermetic installer fixtures, pristine cargo-dist 0.33.0 generation guard, and real dist build --artifacts=global passed. Remains in testing until CI and a real self-hosted macOS release prove no persistent Hauis Cargo-bin changes (before/after inventory and job log required); do not mark fixed yet.
+
+## Resolution
+
+### 2026-09-27T07:33:22Z · @agent
+
+Real v0.12.3 release verified: CI 36302956991 green; GitHub release run 36303190119 passed all targets, including self-hosted macOS arm64 job 108574688933. That job log records cargo-dist installing to RUNNER_TEMP/shipshape-dist.P8Wr1z2H/bin and passing exact-path assertions. Before and after the job, independent read-only Hauis checks found neither persistent ~/.cargo/bin/dist nor ~/.cargo/bin/cargo-dist. Shipshape release verify observed shipshape-core/shipshape-cli 0.12.3 on crates.io, 11 GitHub assets and Homebrew; main advanced to 1cf7bbc9. The older v0.12.2 job log expired; do not infer a historical installation path from it.
