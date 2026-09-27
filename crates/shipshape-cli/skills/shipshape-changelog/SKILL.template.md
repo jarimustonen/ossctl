@@ -59,6 +59,9 @@ From `data.changelog` you need:
   release-please or changesets owns entry generation).
 - `source`: `issuectl-trailers`, `conventional-commits`, or `manual`. This is what the
   engine consults for generated notes at cut time; it does not change what you write.
+  Generated bullets are added next to the authored ones, not merged into them, so an
+  issue that is both written up in `[Unreleased]` and referenced by a commit trailer
+  appears twice in the released section.
 - `fragment_dir`: always present, repo-relative, defaulting to `changelog/fragments`.
   The contract validator has already rejected an absolute or escaping path, so use the
   value as given.
@@ -80,17 +83,20 @@ sealed commit, for `curated` and `fragment` modes:
 - If the file carries the `oss-changelog:unreleased-start` / `-end` markers, exactly one
   of each in order, it works within them. If it carries none, it wraps the existing
   `[Unreleased]` section in markers itself. Any other marker state (one marker, two
-  pairs, reversed, or a released `## [x.y.z]` heading inside the region) fails the cut.
-- It compiles the notes from the `[Unreleased]` body plus, in fragment mode, every `.md`
-  file directly in `fragment_dir` except `README.md` and dotfiles, sorted by name.
+  pairs, reversed, or any other `## ` heading inside the region) fails the cut.
+- It compiles the notes from the `[Unreleased]` body plus, in fragment mode, every
+  non-empty `.md` file directly in `fragment_dir` except `README.md` and dotfiles,
+  sorted by name; an empty fragment is skipped and left in place.
   Fragment text is merged by its `### Added` / `### Changed` / `### Fixed` (and
   `Deprecated`, `Removed`, `Security`) headings; lines under no heading become an
   unsectioned preamble. Consumed fragments are deleted in the release commit.
-- With `source: issuectl-trailers` it also runs `issuectl changelog <range> --json` for a
-  range sealed at plan time (the previous `v<version>` tag to HEAD, or all of history for
-  a first engine release). Feature issues land under `Added`, bugs under `Fixed`, other
-  types under `Changed`. If `issuectl` is missing, fails, or emits something it does not
-  understand, the engine silently uses the authored notes alone.
+- With `source: issuectl-trailers` it also runs
+  `issuectl changelog <range> --json --root <REPO_ROOT>` for a range sealed at plan
+  time (from the tag of the current manifest version, `v<current>`, to HEAD, or all of
+  history when that tag does not exist, which is a first engine release). Feature
+  issues land under `Added`, bugs under `Fixed`, other types under `Changed`. If
+  `issuectl` is missing, fails, or emits something it does not understand, the engine
+  silently uses the authored notes alone.
 - If the compiled notes are empty (a skeleton with only headings, no fragments, no
   trailer output), the cut fails rather than publishing a version with no notes. If a
   `## [<version>]` heading already exists and the notes are empty, the finalize is
