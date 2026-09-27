@@ -48,9 +48,11 @@ different places:
   `schema_version` newer than this binary knows. Show the diagnostics and stop. A
   contract someone approved is theirs; rewriting, downgrading, or re-initializing it
   to make it validate would discard their decisions.
-- No git repository at all: this family adds a public release face to a repository
-  that already exists. It never runs `git init`, creates a GitHub repository, or
-  bootstraps issue tracking. Point the user at their project-creation flow.
+- No git repository at all (not an error code of `contract show`; `shipshape facts
+  --json` reports `is_git: false`): this family adds a public release face to a
+  repository that already exists. It never runs `git init`, creates a GitHub
+  repository, or bootstraps issue tracking. Point the user at their project-creation
+  flow.
 
 `--require-approved` makes `contract show` fail with `not_approved` on a draft. The
 mutating members and `release cut` enforce this themselves, so you do not need to
@@ -125,11 +127,11 @@ builds for one OS is an incomplete release, not a valid one. Intel macOS and Win
 are deliberately not maintained prebuilt channels. `release.yml` belongs to cargo-dist
 and to the release cut, never to `/shipshape-ci`, whose files are `ci*.yml`.
 
-When cutting from a repository whose tap or dist infrastructure exists but whose
-contract does not declare the matching target, `release cut` refuses with
-`undeclared_distribution`. That refusal exists because the alternative is silently
-skipping a channel users install from; fix the contract and re-plan rather than
-working around it.
+When cutting from a repository whose dist infrastructure exists, or whose contract's
+`distribution` block names a tap, but whose `targets` do not declare the matching
+target, `release cut` refuses with `undeclared_distribution`. That refusal exists
+because the alternative is silently skipping a channel users install from; fix the
+contract and re-plan rather than working around it.
 
 ## Cutting a release
 
@@ -261,8 +263,8 @@ sealed commit, so it survives a code fix moving HEAD. It refuses on a target who
 remote state is `unknown`; `--allow-unverified` trusts the journal for such targets
 only, never for one observed `missing` or conflicting. `abandon` ends a run that should
 not finish (or discards an unused plan by its id) and can break a provably dead
-holder's lock. `sealed_commit_unavailable` means the sealed commit is not reachable
-where the cut runs, usually because it was never pushed.
+holder's lock. `sealed_commit_unavailable` means the sealed commit is not present in
+the clone where the command runs (never committed, not fetched, or garbage-collected).
 
 Never re-publish by hand what the engine was publishing; the journal would then
 disagree with the registry and every later reconcile would be wrong. Report the
