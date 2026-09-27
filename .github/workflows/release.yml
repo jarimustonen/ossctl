@@ -130,7 +130,25 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
-      - name: Install dist
+      # Repo-local exception: the macOS ARM64 artifact row uses a persistent
+      # self-hosted runner. Hosted rows keep the generated matrix installer.
+      - name: Install dist (self-hosted macOS)
+        if: ${{ matrix.runner == 'self-hosted' && runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${RUNNER_TEMP:?RUNNER_TEMP must be set for isolated dist install}"
+          export CARGO_DIST_INSTALL_DIR="$(mktemp -d "$RUNNER_TEMP/shipshape-dist.XXXXXXXX")"
+          export CARGO_DIST_NO_MODIFY_PATH=1
+          ${{ matrix.install_dist.run }}
+          export PATH="$CARGO_DIST_INSTALL_DIR/bin:$PATH"
+          # Fail closed on an old PATH entry, missing binary, or symlink escape.
+          test "$(command -v dist)" = "$CARGO_DIST_INSTALL_DIR/bin/dist"
+          test -x "$CARGO_DIST_INSTALL_DIR/bin/dist"
+          test "$(realpath "$(command -v dist)")" = "$CARGO_DIST_INSTALL_DIR/bin/dist"
+          echo "$CARGO_DIST_INSTALL_DIR/bin" >> "$GITHUB_PATH"
+      - name: Install dist (other runners)
+        if: ${{ matrix.runner != 'self-hosted' || runner.os != 'macOS' }}
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
       - name: Fetch local artifacts

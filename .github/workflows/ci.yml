@@ -128,6 +128,29 @@ jobs:
       # required check rather than one buried in the full suite.
       - run: cargo test --locked -p shipshape-cli --test skill --test skill_lockstep
 
+  release-workflow:
+    name: Release workflow guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test installer isolation and generated overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/test_release_workflow.py
+          dir="$(mktemp -d "$RUNNER_TEMP/shipshape-dist-check.XXXXXXXX")"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            https://github.com/axodotdev/cargo-dist/releases/download/v0.33.0/cargo-dist-x86_64-unknown-linux-musl.tar.xz \
+            -o "$dir/dist.tar.xz"
+          echo 'b8e95bc76c63375958173ef5ae2dbd8e9211cc1ed03cdee0899702766b4c2a2e  '"$dir/dist.tar.xz" | sha256sum --check
+          tar -xf "$dir/dist.tar.xz" -C "$dir"
+          dist="$dir/cargo-dist-x86_64-unknown-linux-musl/dist"
+          test "$("$dist" --version)" = 'cargo-dist 0.33.0'
+          python3 scripts/release_workflow.py --check --dist "$dist"
+          # Exercise the pre-publication build validation, not just generation.
+          "$dist" build --artifacts=global
+
   doc:
     name: docs
     runs-on: ubuntu-latest

@@ -3,10 +3,10 @@ members = ["cargo:."]
 
 # Config for 'dist' (cargo-dist). shipshape is a portable, POSIX-friendly CLI
 # (no fork/tmux/signal machinery), so the target set is broad. The tag-triggered
-# `.github/workflows/release.yml` is GENERATED from this [dist] section via
-# `dist generate` — edit config here, then regenerate; never hand-edit the
-# workflow. Only the non-published Cargo package in `crates/shipshape-dist` is
-# marked distributable. Its package and binary are both `shipshape`, so cargo-dist
+# `.github/workflows/release.yml` is generated from this [dist] section via
+# `scripts/release_workflow.py --write` with a reviewed repo-local overlay.
+# Never run `dist generate` against the live workflow. Only the non-published
+# Cargo package in `crates/shipshape-dist` is marked distributable. Its package and binary are both `shipshape`, so cargo-dist
 # produces `shipshape-*` archives and `shipshape-installer.sh`; it calls the same
 # `shipshape-cli` library entry point as the crates.io-installed binary.
 [dist]
@@ -14,8 +14,10 @@ members = ["cargo:."]
 # the version this config was generated against so a regenerated workflow and
 # the local `dist` stay in lockstep.
 cargo-dist-version = "0.33.0"
-# CI backend.
+# CI backend. Only the repository-local self-hosted macOS installer differs
+# from generated CI; scripts/release_workflow.py verifies that exact overlay.
 ci = "github"
+allow-dirty = ["ci"]
 # Installer scripts generated as release assets: curl-to-shell (Unix) only.
 # No PowerShell installer — Windows is not a supported platform (see targets).
 #
