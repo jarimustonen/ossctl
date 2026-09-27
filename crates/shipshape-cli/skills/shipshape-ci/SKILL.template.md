@@ -131,10 +131,10 @@ here:
   runner's own coverage for Node, `pytest --cov`, `go test -coverprofile`); the badge
   is `/shipshape-readme`'s to render, and only when `coverage` is in `health_badges`,
   which needs a service slug the user supplies. The audit's producer probe is a
-  case-insensitive substring search over `.github/workflows/*.yml` for `coverage`,
-  `codecov`, `coveralls`, `tarpaulin`, `llvm-cov`, or `grcov`, so a comment such as
-  `# TODO: coverage` in a workflow with no coverage step would fake a producer the badge
-  depends on. Do not leave one.
+  case-insensitive substring search over `.github/workflows/*.yml` and `*.yaml` for
+  `coverage`, `codecov`, `coveralls`, `tarpaulin`, `llvm-cov`, or `grcov`, so a comment
+  such as `# TODO: coverage` in a workflow with no coverage step would fake a producer
+  the badge depends on. Do not leave one.
 - CodeQL's supported-language list changes over time and Rust joined it much later than
   the others; a CodeQL job for a language the action rejects turns every pull request
   red. Check the current list before emitting `codeql.yml` and skip it for a language
