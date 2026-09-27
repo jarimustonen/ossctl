@@ -3,7 +3,7 @@ created: 2026-09-27
 updated: 2026-09-27
 type: bug
 reporter: agent
-status: in-progress
+status: testing
 priority: high
 ---
 
@@ -20,3 +20,9 @@ Shipshape itself (GitHub repository `jarimustonen/ossctl`) has `[dist.github-cus
 - Install dist on only the self-hosted macOS local-artifact row into an atomic per-job `RUNNER_TEMP` directory; verify `command -v dist` resolves there, fail closed if installer ignores isolation. Preserve Linux matrix and hosted jobs. No automatic removal or modification of pre-existing user Cargo binaries.
 - A generated-workflow drift guard regenerates from pristine cargo-dist 0.33.0 output and overlays only the reviewed exception; keep `allow-dirty = ["ci"]` narrow and prove an actual `dist build --artifacts=global` / valid equivalent passes before a release, unlike the initial issuectl CI-only fix which failed late.
 - Full pinned-toolchain repo green gate, CI, and one real self-hosted macOS release before declaring runner side effects eliminated; collect before/after Hauis persistent-bin evidence and job log. Do not copy personal runner labels into Shipshape's generic downstream generator.
+
+## Comments
+
+### 2026-09-27T07:22:14Z · @agent
+
+Local pinned Rust gate, hermetic installer fixtures, pristine cargo-dist 0.33.0 generation guard, and real dist build --artifacts=global passed. Remains in testing until CI and a real self-hosted macOS release prove no persistent Hauis Cargo-bin changes (before/after inventory and job log required); do not mark fixed yet.
