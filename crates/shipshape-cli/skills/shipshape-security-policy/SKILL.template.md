@@ -76,16 +76,18 @@ facts carry no threat fields by design; the scan below is this skill's own work.
 Things the JSON does not say for itself:
 
 - The readiness audit asks for a security policy from `mvp` upward, as a recommended
-  gap, by looking for `SECURITY.md` or `SECURITY` at the root. It does not judge the
-  content, so a minimal pointer satisfies it as well as a full policy does. Nothing asks
-  a `spike` for one.
+  gap, by looking for `SECURITY.md` or `SECURITY` at the root, in `.github/`, or in
+  `docs/`. It does not judge the content, so a minimal pointer satisfies it as well as a
+  full policy does. Nothing asks a `spike` for one.
 - `scorecard` can appear in `health_badges` only at `production`; the normalizer rejects
   it at lower tiers as a badge without a producer. This skill is that producer, so when
   the badge is enabled you also write `.github/workflows/scorecard.yml`. The audit
   checks for the producer with a case-insensitive substring search over the workflow
   files for `ossf/scorecard`, `scorecard-action`, or `step-security/scorecard`.
 - A policy that points reporters at GitHub Private Vulnerability Reporting (the audit
-  recognizes the phrase and the GitHub docs URL) creates an expectation the audit then
+  recognizes, case-insensitively, the exact phrase "GitHub Private Vulnerability
+  Reporting" or "Private Vulnerability Reporting on GitHub", a `/security/advisories/new`
+  link, or the docs URL the templates below carry) creates an expectation the audit then
   verifies: `shipshape audit` in its publicize pass reads the repository setting through
   `gh api` and reports a gap when it is not confirmed enabled. Enabling it is a
   repository setting that opens an intake channel on the maintainer's behalf. This
