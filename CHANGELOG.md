@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`markedly-obeisant-name`).
 
 ### Fixed
+
+- Shipshape's own self-hosted macOS release job now installs cargo-dist into
+  job-local temporary storage instead of Hauis's persistent Cargo bin; CI
+  checks the generated workflow overlay and exercises a real dist build
+  (`macos-dist-runner-isolation`).
 <!-- oss-changelog:unreleased-end -->
 
 ## [0.12.2] - 2026-09-08
