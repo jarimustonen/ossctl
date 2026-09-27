@@ -12,8 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+### Fixed
+<!-- oss-changelog:unreleased-end -->
+
+## [0.12.3] - 2026-09-27
+
+### Changed
+
 - Shipshape and generated downstream release infrastructure now pin cargo-dist 0.33.0
   (`markedly-obeisant-name`).
+
+- Upgrade cargo-dist pin to 0.33.0 (`markedly-obeisant-name`).
 
 ### Fixed
 
@@ -21,7 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   job-local temporary storage instead of Hauis's persistent Cargo bin; CI
   checks the generated workflow overlay and exercises a real dist build
   (`macos-dist-runner-isolation`).
-<!-- oss-changelog:unreleased-end -->
+
+- Shipshape self-hosted macOS release installs cargo-dist persistently (`macos-dist-runner-isolation`).
 
 ## [0.12.2] - 2026-09-08
 
