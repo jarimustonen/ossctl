@@ -109,8 +109,9 @@ workspace inheritance resolved), committer counts, `tags`, `has_semver_tag`,
   self-labels as WIP/experimental/prototype. Everything else is `mvp`. These are
   presence heuristics over a cooperative repository, so surface the signals in the
   rationale rather than presenting the verdict as proof.
-- Because it never probes a registry, a crate that is on crates.io at 1.x but was
-  never tagged looks unreleased. That is the one correction most worth inviting.
+- Because it never probes a registry, a 0.x crate that has shipped several versions
+  to crates.io but was never tagged shows no release cadence. That is the one
+  correction most worth inviting.
 - `readme_self_label` fires on a short word list ("experimental", "prototype",
   "wip"...) anywhere in the first 4000 characters of the README. A README that calls
   one feature experimental trips it. Confirm against what the README actually says.
@@ -187,10 +188,12 @@ workflow publishes: the engine derives no order for delegated crates and verifie
 exactly what is declared, so an undeclared crate is released unobserved. Do not make an
 engine-published crate depend on a CI-delegated one; the engine publishes before the
 tag that wakes CI, so the dependency is not on the index yet, and `release cut`
-refuses the combination. In a multi-crate workspace the engine plans publishable
-members library-first from the workspace graph, but verify covers only the targets you
-declare, so name them. A `publish = false` wrapper crate (a cargo-dist naming crate,
-for instance) can carry `gh-releases` and `homebrew` targets but never a crates.io one.
+refuses the combination. In a multi-crate workspace the engine expands each declared
+`cargo-publish` crate into its intra-workspace dependency closure, library-first, and
+verifies every crate it plans; a publishable member outside that closure is never
+published, so name every crate you mean to release. A `publish = false` wrapper crate
+(a cargo-dist naming crate, for instance) can carry `gh-releases` and `homebrew`
+targets but never a crates.io one.
 
 **The distribution block.** When the repository ships prebuilt binaries (cargo-dist
 evidence in the facts, or a goreleaser or hand-rolled release workflow), declare it as
@@ -214,6 +217,10 @@ formula writer. That is `cargo-dist` when `dist-workspace.toml` carries
 `publish-jobs = ["homebrew"]` (CI writes the formula; this is the usual pattern) and
 `homebrew-tap` when the engine owns the tap (shipshape's own contract, whose
 `dist-workspace.toml` has no publish job; the exception, not the pattern). The
+installer list follows the writer: a `cargo-dist` homebrew target requires
+`installers` to include `homebrew`, while a `homebrew-tap` target next to a `homebrew`
+installer is refused as two writers of one formula, so the engine-owned shape names
+the tap in `homebrew_tap` and leaves `homebrew` out of `installers`. The
 normalizer reads `dist-workspace.toml` and refuses a mismatch in either direction,
 because one way produces two writers of the same formula and the other a formula the
 verify barrier never observes. It also refuses `targets: []` next to a distribution
@@ -235,7 +242,7 @@ intent in the rationale either way.
 - `conventional_commits`: `true` only when the log actually follows the convention;
   it lets the release skill derive the bump from commit types.
 - `release.model`: `gated` unless the maintainer has asked for on-merge releases;
-  `auto` installs an on-merge workflow and is never allowed at `spike`.
+  `auto` declares on-merge releases and is never allowed at `spike`.
   `release.layout`: `monorepo` only for independently versioned packages.
 - `contribution_provenance`: `dco`, `cla`, or `none`; read by
   `/shipshape-contributing`.
