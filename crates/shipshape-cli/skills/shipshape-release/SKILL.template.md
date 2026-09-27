@@ -12,278 +12,270 @@ schema_version: {{SKILL_SCHEMA_VERSION}}
 
 # /shipshape-release
 
-Orchestrator for taking any repository to open-source release quality and
-cutting a release from it. This skill is a **thin caller** of the `shipshape`
-binary: every deterministic decision (contract normalization, fact detection,
-readiness scoring, release mechanics) is delegated to `shipshape`. This skill owns
-only what the binary deliberately refuses to do — **mode selection, member
-sequencing, user conversation, and the SemVer-bump judgment** — and renders the
-approval boundary the binary stops at.
+You are taking a repository to open-source release quality, or cutting a release
+from one that is already there. The `shipshape` binary does everything that can be
+decided deterministically: it normalizes the `OSS-RELEASE.md` contract, detects repo
+facts, scores readiness, seals release plans, and runs the resumable release engine.
+It never prompts and never guesses a version. What is left for you is judgment: which
+kind of work this repository needs right now, in what order to run the member skills,
+what version the release should carry, and the conversation with the user at the one
+point where something irreversible is about to happen.
 
-> **Binary is the source of truth (§17).** This skill was authored against
-> `shipshape` **{{CLI_VERSION}}**. If `shipshape version --json` reports a different
-> `version`, re-run `shipshape skill print shipshape-release` to get the skill that
-> ships with the running binary before following these steps.
+This skill was rendered from `shipshape` **{{CLI_VERSION}}**. The binary and its skills
+ship as one unit, so if `shipshape version --json` reports a different version, print
+the matching skill with `shipshape skill print shipshape-release` and follow that copy
+instead. The lockstep between skill and binary is what lets you trust every command and
+flag named here.
 
-## First act: read the contract
+## The contract comes first
 
-Every reader's first act is to normalize the release contract and gate on the
-exit code — never re-derive a default from the raw `OSS-RELEASE.md` prose:
-
-```bash
-shipshape contract show --json || exit   # abort on any non-zero exit
-```
-
-On a non-zero exit, **read the JSON error envelope's `error.code` / `error.message`
-to tell the causes apart** — the same `|| exit` covers several, and they route
-differently:
-
-- **No `OSS-RELEASE.md` yet?** Do not invent a config — invoke **`/shipshape-init`** to
-  generate a reviewable draft, then STOP: the draft lands `status: draft` and a
-  human must review and flip it to `status: approved` before any mutating step
-  runs on a later invocation.
-- **Not a git repository?** This family never bootstraps a repo (no `git init`,
-  no GitHub repo, no `issuectl init`). Stop and point the user at
-  `create-project`; `/shipshape-release` only adds the public release face to a repo
-  that already exists.
-- **Contract present but invalid or a newer `schema_version` than this binary
-  knows?** Surface the validation diagnostics and stop — never rewrite,
-  downgrade, or re-init a contract that merely failed to validate.
-
-Before any **mutating** work (cutting a release, or the bootstrap generators),
-require an approved contract — a `draft` config can never authorize a mutation:
+Everything in the family reads the release contract through the normalizer, never from
+the raw `OSS-RELEASE.md` prose, because the normalizer materializes defaults and
+enforces floors that the prose does not show:
 
 ```bash
-shipshape contract show --json --require-approved || exit
+shipshape contract show --json
 ```
 
-## Pick the mode (never a silent guess)
+The JSON error envelope's `error.code` tells the situations apart, and they lead to
+different places:
 
-One `/shipshape-release` run is **either** closing readiness gaps **or** cutting a
-release — exclusive per invocation. Select the mode this way (design §1.2):
+- `contract_not_found`: there is no contract yet. `/shipshape-init` writes a
+  reviewable draft. A draft lands as `status: draft` and only a human flips it to
+  `approved`; nothing that writes files or publishes should run from a draft, so a
+  fresh init is where this invocation ends.
+- `invalid_contract`: the contract exists but would not normalize, including a
+  `schema_version` newer than this binary knows. Show the diagnostics and stop. A
+  contract someone approved is theirs; rewriting, downgrading, or re-initializing it
+  to make it validate would discard their decisions.
+- No git repository at all: this family adds a public release face to a repository
+  that already exists. It never runs `git init`, creates a GitHub repository, or
+  bootstraps issue tracking. Point the user at their project-creation flow.
 
-1. **Explicit override wins.** If the user said `--bootstrap` / "make it
-   publishable", or `--cut` / "ship 1.2.0" / "publish", honor it and skip
-   detection.
-2. **Else audit-first.** Run the readiness audit (read-only) and read the gap
-   report's core status:
+`--require-approved` makes `contract show` fail with `not_approved` on a draft. The
+mutating members and `release cut` enforce this themselves, so you do not need to
+re-check it before each one, but it is a quick way to learn early that a cut is not
+yet authorized.
 
-   ```bash
-   shipshape audit --json || exit
-   ```
+## Which work this repository needs
 
-3. **Decide:**
-   - core **incomplete** → **bootstrap** (you cannot responsibly release a repo
-     missing README / LICENSE / CI — say why).
-   - core **complete** and the phrasing is release-intent → **cut-release**.
-   - core **complete**, no release intent, recommended gaps remain → **bootstrap**
-     (offer to close them; never write a file without the checkpoint below).
-   - core status **unknown** (an API lookup failed — never read an outage as
-     "no prior release"), or complete with no gaps and no intent → **ask** the
-     user which they want, in plain conversational text (no option cards).
-
-**Non-recursion.** `/shipshape-release` invokes members; **no member invokes
-`/shipshape-release`**. "Release intent" authorizes *entering* cut-release mode — it
-never authorizes publishing. Publishing is gated separately at the approval
-boundary below.
-
-**Override selects the mode; it never disarms a gate.** `--cut` on a repo with an
-incomplete core still fails the core gate below (with a reason) — an explicit
-mode choice picks *which* path runs, not *whether* its preconditions hold.
-
-## Bootstrap mode — sequence the members
-
-Detect facts, score the gaps, checkpoint with the user, then sequence the
-generators. The order matters — **CI before README** kills the badge cycle
-(`/shipshape-ci` returns the workflow name + badge URL that `/shipshape-readme` consumes, so
-the README is written exactly once):
+One invocation either closes readiness gaps or cuts a release. The readiness audit is
+read-only and tells you which:
 
 ```bash
-shipshape facts --json || exit    # ecosystems, packages, CI, tags
-shipshape audit --json || exit    # the gap report that drives sequencing
+shipshape audit --json
 ```
 
-1. Present the gaps — **core gaps (must-fix) vs. recommended (offered)** — and
-   get the user's go-ahead **before any file is written**.
-2. Close the core: **`/shipshape-ci`** → **`/shipshape-readme`** (README + LICENSE).
-3. Then the recommended set, scaled to the contract's `maturity` tier, serially
-   (one reviewable diff at a time): **`/shipshape-changelog`** →
-   **`/shipshape-contributing`** → **`/shipshape-security-policy`** →
-   **`/shipshape-architecture`** (only when the contract opts in — its `docs_site` is
-   not `none`, or the user explicitly asked for architecture docs).
-4. Re-audit and report what landed and what remains:
+`core_complete` reports the tier-scaled gated core: README and LICENSE, plus CI at
+`mvp` and above (a spike is not being published, so CI is only a recommended gap
+there). `gaps` lists every unmet obligation, core first. If the user asked for a
+release and the core is complete, cut. If the core is incomplete, bootstrap, and say
+why: releasing a repository without a README, a license, or CI puts something in
+public that nobody can use, license, or trust. If the core is complete and there was no
+release intent, offer to close the recommended gaps. An explicit request such as "make
+it publishable" or "ship 1.2.0" settles the mode, but it does not remove the
+preconditions of that mode; "ship it" on an incomplete core still means explaining the
+gap rather than cutting.
 
-   ```bash
-   shipshape audit --json || exit
-   ```
+A `core_complete` of `unknown` cannot occur today (every core leg is a filesystem
+probe), but the audit's GitHub-API checks do degrade to `unknown` when a lookup fails.
+Never read an outage as absence; when the report cannot tell you, ask the user which
+work they want, in plain conversational text.
 
-**Stop on member failure.** If a member fails, or the user rejects its diff,
-**halt the sequence** — do not invoke a dependent member (notably: never run
-`/shipshape-readme` if `/shipshape-ci` did not return its workflow name + badge URL, or it
-will write a broken badge). Report what changed, re-audit, and wait for
-resolution. Each member self-validates its own inputs (it re-runs
-`contract show`); the orchestrator sequences them but does not substitute for
-their gates.
+Release intent authorizes entering release mode. It does not authorize publishing;
+that decision is made separately, below, with the sealed plan in front of the user.
 
-## Cut-release mode — own the bump, hand off to the engine
+Members never invoke this skill back, so sequencing always has one owner.
 
-The release engine is a **resumable, self-gated state machine** — it never
-prompts and never derives the version. This skill supplies the two things the
-binary cannot: the **approved SemVer bump** and the **human approval** between
-sealing the plan and executing it.
+## Bootstrap: sequencing the members
 
-### Release-infra generation — cross-platform by default (Mac + Linux)
+`shipshape facts --json` and the audit give you the ecosystems, packages, existing CI,
+tags, and the gap list. Present the gaps to the user, distinguishing the core (needed
+before any release) from the recommended set (offered, scaled to the contract's
+`maturity` tier), and agree on what to close before any file is written. Each member
+then produces one reviewable diff.
 
-The downstream project's binary-release infrastructure — the cargo-dist config
-(`dist-workspace.toml`) and the tag-triggered `.github/workflows/release.yml`
-generated from it via `dist generate` — MUST be **cross-platform by default**.
-This is `/shipshape-*` family canon (see `AGENTS.md` → "Cross-platform is a hard
-requirement (macOS AND Linux)"): a release path that builds on only one OS is an
-incomplete release, not a valid one. When establishing or refreshing that config,
-map the contract's `distribution` block straight through — never invent a
-narrower target set:
+The order carries one dependency worth knowing: `/shipshape-ci` reports the workflow
+file and badge URL it created, and `/shipshape-readme` uses them for the badge row.
+Standalone, readme falls back to scanning `.github/workflows/ci*.yml` and, failing
+that, emits a placeholder the user must confirm, so running CI first means the README
+is written once and correctly. After the core (`/shipshape-ci`, then
+`/shipshape-readme` for README and LICENSE) come `/shipshape-changelog`,
+`/shipshape-contributing`, `/shipshape-security-policy`, and `/shipshape-architecture`
+when the contract's `docs_site` is not `none` or the user asked for architecture docs.
+`/shipshape-readme` expects the orchestrator to run `agentify` once at the end of a
+bootstrap so the AI-facing `AGENTS.md` matches what was generated.
 
-- **`distribution.platforms` → cargo-dist `[dist] targets`.** The contract's
-  platform list is a set of Rust target-triples. Copy it verbatim into `targets`.
-  When the contract **omits** `platforms`, the normalizer's cross-platform
-  default applies — `aarch64-apple-darwin`, `aarch64-unknown-linux-musl`, and
-  `x86_64-unknown-linux-musl` (macOS arm64 and **statically-linked musl Linux**
-  arm64 + x86_64). **Never emit a macOS-only matrix.** Intel macOS is refused;
-  Windows is not a maintained prebuilt channel.
-- **`distribution.installers` → cargo-dist `[dist] installers`.** Ensure `shell`
-  is present so the generated curl-installer covers **both macOS and Linux** on
-  the Unix side; carry `powershell`/`msi` through only when a Windows triple is in
-  the target set. A `homebrew` installer requires `distribution.homebrew_tap`
-  (the contract already enforces this floor).
-- **Mirror `shipshape`'s own `dist-workspace.toml`** (repo root) as the reference
-  shape: pinned `cargo-dist-version`, `ci = "github"`, `hosting = "github"`,
-  `github-attestations = true`, `pr-run-mode = "skip"` (tag-triggered only).
-- **`dist generate` is the sole author of `release.yml`** — edit config in
-  `dist-workspace.toml`, then regenerate; never hand-edit the workflow. Owning
-  `release.yml` (the tag-triggered publish/build/sign workflow) is the
-  release-cut's job, **not** `/shipshape-ci`'s (which owns `ci*.yml`).
+Each member re-reads the contract and validates its own inputs; you sequence them, you
+do not stand in for their checks. If a member fails or the user rejects its diff, stop
+and report rather than running a member that depends on the rejected output. Finish
+with a fresh audit so the report of what landed and what remains is the binary's, not
+your recollection.
 
-> **Generating it.** The engine generates this infra for you: `shipshape dist
-> generate` reads the contract's `distribution` block, writes `dist-workspace.toml`
-> in the reference shape (the mapping above — cross-platform by default), and then
-> invokes `dist generate` to emit `.github/workflows/release.yml` from it (the
-> workflow is never hand-authored — cargo-dist is its sole author). It refuses to
-> clobber an existing `dist-workspace.toml` without `--force`, and supports
-> `--no-workflow` to write only the config when the `dist` tool is unavailable.
-> Only the `cargo-dist` distribution adapter is generated today; a
-> `goreleaser`/`manual` scaffolder is a follow-up. The Homebrew formula stays with
-> shipshape's own tap adapter (post-tag), so `homebrew` is deliberately kept out of
-> the generated cargo-dist installer set even when the contract lists it.
+### Binary distribution infrastructure
 
-**1. Gate.** First, check for an already-active run so two cuts never race — if
-one is in flight, reconcile it (`resume` / `verify` below) instead of sealing a
-second plan. Then require an approved contract, a complete core, and a clean
-working tree:
+A repository that ships prebuilt binaries needs cargo-dist configuration
+(`dist-workspace.toml`) and the tag-triggered `release.yml` cargo-dist generates from
+it. `/shipshape-dist` owns that infrastructure and wraps `shipshape dist generate`,
+which maps the contract's `distribution` block straight into cargo-dist's config and
+then runs `dist generate` for the workflow. The one family decision to carry in your
+head: cross-platform is a hard requirement. The normalizer's default platform set is
+macOS arm64 plus statically linked musl Linux arm64 and x86_64, and a release path that
+builds for one OS is an incomplete release, not a valid one. Intel macOS and Windows
+are deliberately not maintained prebuilt channels. `release.yml` belongs to cargo-dist
+and to the release cut, never to `/shipshape-ci`, whose files are `ci*.yml`.
+
+When cutting from a repository whose tap or dist infrastructure exists but whose
+contract does not declare the matching target, `release cut` refuses with
+`undeclared_distribution`. That refusal exists because the alternative is silently
+skipping a channel users install from; fix the contract and re-plan rather than
+working around it.
+
+## Cutting a release
+
+The engine is a journaled, resumable state machine. It knows how to publish; it does
+not know what version this release is, and it will not ask. Those are yours.
+
+### Before planning
+
+Check `shipshape release list --json` for an in-flight run. Two cuts cannot run at
+once (a `cut_in_progress` error means the single-active-cut lock is held), and an
+interrupted run should be reconciled with `resume` or `verify`, not overtaken by a
+second plan.
+
+Read the `[Unreleased]` block of `CHANGELOG.md` yourself before planning. A parallel
+merge once landed a correct-looking entry in an already-published version's section,
+which would have shipped wrong notes and rewritten a version's history; no automated
+check catches that. Confirm CI is green on the default branch too: a green local gate
+runs on one host, and the tag is about to trigger release workflows on others.
+
+Have the user commit or stash uncommitted work. The engine executes in a clean checkout
+of the sealed commit, so stray changes are not swept in, but a tree that differs from
+HEAD means the user is looking at something other than what will ship. Do not stash or
+discard on their behalf.
+
+### Deciding the version
+
+`release plan --bump major|minor|patch` lets the engine own the bump: it computes the
+new version from the manifest, and the cut then sets the workspace version, rewrites
+intra-workspace `=` pins, refreshes `Cargo.lock`, finalizes the CHANGELOG (the
+`[Unreleased]` section becomes a dated release section, for `curated` and `fragment`
+modes; the cut fails before publishing if that section is missing), runs any declared
+`bump_hook`, commits, and tags. The arithmetic is strict semver on `X.Y.Z`; a
+pre-release or build-metadata version is refused rather than guessed. Choosing the
+level is your judgment:
+
+- `conventional_commits: true`: derive it from the commits since the last release tag
+  (`tags` in the facts; `git log <LAST_TAG>..HEAD --oneline`). `feat` is minor, `fix`
+  is patch, `!` or `BREAKING CHANGE` is major. Show the derivation ("minor: 4 feat, 2
+  fix since v1.2.0") so a mislabeled commit can be caught. If nothing since the tag is
+  releasable, say so instead of inventing a bump.
+- `conventional_commits: false`: the user knows what this release means; ask them for
+  the level, offering the log as a non-binding hint.
+- `versioning: zerover` keeps the major at 0, so a breaking change is `--bump minor`.
+  The engine applies the level literally and does not know the scheme.
+- `versioning: calver`, or any version the engine's arithmetic cannot produce: bump the
+  manifests and finalize the CHANGELOG in a release commit yourself, then plan without
+  `--bump`. Without a bump the plan publishes the version already in the manifest and
+  touches no files, so nothing is finalized for you.
+
+`release plan` derives the current version from the workspace manifest alone. If the
+manifests disagree (`version_inconsistent_tree`), carry no version
+(`version_undeterminable`), or a manifest-versioned target's version cannot be read
+(`version_source_unreadable`), it refuses; fix the manifests rather than looking for a
+flag. There is no `--version` flag by design: two sources of truth for the version was
+a drift footgun.
+
+Package names and product names can differ deliberately: the Cargo package
+`shipshape-cli` installs the command `shipshape`. The registry gets the package name,
+Release assets and Homebrew formulas the product name; renaming one coordinate never
+renames the others.
+
+### Sealing and approving
 
 ```bash
-shipshape release list --json || exit    # an in-flight run? resume/verify it, don't start a second
-shipshape contract show --json --require-approved || exit
-shipshape audit --json || exit           # refuse cut-release while the core is incomplete
+shipshape release plan --json --bump <LEVEL>
 ```
 
-`release plan` / `cut` are content-addressed and **refuse on repo drift**; a
-dirty tree also risks sweeping uncommitted work into the release. Have the user
-commit or stash first — do not stash or discard changes on their behalf.
+Planning is read-only. It seals a content-addressed plan over the contract, the facts,
+and HEAD, persists it in the durable plan store, and exits. Read the warnings: they
+name a tag-only plan (no targets), an unresolved package that makes the plan uncuttable,
+a dependency between an engine-published crate and a CI-delegated one (uncuttable by
+construction, since publish runs before the tag that wakes CI), a missing tag trigger
+for a delegated crates.io publisher, the bump's full edit set, and any `bump_hook`
+verbatim. That hook is arbitrary code the cut runs with `sh -c` in the release
+environment, possibly with publish credentials; the approver must see it.
 
-**2. Decide the version (this skill's judgment — design §3.4).** `release plan`
-derives the version **solely from the workspace manifest** — there is no
-`--version` input (`release-drop-version-flag`). So choosing the number is still
-your job, but you apply it by **bumping the manifest** (and finalizing the
-CHANGELOG) in the release commit *before* planning; the plan then reads it back.
-Read the contract's `conventional_commits` and `versioning`. Find the last
-release tag from `shipshape facts --json`, then read the commits since it:
+Now the one conversation that matters. Publishing is irreversible: a crates.io or PyPI
+version can never be reused, and a pushed tag on a half-published release is the worst
+state a repository can be in. Show the user the `plan_id`, the version, the tag, every
+publish destination, the changelog change, and the warnings, and get their explicit
+confirmation of this exact plan. What you are protecting is their name on a permanent
+public artifact. A repository whose own policy grants autonomous cuts (its `AGENTS.md`
+says so, as shipshape's own does) has already given that confirmation in advance;
+report what the plan contains and proceed. Anything else earns the question.
+
+### Cutting
 
 ```bash
-git log <LAST_TAG>..HEAD --oneline    # the commit set the bump is computed from
+shipshape release cut --plan <PLAN_ID> --json
 ```
 
-- `conventional_commits: true` → derive the bump from those commit types
-  (`feat`→minor, `fix`→patch, `!` or `BREAKING CHANGE`→major; `zerover` keeps
-  major at 0, so a breaking change bumps minor; `calver` computes from its
-  pattern). **Propose the version and show the derivation** ("1.3.0 — 4×feat,
-  2×fix since v1.2.0") so a human can catch a mislabeled commit; if no commit is
-  releasable, say so rather than inventing a bump.
-- `conventional_commits: false` → **ask the user** for the exact version in plain
-  text, offering that `git log` as a non-binding hint. Accept a concrete version
-  matching the contract's `versioning` scheme (not a bare `minor`/`patch`).
+The cut refuses (`not_approved`) unless the contract is `approved`, recovers the bump
+disposition from the stored plan (passing `--bump` is optional and must agree),
+re-derives the plan from the current tree and refuses with `plan_stale` if anything
+hashed into it changed, validates the host toolchain, and only then creates the run.
+A stale plan never started anything; re-plan and show the new plan to the user. With
+`--json` the cut streams one JSONL event per journaled fact; the first event carries
+the `run_id`, and every reconciliation command needs it.
 
-Then **bump the manifest to that version** (e.g. `workspace.package.version` and
-any internal `=X.Y.Z` dep in lockstep) and finalize the CHANGELOG, in the release
-commit. `release plan` reads the version from the manifest, so if the manifests
-disagree or carry no version it refuses (`version_inconsistent_tree` /
-`version_undeterminable` / `version_source_unreadable`) — relay the error and fix
-the manifest rather than re-passing a flag.
+Phases run in a fixed order for a reason: bump, dry-run every target, build every
+target, publish every target (crates.io in dependency order, waiting for the index),
+tag (a GitHub Release is delegated to cargo-dist CI), dist (the engine writes a
+Homebrew formula where it owns the tap), verify, advance-branch. Nothing is tagged
+until every publish has succeeded. Verify observes each destination (registry index,
+Release assets, tap formula); a target that CI publishes is watched with a bounded
+wait, around twenty minutes, because a destination that cannot be observed is not
+green. Advance-branch fast-forwards the remote default branch to the release commit
+and never force-pushes; if the branch diverged or the push was refused, the run stays
+resumable at that phase and the fix is to resolve the cause and resume, not to push
+or retag by hand.
 
-Before sealing, preserve each target's authored identity. A Cargo registry package
-may deliberately differ from its installed command (for example, package
-`shipshape-cli` declares binary `shipshape`). Use the Cargo package for crates.io,
-but keep the command/product name for GitHub Release assets and Homebrew formulas;
-never infer that renaming one coordinate renames every channel.
+### When something goes wrong
 
-**3. Seal the plan.** The binary derives the version from the manifest, computes a
-content-addressed plan, and **exits at the approval boundary** rather than
-prompting (ADR-0001 §3):
+There is no automatic rollback of an irreversible step, and there should not be:
+the journal under `git-common-dir/ossctl/releases/<run_id>/` records exactly what
+landed, and the remote is ground truth.
 
 ```bash
-shipshape release plan --json || exit
+shipshape release list --json
+shipshape release show <RUN_ID> --json
+shipshape release verify <RUN_ID> --json
+shipshape release resume <RUN_ID> --json
+shipshape release abandon <RUN_ID> --json
 ```
 
-**4. Render the approval boundary (the one human checkpoint).** Show the user the
-sealed `plan_id`, the version, the one shared tag, the changelog diff, and every
-publish destination — all from the `release plan --json` payload. Publishing is
-**irreversible** (crates.io/PyPI versions are permanent) — state that plainly and
-require an explicit confirmation of this exact plan + version before proceeding.
-This is the *only* approval prompt; step 2 merely settled the number.
+`verify` is a read-only reconcile against the registries. `resume` reconciles and
+continues from the journal, executing the stored plan against a clean checkout of the
+sealed commit, so it survives a code fix moving HEAD. It refuses on a target whose
+remote state is `unknown`; `--allow-unverified` trusts the journal for such targets
+only, never for one observed `missing` or conflicting. `abandon` ends a run that should
+not finish (or discards an unused plan by its id) and can break a provably dead
+holder's lock. `sealed_commit_unavailable` means the sealed commit is not reachable
+where the cut runs, usually because it was never pushed.
 
-**5. Cut, only after human approval.** Re-invoke with the sealed plan; the cut
-re-derives the version from the manifest and refuses if the repo drifted from what
-the plan hashed (a manifest-version edit since sealing shows up here). **Capture
-the `run_id` from its output** — every reconciliation command below needs it:
+Never re-publish by hand what the engine was publishing; the journal would then
+disagree with the registry and every later reconcile would be wrong. Report the
+precise state: which targets are at their destinations, which are not, and what the
+user's choices are (resume, verify, or complete a target out of band and accept the
+skew). A half-published release presented as either done or failed costs the user the
+information they need most.
 
-```bash
-shipshape release cut --plan <PLAN_ID> --json || exit
-```
+## What done looks like
 
-A successful cut does not leave the bump commit reachable only from its tag. After
-all publish destinations verify green, the engine resolves `origin`'s advertised
-default branch and pushes the release commit to it with an ordinary
-fast-forward-only ref update. It never force-pushes and does not depend on the
-current checkout being attached to that branch, so sealed resume worktrees behave
-the same as the original checkout. A divergent branch, missing default-branch
-advertisement, network error, or permission denial leaves the run resumable in the
-final `advance_branch` phase. Fix the reported cause and run `release resume`; do
-not publish or retag by hand.
-
-On a **drift refusal** the cut never started: have the user reconcile the working
-tree, then re-run `release plan` (a new `plan_id`) and re-render the boundary.
-
-**6. Interruptions and reconciliation.** A dropped network / OTP timeout /
-one-of-N registry failure is recoverable from the journal — never re-publish by
-hand. If the session died before you captured the `run_id`, recover it with
-`shipshape release list --json`:
-
-```bash
-shipshape release list --json               # find the in-flight run_id
-shipshape release show <RUN_ID> --json      # progress (live) or post-mortem
-shipshape release resume <RUN_ID> --json    # reconcile + continue from the journal
-shipshape release verify <RUN_ID> --json    # read-only reconcile vs. registry state
-```
-
-Report full success **or the precise partial state** — never present a
-half-published release as wholly done or wholly failed. There is no automatic
-rollback of an irreversible step; surface the concrete choices to the human
-(resume the pending target, verify against the registry, or accept the skew and
-complete the missing publish out of band).
-
-## Success criteria
-
-- **Bootstrap:** `shipshape audit --json` reports no blocking core gaps.
-- **Cut-release:** the run reaches terminal `completed` only after publishes and
-  destinations verify, the tag lands, and the remote default branch contains the
-  release commit, confirmed by `shipshape release show <RUN_ID> --json`.
-- The contract validates throughout: `shipshape contract validate --json` exits 0.
+A bootstrap is done when a fresh `shipshape audit --json` reports the core complete
+and the user has seen what remains. A cut is done when `shipshape release show` reports
+the run terminal and complete: every target observed at its destination, the tag
+pushed, and the remote default branch containing the release commit. Throughout,
+`shipshape contract validate --json` exits zero, because nothing in this flow edits
+the contract.
