@@ -83,10 +83,10 @@ actually looks at:
 - `github-description`, `github-topics`: read through `gh api repos/<slug>`. They
   appear only when `git remote get-url origin` parses as a GitHub slug; a non-GitHub
   remote gets no metadata gaps at all, and a failed API call yields `unknown`.
-- `github-private-vulnerability-reporting`: emitted only when the security policy
-  (found at the root, `.github/`, or `docs/`) references PVR by the exact phrases
-  "GitHub Private Vulnerability Reporting" or "Private Vulnerability Reporting on
-  GitHub", a `/security/advisories/new` link, or the
+- `github-private-vulnerability-reporting`: needs the same GitHub slug, and is emitted
+  only when the security policy (found at the root, `.github/`, or `docs/`) references
+  PVR by the exact phrases "GitHub Private Vulnerability Reporting" or "Private
+  Vulnerability Reporting on GitHub", a `/security/advisories/new` link, or the
   `privately-reporting-a-security-vulnerability` docs URL. The setting is read from
   `gh api repos/<slug>/private-vulnerability-reporting`; anything other than a parsed
   `enabled: true` is a gap, `absent` when the answer was `false` and `unknown` when
@@ -97,15 +97,16 @@ actually looks at:
   triple absent from every `distributions[].platforms`. Clauses saying "unsupported",
   "not supported", "no prebuilt", or "does not ship" are skipped, so an honest
   limitation is not a false claim.
-- `readme-command:<n>` and `readme-command-help:<binary>`: fenced `sh`, `bash`,
-  `shell`, `console`, or unlabeled blocks whose first token is one of the project's
-  own Cargo binaries are walked against that binary's `--help --json` tree. Before
-  walking, the audit runs `<binary> version --json` and compares its `commit` to
-  `HEAD` of a clean tree; a mismatch, a dirty tree, or a binary without canonical
-  structured help yields `unknown` for every example. So the command check only goes
-  definitive after the rewritten README is committed and the binary on `PATH` is built
-  from that commit; an `unknown` here right after a README edit is expected, not a
-  finding.
+- `readme-command:<n>` and `readme-command-help:<binary>` (suffixed with the
+  subcommand path, as in `readme-command-help:<binary>:<sub>`, when the walk fails
+  partway down the tree): fenced `sh`, `bash`, `shell`, `console`, or unlabeled blocks
+  whose first token is one of the project's own Cargo binaries are walked against that
+  binary's `--help --json` tree. Before walking, the audit runs `<binary> version --json`
+  and compares its `commit` to `HEAD` of a clean tree; a mismatch, a dirty tree, or a
+  binary without canonical structured help yields `unknown` for every example. So the
+  command check only goes definitive after the rewritten README is committed and the
+  binary on `PATH` is built from that commit; an `unknown` here right after a README
+  edit is expected, not a finding.
 - `symlink-link:<doc>:<target>`: a relative link in a public document that resolves
   to a tracked symlink. GitHub renders a symlink blob as its target path, not as the
   target's content, so a reader who follows the link sees one line of text. Public
