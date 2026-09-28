@@ -203,13 +203,14 @@ names it would break for every other user of the generated workflow.
 
 A `release.yml` without cargo-dist's header, a `dist-workspace.toml` without the
 generated header, an unmarked `[profile.dist]`, or a `docs/DISTRIBUTION.md` without the
-marker pair is someone's hand-tuned work. Some of it carries decisions no generator
-would reproduce: reitti-cli's config carries its Homebrew publish job, a build-setup
-hook that strips private paths from binaries, and a runner override, and its
-documentation region records release-specific verification notes written after the
-first public cut. Replacing any of that silently is the real damage this skill can do.
-A marked file is yours to regenerate in place; an unmarked file at a path you would
-write is not yours to replace on your own judgment.
+marker pair is someone's hand-tuned work. Hand-carried decisions can also sit under a
+generated header: reitti-cli's `dist-workspace.toml` begins with the generated header
+yet carries its Homebrew publish job, a build-setup hook that remaps private paths out
+of binaries, and a runner override, and its marked documentation region records
+release-specific verification notes written after the first public cut. Replacing any
+of that silently is the real damage this skill can do. A marked file is yours to
+regenerate in place; an unmarked file at a path you would write is not yours to replace
+on your own judgment.
 
 So decide about the whole set before touching any of it. Classify every path (absent,
 marked, unmarked or differing). If any path you need to change is unmarked and
