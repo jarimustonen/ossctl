@@ -1,241 +1,199 @@
 # shipshape
 
-Release & readiness coordinator: the deterministic engine that takes any repo to
-OSS release quality — the AI-first Rust CLI behind the `/shipshape-*` Agent Skills
-family. `shipshape` owns the normalizer/validator for the project release contract
+Shipshape is the release and readiness engine behind the `/shipshape-*` Agent Skills:
+an AI-first Rust CLI that takes a repository to open-source release quality and cuts
+releases from it. The binary owns the contract normalizer and validator
 (`OSS-RELEASE.md`), repo-fact detection, the readiness audit, and the resumable
-per-ecosystem release-cut state machine; the prose `/shipshape-*` skills are thin callers
-of this binary (the binary is the source of truth, §17).
+per-ecosystem release-cut state machine. The prose skills are thin callers; when a skill
+and the binary disagree, the binary is right and the skill is what gets fixed.
 
-**Status: Shipshape migration and external rollout complete.** The maintained channels
-are crates.io (`shipshape-cli` + `shipshape-core`; the former installs binary
-`shipshape`), GitHub Releases (cargo-dist: macOS arm64 and Linux musl arm64+x86_64,
-`.sh` installer), and the Homebrew tap. The frozen ossctl 0.10.x line remains historical,
-not an active rollout fallback. **No Windows or Intel macOS prebuilt binaries** (maintainer
-decision 2026-08-23; deliberate, documented in `DEFAULT_CROSS_PLATFORM_TARGETS`).
-Version history: `CHANGELOG.md` + git tags.
+The product is live on its maintained channels: crates.io (`shipshape-core` and
+`shipshape-cli`, the latter installing the `shipshape` binary), GitHub Releases through
+cargo-dist (macOS arm64, Linux musl arm64 and x86_64, a `.sh` installer), and the
+Homebrew tap. The earlier `ossctl` 0.10.x line is frozen history, not a fallback.
+Version history is `CHANGELOG.md` plus git tags; `shipshape version --json` tells you
+what is installed.
 
-## CLI Design Principles
+## The architecture is decided; read it before coding
 
-Use the `/ai-first-cli-canon` skill shipped by `project-canon` as the maintained AI-first
-CLI canon. It is the binding reference for CLI surface work: strict input validation,
-`--json` output, JSONL logs, no interactive prompts, informative errors and composable
-commands. Do not keep or edit a repo-local `AGENTS-AI-FIRST-CLI.md` copy; update the
-canon at its source and reinstall the skill from the released tool.
+The accepted ADRs under [`docs/adr/`](docs/adr/) are the spec, not background. Their
+README summarizes what each one decides: the command taxonomy and core/CLI split
+(0001), the adapter model, phase-barrier coordinator, sealed `plan_id` seam and the
+mandatory post-cut verify barrier (0002), the contract, event-sourced journal and plan
+store under `git-common-dir/ossctl/` (0003), one target = one publish unit (0004), and
+the Shipshape migration with its compatibility boundary (0005). ADRs 0001–0004 keep the
+historical `ossctl` name on purpose.
 
-## Architecture (decided before code — read first)
+Two things in there are easy to mistake for leftovers. The `ossctl` path component, the
+`ossctl.release-plan` seal domain, the `oss-changelog:*` markers and the
+`OSS-RELEASE.md` filename are permanent compatibility identifiers (ADR-0005 §3). Renaming
+any of them would strand every existing journal, sealed plan, changelog and downstream
+contract across the fleet, so they stay. And `crates/shipshape-dist` is only a
+non-published naming wrapper so cargo-dist emits `shipshape-*` archives; it is not a
+third public API.
 
-The architecture lives in accepted ADRs under [`docs/adr/`](docs/adr/) — read them before
-writing any code; they are the spec, not background:
+Open an `issuectl` issue before building a feature, and keep design within the ADRs.
+Planning documents belong under the issue that needs them, so an issue is the place
+where design can happen at all.
 
-- [`0001-founding-architecture.md`](docs/adr/0001-founding-architecture.md) — CLI command
-  taxonomy, the published core+CLI split (`shipshape-core` + `shipshape-cli` in
-  `crates/shipshape-cli/`), and the binary↔skill boundary. ADR-0005 adds the
-  non-published `shipshape` cargo-dist naming wrapper; it is not a third public API.
-- [`0002-release-engine-adapter-model.md`](docs/adr/0002-release-engine-adapter-model.md)
-  — the `ReleaseAdapter` trait + enum registry, the phase-barrier coordinator, the sealed
-  content-addressed `plan_id` approval seam, and (amendments) the cargo interleave and the
-  mandatory post-cut **verify** barrier ("a publish target that cannot be observed after
-  the fact is not a publish target"; `Unknown` is not green).
-- [`0003-config-and-journal-storage.md`](docs/adr/0003-config-and-journal-storage.md) —
-  `OSS-RELEASE.md` as the project contract; the event-sourced JSONL release journal under
-  `git-common-dir/ossctl/releases/<run_id>/`; the remote-is-ground-truth resume/reconcile
-  table; and (amendment) the durable **plan store** under `git-common-dir/ossctl/plans/`.
-  The `ossctl` path component is a permanent compatibility namespace (ADR-0005), not a
-  stale product string: do not rename it or the sealed-plan hash domain.
-- [`0004-cargo-adapter-one-target-one-publish-unit.md`](docs/adr/0004-cargo-adapter-one-target-one-publish-unit.md)
-  — one target = one publish unit; the coordinator owns cross-target ordering.
-- [`0005-shipshape-product-migration.md`](docs/adr/0005-shipshape-product-migration.md)
-  — canonical Shipshape identities and the compatibility boundary. Never rename the
-  `git-common-dir/ossctl` namespace, `ossctl.release-plan` seal domain,
-  `oss-changelog:*` markers, or `OSS-RELEASE.md` contract filename.
+For any CLI surface work, the binding reference is the `/ai-first-cli-canon` skill from
+`project-canon` (strict input validation, `--json`, JSONL logs, no prompts, informative
+errors, composable commands). Update the canon at its source rather than keeping a
+repo-local copy. The canonical JSON output shape is a schema-versioned compatibility
+contract under that canon's §10: every family member reads it, so a breaking change is
+a `schema_version` bump, never a silent edit.
 
-Open an `issuectl` issue before building a feature — do not pre-design beyond the ADRs.
+## Operating policy
 
-## Operating policy (for `/stint`)
+`/stint` reads this section for how work runs here.
 
-`/stint` reads this section for how to run a work-session in this repo.
+**Green gate.** A unit counts as landed when these pass:
 
-- **Green gate** (must pass before a unit counts as landed). The repository's
-  `rust-toolchain.toml` pins the same Rust release used by CI; do not override it with an
-  ambient `stable`, because Clippy lint sets change between releases. Keep the exact
-  `dtolnay/rust-toolchain` refs in `.github/workflows/ci.yml` synchronized when bumping
-  the pin. Tests in this gate must control observer behavior rather than depend on host
-  credentials or network access: an answering destination that lacks an artifact is
-  `Missing`; a destination that cannot be reached or understood is `Unknown` (and red).
-  - `cargo fmt --all --check`
-  - `cargo clippy --workspace --all-targets -- -D warnings`
-  - `cargo test --workspace`
-  - `cargo build --workspace` (release build not required per-unit)
-  - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` — CI runs this and it is
-    easy to miss locally: broken intra-doc links fail the `docs` job even when tests pass.
-- **Releases MAY be cut automatically whenever there is something to release** (maintainer
-  decision, 2026-08-05), and **the engine-driven cut is fully autonomous — NO go/no-go
-  checkpoint, ever** (2026-08-06). Do not stop to ask "shall I cut?" — run the recipe end
-  to end and report as you go. The safety is structural: the sealed plan, `dry-run-all`
-  before any publish, dep-order + index-wait on crates.io, the `undeclared_distribution`
-  refusal, `resume`/`abandon`, and the mandatory **verify** phase (green means every
-  target was OBSERVED at its destination). Still: green gate first, plan first, never
-  publish red, report each phase. Trust the refusals — and since the verify phase, the
-  green is observation-backed, not assumed.
-- **The ENGINE recipe** (`shipshape release cut` — the primary and proven path; shipshape's own
-  contract declares all four targets + the `distribution` block with its tap):
-  1. Ensure `CHANGELOG.md` `[Unreleased]` is complete and main is clean + pushed.
-     **Two pre-cut checks that a green local gate does NOT cover** (both learned the hard
-     way when 0.10.0 was cut from a red tree, 2026-08-21):
-     - **CI must be green on main** — `gh run list --workflow=ci.yml --branch main --limit 3`.
-       The local gate is now toolchain-pinned, but it still runs on one host with one
-       environment; CI runs Linux + macOS. A local green is necessary, never sufficient.
-     - **Read the `[Unreleased]` block itself** before planning. A parallel merge can land a
-       correct-looking entry in the WRONG section — this happened into an already-published
-       version's block, which would have shipped wrong release notes and rewritten the
-       history of a version already on crates.io. Union-merge cannot catch it.
-  2. **Build a fresh binary from the tree**: `cargo build --release -p shipshape-cli` (the
-     Cargo package is **`shipshape-cli`** while its only binary remains `shipshape`). `plan`
-     and `cut` refuse when the binary's compiled commit differs from tree `HEAD`
-     (`--allow-stale-binary` is the escape hatch for deliberate cross-tree use).
-  3. `shipshape release plan --bump major|minor|patch` — seals the plan (bump version,
-     `=`-pin rewrites, CHANGELOG finalize plan) and persists it in the plan store.
-     **One-time 0.11.0 collision recovery:** follow ADR-0005's pre-bumped, non-bump
-     replacement sequence instead; bump runs are not the recovery path.
-     Inspect the JSON. There is **no `--version` flag** (version derives from the
-     manifest; `--bump` computes the next one).
-  4. `shipshape release cut --plan <id>` — the `--bump` flag is optional (the cut recovers
-     the bump disposition from the stored plan). Phases: `bump → dry-run-all → build-all
-     → publish-all (crates.io, dep-ordered, index-waited) → tag (GitHub Release delegated
-     to cargo-dist CI) → dist (engine tap-write, real per-platform sha256s) → verify
-     (all targets observed: index, Release assets, tap formula)`.
-  5. Post-cut: the engine's final `advance-branch` barrier fast-forwards the remote
-     default branch to the bump commit after verify; it never force-pushes. A manual
-     spot-check of the channels is optional — the verify phase already observed them.
-  - **hauis note:** macOS aarch64 CI builds run on the personal `hauis` self-hosted
-    runner. If it 400s:
-    `ssh hauis 'git config --global --unset-all "http.https://github.com/.extraheader"'`
-    then `gh run rerun <run-id> --failed`. (Tracked: `release-macos-hauis-coupling`.)
-  - **Resume semantics:** `release resume <run>` executes the run's **stored sealed
-    plan** against a clean checkout of the sealed commit, so it survives a code fix
-    moving HEAD (plan-store era). `resume --allow-unverified` skips only targets whose
-    verify is `Unknown` — never `Missing`/`Conflicts`. `release abandon <run>` is the
-    exit for runs that should not finish, and it can break a provably-dead holder's
-    stale lock on its own.
-  - **Fallback (partial-failure insurance):** the manual path still works —
-    `gh workflow run publish-crates.yml` for crates, a hand formula bump for the tap.
-- **Three publish dispositions — one vocabulary** (0.8.0/0.9.0). Every target declares who
-  performs the publish, and the engine's job differs accordingly:
-  - **Engine publishes** — `cargo-publish` (crates.io), `homebrew-tap` (engine writes the
-    formula, carrying the exact first-line marker
-    `# Generated by shipshape; do not edit by hand (template-version: 2)`).
-  - **CI publishes, engine OBSERVES** — `cargo-publish-ci` (crates.io; the cut stops at the
-    pushed tag and verify watches the index), `cargo-dist` (gh-releases, and homebrew when
-    cargo-dist's own `publish-jobs` owns the tap). The engine writes nothing and requires no
-    marker, but verify still polls the destination with a bounded wait
-    (`DELEGATED_RELEASE_VERIFY_TIMEOUT_SECS`, 20 min / 15 s). Delegated ≠ unverified.
-  - **Nothing is published** — an authored `targets: []` survives normalization as a
-    tag-only cut: publishes nothing, delegates no Release, and passes verify *vacuously*
-    (nothing to observe, which is categorically NOT `Unknown`). A `distribution:` block
-    next to `targets: []` is refused, so a tag-only cut cannot trigger cargo-dist behind
-    the plan's back.
-- **Homebrew tap ownership — shipshape is the exception, not the pattern.** shipshape owns its
-  OWN tap via `homebrew-tap` (its `dist-workspace.toml` has NO `publish-jobs`), and it is
-  the only live exercise of that adapter. Every other fleet repo
-  (issuectl / glasspad / taskfleet / project-canon) carries
-  `publish-jobs = ["homebrew"]`, so cargo-dist's `publish-homebrew-formula` job writes
-  their formula on every tag: their contracts **must declare the homebrew target with
-  `adapter: cargo-dist`**. Declaring `homebrew-tap` there creates a double writer (this
-  already false-red'd an issuectl cut on a transient 503); omitting the target entirely
-  under-declares a channel users install from. Full fleet picture:
-  `homebase/issues/cross-repo-release-standardisation/audit-2026-08-17.md`.
-- **`SEAL_VERSION` is 11.** The sealed plan's pre-image includes the phase sequence and
-  complete engine-owned bump edit set, so a
-  phase-model change is a deliberate `SEAL_VERSION` event per `release/plan.rs`'s evolution
-  rule — never a silent hash change. Live consequence of the 5→6 bump (0.8.0, when `verify`
-  joined the phase list): a plan sealed by an older binary can no longer be cut and must be
-  re-planned. Legacy plans still *load*, so an interrupted run can still `resume`.
-- **Git: `pull --rebase` → `push` is always allowed, no confirmation** (maintainer
-  decision, 2026-08-05), including tag pushes, whenever `main` is clean and green. This
-  repo-scoped grant overrides the global "pushing is the user's step" default. Never
-  force-push a shared branch; never push a red tree.
-- **Scope boundary: shipshape the PRODUCT ≠ a maintainer's personal environment.** shipshape
-  owns the generic, reusable release/readiness engine. Cross-repository standardisation
-  and personal self-hosted CI infrastructure are homebase concerns — keep them out of
-  shipshape's issues/TODO/handoff. The `hauis` override in `dist-workspace.toml` is the
-  documented repo-local exception.
-- **Cross-platform is a hard requirement (macOS arm64 AND Linux musl arm64+x86_64).** Every
-  tool the `/shipshape-*` family produces — and shipshape itself — must offer a source path
-  (`cargo install`) plus prebuilt binaries/installers for those three targets. Windows and
-  Intel macOS are deliberately unsupported as prebuilt channels; a macOS-only or Linux-only
-  install story is a release gap.
-- **No Code of Conduct — deliberate** (maintainer decision). `shipshape audit` listing it as
-  a `recommended` gap is expected and accepted; do not propose adding one.
-- **Live-version check:** `shipshape version --json`.
-- **Hot files.** Two classes — do not treat them the same:
-  - **Append-union-safe — parallel is fine:** `Cargo.toml`, module `mod.rs` files, CLI
-    subcommand-dispatch files, the bundled-skill `CATALOG` in
-    `crates/shipshape-cli/src/skill.rs`. Brief each worker to union-resolve (keep all deps /
-    decls / arms / rows). The auto-merge is not guaranteed, though — expect to salvage
-    the last-in-line row-adder's merge by hand occasionally.
-  - **True shared-logic — sequence strictly, never parallelise:**
-    `crates/shipshape-core/src/contract/schema.rs` (the ONE canonical serde model), any
-    existing shared `crates/shipshape-core/src/protocol/*.rs` module (a NEW file per unit is
-    append-safe), `crates/shipshape-core/src/release/coordinator.rs` +
-    `crates/shipshape-core/src/release/adapters/mod.rs` (the release-engine seam), and the
-    canonical-JSON contract shape (SCHEMA — ripples to every family member).
-- **Worker-model note:** for units on the coordinator/adapters seam, prefer the stronger
-  worker model up front — a weaker model has twice abandoned mid-unit there.
-- **Migration rule:** the canonical-JSON output shape is a schema-versioned compatibility
-  contract (§10). Preserve it; bump `schema_version` on a breaking change, never silently.
-- **Test-account reset:** n/a (no external test accounts).
-- **Issue standard: a finding earns a place in the tracker only if its failure can
-  actually occur here** (maintainer decision, 2026-08-17). Judge the content: is the
-  failure reachable in this project, on this path, and what is the damage beyond an error
-  message? Provenance (a review panel, several models agreeing) is a supporting signal,
-  never the verdict — models correlate hardest on plausible-sounding generic advice.
-  **Reject** cosmic-ray scenarios, duplicate checks, and hostile-input hardening where the
-  only actor is the maintainer's own machine. **Keep** an unobserved finding when the
-  failure would be silent, irreversible, reachable by a downstream user, or contradicts a
-  documented guarantee. When closing one, record the reason **and a reopen condition**.
-  Also applies to **deferral justifications** — verify a claimed blocker, never inherit it.
+```
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo build --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+```
 
-## Companion-skill installer (`shipshape skill install`)
+`rust-toolchain.toml` pins the Rust release CI uses; running with an ambient `stable`
+gives a different Clippy lint set and a green that CI will not reproduce. CI checks that
+the `dtolnay/rust-toolchain` refs in `ci.yml` match the pin (the MSRV job is the one
+exception), so bump both together. The doc build is the step people forget: a broken
+intra-doc link fails CI's `docs` job even when tests pass. Tests that touch destination
+verification control the observer rather than relying on host credentials or network:
+an answering destination without the artifact is `Missing`, an unreachable or
+unreadable one is `Unknown`, and `Unknown` is red.
 
-The bundled `/shipshape-*` skills install into all maintained runtimes by default:
-Claude at `.claude/skills/<name>/...`, pi at `.pi/agent/skills/<name>/...`, and a
-self-contained Codex prompt at `.codex/prompts/<name>.md`. Omitted `--agent` and explicit
-`--agent all` are equivalent; `claude` | `pi` | `codex` narrows to one runtime.
-`--target <PATH>` overrides the install base while preserving those native layouts.
-Compatibility `--dest <PATH>` still overrides the resolved skills directory directly and
-is mutually exclusive with `--target`. Installation is non-interactive, atomic per file,
-§17 version-guarded, and no-clobber by default; use `--dry-run` to preflight without
-writes and `--force` to overwrite a refused destination explicitly. Inspect the full
-machine contract with `shipshape skill list --json`.
+**Git.** Rebase-then-push to `main`, including tag pushes, is granted here without
+confirmation whenever the tree is clean and green (maintainer decision, 2026-08-05); this
+overrides the global default that pushing is the user's step. What the grant does not
+cover: force-pushing a shared branch, which rewrites history other machines and the
+release engine have already observed, and pushing a red tree, which is how a bad release
+gets cut.
 
-## Gitignored directories
+**Releases are cut whenever there is something to release, autonomously, with no
+go/no-go checkpoint** (maintainer decisions, 2026-08-05 and 2026-08-06). Do not stop to
+ask; run the cut end to end and report each phase. The safety is structural, not
+conversational: the sealed content-addressed plan, `dry-run-all` before any publish,
+dependency-ordered and index-waited crates.io publishes, the undeclared-distribution
+refusal, `resume` and `abandon`, and a verify phase whose green means every target was
+observed at its destination. Trust the refusals. What is at stake: a crates.io publish
+cannot be undone (yank is the only withdrawal and the number is burned), and a pushed
+tag with a GitHub Release is effectively permanent for the installer and the formula
+that pin it.
 
-- `history/` — agent scratchpad and ephemeral planning docs (not tracked)
+**What a cut needs that a local green does not show.** Both were learned when 0.10.0
+was cut from a red tree (2026-08-21):
 
-## Documentation Pattern
+- CI on `main` is green (`gh run list --workflow=ci.yml --branch main --limit 3`). The
+  local gate runs on one host; CI runs Linux and macOS.
+- The `[Unreleased]` block of `CHANGELOG.md` is complete and is what you think it is.
+  A parallel merge once landed a correct-looking entry inside an already-published
+  version's block, which would have shipped wrong notes and rewritten a version already
+  on crates.io. Union merge cannot detect this; only reading the block does.
 
-Every directory follows this structure:
+The engine path is `shipshape release plan --bump <level>`, inspect the JSON, then
+`shipshape release cut --plan <id>`; the phases run `bump → dry-run-all → build-all →
+publish-all → tag → dist → verify → advance-branch`, where `advance-branch`
+fast-forwards remote `main` to the bump commit and never force-pushes. The subcommand
+help documents the flags and the resume and abandon semantics; a few facts sit outside
+it. `plan` and `cut` refuse a binary not built from tree `HEAD`, so build a release
+binary first (`cargo build --release -p shipshape-cli`). The cut also requires the exact
+cargo-dist version pinned in `dist-workspace.toml` to be installed and never installs it
+itself. `.github/workflows/release.yml` is generated by `scripts/release_workflow.py`
+with a reviewed repo-local overlay; running `dist generate` against it would discard
+that overlay. Should a phase fail past the point of resume, the manual fallback still
+works: `gh workflow run publish-crates.yml` for the crates and a hand formula bump for
+the tap. The one-time v0.11.0 recovery sequence in ADR-0005 and `docs/recovery/` is
+history; bump runs are the normal path now.
 
-- `CLAUDE.md` — symlink to `AGENTS.md`
-- `AGENTS.md` — all AI-relevant info (consolidated)
-- `AGENTS-<TOPIC>.md` — complex topics split out (optional)
+**The macOS arm64 build runs on the maintainer's personal `hauis` self-hosted runner**
+(the override at the end of `dist-workspace.toml`, a documented repo-local exception
+that shipshape never generates for others). When that job fails with HTTP 400, the
+cause is a stale git credential header on the runner:
 
-## Issues & Planning
+```
+ssh hauis 'git config --global --unset-all "http.https://github.com/.extraheader"'
+gh run rerun <run-id> --failed
+```
 
-Issue tracking is managed by `issuectl`. Use the `/issue` skill (installed by
-`issuectl init`) to create, search, update, and close issues.
+**Publish dispositions.** Every target declares who performs its publish, and the
+engine's job follows from that. With `cargo-publish` and `homebrew-tap` the engine
+publishes itself; the tap formula it writes carries the exact first-line marker
+`# Generated by shipshape; do not edit by hand (template-version: 2)`, and the adapter
+refuses to overwrite a formula without it. With `cargo-publish-ci` and `cargo-dist`, CI
+publishes and the engine only observes, polling the destination with a bounded wait
+(constants in `release/coordinator.rs`); delegated is not the same as unverified. An
+authored `targets: []` is a tag-only cut that publishes nothing and passes verify
+vacuously, which is categorically different from `Unknown`; a `distribution:` block
+beside it is refused so cargo-dist cannot fire behind the plan's back.
 
-- `issues/<slug>/item.md` — every issue and epic (flat layout)
-- Status lives in the `status:` frontmatter field, not in the path
-- `issues/AGENTS.md` — issue schema, types, workflow (owned by issuectl)
-- `.issuectl/AGENTS.md` — repo-local policy for AI agents (owned by issuectl)
+Shipshape is the only live user of `homebrew-tap`, because its `dist-workspace.toml`
+has no `publish-jobs`. Every other fleet repo (issuectl, glasspad, taskfleet,
+project-canon) carries `publish-jobs = ["homebrew"]`, so cargo-dist writes their formula
+on every tag and their contracts declare homebrew with `adapter: cargo-dist`. Declaring
+`homebrew-tap` there creates two writers (this false-red'd an issuectl cut on a transient
+503); omitting the target under-declares a channel users install from. The fleet
+picture is in `homebase/issues/cross-repo-release-standardisation/audit-2026-08-17.md`.
 
-All planning documents (plans, analyses, validations, designs, breakdowns, todos) belong
-under their parent issue directory — not as standalone files. If work needs a planning
-document, it also needs an issue.
+**The sealed plan's hash format is versioned.** `release/plan.rs` documents what the
+pre-image covers and the rule for evolving it: a change to the phase model or the
+engine-owned bump edit set is a deliberate `SEAL_VERSION` bump, never a silent hash
+change. After a bump, plans sealed by an older binary can no longer be cut and are
+re-planned, though they still load so an interrupted run can `resume`.
 
-Do not maintain reporter-specific, provenance-specific, or hand-curated issue lists in
-`TODO.md`, `AGENTS.md`, or other project documents. Reporter and provenance are issuectl
-metadata; query them there. `TODO.md` carries only the current handoff narrative and stable
-pointers, while issue state and scheduling remain exclusively in issuectl.
+**Cross-platform is a hard requirement.** Shipshape and every tool the family produces
+offer `cargo install` plus prebuilt binaries for macOS arm64 and Linux musl arm64 and
+x86_64. Windows and Intel macOS are deliberately unsupported as prebuilt channels
+(reasons in `dist-workspace.toml` and the ADR-0005 amendment); a single-platform install
+story is a release gap the audit reports.
+
+**Two deliberate audit findings.** There is no Code of Conduct by maintainer decision;
+`shipshape audit` listing it as a `recommended` gap is expected. Do not propose adding
+one.
+
+**Scope.** Shipshape is the generic, reusable engine. Cross-repository standardisation
+and the maintainer's personal CI infrastructure are homebase concerns and stay out of
+this repo's issues, `TODO.md` and handoffs; the `hauis` override above is the documented
+exception.
+
+**Hot files when work runs in parallel.** `Cargo.toml`, module `mod.rs` files, CLI
+subcommand-dispatch files and the bundled-skill `CATALOG` in
+`crates/shipshape-cli/src/skill.rs` are append-only rows that union-merge; brief workers
+to keep every dep, declaration, arm and row, and expect to salvage the last adder's merge
+by hand now and then. The shared-logic files are different: the canonical serde model in
+`contract/schema.rs`, any existing `protocol/*.rs` module (a new file per unit is fine),
+and the `release/coordinator.rs` plus `release/adapters/mod.rs` seam. Two workers
+editing those produce semantic conflicts a merge tool cannot see, so sequence that work.
+On the coordinator/adapters seam, start with the stronger worker model; a weaker one has
+twice abandoned mid-unit there.
+
+**What earns a place in the tracker** (maintainer decision, 2026-08-17): a finding whose
+failure can actually occur in this project, on this path, with damage beyond an error
+message. Provenance is a supporting signal, never the verdict; several models agreeing
+correlates hardest on plausible-sounding generic advice. Cosmic-ray scenarios, duplicate
+checks and hostile-input hardening where the only actor is the maintainer's own machine
+are rejected. An unobserved finding is kept when the failure would be silent,
+irreversible, reachable by a downstream user, or would contradict a documented
+guarantee. Closing one records the reason and a reopen condition. The same standard
+applies to a claimed blocker in a deferral: verify it rather than inherit it.
+
+## Layout and conventions
+
+The bundled skills live in `crates/shipshape-cli/skills/` and install with
+`shipshape skill install`; its `--help` and `shipshape skill list --json` are the
+complete contract, including runtimes, path overrides and the no-clobber rules.
+
+`history/` is gitignored scratch for agents. Every directory follows the pattern
+`AGENTS.md` for consolidated agent-relevant information, `CLAUDE.md` as a symlink to
+it, and optional `AGENTS-<TOPIC>.md` splits.
+
+Issues are managed by `issuectl` through the `/issue` skill: `issues/<slug>/item.md`
+holds every issue and epic, status lives in frontmatter, `issues/AGENTS.md` carries the
+schema and `.issuectl/AGENTS.md` the repo-local policy. Planning documents of any kind
+go under their parent issue. Reporter and provenance are issuectl metadata to query
+there, not lists to maintain in `TODO.md` or here; `TODO.md` carries only the current
+handoff narrative and stable pointers, while issue state and scheduling stay in
+issuectl.
