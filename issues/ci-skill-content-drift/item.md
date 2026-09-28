@@ -2,8 +2,10 @@
 created: 2026-09-28
 updated: 2026-09-28
 type: bug
-status: open
+status: fixed
 priority: normal
+closed: 2026-09-28
+closed_by: agent
 ---
 
 # CI skill tests fail after skill content drift
