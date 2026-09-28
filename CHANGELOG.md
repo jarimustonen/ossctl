@@ -12,10 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+### Fixed
+<!-- oss-changelog:unreleased-end -->
+
+## [0.12.4] - 2026-09-28
+
+### Changed
+
 - The bundled `/shipshape-*` skills are rewritten to explain purpose, knowledge, and considerations instead of prescribing numbered steps, and their claims about the CLI are checked against the source (homebase `rethink-all-instructions`).
 
 ### Fixed
-<!-- oss-changelog:unreleased-end -->
+
+- CI skill tests fail after skill content drift (`ci-skill-content-drift`).
+- Shipshape self-hosted macOS release installs cargo-dist persistently (`macos-dist-runner-isolation`).
 
 ## [0.12.3] - 2026-09-27
 
