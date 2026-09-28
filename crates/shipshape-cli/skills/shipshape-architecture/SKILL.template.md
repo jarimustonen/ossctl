@@ -100,11 +100,12 @@ you ever see one the binary and this skill disagree and you stop rather than gue
 
 Things the JSON does not say for itself:
 
-- The audit's publicize pass reads `ARCHITECTURE.md` and every markdown file under
-  `docs/` as public documents. It flags "Claude Code skill" phrasing, because a public
-  document should speak in category terms rather than one runtime's, and it flags a
-  relative link whose target is a tracked symlink. Repositories in this family keep
-  `CLAUDE.md` as a symlink to `AGENTS.md`, so link the latter.
+- The audit's publicize pass reads `ARCHITECTURE.md` and the markdown under `docs/`,
+  except `docs/adr/` and `docs/recovery/`, as public documents. It flags "Claude Code
+  skill" phrasing, because a public document should speak in category terms rather
+  than one runtime's, and it flags a relative link whose target is a tracked symlink.
+  Repositories in this family keep `CLAUDE.md` as a symlink to `AGENTS.md`, so link
+  the latter.
 - The map is derived from the code, and that derivation is kept in this skill on
   purpose: `shipshape facts` reports packages and manifests, not module boundaries.
   Do not expect the binary to hand you the map.
