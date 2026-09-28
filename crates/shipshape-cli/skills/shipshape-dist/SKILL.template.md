@@ -115,7 +115,7 @@ Three facts about its output that the contract does not make obvious:
 
 - **It always ensures the `shell` installer** (the curl-to-shell script that covers
   macOS and Linux) and **always excludes `homebrew`** from `installers`, and it never
-  emits `tap`, `publish-jobs`, `github-custom-runners`, or `github-build-setup`. It was
+  emits `tap`, `publish-jobs`, custom runner mappings, or `github-build-setup`. It was
   written for shipshape's own shape, where the release engine writes the tap formula
   itself. See the next section for what this means when cargo-dist is supposed to
   write the formula.
@@ -128,8 +128,7 @@ Three facts about its output that the contract does not make obvious:
   the profile is your job (below).
 
 Its failures name what happened: `dist_tool_missing` means the config was written but
-cargo-dist is not on `PATH`, and the message carries the exact
-`cargo install cargo-dist --version <pinned> --locked` line for the maintainer to run.
+cargo-dist is not on `PATH`, and the message identifies the pinned version needed.
 Installing a global tool on someone's machine is not this skill's call, and a
 workflow that was not produced must be reported as not produced; passing
 `--no-workflow` to get a green report leaves the repository half-done. A
@@ -194,7 +193,7 @@ in the wild, so they stay exact. Nothing else is yours: not `OSS-RELEASE.md`
 (`/shipshape-readme`), CHANGELOG (`/shipshape-changelog`), package metadata, GitHub
 settings, or the tap repository. This skill does not cut, tag, or publish.
 
-Never add a `[dist.github-custom-runners]` table or any self-hosted runner. Some fleet
+Never add a custom runner table or any self-hosted runner. Some fleet
 repositories carry one for a maintainer's own Apple-silicon machine; that is personal
 infrastructure documented as a repo-local exception, and a generated default that
 names it would break for every other user of the generated workflow.

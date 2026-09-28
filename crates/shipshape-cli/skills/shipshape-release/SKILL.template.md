@@ -225,9 +225,9 @@ shipshape release cut --plan <PLAN_ID> --json
 
 The cut refuses (`not_approved`) unless the contract is `approved`, recovers the bump
 disposition from the stored plan (passing `--bump` is optional and must agree),
-re-derives the plan from the current tree and refuses with `plan_stale` if anything
-hashed into it changed, validates the host toolchain, and only then creates the run.
-A stale plan never started anything; re-plan and show the new plan to the user. With
+re-derives the plan from the current tree and refuses if anything hashed into it
+changed, validates the host toolchain, and only then creates the run. An invalidated
+plan never started anything; re-plan and show the new plan to the user. With
 `--json` the cut streams one JSONL event per journaled fact; the first event carries
 the `run_id`, and every reconciliation command needs it.
 
@@ -246,8 +246,9 @@ or retag by hand.
 ### When something goes wrong
 
 There is no automatic rollback of an irreversible step, and there should not be:
-the journal under `git-common-dir/ossctl/releases/<run_id>/` records exactly what
-landed, and the remote is ground truth.
+the release journal in the repository's git common directory records exactly what
+landed, and the remote is ground truth. Inspect it through `shipshape release show`
+rather than assuming a worktree-local path.
 
 ```bash
 shipshape release list --json
