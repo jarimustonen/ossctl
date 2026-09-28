@@ -105,31 +105,31 @@ the maintainer and `/shipshape-init`, not a stack of work to schedule.
 
 **Producer obligations** (`category: producer`) are gaps the contract created for
 itself: it declared something whose producer is not there. A `fragment` changelog mode
-without its fragment directory; a registry target (anything other than GitHub
-Releases) without a license in the contract; a `coverage`, `scorecard`, `ci`, or
-`license` health badge without the CI step or file that would make it true; a declared
-binary distribution whose `platforms` omit Linux or macOS (`distribution-linux`,
+without its fragment directory; a `coverage`, `scorecard`, `ci`, or `license` health
+badge without the CI step or file that would make it true; a declared binary
+distribution whose `platforms` omit Linux or macOS (`distribution-linux`,
 `distribution-macos`, suffixed with the package name in a monorepo). Each has two
 honest fixes, create the producer or change the dial, and the report should offer both
-rather than assume the file is wanted. Two of them bite harder than their `recommended`
-severity suggests: a registry refuses a package without a license, so a cut with that
-gap open fails at publish; and the family's cross-platform decision (macOS arm64 plus
-musl Linux arm64 and x86_64 for every prebuilt channel) means a one-OS distribution is
-a release gap, not a variant. The normalizer defaults an omitted `platforms` to the full
-set and rejects an empty one, so a missing OS is always an explicit authoring choice
-worth naming as such.
+rather than assume the file is wanted. One of them bites harder than its `recommended`
+severity suggests: the family's cross-platform decision (macOS arm64 plus musl Linux
+arm64 and x86_64 for every prebuilt channel) means a one-OS distribution is a release
+gap, not a variant. The normalizer defaults an omitted `platforms` to the full set and
+rejects an empty one, so a missing OS is always an explicit authoring choice worth
+naming as such.
 
-**The front-door checks** carry `member: shipshape-publicize`: empty GitHub
-description or topics, a security policy that promises Private Vulnerability Reporting
-on a repository where it is not enabled, README claims of prebuilt binaries for
-platforms no distribution builds, README command examples that the project's own
-binary does not accept, links to tracked symlinks that GitHub renders as a path, and
-"Claude Code skill" where the category term is Agent Skills. They describe whether a
-stranger can use the project, not whether it can be released, and they are best closed
-as one pass by `/shipshape-publicize` rather than picked off one by one. One of them
-needs a caveat in your report: the README command check compares the binary on `PATH`
-against a clean `HEAD`, so right after a README or CLI change it reads `unknown` until
-the tree is committed and the binary rebuilt. That is expected, not a finding.
+**The front-door checks** carry `member: shipshape-publicize` (their `category` is
+`canon` too, so the member, not the category, is what separates them from the
+recommended set): empty GitHub description or topics, a security policy that promises
+Private Vulnerability Reporting on a repository where it is not enabled, README claims
+of prebuilt binaries for platforms no distribution builds, README command examples that
+the project's own binary does not accept, links to tracked symlinks that GitHub renders
+as a path, and "Claude Code skill" where the category term is Agent Skills. They
+describe whether a stranger can use the project, not whether it can be released, and
+they are best closed as one pass by `/shipshape-publicize` rather than picked off one by
+one. One of them needs a caveat in your report: the README command check compares the
+binary on `PATH` against a clean `HEAD`, so right after a README or CLI change it reads
+`unknown` until the tree is committed and the binary rebuilt. That is expected, not a
+finding.
 
 **The `unknown` discipline.** Every check distinguishes checked-and-absent from
 could-not-check. Filesystem probes are always determinate. A GitHub lookup that fails,
