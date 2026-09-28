@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The bundled `/shipshape-*` skills are rewritten to explain purpose, knowledge, and considerations instead of prescribing numbered steps, and their claims about the CLI are checked against the source (homebase `rethink-all-instructions`).
+
 ### Fixed
 <!-- oss-changelog:unreleased-end -->
 
