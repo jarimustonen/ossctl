@@ -44,3 +44,13 @@ AGENTS.md is wanted, point to `rethink-instructions`, and for stale claims to
 
 Until a release carries the change, the stale reference is harmless beyond
 the missing skill: the agent has to update AGENTS.md by its own judgment.
+
+<!-- intakectl:analysis:start job:cb2a970b-3867-4370-a34d-432a333895cb generation:0 -->
+## Triage analysis
+
+- **Verdict:** Confirmed.
+- **Severity:** Low; the obsolete references are reachable in bundled skill instructions, but the impact is limited to agents being directed to a skill that no longer exists and needing to recover manually.
+- **Affected area:** The source templates for `shipshape-release`, `shipshape-publicize`, and `shipshape-readme` under `crates/shipshape-cli/skills/`.
+- **Repro status:** Verified by reading the current templates: they still instruct agents to invoke or hand `AGENTS.md` to `agentify` at the listed sites.
+- **Fix sketch:** Replace those handoffs with concise instructions for the desired AGENTS.md alignment/re-grounding in the respective skills. Point full rewrites to `rethink-instructions` and stale-fact verification to `fact-check-instructions`; do not change ownership of the README or AGENTS.md.
+<!-- intakectl:analysis:end job:cb2a970b-3867-4370-a34d-432a333895cb generation:0 -->
