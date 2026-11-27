@@ -2,13 +2,14 @@
 created: 2026-11-27
 updated: 2026-11-27
 type: bug
-status: untriaged
+status: open
 priority: normal
 provenance: other
 provenance_detail: release driver observation
 source_ref: taskfleet:01m8en8aph52v6dfs5c3gmzcg3/observation:fragment-trailer-duplicate
 originating_run: 01m8en8aph52v6dfs5c3gmzcg3
 originating_run_kind: spinoff
+lane: unlaned
 ---
 
 # Fragment-mode changelog finalize duplicates entries that have both a fragment and an issuectl trailer
