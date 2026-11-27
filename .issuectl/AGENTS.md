@@ -12,11 +12,12 @@ the top-level `AGENTS.md`; this file only covers the tracker itself.
 
 Issues are the one place where design happens. A feature is opened as an issue
 before it is built, and any planning document lives under the issue that needs
-it rather than in `TODO.md` or a loose file, so that the reasoning stays next to
+it rather than in a loose file, so that the reasoning stays next to
 the decision it produced. Scheduling is also frontmatter: `lane`, `lane_seq`,
 `blocked_by` and `collision` are what `issuectl dag` reads, and stint
-orchestration starts from that view rather than from any prose backlog.
-`TODO.md` carries only the handoff narrative.
+orchestration starts from that view rather than from any prose backlog. Do not
+keep a markdown DAG or backlog beside it: two schedules drift, and the one agents
+read first wins.
 
 Admission is deliberately strict. The standard in the top-level `AGENTS.md`
 asks for a failure that can actually occur in this project, on this path, with

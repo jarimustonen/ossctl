@@ -45,7 +45,9 @@ a `schema_version` bump, never a silent edit.
 
 ## Operating policy
 
-`/stint-start` reads this section for how work runs here.
+`/stint-start` reads this section for how work runs here. The session narrative
+(handoffs, round history, open decisions) is kept outside this repository; the issuectl
+DAG is the schedule, so start a round from `issuectl dag` rather than from any prose.
 
 **Green gate.** A unit counts as landed when these pass:
 
@@ -158,7 +160,7 @@ one.
 
 **Scope.** Shipshape is the generic, reusable engine. Cross-repository standardisation
 and the maintainer's personal CI infrastructure are homebase concerns and stay out of
-this repo's issues, `TODO.md` and handoffs; the `hauis` override above is the documented
+this repo's issues and handoffs; the `hauis` override above is the documented
 exception.
 
 **Hot files when work runs in parallel.** `Cargo.toml`, module `mod.rs` files, CLI
@@ -196,6 +198,5 @@ Issues are managed by `issuectl` through the `/issue` skill: `issues/<slug>/item
 holds every issue and epic, status lives in frontmatter, `issues/AGENTS.md` carries the
 schema and `.issuectl/AGENTS.md` the repo-local policy. Planning documents of any kind
 go under their parent issue. Reporter and provenance are issuectl metadata to query
-there, not lists to maintain in `TODO.md` or here; `TODO.md` carries only the current
-handoff narrative and stable pointers, while issue state and scheduling stay in
-issuectl.
+there, not lists to maintain here or in any other markdown file; issue state and
+scheduling stay in issuectl.
