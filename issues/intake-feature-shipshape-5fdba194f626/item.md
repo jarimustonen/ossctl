@@ -3,11 +3,15 @@ created: 2026-09-29
 updated: 2026-11-27
 type: feature
 reporter: jari
-status: open
+status: done
 priority: normal
 provenance: agent:homebase-session
 source_ref: agent:homebase-session/reporter:jari/id:homebase-agentify-retired-2026-09-29
 lane: unlaned
+closed: 2026-11-27
+commits:
+- hash: 7537e9c
+  summary: drop agentify references from bundled skills
 ---
 
 # Remove references to the retired agentify skill from shipshape skills
