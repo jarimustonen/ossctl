@@ -13,9 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 ### Fixed
+<!-- oss-changelog:unreleased-end -->
+
+## [0.12.6] - 2026-11-27
+
+### Fixed
 
 - With `changelog: {mode: fragment, source: issuectl-trailers}`, a fragment named after an issue slug now replaces the trailer-derived line for that issue instead of listing the change twice in the finalized section and the GitHub Release body, and entries merged from the `[Unreleased]` body, fragments, and trailers form one tight list per category instead of blank-line-separated runs (`excessively-slippery-celery`).
-<!-- oss-changelog:unreleased-end -->
+- Fragment-mode changelog finalize duplicates entries that have both a fragment and an issuectl trailer (`excessively-slippery-celery`).
 
 ## [0.12.5] - 2026-11-27
 
