@@ -9,7 +9,7 @@ description: >-
   only its own marked regions and leaves a human-written README or an existing
   license alone without --force. Sole writer of README.md and the license files.
   Not CI (/shipshape-ci), CHANGELOG (/shipshape-changelog), the contract
-  (/shipshape-init), or AGENTS.md (agentify). Use for "generate or refresh the
+  (/shipshape-init), or AGENTS.md (aligned by /shipshape-release). Use for "generate or refresh the
   README", "add a LICENSE", "write the front door", "fix the badge row or the
   install instructions".
 allowed-tools: Bash, Glob, Grep, Read, Write
@@ -280,8 +280,8 @@ This skill writes `README.md` and the license set and nothing else. CI belongs t
 `/shipshape-ci`, `CHANGELOG.md` to `/shipshape-changelog`, `CONTRIBUTING` to
 `/shipshape-contributing`, `SECURITY.md` to `/shipshape-security-policy`, the contract
 to `/shipshape-init`, and release cuts to `/shipshape-release`. The AI-facing
-`AGENTS.md` is `agentify`'s, run once by `/shipshape-release` at the end of a bootstrap;
-a project that keeps a human README and an AI-facing document separate, or English and
+`AGENTS.md` is not this skill's either: `/shipshape-release` brings it in line with the
+fresh README at the end of a bootstrap. A project that keeps a human README and an AI-facing document separate, or English and
 Finnish documents separate, is following a convention, not exhibiting a defect for you
 to fix. One file per owner is what keeps each member's diff reviewable and keeps two
 members from fighting over a file.
@@ -292,5 +292,5 @@ Say what was written and where, or that a proposal and diff are waiting in the s
 directory and how to apply them. Name the license rendered and any divergence from the
 contract. List every placeholder the user still has to resolve, the copyright holder
 first. Give the repository-metadata suggestions as suggestions. If invoked standalone,
-note that `AGENTS.md` may now describe an older README and point at `/shipshape-release`
-or a manual `agentify` pass. Then stop; the next member is the orchestrator's call.
+note that `AGENTS.md` may now describe an older README and should be updated to carry the
+same install, usage, and release facts; `/fact-check-instructions` finds its stale claims. Then stop; the next member is the orchestrator's call.

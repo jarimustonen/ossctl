@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 ### Fixed
+
+- The bundled `/shipshape-release`, `/shipshape-publicize`, and `/shipshape-readme` skills no longer send `AGENTS.md` work to the retired `agentify` skill; they say what the file needs in their own words and point to `rethink-instructions` and `fact-check-instructions` (`intake-feature-shipshape-5fdba194f626`).
 <!-- oss-changelog:unreleased-end -->
 
 ## [0.12.4] - 2026-09-28

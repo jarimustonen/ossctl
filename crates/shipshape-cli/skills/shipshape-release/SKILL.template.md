@@ -105,8 +105,10 @@ is written once and correctly. After the core (`/shipshape-ci`, then
 `/shipshape-readme` for README and LICENSE) come `/shipshape-changelog`,
 `/shipshape-contributing`, `/shipshape-security-policy`, and `/shipshape-architecture`
 when the contract's `docs_site` is not `none` or the user asked for architecture docs.
-`/shipshape-readme` expects the orchestrator to run `agentify` once at the end of a
-bootstrap so the AI-facing `AGENTS.md` matches what was generated.
+At the end of a bootstrap, update the AI-facing `AGENTS.md` so it carries the same
+install, usage, and release facts as the README just generated, as a reviewable edit;
+a full rewrite of a grown file is `/rethink-instructions`, and outdated claims elsewhere in
+it are `/fact-check-instructions`.
 
 Each member re-reads the contract and validates its own inputs; you sequence them, you
 do not stand in for their checks. If a member fails or the user rejects its diff, stop

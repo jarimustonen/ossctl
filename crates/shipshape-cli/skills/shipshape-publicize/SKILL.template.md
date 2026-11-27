@@ -3,10 +3,10 @@ name: shipshape-publicize
 description: >-
   Turn a public-but-insider-facing repository into a project an outside user can
   understand, find, install, try, and contribute to. A one-time orchestrator of the
-  /shipshape-* family: briefs /shipshape-readme, agentify, /shipshape-contributing,
+  /shipshape-* family: briefs /shipshape-readme, /shipshape-contributing,
   /shipshape-security-policy, and optionally /shipshape-architecture for an external
-  audience, checks the public front door with the publicize gaps of `shipshape audit`
-  (GitHub description and topics, Private Vulnerability Reporting, README command and
+  audience, aligns AGENTS.md, checks the public front door with the publicize gaps of
+  `shipshape audit` (GitHub description and topics, Private Vulnerability Reporting, README command and
   platform claims, symlink links, Agent Skills terminology), applies GitHub metadata and
   PVR under the user's authorization, separates GitHub Issues intake from committer-only
   issuectl, and ends in the release that carries a changed README to the registry. Use
@@ -182,8 +182,11 @@ biggest single finding in both observed passes.
 
 **The AI face.** `AGENTS.md` in a stealth repository tends to describe the software as
 it was several releases ago ("bootstrap only, verbs not built yet", four releases after
-they shipped). Hand it to `agentify` for a re-ground against current source; it owns
-that file, and neither `/shipshape-readme` nor this skill writes it. Keep a
+they shipped). Bring it in line with the software as shipped: remove the stale "not
+implemented" and old-command claims, checking each against the binary and the source, as
+a reviewable edit to the existing file rather than a replacement. `/shipshape-readme`
+does not write it. `/fact-check-instructions` checks its claims systematically; where a
+grown file wants a full rewrite, that is `/rethink-instructions`, not this pass. Keep a
 `CLAUDE.md -> AGENTS.md` symlink where that is the repository's convention.
 
 **Contribution intake.** Brief `/shipshape-contributing` with the publicize audience:
