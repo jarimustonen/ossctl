@@ -94,7 +94,9 @@ sealed commit, for `curated` and `fragment` modes:
   `issuectl changelog <range> --json --root <REPO_ROOT>` for a range sealed at plan
   time (from the tag of the current manifest version, `v<current>`, to HEAD, or all of
   history when that tag does not exist, which is a first engine release). Feature
-  issues land under `Added`, bugs under `Fixed`, other types under `Changed`. If
+  issues land under `Added`, bugs under `Fixed`, other types under `Changed`. In
+  fragment mode a fragment named `<issue-slug>.md` replaces the generated line for that
+  issue, so name a fragment after its issue slug when it rewords that issue. If
   `issuectl` is missing, fails, or emits something it does not understand, the engine
   silently uses the authored notes alone.
 - If the compiled notes are empty (a skeleton with only headings, no fragments, no

@@ -58,7 +58,7 @@
 //!   to completion (a CI-level job timeout is the backstop). A first-class per-command
 //!   timeout is a tracked follow-up.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::contract::schema::{ChangelogMode, ChangelogSource};
@@ -298,10 +298,20 @@ fn compile_changelog(
 ) -> Result<(String, Vec<PathBuf>), BumpExecError> {
     let mut sources = Vec::new();
     let mut consumed = Vec::new();
+    // Issue slugs that have a hand-worded fragment (`<slug>.md`). A fragment is the
+    // explicit wording for its change, so the trailer-derived line for the same slug
+    // is suppressed rather than listed a second time.
+    let mut fragment_slugs = BTreeSet::new();
 
     match plan.mode {
         ChangelogMode::Fragment => {
-            collect_fragments(ctx.repo_root, plan, &mut sources, &mut consumed)?;
+            collect_fragments(
+                ctx.repo_root,
+                plan,
+                &mut sources,
+                &mut consumed,
+                &mut fragment_slugs,
+            )?;
         }
         ChangelogMode::Curated => {}
         ChangelogMode::Automated => {
@@ -325,7 +335,7 @@ fn compile_changelog(
                 ctx.repo_root,
             ) {
                 if output.status == Some(0) {
-                    if let Ok(notes) = render_issuectl_notes(&output.stdout) {
+                    if let Ok(notes) = render_issuectl_notes(&output.stdout, &fragment_slugs) {
                         if !notes.is_empty() {
                             sources.push(notes);
                         }
@@ -354,6 +364,7 @@ fn collect_fragments(
     plan: &ChangelogFinalizePlan,
     sources: &mut Vec<String>,
     consumed: &mut Vec<PathBuf>,
+    slugs: &mut BTreeSet<String>,
 ) -> Result<(), BumpExecError> {
     let dir = root.join(&plan.fragment_dir);
     if !dir.exists() {
@@ -420,6 +431,9 @@ fn collect_fragments(
         }
         let contents = read(&path)?;
         if !contents.trim().is_empty() {
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                slugs.insert(stem.to_string());
+            }
             sources.push(contents);
             consumed.push(path);
         }
@@ -428,7 +442,12 @@ fn collect_fragments(
 }
 
 /// Validate issuectl's JSON envelope and render its issue groups as stable markdown.
-fn render_issuectl_notes(json: &str) -> Result<String, BumpExecError> {
+/// Issues whose slug is in `suppressed` (they have a fragment) are validated but not
+/// rendered.
+fn render_issuectl_notes(
+    json: &str,
+    suppressed: &BTreeSet<String>,
+) -> Result<String, BumpExecError> {
     let value: serde_json::Value = serde_json::from_str(json)
         .map_err(|e| BumpExecError::ChangelogCompile(format!("invalid issuectl JSON: {e}")))?;
     if value
@@ -474,6 +493,9 @@ fn render_issuectl_notes(json: &str) -> Result<String, BumpExecError> {
                         "issuectl group `{kind}` has an item without slug"
                     ))
                 })?;
+            if suppressed.contains(slug) {
+                continue;
+            }
             categories
                 .entry(heading)
                 .or_default()

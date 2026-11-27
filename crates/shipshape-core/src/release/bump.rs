@@ -725,7 +725,10 @@ fn release_note_content(sources: &[&str]) -> String {
         "Security",
     ];
     let mut preamble = Vec::new();
-    let mut sections: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // Each heading collects one contribution per occurrence (the authored region, each
+    // fragment, the trailer-derived block), joined below so source boundaries do not
+    // turn a tight bullet list into a loose one.
+    let mut sections: BTreeMap<String, Vec<Vec<String>>> = BTreeMap::new();
     for source in sources {
         let mut current: Option<String> = None;
         for line in source.lines() {
@@ -735,11 +738,15 @@ fn release_note_content(sources: &[&str]) -> String {
             }
             if let Some(heading) = trimmed.strip_prefix("### ") {
                 current = Some(heading.to_string());
-                sections.entry(heading.to_string()).or_default();
+                sections
+                    .entry(heading.to_string())
+                    .or_default()
+                    .push(Vec::new());
             } else if let Some(heading) = &current {
                 sections
-                    .entry(heading.clone())
-                    .or_default()
+                    .get_mut(heading)
+                    .and_then(|contributions| contributions.last_mut())
+                    .expect("a contribution is opened with its heading")
                     .push(line.to_string());
             } else {
                 preamble.push(line.to_string());
@@ -760,13 +767,45 @@ fn release_note_content(sources: &[&str]) -> String {
             .unwrap_or(ORDER.len())
     });
     for heading in headings {
-        let body = sections.remove(&heading).expect("heading came from map");
-        let body = collapse_blank_lines(&body.join("\n"));
+        let contributions = sections.remove(&heading).expect("heading came from map");
+        let body = join_contributions(&contributions);
         if !body.is_empty() {
             kept.push(format!("### {heading}\n\n{body}"));
         }
     }
     kept.join("\n\n")
+}
+
+/// Join one category's contributions. Two contributions that both open with a bullet
+/// meet on a single newline so the merged list stays tight; anything else keeps one
+/// blank line between. Formatting inside a contribution is left as authored.
+fn join_contributions(contributions: &[Vec<String>]) -> String {
+    let mut body = String::new();
+    let mut previous_is_list = false;
+    for contribution in contributions {
+        let text = collapse_blank_lines(&contribution.join("\n"));
+        if text.is_empty() {
+            continue;
+        }
+        let is_list = text.lines().next().is_some_and(is_list_item);
+        if !body.is_empty() {
+            body.push_str(if previous_is_list && is_list {
+                "\n"
+            } else {
+                "\n\n"
+            });
+        }
+        body.push_str(&text);
+        previous_is_list = is_list;
+    }
+    body
+}
+
+/// Whether `line` opens a top-level Markdown bullet (`- `, `* `, `+ `).
+fn is_list_item(line: &str) -> bool {
+    ["- ", "* ", "+ "]
+        .iter()
+        .any(|marker| line.starts_with(marker))
 }
 
 fn collapse_blank_lines(text: &str) -> String {
@@ -1274,9 +1313,7 @@ mod tests {
                 .unwrap();
         assert!(out.contains("<!-- oss-changelog:unreleased-start -->"));
         assert!(
-            out.contains(
-                "## [1.0.0] - 2026-08-23\n\n### Fixed\n\n- Authored fix.\n\n- Trailer fix."
-            ),
+            out.contains("## [1.0.0] - 2026-08-23\n\n### Fixed\n\n- Authored fix.\n- Trailer fix."),
             "{out}"
         );
         assert_eq!(out.matches("### Fixed").count(), 2, "skeleton + release");

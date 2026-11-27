@@ -425,6 +425,90 @@ fn fragment_finalize_reproduces_and_repairs_the_project_canon_cut_failure() {
         .any(|call| { call.starts_with("issuectl changelog v0.4.0..HEAD --json --root") }));
 }
 
+/// Run a fragment + issuectl-trailers finalize over `fragments` (name, contents) with
+/// `issuectl_groups` as the `data.groups` JSON, and return the released section body.
+fn finalize_fragments_with_trailers(fragments: &[(&str, &str)], issuectl_groups: &str) -> String {
+    let dir = temp_workspace();
+    std::fs::write(
+        dir.path().join("CHANGELOG.md"),
+        "# Changelog\n\n<!-- oss-changelog:unreleased-start -->\n## [Unreleased]\n\n### Added\n\n### Changed\n\n### Fixed\n<!-- oss-changelog:unreleased-end -->\n\n## [0.4.0] - 2026-08-01\n\nOld notes.\n",
+    )
+    .unwrap();
+    let dir_path = dir.path().join("changelog/fragments");
+    std::fs::create_dir_all(&dir_path).unwrap();
+    for (name, contents) in fragments {
+        std::fs::write(dir_path.join(name), contents).unwrap();
+    }
+    let mut runner = FakeRunner::new("dedupe123");
+    runner.issuectl_json = Some(format!(
+        r#"{{"schema_version":1,"data":{{"groups":{issuectl_groups}}}}}"#
+    ));
+    let (clock, reg) = (FakeClock, NoRegistry);
+    let mut plan = bump_plan();
+    plan.changelog = Some(ChangelogFinalizePlan {
+        mode: ChangelogMode::Fragment,
+        source: ChangelogSource::IssuectlTrailers,
+        fragment_dir: "changelog/fragments".into(),
+        issuectl_range: Some("v0.4.0..HEAD".into()),
+    });
+    apply_bump(&ctx(&runner, &clock, &reg, dir.path()), &plan, "2026-08-23").unwrap();
+    let changelog = std::fs::read_to_string(dir.path().join("CHANGELOG.md")).unwrap();
+    let start = changelog.find("## [0.5.0] - 2026-08-23\n\n").unwrap()
+        + "## [0.5.0] - 2026-08-23\n\n".len();
+    let end = changelog.find("\n\n## [0.4.0]").unwrap();
+    changelog[start..end].to_string()
+}
+
+#[test]
+fn fragment_suppresses_the_trailer_line_for_the_same_slug() {
+    let release = finalize_fragments_with_trailers(
+        &[("repo-name.md", "### Added\n\n- Worded by hand.\n")],
+        r#"{"feature":[{"slug":"repo-name","title":"Generated title"}]}"#,
+    );
+    assert_eq!(release, "### Added\n\n- Worded by hand.");
+}
+
+#[test]
+fn trailer_line_without_a_fragment_is_kept() {
+    let release = finalize_fragments_with_trailers(
+        &[],
+        r#"{"bug":[{"slug":"crash-fix","title":"Fix the crash"}]}"#,
+    );
+    assert_eq!(release, "### Fixed\n\n- Fix the crash (`crash-fix`).");
+}
+
+#[test]
+fn fragment_without_a_trailer_is_kept() {
+    let release = finalize_fragments_with_trailers(
+        &[("docs-tidy.md", "### Changed\n\n- Tidy the docs.\n")],
+        "{}",
+    );
+    assert_eq!(release, "### Changed\n\n- Tidy the docs.");
+}
+
+#[test]
+fn fragment_spanning_categories_suppresses_its_trailer_and_lists_stay_tight() {
+    // The shape of the cut that exposed the duplication: one fragment with Changed and
+    // Fixed entries, another fragment and its trailer under Fixed, a trailer whose
+    // fragment sits in a different category than the trailer would choose, and one
+    // trailer with no fragment at all.
+    let release = finalize_fragments_with_trailers(
+        &[
+            (
+                "doctor-profile.md",
+                "### Changed\n\n- Doctor checks the declared profile.\n\n### Fixed\n\n- Generated docs name the profile.\n",
+            ),
+            ("review-profile.md", "### Fixed\n\n- Review audits the declared profile.\n"),
+            ("repo-name.md", "### Changed\n\n- Repository and CLI names may differ.\n"),
+        ],
+        r#"{"bug":[{"slug":"doctor-profile","title":"Doctor ignores profile"},{"slug":"review-profile","title":"Review ignores profile"},{"slug":"other-bug","title":"Other bug"}],"feature":[{"slug":"repo-name","title":"Allow names to differ"}]}"#,
+    );
+    assert_eq!(
+        release,
+        "### Changed\n\n- Doctor checks the declared profile.\n- Repository and CLI names may differ.\n\n### Fixed\n\n- Generated docs name the profile.\n- Review audits the declared profile.\n- Other bug (`other-bug`)."
+    );
+}
+
 #[test]
 fn invalid_issuectl_output_falls_back_to_fragments() {
     let dir = temp_workspace();
